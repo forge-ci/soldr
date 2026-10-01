@@ -91,6 +91,196 @@ class FakeAPI:  # pylint: disable=too-few-public-methods
 
 
 class CostReportTests(unittest.TestCase):
+    def test_linked_push_is_explicit_and_includes_cancelled_attempts_and_child(self):
+        m = load_report()
+        sha = "a" * 40
+        pr = run(1, sha, event="pull_request")
+        push = run(2, sha, attempts=2, created_at="2026-01-02T00:00:00Z")
+        association = {
+            "number": 7,
+            "head": {"ref": "topic", "sha": sha, "repo": {"id": 12}},
+        }
+        for item in [pr, push]:
+            item.update(head_branch="topic", pull_requests=[association])
+        api = FakeAPI(
+            {1: [pr, push, run(3, "other", event="workflow_run", parent_run_id=2)]},
+            {
+                (1, 1, 1): [job(11, "2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z")],
+                (2, 1, 1): [
+                    job(21, "2026-01-01T00:00:00Z", "2026-01-01T00:02:00Z", "cancelled")
+                ],
+                (2, 2, 1): [job(22, "2026-01-01T00:00:00Z", "2026-01-01T00:03:00Z")],
+                (3, 1, 1): [job(31, "2026-01-01T00:00:00Z", "2026-01-01T00:04:00Z")],
+            },
+        )
+        receipt = {
+            "schema": "fleet-ci-linked-event/v1",
+            "repository": "o/r",
+            "anchor_run_id": 1,
+            "linked_run_id": 2,
+            "relation": "branch-push-to-pr-synchronize",
+            "provenance": "operator-attested",
+            "pull_request": 7,
+            "head_repository_id": 12,
+            "head_ref": "topic",
+            "before_sha": "b" * 40,
+            "after_sha": sha,
+        }
+        report = m.collect_sha(
+            api,
+            "o/r",
+            sha,
+            "pull_request",
+            anchor_run_id=1,
+            linked_event_receipts=[receipt],
+        )
+        self.assertEqual(report["runner_minutes"], 10)
+        self.assertEqual(
+            report["runner_minutes_by_event"],
+            {"pull_request": 1, "push": 5, "workflow_run": 4},
+        )
+        self.assertFalse(report["linked_events_acceptance_evidence"])
+        self.assertEqual(
+            report["direct_root_attribution"], "120-second heuristic; not causal proof"
+        )
+        for field, value in [
+            ("head_ref", "foreign"),
+            ("after_sha", "c" * 40),
+            ("relation", "branch-push-to-pr-opened"),
+        ]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                m.collect_sha(
+                    api,
+                    "o/r",
+                    sha,
+                    "pull_request",
+                    anchor_run_id=1,
+                    linked_event_receipts=[{**receipt, field: value}],
+                )
+        captured = {
+            **receipt,
+            "provenance": "captured-event-payloads",
+            "pr_payload": {
+                "action": "synchronize",
+                "number": 7,
+                "before": "b" * 40,
+                "after": sha,
+                "repository": {"full_name": "o/r"},
+                "pull_request": association,
+            },
+            "push_payload": {
+                "before": "b" * 40,
+                "after": sha,
+                "created": False,
+                "deleted": False,
+                "ref": "refs/heads/topic",
+                "repository": {"id": 12},
+            },
+        }
+        self.assertTrue(
+            m.collect_sha(
+                api,
+                "o/r",
+                sha,
+                "pull_request",
+                anchor_run_id=1,
+                linked_event_receipts=[captured],
+            )["linked_events_acceptance_evidence"]
+        )
+        for action in ["opened", "labeled", "reopened"]:
+            with self.subTest(action=action), self.assertRaises(ValueError):
+                m.collect_sha(
+                    api,
+                    "o/r",
+                    sha,
+                    "pull_request",
+                    anchor_run_id=1,
+                    linked_event_receipts=[
+                        {
+                            **captured,
+                            "pr_payload": {**captured["pr_payload"], "action": action},
+                        }
+                    ],
+                )
+        for field, value in [
+            ("before_sha", "0" * 40),
+            ("anchor_run_id", 9),
+            ("head_repository_id", 99),
+            ("repository", "other/repo"),
+            ("provenance", "unspecified"),
+        ]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                m.collect_sha(
+                    api,
+                    "o/r",
+                    sha,
+                    "pull_request",
+                    anchor_run_id=1,
+                    linked_event_receipts=[{**receipt, field: value}],
+                )
+        for field, value in [
+            ("created", True),
+            ("deleted", True),
+            ("before", "c" * 40),
+            ("ref", "refs/heads/other"),
+        ]:
+            with self.subTest(push_field=field), self.assertRaises(ValueError):
+                m.collect_sha(
+                    api,
+                    "o/r",
+                    sha,
+                    "pull_request",
+                    anchor_run_id=1,
+                    linked_event_receipts=[
+                        {
+                            **captured,
+                            "push_payload": {**captured["push_payload"], field: value},
+                        }
+                    ],
+                )
+        with self.assertRaises(ValueError):
+            m.collect_sha(
+                api,
+                "o/r",
+                sha,
+                "pull_request",
+                anchor_run_id=1,
+                linked_event_receipts=[receipt, receipt],
+            )
+        # An explicitly linked run's jobs still paginate, including a cancelled
+        # first attempt. Repeated discovery must not charge any run twice.
+        api.jobs[2, 1, 1] = [
+            job(100 + i, "2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z", "cancelled")
+            for i in range(100)
+        ]
+        api.jobs[2, 1, 2] = [job(200, "2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z")]
+        report = m.collect_sha(
+            api,
+            "o/r",
+            sha,
+            "pull_request",
+            anchor_run_id=1,
+            linked_event_receipts=[receipt],
+        )
+        self.assertEqual(report["runner_minutes"], 109)
+        self.assertEqual(len(report["included_runs"]), 3)
+        self.assertTrue(
+            any(
+                "runs/2/attempts/1/jobs" in endpoint and params["page"] == 2
+                for endpoint, params in api.calls
+            )
+        )
+        push["status"] = "in_progress"
+        with self.assertRaisesRegex(ValueError, "not completed"):
+            m.collect_sha(
+                api,
+                "o/r",
+                sha,
+                "pull_request",
+                anchor_run_id=1,
+                linked_event_receipts=[receipt],
+            )
+
     def test_merge_queue_cost_is_a_disclosed_separate_event(self):
         m = load_report()
         api = FakeAPI(

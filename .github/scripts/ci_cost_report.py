@@ -110,7 +110,97 @@ def seconds(start, end):
     return elapsed, 0
 
 
-def collect_sha(api, repo, sha, event, *, weights=None, anchor_run_id=None):
+def validate_linked_receipt(receipt, repo, sha, anchor, linked):
+    """Validate supplied capture evidence, not timestamps or a common SHA.
+
+    Capture authenticity belongs to the trusted evidence supplier. This reader
+    checks its contents against authoritative run associations; it is not a
+    signature verifier for hostile, caller-invented webhook payloads.
+    """
+    if not isinstance(receipt, dict):
+        raise ValueError("linked receipt must be an object")
+    before = receipt.get("before_sha", "")
+    after = receipt.get("after_sha")
+    association = {
+        "number": receipt.get("pull_request"),
+        "head": {
+            "ref": receipt.get("head_ref"),
+            "sha": sha,
+            "repo": {"id": receipt.get("head_repository_id")},
+        },
+    }
+    if (
+        receipt.get("schema") != "fleet-ci-linked-event/v1"
+        or receipt.get("repository") != repo
+        or receipt.get("relation") != "branch-push-to-pr-synchronize"
+        or receipt.get("anchor_run_id") != anchor["id"]
+        or type(receipt.get("anchor_run_id")) is not int
+        or receipt.get("linked_run_id") != linked["id"]
+        or anchor["event"] != "pull_request"
+        or linked["event"] != "push"
+        or after != sha
+        or linked["head_sha"] != sha
+        or not isinstance(before, str)
+        or not re.fullmatch(r"[0-9a-f]{40}", before)
+        or before == "0" * 40
+        or before == after
+        or type(receipt.get("pull_request")) is not int
+        or receipt["pull_request"] <= 0
+        or type(receipt.get("head_repository_id")) is not int
+        or receipt["head_repository_id"] <= 0
+        or not isinstance(receipt.get("head_ref"), str)
+        or not receipt["head_ref"]
+    ):
+        raise ValueError("invalid synchronize linked-event receipt")
+    for run in [anchor, linked]:
+        if run.get("head_branch") != receipt["head_ref"] or not any(
+            row.get("number") == association["number"]
+            and row.get("head", {}).get("ref") == receipt["head_ref"]
+            and row.get("head", {}).get("sha") == sha
+            and row.get("head", {}).get("repo", {}).get("id")
+            == receipt["head_repository_id"]
+            for row in run.get("pull_requests", [])
+        ):
+            raise ValueError("linked run PR association mismatch")
+    provenance = receipt.get("provenance")
+    if provenance == "operator-attested":
+        return False
+    if provenance != "captured-event-payloads":
+        raise ValueError("linked receipt has no explicit provenance")
+    pr, push = receipt.get("pr_payload"), receipt.get("push_payload")
+    if not isinstance(pr, dict) or not isinstance(push, dict):
+        raise ValueError("captured original event payloads required")
+    if (
+        pr.get("action") != "synchronize"
+        or pr.get("number") != receipt["pull_request"]
+        or pr.get("repository", {}).get("full_name") != repo
+        or pr.get("pull_request", {}).get("head", {}).get("ref") != receipt["head_ref"]
+        or pr.get("pull_request", {}).get("head", {}).get("sha") != sha
+        or pr.get("pull_request", {}).get("head", {}).get("repo", {}).get("id")
+        != receipt["head_repository_id"]
+        or push.get("repository", {}).get("id") != receipt["head_repository_id"]
+        or push.get("ref") != "refs/heads/" + receipt["head_ref"]
+        or push.get("created") is not False
+        or push.get("deleted") is not False
+        or any(
+            payload.get("before") != before or payload.get("after") != after
+            for payload in [pr, push]
+        )
+    ):
+        raise ValueError("captured events do not prove synchronize relationship")
+    return True
+
+
+def collect_sha(
+    api,
+    repo,
+    sha,
+    event,
+    *,
+    weights=None,
+    anchor_run_id=None,
+    linked_event_receipts=None,
+):
     if event not in EVENTS:
         raise ValueError(f"event must be one of {EVENTS}")
     if not sha:
@@ -178,6 +268,27 @@ def collect_sha(api, repo, sha, event, *, weights=None, anchor_run_id=None):
     ]
     if not roots:
         raise ValueError(f"no {event} workflow runs for {sha}")
+    receipt_results = []
+    linked_ids = set()
+    for receipt in linked_event_receipts or []:
+        if event != "pull_request" or anchor_run_id is None:
+            raise ValueError("linked events require an explicit PR anchor")
+        if (
+            not isinstance(receipt, dict)
+            or type(receipt.get("linked_run_id")) is not int
+        ):
+            raise ValueError("invalid linked run ID")
+        if receipt.get("anchor_run_id") != anchor_run_id:
+            raise ValueError("linked receipt anchor mismatch")
+        linked_id = receipt["linked_run_id"]
+        if linked_id <= 0 or linked_id in linked_ids:
+            raise ValueError("duplicate or invalid linked run ID")
+        linked_ids.add(linked_id)
+        linked = api.get(f"repos/{repo}/actions/runs/{linked_id}")
+        verified = validate_linked_receipt(receipt, repo, sha, anchors[0], linked)
+        receipt_results.append({"receipt": receipt, "acceptance_evidence": verified})
+        roots.append(linked)
+        runs.append(linked)
     selected = {run["id"] for run in roots}
     # A workflow_run executes the default branch workflow, so its head SHA
     # can differ from the triggering run. Search by event/time, not head_sha.
@@ -214,6 +325,7 @@ def collect_sha(api, repo, sha, event, *, weights=None, anchor_run_id=None):
         selected = expanded
     included, excluded, jobs_out = [], [], []
     total_seconds = weighted_seconds = 0
+    event_seconds = {}
     unknown_weights = []
     for run in sorted(runs, key=lambda item: item["id"]):
         if (
@@ -275,6 +387,9 @@ def collect_sha(api, repo, sha, event, *, weights=None, anchor_run_id=None):
                     raise ValueError(f"job {job['id']} has no completion time")
                 duration = duration or 0
                 total_seconds += duration
+                event_seconds[run["event"]] = (
+                    event_seconds.get(run["event"], 0) + duration
+                )
                 labels = job.get("labels") or []
                 matched = [label for label in labels if weights and label in weights]
                 if weights is not None:
@@ -302,6 +417,17 @@ def collect_sha(api, repo, sha, event, *, weights=None, anchor_run_id=None):
         "event": event,
         "anchor_run_id": anchor_run_id,
         "event_window_seconds": EVENT_WINDOW_SECONDS,
+        "direct_root_attribution": (
+            "explicit full dispatch"
+            if event == "workflow_dispatch"
+            else "120-second heuristic; not causal proof"
+        ),
+        "linked_event_receipts": receipt_results,
+        "linked_events_acceptance_evidence": bool(receipt_results)
+        and all(row["acceptance_evidence"] for row in receipt_results),
+        "runner_minutes_by_event": {
+            key: value / 60 for key, value in event_seconds.items()
+        },
         "runner_minutes": total_seconds / 60,
         "weighted_runner_minutes_known": (
             weighted_seconds / 60 if weights is not None else None
@@ -347,6 +473,11 @@ def compare(baseline, post, allow_cross_event=False):
         )
         for report in baseline + post
     }
+    linked_evidence = all(
+        row["acceptance_evidence"]
+        for report in baseline + post
+        for row in report.get("linked_event_receipts", [])
+    )
     return {
         "baseline": before,
         "post": after,
@@ -355,7 +486,8 @@ def compare(baseline, post, allow_cross_event=False):
         "workflow_ids_by_sample": inventories,
         "workflow_inventory_matched": len({tuple(ids) for ids in inventories.values()})
         <= 1,
-        "meets_12_5_percent_target": ratio <= 0.125,
+        "linked_events_acceptance_evidence": linked_evidence,
+        "meets_12_5_percent_target": ratio <= 0.125 and linked_evidence,
     }
 
 
@@ -370,6 +502,9 @@ def main(argv=None):
     parser.add_argument("--baseline-anchor-run-id", type=int, action="append")
     parser.add_argument("--post-anchor-run-id", type=int, action="append")
     parser.add_argument("--weights", help="JSON label-to-positive-multiplier file")
+    parser.add_argument(
+        "--linked-event-receipts", help="JSON list of explicit linked event receipts"
+    )
     args = parser.parse_args(argv)
     if args.event and (args.baseline_event or args.post_event):
         parser.error("use --event or separate baseline/post events, not both")
@@ -396,6 +531,22 @@ def main(argv=None):
         args.baseline_sha, args.baseline_anchor_run_id, "baseline"
     )
     post_samples = cohort_samples(args.post_sha, args.post_anchor_run_id, "post")
+    linked_receipts = []
+    if args.linked_event_receipts:
+        with open(args.linked_event_receipts, encoding="utf-8") as stream:
+            linked_receipts = json.load(stream)
+        known_anchors = {
+            anchor
+            for _, anchor in baseline_samples + post_samples
+            if anchor is not None
+        }
+        if not isinstance(linked_receipts, list) or any(
+            not isinstance(row, dict) or row.get("anchor_run_id") not in known_anchors
+            for row in linked_receipts
+        ):
+            parser.error(
+                "linked receipts must be a list matching explicit sample anchors"
+            )
     api = GhAPI()
     reports = {}
     for event, samples in (
@@ -406,7 +557,15 @@ def main(argv=None):
             key = (sha, anchor, event)
             if key not in reports:
                 reports[key] = collect_sha(
-                    api, args.repo, sha, event, weights=weights, anchor_run_id=anchor
+                    api,
+                    args.repo,
+                    sha,
+                    event,
+                    weights=weights,
+                    anchor_run_id=anchor,
+                    linked_event_receipts=[
+                        row for row in linked_receipts if row["anchor_run_id"] == anchor
+                    ],
                 )
     result = compare(
         [reports[sample[0], sample[1], baseline_event] for sample in baseline_samples],
