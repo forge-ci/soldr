@@ -101,8 +101,7 @@ def _release_workflow(tmp_path: Path, gate_job: str = "smoke_macos_arm64") -> Pa
 def test_required_execution_without_run_job_fails_closed(tmp_path: Path) -> None:
     failures = MODULE.release_execution_failures(_contract(tmp_path, None))
     assert failures == [
-        "aarch64-apple-darwin: release execution required by soldr#3071 "
-        "but ci.run_job is missing"
+        "aarch64-apple-darwin: release execution required by soldr#3071 but ci.run_job is missing"
     ]
 
 
@@ -373,3 +372,37 @@ def test_publish_requires_execution_contract_gate() -> None:
     )[0]
     assert "needs.prepare.result == 'skipped'" in npm
     assert "validate_npm_release_recovery.py" in npm
+
+
+def test_missing_release_execution_cells_are_required():
+    payload = json.loads(CONTRACT.read_text())
+    for target in (
+        "x86_64-pc-windows-msvc",
+        "aarch64-pc-windows-msvc",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+    ):
+        row = next(row for row in payload["targets"] if row["triple"] == target)
+        assert row["release"]["execution_gate"]["required"] is True
+        assert all(
+            record["status"] == "required-before-publication"
+            for record in row["release"]["artifact_provenance"]["execution"].values()
+        )
+
+
+def test_every_publication_requires_new_artifact_smokes():
+    workflow = WORKFLOW.read_text()
+    for publisher in ("publish", "publish-pypi", "publish-npm"):
+        job = MODULE._workflow_job(workflow, publisher)
+        for gate in (
+            "smoke_macos_x64",
+            "smoke_macos_arm64",
+            "smoke_windows",
+            "smoke_linux_arm64",
+        ):
+            assert MODULE._job_needs(job, gate), (publisher, gate)
+            assert MODULE._job_requires_success(job, gate), (publisher, gate)
+    assert (
+        "inputs.npm_release_ref != '' && needs.prepare.result == 'skipped'"
+        in MODULE._workflow_job(workflow, "publish-npm")
+    )

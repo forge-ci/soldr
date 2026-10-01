@@ -132,10 +132,7 @@ def release_execution_failures(
             )
             for artifact in ("archive", "wheel")
         }
-        prefix = (
-            f"{entry['triple']}: release execution required by "
-            f"soldr#{gate.get('issue')}"
-        )
+        prefix = f"{entry['triple']}: release execution required by soldr#{gate.get('issue')}"
         if not isinstance(run_job, str) or not run_job.strip():
             failures.append(f"{prefix} but ci.run_job is missing")
             for artifact, status in statuses.items():
@@ -201,9 +198,10 @@ def release_execution_failures(
                 if artifact == "archive"
                 else f"pypi-soldr-{entry['triple']}"
             )
-            if (
-                "actions/download-artifact@" not in gate_job
-                or artifact_name not in gate_job
+            if "actions/download-artifact@" not in gate_job or (
+                artifact_name not in gate_job
+                and artifact_name.replace(entry["triple"], "${{ matrix.target }}")
+                not in gate_job
             ):
                 failures.append(
                     f"{prefix} release gate {release_gate!r} does not download "

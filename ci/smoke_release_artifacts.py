@@ -56,6 +56,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import platform
 import re
 import shutil
 import subprocess
@@ -111,6 +112,25 @@ def exe_suffix(target: str) -> str:
     return ".exe" if target.endswith("-pc-windows-msvc") else ""
 
 
+def check_native_host(target: str) -> None:
+    """Require the runner's reported OS and architecture to match its target."""
+    expected_os = (
+        "Windows"
+        if exe_suffix(target)
+        else "Darwin"
+        if "apple-darwin" in target
+        else "Linux"
+    )
+    expected_arch = "arm64" if target.startswith("aarch64-") else "x86_64"
+    machine = platform.machine().lower()
+    arch = {"amd64": "x86_64", "aarch64": "arm64"}.get(machine, machine)
+    if platform.system() != expected_os or arch != expected_arch:
+        sys.exit(
+            f"ERROR: {target} requires native {expected_os}/{expected_arch}, "
+            f"got {platform.system()}/{machine}"
+        )
+
+
 def required_members(target: str) -> list[str]:
     """Bundle members whose absence fails the smoke."""
     suffix = exe_suffix(target)
@@ -143,8 +163,7 @@ def check_macho_architecture(binary: Path, expected_arch: str) -> None:
     cputype = header[4:8]
     if cputype != expected_bytes:
         sys.exit(
-            f"ERROR: {binary}: expected Mach-O cputype for {expected_arch}, "
-            f"got {cputype!r}"
+            f"ERROR: {binary}: expected Mach-O cputype for {expected_arch}, got {cputype!r}"
         )
     print(f"Mach-O architecture OK: {binary} is {expected_arch}")
 
@@ -163,8 +182,7 @@ def wheel_version(wheel: Path) -> str:
         ]
         if len(metadata_names) != 1:
             raise RuntimeError(
-                f"expected exactly one *.dist-info/METADATA in {wheel}, "
-                f"found {metadata_names}"
+                f"expected exactly one *.dist-info/METADATA in {wheel}, found {metadata_names}"
             )
         metadata = archive.read(metadata_names[0]).decode("utf-8", errors="replace")
     match = re.search(r"^Version:\s*(\S+)\s*$", metadata, re.MULTILINE)
@@ -196,12 +214,14 @@ def run(cmd: list[str | Path]) -> subprocess.CompletedProcess[str]:
 WHEEL_IMPORT_MODULE = "soldr"
 
 
-def check_native_wheel_import(wheel: Path, expected: str) -> None:
+def check_native_wheel_import(wheel: Path, expected: str, *, target: str = "") -> None:
     """Install the shipped wheel offline in an isolated pinned-Python venv."""
     with tempfile.TemporaryDirectory(prefix="soldr-release-wheel-") as root:
         env_dir = Path(root) / "venv"
         run(["uv", "venv", "--python", sys.executable, env_dir])
-        python = env_dir / "bin" / "python"
+        windows = bool(exe_suffix(target))
+        scripts = env_dir / ("Scripts" if windows else "bin")
+        python = scripts / ("python.exe" if windows else "python")
         run(
             [
                 "uv",
@@ -225,7 +245,9 @@ def check_native_wheel_import(wheel: Path, expected: str) -> None:
             sys.exit(
                 f"ERROR: installed release wheel did not expose {WHEEL_IMPORT_MODULE}"
             )
-        check_version_output(env_dir / "bin" / "soldr", expected, "installed wheel")
+        check_version_output(
+            scripts / ("soldr.exe" if windows else "soldr"), expected, "installed wheel"
+        )
 
 
 def check_version_output(binary: Path, expected: str, label: str) -> None:
@@ -239,15 +261,13 @@ def check_version_output(binary: Path, expected: str, label: str) -> None:
     json_out = run([binary, "version", "--json"]).stdout.strip()
     if not json_out:
         sys.exit(
-            f"ERROR: {label}: 'soldr version --json' produced empty stdout "
-            "(soldr#1202)."
+            f"ERROR: {label}: 'soldr version --json' produced empty stdout (soldr#1202)."
         )
     print(f"{label} — soldr version --json: {json_out}")
     reported = json.loads(json_out).get("soldr_version")
     if reported != expected:
         sys.exit(
-            f"ERROR: {label}: soldr_version {reported!r} != expected {expected!r} "
-            "(soldr#1202)."
+            f"ERROR: {label}: soldr_version {reported!r} != expected {expected!r} (soldr#1202)."
         )
 
 
@@ -737,6 +757,7 @@ def main() -> int:
             print(f"appended 'script' output to {args.github_output}")
         return 0
 
+    check_native_host(target)
     check_version_output(soldr_bin, expected, f"{target} archive")
     run([extract / f"soldr-daemon{suffix}", "--help"])
     run([extract / f"crgx{suffix}", "--version"])
@@ -748,7 +769,7 @@ def main() -> int:
             sys.exit(f"ERROR: shipped daemon did not report running: {status!r}")
         run([soldr_bin, "cache", "report", "--json"])
     if args.require_wheel_import:
-        check_native_wheel_import(wheels[0], expected)
+        check_native_wheel_import(wheels[0], expected, target=target)
     print(f"native smoke OK: {target} {version}")
     return 0
 

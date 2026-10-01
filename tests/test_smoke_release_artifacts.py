@@ -289,3 +289,57 @@ def test_wheel_import_targets_a_module_the_wheel_ships() -> None:
         "0.9.11", "soldr-0.9.11-cp310-abi3-macosx_11_0_x86_64.whl"
     )
     assert f"import {module}" in script
+
+
+@pytest.mark.parametrize(
+    "target", ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
+)
+def test_windows_wheel_executes_installed_scripts(tmp_path, monkeypatch, target):
+    commands = []
+    monkeypatch.setattr(
+        MODULE,
+        "run",
+        lambda command: commands.append(command)
+        or type("Result", (), {"stdout": "soldr"})(),
+    )
+    probes = []
+    monkeypatch.setattr(
+        MODULE,
+        "check_version_output",
+        lambda binary, expected, label: probes.append(binary),
+    )
+    MODULE.check_native_wheel_import(tmp_path / "fixture.whl", "0.9.1", target=target)
+    install = next(command for command in commands if "install" in command)
+    assert "--no-index" in install and "--no-deps" in install
+    python = install[install.index("--python") + 1]
+    assert python.parts[-2:] == ("Scripts", "python.exe")
+    assert probes[0].parts[-2:] == ("Scripts", "soldr.exe")
+
+
+@pytest.mark.parametrize(
+    "target,system,machine",
+    [
+        ("aarch64-pc-windows-msvc", "Windows", "ARM64"),
+        ("x86_64-pc-windows-msvc", "Windows", "AMD64"),
+        ("aarch64-unknown-linux-gnu", "Linux", "aarch64"),
+    ],
+)
+def test_native_release_host_must_match_target(monkeypatch, target, system, machine):
+    monkeypatch.setattr(MODULE.platform, "system", lambda: system)
+    monkeypatch.setattr(MODULE.platform, "machine", lambda: machine)
+    MODULE.check_native_host(target)
+    monkeypatch.setattr(MODULE.platform, "machine", lambda: "mismatched")
+    with pytest.raises(SystemExit, match="requires native"):
+        MODULE.check_native_host(target)
+
+
+def test_wheel_install_failure_stops_execution(tmp_path, monkeypatch):
+    def fail_install(command):
+        if "install" in command:
+            raise MODULE.subprocess.CalledProcessError(7, command)
+
+    monkeypatch.setattr(MODULE, "run", fail_install)
+    with pytest.raises(MODULE.subprocess.CalledProcessError):
+        MODULE.check_native_wheel_import(
+            tmp_path / "fixture.whl", "0.9.1", target="aarch64-pc-windows-msvc"
+        )
