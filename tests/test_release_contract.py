@@ -336,3 +336,143 @@ def test_npm_unfrozen_blocks_publication(fixture, mode, before, after):
             files=files,
             outcomes=dict.fromkeys(value["destinations"], "verified"),
         )
+
+
+def npm_fixture(version="0.9.27"):
+    import io
+    import tarfile
+
+    source = {"name": "@zackees/soldr", "version": version, "files": ["bin/soldr.js"]}
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz") as archive:
+        for name, data in [
+            ("package/package.json", json.dumps(source).encode()),
+            ("package/bin/soldr.js", b'console.log("soldr")'),
+        ]:
+            entry = tarfile.TarInfo(name)
+            entry.size = len(data)
+            archive.addfile(entry, io.BytesIO(data))
+    return {"package_json": source, "archive": output.getvalue()}
+
+
+@pytest.mark.parametrize("mode", ["full", "partial"])
+def test_actual_npm_bytes_freeze(fixture, mode):
+    value, contract, files, required, proof = fixture
+    if mode == "partial":
+        value.update(
+            mode="partial",
+            partial_reason="npm retry",
+            destinations=["npm"],
+            expected_artifacts=[],
+        )
+        files = []
+    package = npm_fixture()
+    info = rc.freeze_info(value, contract, files, npm_package=package)
+    assert info["npm_package"]["filename"] == "zackees-soldr-0.9.27.tgz"
+    assert info["npm_package"]["size"] == len(package["archive"])
+    assert info["npm_package"]["integrity"].startswith("sha512-")
+    for before, after in [
+        ("full-ci", "artifacts-ready"),
+        ("artifacts-ready", "publishing"),
+        ("publishing", "complete" if mode == "full" else "partial-complete"),
+    ]:
+        assert (
+            rc.validate_transition(
+                before,
+                after,
+                directive=value,
+                contract=contract,
+                files=files,
+                info=info,
+                proof=proof,
+                required_cells=required,
+                npm_package=package,
+                outcomes=dict.fromkeys(value["destinations"], "verified"),
+            )
+            == after
+        )
+    package["archive"] += b"changed"
+    with pytest.raises(rc.ContractError):
+        rc.require_frozen_info(info, value, contract, files, npm_package=package)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "source-version",
+        "source-name",
+        "packed-version",
+        "unsafe",
+        "duplicate",
+        "link",
+        "missing",
+        "size",
+        "notbytes",
+    ],
+)
+def test_npm_pack_refusals(mutation):
+    import io
+    import tarfile
+
+    package = npm_fixture()
+    if mutation == "source-version":
+        package["package_json"]["version"] = "9.9.9"
+    elif mutation == "source-name":
+        package["package_json"]["name"] = "../escape"
+    elif mutation == "notbytes":
+        package["archive"] = "notbytes"
+    else:
+        out = io.BytesIO()
+        with tarfile.open(fileobj=out, mode="w:gz") as archive:
+            metadata = dict(package["package_json"])
+            if mutation == "packed-version":
+                metadata["version"] = "9.9.9"
+            data = json.dumps(metadata).encode()
+            entry = tarfile.TarInfo("package/package.json")
+            entry.size = len(data)
+            if mutation == "unsafe":
+                entry.name = "package/../package.json"
+            if mutation == "link":
+                entry.type = tarfile.SYMTYPE
+                entry.linkname = "/etc/passwd"
+                entry.size = 0
+            if mutation == "missing":
+                entry.name = "package/other.json"
+            if mutation == "size":
+                entry.size = 16_000_001
+            if mutation != "size":
+                archive.addfile(entry, io.BytesIO(data))
+                if mutation == "duplicate":
+                    archive.addfile(entry, io.BytesIO(data))
+            else:
+                # Only the oversized header is needed: reject before any read.
+                out.write(entry.tobuf())
+        package["archive"] = out.getvalue()
+    with pytest.raises(rc.ContractError):
+        rc.freeze_npm_package(package, "0.9.27")
+
+
+def test_npm_identity_matches_real_source_naming():
+    source = json.loads((ROOT / "package.json").read_text())
+    assert source["name"] == "@zackees/soldr"
+    assert source["scripts"]["prepack"] == "node scripts/test-npm-package.js"
+    package = npm_fixture(source["version"])
+    package["package_json"] = source
+    frozen = rc.freeze_npm_package(package, source["version"])
+    assert frozen["filename"] == f"zackees-soldr-{source['version']}.tgz"
+
+
+@pytest.mark.parametrize("kind", ["pax", "longname"])
+def test_npm_metadata_expansion_bound(monkeypatch, kind):
+    import gzip
+    import tarfile
+
+    monkeypatch.setattr(rc, "MAX_NPM_EXPANDED_BYTES", 2048, raising=False)
+    header = tarfile.TarInfo("metadata")
+    header.type = tarfile.XHDTYPE if kind == "pax" else tarfile.GNUTYPE_LONGNAME
+    header.size = 4096
+    raw = header.tobuf() + b"x" * 4096 + b"\0" * 1024
+    package = npm_fixture()
+    package["archive"] = gzip.compress(raw)
+    with pytest.raises(rc.ContractError, match="npm expanded byte ceiling"):
+        rc.freeze_npm_package(package, "0.9.27")

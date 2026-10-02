@@ -4,12 +4,17 @@ Callers must authenticate issue directives, canonical source and native receipts
 independently before using these results. A supplied proof is data, not authority.
 """
 
+import gzip
+import base64
+import io
+import tarfile
 import copy
 import hashlib
 import importlib.util
 import json
 import re
 import uuid
+import zlib
 from pathlib import Path
 
 
@@ -176,8 +181,108 @@ def _files(files, expected):
     return sorted(copy.deepcopy(files), key=lambda row: row["name"])
 
 
-def freeze_info(directive, contract, files):
+MAX_NPM_EXPANDED_BYTES = 64_000_000
+
+
+def freeze_npm_package(package, version):
+    """Inspect supplied pack bytes, never run npm or authenticate their source.
+
+    Producer must bind source package.json and tarball to the exact candidate.
+    It must publish these frozen bytes, not rebuild with npm publish(source).
+    """
+    _require(
+        isinstance(package, dict) and set(package) == {"package_json", "archive"},
+        "npm package fields",
+    )
+    source, data = package["package_json"], package["archive"]
+    _require(isinstance(source, dict), "npm source metadata")
+    name = source.get("name")
+    _require(
+        isinstance(name, str)
+        and re.fullmatch(r"(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*", name),
+        "npm package name",
+    )
+    _require(source.get("version") == version, "npm source version mismatch")
+    _require(
+        isinstance(data, bytes) and 0 < len(data) <= 100_000_000,
+        "npm archive byte ceiling",
+    )
+    # Bound every decompressed byte before tarfile can process hidden PAX/GNU
+    # metadata. Member-only bounds cannot protect tarfile's metadata parser.
+    expanded = io.BytesIO()
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(data)) as compressed:
+            while True:
+                chunk = compressed.read(
+                    min(65536, MAX_NPM_EXPANDED_BYTES - expanded.tell() + 1)
+                )
+                if not chunk:
+                    break
+                _require(
+                    expanded.tell() + len(chunk) <= MAX_NPM_EXPANDED_BYTES,
+                    "npm expanded byte ceiling",
+                )
+                expanded.write(chunk)
+    except (OSError, EOFError, zlib.error) as error:
+        raise ContractError("invalid npm gzip archive") from error
+    expanded.seek(0)
+    rows, metadata, total = [], None, 0
+    try:
+        with tarfile.open(fileobj=expanded, mode="r:") as archive:
+            seen = set()
+            for entry in archive:
+                _require(len(seen) < 1024, "npm archive member ceiling")
+                path = entry.name
+                _require(
+                    path.startswith("package/")
+                    and all(part not in ("", ".", "..") for part in path.split("/"))
+                    and "\\" not in path
+                    and path not in seen,
+                    "unsafe or duplicate npm member",
+                )
+                seen.add(path)
+                _require(entry.isfile(), "npm member must be regular file")
+                _require(0 <= entry.size <= 16_000_000, "npm member byte ceiling")
+                total += entry.size
+                _require(total <= MAX_NPM_EXPANDED_BYTES, "npm expanded byte ceiling")
+                stream = archive.extractfile(entry)
+                content = stream.read(entry.size + 1)
+                _require(len(content) == entry.size, "npm member truncated")
+                rows.append(
+                    {
+                        "name": path,
+                        "size": entry.size,
+                        "sha256": hashlib.sha256(content).hexdigest(),
+                    }
+                )
+                if path == "package/package.json":
+                    metadata = json.loads(content)
+    except (tarfile.TarError, OSError, ValueError) as error:
+        raise ContractError("invalid npm archive") from error
+    _require(
+        isinstance(metadata, dict)
+        and metadata.get("name") == name
+        and metadata.get("version") == version,
+        "npm packed metadata mismatch",
+    )
+    return {
+        "name": name,
+        "version": version,
+        "filename": name.removeprefix("@").replace("/", "-") + "-" + version + ".tgz",
+        "size": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "integrity": "sha512-"
+        + base64.b64encode(hashlib.sha512(data).digest()).decode(),
+        "source_metadata_sha256": canonical_digest(source),
+        "files": sorted(rows, key=lambda row: row["name"]),
+    }
+
+
+def freeze_info(directive, contract, files, *, npm_package=None):
     value = validate_directive(directive, contract)
+    _require(
+        npm_package is None or "npm" in value["destinations"], "undeclared npm artifact"
+    )
     return {
         "schema_version": 1,
         "issue": value["issue"],
@@ -186,6 +291,11 @@ def freeze_info(directive, contract, files):
         "contract_sha256": value["contract_sha256"],
         "directive": value,
         "files": _files(files, value["expected_artifacts"]),
+        "npm_package": (
+            freeze_npm_package(npm_package, value["version"])
+            if npm_package is not None and "npm" in value["destinations"]
+            else None
+        ),
     }
 
 
@@ -196,10 +306,12 @@ def require_same_directive(existing, desired):
     )
 
 
-def require_frozen_info(frozen, directive, contract, files):
+def require_frozen_info(frozen, directive, contract, files, *, npm_package=None):
     _require(
         canonical_digest(frozen)
-        == canonical_digest(freeze_info(directive, contract, files)),
+        == canonical_digest(
+            freeze_info(directive, contract, files, npm_package=npm_package)
+        ),
         "frozen info or artifact bytes changed",
     )
 
@@ -263,6 +375,7 @@ def validate_transition(
     info=None,
     files=None,
     outcomes=None,
+    npm_package=None,
 ):
     """Nonexecuting state validator. Inputs do not grant publication authority."""
     validate_directive(directive, contract)
@@ -274,11 +387,11 @@ def validate_transition(
     )
     if following in {"artifacts-ready", "publishing", "complete", "partial-complete"}:
         _require(
-            "npm" not in directive["destinations"],
+            "npm" not in directive["destinations"] or npm_package is not None,
             "npm package byte identity not frozen",
         )
         validate_native_proof(proof, directive, contract, required_cells)
-        require_frozen_info(info, directive, contract, files)
+        require_frozen_info(info, directive, contract, files, npm_package=npm_package)
     if following in {"complete", "partial-complete"}:
         _require(
             (following == "complete") == (directive["mode"] == "full"),
