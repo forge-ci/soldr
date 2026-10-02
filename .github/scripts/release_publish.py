@@ -6,9 +6,11 @@ The two mutating steps of the publish job, extracted from release-auto.yml
 `GITHUB_STEP_SUMMARY` block emitting copy-pasteable recovery commands when the
 token cannot perform the mutation (soldr#1252).
 
-Behavior is preserved exactly, including the check-first idempotency that makes
-a rerun after a partial success safe -- an existing tag is a skip, and an
-existing release is an asset re-upload with `--clobber` rather than a failure.
+Retries preserve immutable identity: an existing tag must peel to the exact
+candidate and existing assets must match local name, size, and SHA-256. Missing
+assets may be added; conflicting assets are never replaced. These primitives
+require the caller's frozen candidate and pretag approval; they do not supply
+that approval themselves.
 
 One thing genuinely changes. The inline steps passed `dist/*` to `gh`, relying
 on the shell to expand it; here the glob is expanded in Python. That closes a
@@ -21,6 +23,9 @@ error instead, and it is tested.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import re
 import os
 import subprocess
 import sys
@@ -124,7 +129,7 @@ def release_recovery_summary(repo: str, tag: str, sha: str, run_id: str) -> str:
             f"gh run download {run_id} --repo {repo} "
             "--pattern 'release-soldr-*' --dir dist",
             f"gh release create {tag} dist/* --repo {repo} "
-            f"--generate-notes --target {sha} --title {tag}",
+            f"--draft --verify-tag --generate-notes --target {sha} --title {tag}",
             "```",
             "",
         ]
@@ -149,96 +154,263 @@ def write_output(name: str, value: str) -> None:
         handle.write(f"{name}={value}\n")
 
 
+def validate_identity(repo: str, tag: str, sha: str) -> None:
+    """Never substitute a branch or abbreviated commit for the frozen candidate."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+        raise ValueError("invalid release repository")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", tag) or ".." in tag:
+        raise ValueError("invalid immutable release tag")
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", sha):
+        raise ValueError("candidate must be an exact 40- or 64-character commit SHA")
+
+
+def api_document(run: Runner, endpoint: str, *, pages: bool = False):
+    args = ["gh", "api", endpoint]
+    if pages:
+        args.extend(["--paginate", "--slurp"])
+    result = run(args)
+    if result.returncode != 0:
+        # Auth/rate-limit/server failures are not evidence of absence.
+        if not pages and re.search(r"\bHTTP 404\b", result.stderr or ""):
+            return None
+        raise ValueError(f"GitHub observation failed: {gh_output_excerpt(result)}")
+    try:
+        document = json.loads(result.stdout)
+        if document is None:
+            raise ValueError("GitHub observation returned null instead of proof")
+        return document
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ValueError("GitHub observation returned no valid JSON proof") from error
+
+
+def matching_tag(repo: str, tag: str, sha: str, run: Runner) -> bool:
+    ref = api_document(run, f"repos/{repo}/git/ref/tags/{tag}")
+    if ref is None:
+        return False
+    if not isinstance(ref, dict) or ref.get("ref") != f"refs/tags/{tag}":
+        raise ValueError("tag reference identity mismatch")
+    obj = ref.get("object")
+    seen = set()
+    for _ in range(16):
+        if (
+            not isinstance(obj, dict)
+            or not isinstance(obj.get("sha"), str)
+            or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", obj["sha"])
+        ):
+            raise ValueError("tag target lacks exact object identity")
+        oid = obj["sha"]
+        if obj.get("type") == "commit":
+            if oid != sha:
+                raise ValueError("immutable tag points at a different candidate")
+            return True
+        if obj.get("type") != "tag" or oid in seen:
+            raise ValueError("tag target is not a commit or bounded annotated tag")
+        seen.add(oid)
+        peeled = api_document(run, f"repos/{repo}/git/tags/{oid}")
+        if not isinstance(peeled, dict) or peeled.get("sha") != oid:
+            raise ValueError("annotated tag object identity mismatch")
+        obj = peeled.get("object")
+    raise ValueError("annotated tag nesting exceeds bound")
+
+
 def ensure_tag(repo: str, tag: str, sha: str, run: Runner) -> int:
-    """Create `tag` at `sha` unless it already exists."""
+    """Create only an absent tag, and prove its exact peeled target on retry."""
     run = logged(run)
-    if run(["gh", "api", f"repos/{repo}/git/refs/tags/{tag}"]).returncode == 0:
-        print(f"tag {tag} already exists - skipping create")
+    validated = False
+    try:
+        validate_identity(repo, tag, sha)
+        validated = True
+        if matching_tag(repo, tag, sha, run):
+            print(f"tag {tag} already matches immutable candidate {sha}")
+            return 0
+        created = run(
+            [
+                "gh",
+                "api",
+                f"repos/{repo}/git/refs",
+                "-X",
+                "POST",
+                "-f",
+                f"ref=refs/tags/{tag}",
+                "-f",
+                f"sha={sha}",
+            ]
+        )
+        if not matching_tag(repo, tag, sha, run):
+            raise ValueError(
+                f"tag creation lacks exact target proof: {gh_output_excerpt(created)}"
+            )
         return 0
-    created = run(
-        [
-            "gh",
-            "api",
-            f"repos/{repo}/git/refs",
-            "-X",
-            "POST",
-            "-f",
-            f"ref=refs/tags/{tag}",
-            "-f",
-            f"sha={sha}",
-        ]
+    except (ValueError, OSError) as error:
+        print(f"::error::Immutable tag prerequisite failed: {error}. {BLOCKED_NOTE}")
+        recovery = tag_recovery_summary(repo, tag, sha) if validated else ""
+        append_summary(recovery + f"\nRefusal: {error}\n")
+        return 1
+
+
+def expected_assets(assets: list[str]) -> dict[str, tuple[int, str]]:
+    expected = {}
+    for asset in assets:
+        path = Path(asset)
+        if path.is_symlink() or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._+-]*", path.name
+        ):
+            raise ValueError("release assets require safe regular filenames")
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                size += len(block)
+                digest.update(block)
+        expected[path.name] = (size, "sha256:" + digest.hexdigest())
+    return expected
+
+
+def release_document(repo: str, tag: str, run: Runner):
+    release = api_document(run, f"repos/{repo}/releases/tags/{tag}")
+    if release is None:
+        return None
+    if (
+        not isinstance(release, dict)
+        or release.get("tag_name") != tag
+        or type(release.get("id")) is not int
+        or release["id"] <= 0
+        or type(release.get("draft")) is not bool
+    ):
+        raise ValueError("release identity mismatch")
+    return release
+
+
+def missing_assets(repo: str, release: dict, expected: dict, run: Runner) -> set[str]:
+    pages = api_document(
+        run, f"repos/{repo}/releases/{release['id']}/assets?per_page=100", pages=True
     )
-    if created.returncode == 0:
-        return 0
-    print(
-        f"::error::GITHUB_TOKEN could not create tag {tag} via /git/refs. "
-        f"{BLOCKED_NOTE} gh output: {gh_output_excerpt(created)}"
-    )
-    append_summary(tag_recovery_summary(repo, tag, sha) + gh_output_block(created))
-    return 1
+    if (
+        not isinstance(pages, list)
+        or not pages
+        or any(not isinstance(page, list) for page in pages)
+    ):
+        raise ValueError("asset pagination returned no complete list proof")
+    seen = set()
+    identities = set()
+    for page in pages:
+        for asset in page:
+            if not isinstance(asset, dict):
+                raise ValueError("malformed release asset")
+            name = asset.get("name")
+            identity = asset.get("id")
+            if (
+                not isinstance(name, str)
+                or name not in expected
+                or name in seen
+                or type(identity) is not int
+                or identity <= 0
+                or identity in identities
+                or asset.get("state") != "uploaded"
+                or type(asset.get("size")) is not int
+                or (asset["size"], asset.get("digest")) != expected[name]
+            ):
+                raise ValueError(
+                    f"immutable release asset conflict or missing SHA-256 proof: {name}"
+                )
+            seen.add(name)
+            identities.add(identity)
+    return set(expected) - seen
 
 
 def create_draft_release(
     repo: str, tag: str, sha: str, *, run_id: str, dist: Path, run: Runner
 ) -> int:
-    """Create the draft release, or re-upload assets if it already exists."""
-    assets = release_assets(dist)
+    """Reconcile only missing assets; never replace immutable existing bytes."""
     run = logged(run)
-    if run(["gh", "release", "view", tag, "--repo", repo]).returncode == 0:
-        print(f"release {tag} already exists; uploading/replacing assets")
-        uploaded = run(
-            ["gh", "release", "upload", tag, *assets, "--repo", repo, "--clobber"]
-        )
-        if uploaded.returncode != 0:
-            # The inline version failed here too -- `set -e` aborted the step
-            # on a non-zero `gh release upload`, so `created=true` was never
-            # written. What it did not do was say anything: the step died with
-            # gh's own message and no recovery block. This emits the same
-            # guidance the create path already emitted, for the same reason.
-            print(
-                f"::error::GITHUB_TOKEN could not re-upload assets for {tag}. "
-                f"{BLOCKED_NOTE} gh output: {gh_output_excerpt(uploaded)}"
-            )
-            write_output("created", "false")
-            append_summary(
-                release_recovery_summary(repo, tag, sha, run_id)
-                + gh_output_block(uploaded)
-            )
-            return 1
-        write_output("created", "true")
-        return 0
-
-    created = run(
-        [
-            "gh",
-            "release",
-            "create",
-            tag,
-            *assets,
-            "--repo",
-            repo,
-            "--draft",
-            "--generate-notes",
-            "--target",
-            sha,
-            "--title",
-            tag,
-        ]
-    )
-    if created.returncode == 0:
-        write_output("created", "true")
-        return 0
     write_output("created", "false")
-    print(
-        f"::error::GITHUB_TOKEN could not create the GitHub release for {tag}. "
-        "Registry publishes are blocked until the GitHub release exists with "
-        "the expected assets. See soldr#1252. "
-        f"gh output: {gh_output_excerpt(created)}"
-    )
-    append_summary(
-        release_recovery_summary(repo, tag, sha, run_id) + gh_output_block(created)
-    )
-    return 1
+    validated = False
+    try:
+        validate_identity(repo, tag, sha)
+        if not re.fullmatch(r"[0-9]+", run_id):
+            raise ValueError("invalid release run identity")
+        validated = True
+        assets = release_assets(dist)
+        expected = expected_assets(assets)
+        if not matching_tag(repo, tag, sha, run):
+            raise ValueError("release requires an existing exact candidate tag")
+        release = release_document(repo, tag, run)
+        if release is None:
+            if not matching_tag(repo, tag, sha, run):
+                raise ValueError("candidate tag disappeared before draft creation")
+            changed = run(
+                [
+                    "gh",
+                    "release",
+                    "create",
+                    tag,
+                    *assets,
+                    "--repo",
+                    repo,
+                    "--draft",
+                    "--verify-tag",
+                    "--generate-notes",
+                    "--target",
+                    sha,
+                    "--title",
+                    tag,
+                ]
+            )
+        else:
+            missing = missing_assets(repo, release, expected, run)
+            if missing:
+                if release["draft"] is not True:
+                    raise ValueError(
+                        "published release is incomplete; missing assets cannot be exposed by retry"
+                    )
+                # Verify candidate again immediately before any mutation.
+                if not matching_tag(repo, tag, sha, run):
+                    raise ValueError("candidate tag disappeared before upload")
+                current = release_document(repo, tag, run)
+                if (
+                    current is None
+                    or current["id"] != release["id"]
+                    or current["draft"] is not True
+                ):
+                    raise ValueError(
+                        "release is no longer the same draft before upload"
+                    )
+                changed = run(
+                    [
+                        "gh",
+                        "release",
+                        "upload",
+                        tag,
+                        *[asset for asset in assets if Path(asset).name in missing],
+                        "--repo",
+                        repo,
+                    ]
+                )
+            else:
+                changed = None
+        if changed is not None and changed.returncode != 0:
+            raise ValueError(
+                f"GitHub release mutation failed: {gh_output_excerpt(changed)}"
+            )
+        if not matching_tag(repo, tag, sha, run):
+            raise ValueError("candidate tag disappeared after release reconciliation")
+        final = release_document(repo, tag, run)
+        if final is None or (release is not None and final["id"] != release["id"]):
+            raise ValueError("release identity changed during reconciliation")
+        if missing_assets(repo, final, expected, run):
+            raise ValueError("release reconciliation left missing expected assets")
+        # Also detect local artifact changes during upload/retry.
+        if release_assets(dist) != assets or expected_assets(assets) != expected:
+            raise ValueError("local expected assets changed during reconciliation")
+        write_output("created", "true")
+        return 0
+    except (ValueError, OSError) as error:
+        print(
+            f"::error::Immutable release prerequisite failed: {error}. {BLOCKED_NOTE}"
+        )
+        recovery = release_recovery_summary(repo, tag, sha, run_id) if validated else ""
+        append_summary(recovery + f"\nRefusal: {error}\n")
+        return 1
 
 
 def main(argv: list[str] | None = None) -> int:
