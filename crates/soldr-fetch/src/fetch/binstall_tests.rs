@@ -342,22 +342,11 @@ fn https_policy_refuses_non_https_pkg_urls() {
 
 /// Committed minisign fixtures: a TEST keypair generated for soldr#3735
 /// (the secret half was never committed; it is not a real publisher key).
-const SIGNED_ASSET: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/binstall_minisign/asset.tgz"
-));
-const GOOD_SIG: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/binstall_minisign/asset.tgz.sig"
-));
-const WRONG_KEY_SIG: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/binstall_minisign/asset.tgz.wrongkey.sig"
-));
-const TEST_PUBKEY: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/binstall_minisign/test.pub"
-));
+const SIGNED_ASSET: &[u8] = include_bytes!("../../tests/fixtures/binstall_minisign/asset.tgz");
+const GOOD_SIG: &[u8] = include_bytes!("../../tests/fixtures/binstall_minisign/asset.tgz.sig");
+const WRONG_KEY_SIG: &[u8] =
+    include_bytes!("../../tests/fixtures/binstall_minisign/asset.tgz.wrongkey.sig");
+const TEST_PUBKEY: &str = include_str!("../../tests/fixtures/binstall_minisign/test.pub");
 
 struct Served {
     _root: tempfile::TempDir,
