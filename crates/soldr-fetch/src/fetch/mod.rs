@@ -4,8 +4,12 @@
 //! 1. Local cache (`~/.soldr/bin/<tool>-<version>/`)
 //! 2. GitHub Releases (repository URL from crates.io, or override from `known_tools`)
 //! 3. QuickInstall prebuilt index (exact versions only; trust-unverified
-//!    unless pinned) -- see [`quickinstall`] (soldr#3700)
+//!    unless pinned) -- see [`quickinstall`] (soldr#3700); before it, the
+//!    crate's own `[package.metadata.binstall]` pkg-url -- see [`binstall`]
+//!    (soldr#3726)
 
+pub mod binstall;
+pub(crate) mod binstall_template;
 pub mod known_tools;
 pub mod quickinstall;
 mod resolver_order;
@@ -603,6 +607,20 @@ async fn fetch_repo_binary_once(
     match api_result {
         Ok(result) => Ok(result),
         Err(err) => {
+            // soldr#3726: the crate's own binstall metadata before QuickInstall.
+            if let Some(result) = binstall::fallback_after_api(
+                order,
+                paths,
+                cache_name,
+                binary_names,
+                version,
+                tag_prefix,
+                target,
+            )
+            .await?
+            {
+                return Ok(result);
+            }
             quickinstall::fallback_after_api(
                 order,
                 err,

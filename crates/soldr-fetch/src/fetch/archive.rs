@@ -67,6 +67,7 @@ pub(super) async fn download_and_extract_with_pin(
         binary_names,
         manifest_pin,
         None,
+        None,
     )
     .await
 }
@@ -93,6 +94,38 @@ pub(super) async fn download_and_extract_with_policy(
         binary_names,
         None,
         Some(policy),
+        None,
+    )
+    .await
+}
+
+/// [`download_and_extract_with_policy`] for an asset whose URL does not
+/// carry its archive suffix (soldr#3726: binstall `pkg-fmt`). `format_hint`
+/// is the suffix the extractor dispatches on; `""` means a raw binary.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the policy variant plus the explicit archive format"
+)]
+pub(super) async fn download_and_extract_with_policy_as(
+    paths: &SoldrPaths,
+    cache_name: &str,
+    version: &str,
+    url: &str,
+    target: &TargetTriple,
+    binary_names: &[&str],
+    policy: (&trust::PinnedChecksumStore, trust::TrustMode),
+    format_hint: &str,
+) -> Result<PathBuf, SoldrError> {
+    download_and_extract_with_pin_inner(
+        paths,
+        cache_name,
+        version,
+        ArchiveSource::Url(url),
+        target,
+        binary_names,
+        None,
+        Some(policy),
+        Some(format_hint),
     )
     .await
 }
@@ -121,6 +154,7 @@ pub(super) async fn extract_catalogue_asset_with_pin(
         binary_names,
         Some((&entry.asset, &entry.sha256)),
         None,
+        None,
     )
     .await
 }
@@ -139,6 +173,7 @@ async fn download_and_extract_with_pin_inner(
     binary_names: &[&str],
     manifest_pin: Option<(&str, &str)>,
     policy: Option<(&trust::PinnedChecksumStore, trust::TrustMode)>,
+    format_hint: Option<&str>,
 ) -> Result<PathBuf, SoldrError> {
     // soldr#3683: serialize download, extract and promote per tool+version
     // so concurrent fetches sharing one bin directory cannot race the
@@ -241,19 +276,29 @@ async fn download_and_extract_with_pin_inner(
         .ok_or_else(|| SoldrError::Other(format!("no binary names configured for {cache_name}")))?;
     let staged_binary_path = staging_dir.join(&main_binary_name);
 
-    if source_name.ends_with(".zip") {
+    let dispatch_name = format_hint.unwrap_or(source_name);
+    if dispatch_name.ends_with(".zip") {
         extract_zip(
             std::fs::File::open(downloaded.path())?,
             staging_dir,
             &desired_binaries,
         )?;
-    } else if source_name.ends_with(".tar.gz") || source_name.ends_with(".tgz") {
+    } else if dispatch_name.ends_with(".tar.gz") || dispatch_name.ends_with(".tgz") {
         extract_tar_gz(
             std::fs::File::open(downloaded.path())?,
             staging_dir,
             &desired_binaries,
         )?;
-    } else if source_name.ends_with(".tar.xz") || source_name.ends_with(".txz") {
+    } else if dispatch_name.ends_with(".tar.zst") || dispatch_name.ends_with(".tzst") {
+        let zst = zstd::stream::read::Decoder::new(std::fs::File::open(downloaded.path())?)?;
+        extract_tar(zst, staging_dir, &desired_binaries)?;
+    } else if dispatch_name.ends_with(".tar") {
+        extract_tar(
+            std::fs::File::open(downloaded.path())?,
+            staging_dir,
+            &desired_binaries,
+        )?;
+    } else if dispatch_name.ends_with(".tar.xz") || dispatch_name.ends_with(".txz") {
         // cargo-zigbuild and other rust-cross prebuilts ship their
         // per-triple binary tarballs in xz. Without this branch the
         // fall-through "raw binary" path below wrote the compressed
@@ -600,6 +645,7 @@ mod tests {
                                     &target,
                                     &["fixture-tool"],
                                     Some(("fixture-tool", fixture_sha.as_str())),
+                                    None,
                                     None,
                                 ))
                                 .map_err(|error| error.to_string())

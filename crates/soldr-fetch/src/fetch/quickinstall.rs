@@ -15,8 +15,8 @@
 //! mismatch is always fatal and `SOLDR_TRUST_MODE=strict` refuses an
 //! unpinned asset. The hop never bypasses a pin.
 //!
-//! Not yet covered: a crate's own `[package.metadata.binstall]` `pkg-url`
-//! templates (tracked as a follow-up sub-issue of #3680).
+//! A crate's own `[package.metadata.binstall]` `pkg-url` is consulted first,
+//! by the [`super::binstall`] hop (soldr#3726).
 
 use crate::core::{SoldrError, SoldrPaths, TargetTriple};
 
