@@ -13,20 +13,25 @@
 //! overridable through [`CRATES_BASE_URL_ENV_VAR`]. Both the `.crate` URL
 //! and the rendered `pkg-url` must be `https`.
 //!
-//! Trust: binstall metadata carries no checksum soldr honours (minisign
-//! signing is not implemented), so an asset is `trust: unverified` unless
-//! `SOLDR_CHECKSUMS_FILE` pins it; a pin mismatch is always fatal and
-//! `SOLDR_TRUST_MODE=strict` refuses an unpinned asset. The `.crate` itself
-//! is only read for metadata; nothing from it is executed.
+//! A crate that declares no `pkg-url` is probed with binstall's default
+//! `{ repo }/releases/download/...` guesses (soldr#3735).
+//!
+//! Trust: binstall metadata carries no checksum soldr honours, so an asset
+//! is `trust: unverified` unless `SOLDR_CHECKSUMS_FILE` pins it; a pin
+//! mismatch is always fatal and `SOLDR_TRUST_MODE=strict` refuses an
+//! unpinned asset. A declared minisign `signing` key is enforced fail-closed
+//! ([`super::binstall_signing`]) but is not a pin. The `.crate` itself is
+//! only read for metadata; nothing from it is executed.
 
 use std::io::Read as _;
 
 use crate::core::{SoldrError, SoldrPaths, TargetTriple};
 
+use super::binstall_signing::Verifier;
 use super::binstall_template::{render, BinstallMeta, TemplateVars};
 use super::stream_download::{
     asset_http_client, get_request, send_asset_request, stream_response_to_temp_file,
-    ASSET_HEADER_TIMEOUT, ASSET_IDLE_TIMEOUT,
+    DownloadedAsset, ASSET_HEADER_TIMEOUT, ASSET_IDLE_TIMEOUT,
 };
 use super::{archive, trust, FetchResult, ResolverOrder, VersionSpec};
 
@@ -63,6 +68,33 @@ fn require_https(raw: &str, what: &str, allow_loopback_http: bool) -> Result<(),
     }
 }
 
+fn is_gone(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE
+}
+
+/// GET `url` (https-checked) to a temp file. `Ok(None)` on 404/410.
+async fn download_optional(
+    url: &str,
+    what: &str,
+    allow_loopback_http: bool,
+) -> Result<Option<DownloadedAsset>, SoldrError> {
+    require_https(url, what, allow_loopback_http)?;
+    let client = asset_http_client(what)?;
+    let resp = send_asset_request(get_request(&client, url), url, ASSET_HEADER_TIMEOUT).await?;
+    let status = resp.status();
+    if is_gone(status) {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(SoldrError::Network(format!(
+            "binstall: HTTP {status} downloading {what} {url}"
+        )));
+    }
+    Ok(Some(
+        stream_response_to_temp_file(resp, url, ASSET_IDLE_TIMEOUT).await?,
+    ))
+}
+
 /// Download the `.crate` and return its `Cargo.toml`. `Ok(None)` on 404/410.
 async fn fetch_cargo_toml(
     crates_base: &str,
@@ -72,19 +104,11 @@ async fn fetch_cargo_toml(
 ) -> Result<Option<String>, SoldrError> {
     let base = crates_base.trim_end_matches('/');
     let url = format!("{base}/{crate_name}/{crate_name}-{version}.crate");
-    require_https(&url, "crate download URL", allow_loopback_http)?;
-    let client = asset_http_client("binstall crate metadata")?;
-    let resp = send_asset_request(get_request(&client, &url), &url, ASSET_HEADER_TIMEOUT).await?;
-    let status = resp.status();
-    if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
+    let Some(downloaded) =
+        download_optional(&url, "crate download URL", allow_loopback_http).await?
+    else {
         return Ok(None);
-    }
-    if !status.is_success() {
-        return Err(SoldrError::Network(format!(
-            "binstall: HTTP {status} downloading {crate_name} v{version} .crate"
-        )));
-    }
-    let downloaded = stream_response_to_temp_file(resp, &url, ASSET_IDLE_TIMEOUT).await?;
+    };
     let gz = flate2::read::GzDecoder::new(std::fs::File::open(downloaded.path())?);
     let mut tar = tar::Archive::new(gz);
     let wanted = format!("{crate_name}-{version}/Cargo.toml");
@@ -130,46 +154,66 @@ pub async fn try_resolve(
     else {
         return Ok(None);
     };
-    let Some(meta) = BinstallMeta::from_cargo_toml(&cargo_toml, target)? else {
-        return Ok(None);
-    };
-    let vars = TemplateVars {
-        name: crate_name,
-        version,
-        target,
-        pkg_fmt: meta.pkg_fmt,
-        repo: meta.repo.as_deref(),
-        bin: None,
-    };
-    let url = render(&meta.pkg_url, &vars)?;
-    if let Some(bin_dir) = &meta.bin_dir {
+    let meta = BinstallMeta::from_cargo_toml(&cargo_toml, target)?;
+    let guessed = meta.pkg_url.is_none();
+    let candidates = meta.candidates(crate_name, version, target)?;
+    if let (Some(bin_dir), Some(&(_, fmt))) = (&meta.bin_dir, candidates.first()) {
         // Validated strictly; extraction locates binaries by name.
-        let bin_vars = TemplateVars {
-            bin: binary_names.first().copied(),
-            ..vars
-        };
-        render(bin_dir, &bin_vars)?;
+        render(
+            bin_dir,
+            &TemplateVars {
+                name: crate_name,
+                version,
+                target,
+                pkg_fmt: fmt,
+                repo: meta.repo.as_deref(),
+                bin: binary_names.first().copied(),
+                url: None,
+            },
+        )?;
     }
-    require_https(&url, "pkg-url", allow_loopback_http)?;
-    let hint = meta.pkg_fmt.extract_hint()?;
-    let client = asset_http_client("binstall probe")?;
-    let probe = send_asset_request(
-        super::stream_download::head_request(&client, &url),
-        &url,
-        ASSET_HEADER_TIMEOUT,
+    let Some((url, pkg_fmt)) = probe_candidates(
+        candidates,
+        guessed,
+        crate_name,
+        version,
+        allow_loopback_http,
     )
-    .await?;
-    let status = probe.status();
-    if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
+    .await?
+    else {
         return Ok(None);
-    }
-    if !status.is_success() {
-        return Err(SoldrError::Network(format!(
-            "binstall: HTTP {status} probing {crate_name} v{version} pkg-url"
-        )));
-    }
+    };
+    let verifier = match &meta.signing {
+        Some(signing) => Some(Verifier::new(
+            signing, crate_name, version, target, pkg_fmt, &url,
+        )?),
+        None => None,
+    };
+    let signature = match &verifier {
+        Some(v) => {
+            let sig_file = download_optional(&v.sig_url, "minisign signature", allow_loopback_http)
+                .await?
+                .ok_or_else(|| {
+                    SoldrError::Other(format!(
+                        "binstall: minisign: {crate_name}: declares signing but has no signature at {}",
+                        v.sig_url
+                    ))
+                })?;
+            Some(v.decode_signature(sig_file.path())?)
+        }
+        None => None,
+    };
+    let check = |asset: &std::path::Path| match (&verifier, &signature) {
+        (Some(v), Some(sig)) => v.verify_file(asset, sig),
+        _ => Ok(()),
+    };
     eprintln!(
-        "soldr: {crate_name}: resolving v{version} from [package.metadata.binstall] pkg-url ({})",
+        "soldr: {crate_name}: resolving v{version} from [package.metadata.binstall] {} ({})",
+        if guessed {
+            "default pkg-url guess"
+        } else {
+            "pkg-url"
+        },
         target.triple()
     );
     let binary_path = archive::download_and_extract_with_policy_as(
@@ -180,7 +224,12 @@ pub async fn try_resolve(
         target,
         binary_names,
         policy,
-        hint,
+        archive::AssetAs {
+            format_hint: pkg_fmt.extract_hint(),
+            verify: verifier
+                .is_some()
+                .then_some(&check as archive::AssetVerifier<'_>),
+        },
     )
     .await?;
     Ok(Some(FetchResult {
@@ -188,6 +237,38 @@ pub async fn try_resolve(
         version: version.to_string(),
         cached: false,
     }))
+}
+
+/// HEAD-probe `candidates` in order; the first 2xx wins. A declared
+/// `pkg-url` that answers anything but 2xx/404/410 is a network error; a
+/// guess that does is just skipped.
+async fn probe_candidates(
+    candidates: Vec<(String, super::binstall_template::PkgFmt)>,
+    guessed: bool,
+    crate_name: &str,
+    version: &str,
+    allow_loopback_http: bool,
+) -> Result<Option<(String, super::binstall_template::PkgFmt)>, SoldrError> {
+    let client = asset_http_client("binstall probe")?;
+    for (url, fmt) in candidates {
+        require_https(&url, "pkg-url", allow_loopback_http)?;
+        let probe = send_asset_request(
+            super::stream_download::head_request(&client, &url),
+            &url,
+            ASSET_HEADER_TIMEOUT,
+        )
+        .await?;
+        let status = probe.status();
+        if status.is_success() {
+            return Ok(Some((url, fmt)));
+        }
+        if !guessed && !is_gone(status) {
+            return Err(SoldrError::Network(format!(
+                "binstall: HTTP {status} probing {crate_name} v{version} pkg-url"
+            )));
+        }
+    }
+    Ok(None)
 }
 
 /// Production hop after the API hop missed. `Ok(None)` when the hop is not

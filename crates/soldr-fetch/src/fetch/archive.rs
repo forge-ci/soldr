@@ -99,9 +99,22 @@ pub(super) async fn download_and_extract_with_policy(
     .await
 }
 
+/// Pre-trust check on the downloaded asset file (soldr#3735: binstall
+/// minisign). Runs before the pin/trust policy and before extraction; an
+/// error aborts the install.
+pub(super) type AssetVerifier<'a> = &'a (dyn Fn(&Path) -> Result<(), SoldrError> + Send + Sync);
+
+/// Per-asset options for [`download_and_extract_with_policy_as`].
+#[derive(Clone, Copy)]
+pub(super) struct AssetAs<'a> {
+    /// Suffix the extractor dispatches on; `""` means a raw binary.
+    pub format_hint: &'a str,
+    pub verify: Option<AssetVerifier<'a>>,
+}
+
 /// [`download_and_extract_with_policy`] for an asset whose URL does not
-/// carry its archive suffix (soldr#3726: binstall `pkg-fmt`). `format_hint`
-/// is the suffix the extractor dispatches on; `""` means a raw binary.
+/// carry its archive suffix (soldr#3726: binstall `pkg-fmt`), optionally
+/// checked by a verifier before trust policy and extraction.
 #[expect(
     clippy::too_many_arguments,
     reason = "the policy variant plus the explicit archive format"
@@ -114,7 +127,7 @@ pub(super) async fn download_and_extract_with_policy_as(
     target: &TargetTriple,
     binary_names: &[&str],
     policy: (&trust::PinnedChecksumStore, trust::TrustMode),
-    format_hint: &str,
+    asset_as: AssetAs<'_>,
 ) -> Result<PathBuf, SoldrError> {
     download_and_extract_with_pin_inner(
         paths,
@@ -125,7 +138,7 @@ pub(super) async fn download_and_extract_with_policy_as(
         binary_names,
         None,
         Some(policy),
-        Some(format_hint),
+        Some(asset_as),
     )
     .await
 }
@@ -173,7 +186,7 @@ async fn download_and_extract_with_pin_inner(
     binary_names: &[&str],
     manifest_pin: Option<(&str, &str)>,
     policy: Option<(&trust::PinnedChecksumStore, trust::TrustMode)>,
-    format_hint: Option<&str>,
+    asset_as: Option<AssetAs<'_>>,
 ) -> Result<PathBuf, SoldrError> {
     // soldr#3683: serialize download, extract and promote per tool+version
     // so concurrent fetches sharing one bin directory cannot race the
@@ -227,6 +240,9 @@ async fn download_and_extract_with_pin_inner(
         .filter(|s| !s.is_empty())
         .unwrap_or(source_name);
     let digest = downloaded.sha256();
+    if let Some(verify) = asset_as.and_then(|opts| opts.verify) {
+        verify(downloaded.path())?;
+    }
 
     if let Some((pinned_asset, expected_sha)) = manifest_pin {
         let expected = expected_sha.trim().to_ascii_lowercase();
@@ -276,7 +292,7 @@ async fn download_and_extract_with_pin_inner(
         .ok_or_else(|| SoldrError::Other(format!("no binary names configured for {cache_name}")))?;
     let staged_binary_path = staging_dir.join(&main_binary_name);
 
-    let dispatch_name = format_hint.unwrap_or(source_name);
+    let dispatch_name = asset_as.map_or(source_name, |opts| opts.format_hint);
     if dispatch_name.ends_with(".zip") {
         extract_zip(
             std::fs::File::open(downloaded.path())?,
@@ -292,6 +308,10 @@ async fn download_and_extract_with_pin_inner(
     } else if dispatch_name.ends_with(".tar.zst") || dispatch_name.ends_with(".tzst") {
         let zst = zstd::stream::read::Decoder::new(std::fs::File::open(downloaded.path())?)?;
         extract_tar(zst, staging_dir, &desired_binaries)?;
+    } else if dispatch_name.ends_with(".tar.bz2") || dispatch_name.ends_with(".tbz2") {
+        // soldr#3735: binstall `pkg-fmt = "tbz2"` (pure-Rust bzip2 backend).
+        let bz = bzip2::read::BzDecoder::new(std::fs::File::open(downloaded.path())?);
+        extract_tar(bz, staging_dir, &desired_binaries)?;
     } else if dispatch_name.ends_with(".tar") {
         extract_tar(
             std::fs::File::open(downloaded.path())?,

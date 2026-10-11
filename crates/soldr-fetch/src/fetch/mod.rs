@@ -9,6 +9,7 @@
 //!    (soldr#3726)
 
 pub mod binstall;
+pub(crate) mod binstall_signing;
 pub(crate) mod binstall_template;
 pub mod known_tools;
 pub mod quickinstall;

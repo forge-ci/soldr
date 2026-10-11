@@ -91,9 +91,11 @@
       "zccache"
     ],
     "soldr-fetch": [
+      "bzip2",
       "flate2",
       "fs2",
       "hex",
+      "minisign-verify",
       "reqwest",
       "semver",
       "serde",

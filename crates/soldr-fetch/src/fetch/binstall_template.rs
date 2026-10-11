@@ -66,20 +66,29 @@ impl PkgFmt {
     }
 
     /// Suffix the shared extractor dispatches on (`""` = raw binary).
-    /// `tbz2` has no decoder in soldr and is refused.
-    pub(crate) fn extract_hint(self) -> Result<&'static str, SoldrError> {
+    pub(crate) fn extract_hint(self) -> &'static str {
         match self {
-            Self::Tbz2 => Err(SoldrError::Other(
-                "binstall: pkg-fmt `tbz2` is not supported by soldr".into(),
-            )),
-            Self::Bin => Ok(""),
-            Self::Tar => Ok(".tar"),
-            Self::Tgz => Ok(".tar.gz"),
-            Self::Txz => Ok(".tar.xz"),
-            Self::Tzstd => Ok(".tar.zst"),
-            Self::Zip => Ok(".zip"),
+            Self::Bin => "",
+            Self::Tar => ".tar",
+            Self::Tbz2 => ".tar.bz2",
+            Self::Tgz => ".tar.gz",
+            Self::Txz => ".tar.xz",
+            Self::Tzstd => ".tar.zst",
+            Self::Zip => ".zip",
         }
     }
+
+    /// Formats binstall's default guesses try when no `pkg-fmt` is given,
+    /// in binstall's order.
+    const GUESS_ORDER: [Self; 7] = [
+        Self::Tgz,
+        Self::Tbz2,
+        Self::Txz,
+        Self::Tzstd,
+        Self::Tar,
+        Self::Zip,
+        Self::Bin,
+    ];
 }
 
 /// Inputs to [`render`].
@@ -91,6 +100,8 @@ pub(crate) struct TemplateVars<'a> {
     pub repo: Option<&'a str>,
     /// Set only when rendering `bin-dir`.
     pub bin: Option<&'a str>,
+    /// Set only when rendering `signing.file` (`{ url }` = the asset URL).
+    pub url: Option<&'a str>,
 }
 
 impl TemplateVars<'_> {
@@ -133,6 +144,7 @@ impl TemplateVars<'_> {
                 .trim_end_matches('/')
                 .to_string(),
             "bin" if self.bin.is_some() => self.bin.unwrap_or_default().to_string(),
+            "url" if self.url.is_some() => self.url.unwrap_or_default().to_string(),
             other => {
                 return Err(SoldrError::Other(format!(
                     "binstall: unknown template variable `{other}`"
@@ -171,22 +183,46 @@ pub(crate) fn render(template: &str, vars: &TemplateVars<'_>) -> Result<String, 
     Ok(out)
 }
 
+/// binstall's default `pkg-url` guesses, tried when a crate declares none
+/// (cargo-binstall `DEFAULT_PKG_URLS`, GitHub-style release layout).
+const DEFAULT_PKG_URLS: [&str; 9] = [
+    "{ repo }/releases/download/{ version }/{ name }-{ target }-v{ version }{ archive-suffix }",
+    "{ repo }/releases/download/v{ version }/{ name }-{ target }-v{ version }{ archive-suffix }",
+    "{ repo }/releases/download/{ version }/{ name }-{ target }-{ version }{ archive-suffix }",
+    "{ repo }/releases/download/v{ version }/{ name }-{ target }-{ version }{ archive-suffix }",
+    "{ repo }/releases/download/{ version }/{ name }-{ version }-{ target }{ archive-suffix }",
+    "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }{ archive-suffix }",
+    "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }{ archive-suffix }",
+    "{ repo }/releases/download/{ version }/{ name }-{ target }{ archive-suffix }",
+    "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }",
+];
+
+/// `[package.metadata.binstall.signing]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Signing {
+    pub algorithm: String,
+    pub pubkey: String,
+    /// Signature URL template; binstall's default is `{ url }.sig`.
+    pub file: Option<String>,
+}
+
 /// Resolved binstall metadata for one target (overrides applied).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BinstallMeta {
-    pub pkg_url: String,
-    pub pkg_fmt: PkgFmt,
+    /// `None` = no declared `pkg-url`; binstall's default guesses apply.
+    pub pkg_url: Option<String>,
+    /// `None` = undeclared (`tgz` for a declared `pkg-url`, every format
+    /// for the default guesses).
+    pub pkg_fmt: Option<PkgFmt>,
     pub bin_dir: Option<String>,
     pub repo: Option<String>,
+    pub signing: Option<Signing>,
 }
 
 impl BinstallMeta {
-    /// Parse a crate's `Cargo.toml`. `Ok(None)` when it declares no
-    /// `pkg-url` for `target` (soldr does not guess binstall's defaults).
-    pub(crate) fn from_cargo_toml(
-        text: &str,
-        target: &TargetTriple,
-    ) -> Result<Option<Self>, SoldrError> {
+    /// Parse a crate's `Cargo.toml`. A crate with no binstall table yields
+    /// all-`None` metadata, i.e. the default guesses.
+    pub(crate) fn from_cargo_toml(text: &str, target: &TargetTriple) -> Result<Self, SoldrError> {
         let doc: toml::Value = text
             .parse()
             .map_err(|e| SoldrError::Other(format!("binstall: invalid Cargo.toml: {e}")))?;
@@ -195,33 +231,76 @@ impl BinstallMeta {
             .and_then(|p| p.get("repository"))
             .and_then(toml::Value::as_str)
             .map(str::to_string);
-        let Some(meta) = package
+        let meta = package
             .and_then(|p| p.get("metadata"))
-            .and_then(|m| m.get("binstall"))
-        else {
-            return Ok(None);
-        };
+            .and_then(|m| m.get("binstall"));
         let over = meta
-            .get("overrides")
+            .and_then(|m| m.get("overrides"))
             .and_then(|o| o.get(target.triple().as_str()));
         let field = |key: &str| {
             over.and_then(|o| o.get(key))
-                .or_else(|| meta.get(key))
+                .or_else(|| meta.and_then(|m| m.get(key)))
                 .and_then(toml::Value::as_str)
                 .map(str::to_string)
         };
-        let Some(pkg_url) = field("pkg-url") else {
-            return Ok(None);
-        };
-        let pkg_fmt = match field("pkg-fmt") {
-            Some(raw) => PkgFmt::parse(&raw)?,
-            None => PkgFmt::Tgz,
-        };
-        Ok(Some(Self {
-            pkg_url,
+        let pkg_fmt = field("pkg-fmt")
+            .map(|raw| PkgFmt::parse(&raw))
+            .transpose()?;
+        let signing = over
+            .and_then(|o| o.get("signing"))
+            .or_else(|| meta.and_then(|m| m.get("signing")))
+            .map(|table| {
+                let get = |key: &str| table.get(key).and_then(toml::Value::as_str);
+                Signing {
+                    algorithm: get("algorithm").unwrap_or_default().to_string(),
+                    pubkey: get("pubkey").unwrap_or_default().to_string(),
+                    file: get("file").map(str::to_string),
+                }
+            });
+        Ok(Self {
+            pkg_url: field("pkg-url"),
             pkg_fmt,
             bin_dir: field("bin-dir"),
             repo,
-        }))
+            signing,
+        })
+    }
+
+    /// Candidate `(url, pkg-fmt)` pairs, in probe order. The declared
+    /// `pkg-url` alone when present; otherwise binstall's default guesses
+    /// (empty when the crate has no `package.repository`).
+    pub(crate) fn candidates(
+        &self,
+        name: &str,
+        version: &str,
+        target: &TargetTriple,
+    ) -> Result<Vec<(String, PkgFmt)>, SoldrError> {
+        let vars = |pkg_fmt| TemplateVars {
+            name,
+            version,
+            target,
+            pkg_fmt,
+            repo: self.repo.as_deref(),
+            bin: None,
+            url: None,
+        };
+        if let Some(pkg_url) = &self.pkg_url {
+            let fmt = self.pkg_fmt.unwrap_or(PkgFmt::Tgz);
+            return Ok(vec![(render(pkg_url, &vars(fmt))?, fmt)]);
+        }
+        if self.repo.is_none() {
+            return Ok(Vec::new());
+        }
+        let fmts: Vec<PkgFmt> = match self.pkg_fmt {
+            Some(fmt) => vec![fmt],
+            None => PkgFmt::GUESS_ORDER.to_vec(),
+        };
+        let mut out = Vec::new();
+        for template in DEFAULT_PKG_URLS {
+            for &fmt in &fmts {
+                out.push((render(template, &vars(fmt))?, fmt));
+            }
+        }
+        Ok(out)
     }
 }
