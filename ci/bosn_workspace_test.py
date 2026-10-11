@@ -12,8 +12,17 @@ import argparse
 import os
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# pylint: disable-next=wrong-import-position
+from crate_graph import (  # noqa: E402 -- script-relative import precedes this
+    changed_paths,
+    reverse_dependency_closure,
+    workspace_crates,
+)
 
 
 @dataclass(frozen=True)
@@ -55,13 +64,73 @@ class WorkspaceTestPlan:
         return [*self.setup, self.source_start, self.validation, *self.teardown]
 
 
+# soldr#3731: soldr-cli's guard tests read the whole workspace tree, so a
+# change to any crate can reach them; it is always selected.
+ALWAYS_SELECTED = ("soldr-cli",)
+# Paths inside a crate that are test infrastructure or a dependency edge
+# rather than crate source: a change to one runs the full suite.
+CRATE_FULL_RUN_PARTS = ("tests", "Cargo.toml")
+
+
+@dataclass(frozen=True)
+class Selection:
+    """The packages to test, or None for the whole workspace, and why."""
+
+    packages: tuple[str, ...] | None
+    reason: str
+
+
+def select_packages(root: Path, changed: list[str] | None) -> Selection:
+    """Narrow the suite to the reverse-dependency closure of the changed
+    crates only on proof (soldr#3731); anything uncertain runs it all.
+
+    A crate's test binaries are built from it and its path-dependency
+    closure, against an unchanged Cargo.lock. If every changed path is crate
+    source, a crate outside the changed crates' reverse closure builds the
+    same test binaries as on the base, so its tests cannot change outcome.
+    """
+    full = "tests lane: FULL workspace"
+    if not changed:
+        return Selection(None, f"{full} -- change set unknown or empty")
+    try:
+        crates = {c.name for c in workspace_crates(root)}
+    except (OSError, ValueError, tomllib.TOMLDecodeError) as error:
+        return Selection(None, f"{full} -- crate graph unreadable ({error})")
+    touched: set[str] = set()
+    for path in changed:
+        parts = path.split("/")
+        if (
+            len(parts) < 3
+            or parts[0] != "crates"
+            or parts[1] not in crates
+            or parts[2] in CRATE_FULL_RUN_PARTS
+        ):
+            return Selection(None, f"{full} -- {path} is not crate source")
+        touched.add(parts[1])
+    selected = reverse_dependency_closure(root, tuple(sorted(touched)))
+    packages = tuple(sorted(selected | set(ALWAYS_SELECTED)))
+    skipped = sorted(crates - set(packages))
+    return Selection(
+        packages,
+        f"tests lane: SELECTED {list(packages)} (soldr#3731) -- changes touch only "
+        f"{sorted(touched)}; skipped {skipped}, outside their reverse-dependency "
+        "closure",
+    )
+
+
 def container_path(path: Path) -> str:
     """Render a Linux container path even when the contract test runs on Windows."""
     return path.as_posix()
 
 
-def workspace_test_plan(*, target: Path, bootstrap: Path) -> WorkspaceTestPlan:
-    """Return the ordered bootstrap-to-source validation handoff."""
+def workspace_test_plan(
+    *, target: Path, bootstrap: Path, packages: tuple[str, ...] | None = None
+) -> WorkspaceTestPlan:
+    """Return the ordered bootstrap-to-source validation handoff.
+
+    ``packages`` narrows both test stages (soldr#3731); None is --workspace.
+    """
+    scope = " ".join(f"-p {p}" for p in packages) if packages else "--workspace"
     source = target / "debug" / "soldr"
     source_text = container_path(source)
     wrapper_text = container_path(target / "debug" / "soldr-nextest-wrapper")
@@ -145,8 +214,8 @@ def workspace_test_plan(*, target: Path, bootstrap: Path) -> WorkspaceTestPlan:
             [
                 "sh",
                 "-c",
-                f'"{source_text}" cargo test --workspace --doc'
-                f' && "{source_text}" cargo nextest run --no-fail-fast --workspace --lib --tests',
+                f'"{source_text}" cargo test {scope} --doc'
+                f' && "{source_text}" cargo nextest run --no-fail-fast {scope} --lib --tests',
             ],
             base_env,
             unset=source_unset,
@@ -199,7 +268,11 @@ def main(argv: list[str] | None = None) -> int:
     seen = nonce.read_text(encoding="utf-8").strip() if nonce.is_file() else "(none)"
     print(f"gate-nonce: {seen}", flush=True)
 
-    plan = workspace_test_plan(target=args.target, bootstrap=args.bootstrap)
+    selection = select_packages(args.repo, changed_paths(args.repo))
+    print(selection.reason, flush=True)
+    plan = workspace_test_plan(
+        target=args.target, bootstrap=args.bootstrap, packages=selection.packages
+    )
     for step in plan.setup:
         run_step(step, repo=args.repo.resolve())
     try:

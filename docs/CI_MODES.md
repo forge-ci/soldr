@@ -159,3 +159,17 @@ proof remain required before claiming protected merge enforcement.
   lockfile, toolchain, script, unknown path or unreadable diff runs it in full. `cross`
   is not skipped this way: a cfg-free edit can still call a cfg-gated API.
 
+**The `tests` lane may narrow by proof (soldr#3731).** When every changed path is
+  crate source -- under `crates/<known crate>/`, but not that crate's `Cargo.toml` or
+  `tests/` -- `ci/bosn_workspace_test.py` runs doctests and nextest with `-p` for the
+  reverse-dependency closure of the changed crates plus `soldr-cli` (whose guards read
+  the whole tree), and prints `tests lane: SELECTED [...] (soldr#3731)` with the skipped
+  crates. A skipped crate's test binaries are built only from crates outside the change,
+  against the base's `Cargo.lock`, so they are the base's binaries. Anything else --
+  a root manifest, `Cargo.lock`, toolchain, `.config/nextest.toml`, `tests/`, a crate's
+  `tests/` or manifest, `ci/`, `docs/`, an unknown path, a dirty tree or a git error --
+  prints `tests lane: FULL workspace` and runs everything. The `tests` attestation then
+  means "every test the change can reach passed"; the attested PR skips remote Linux x64,
+  and every push to `main` still runs the full suite. The graph and change set are one
+  implementation, `ci/crate_graph.py`, shared with the `wine` lane.
+

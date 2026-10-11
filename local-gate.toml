@@ -108,7 +108,7 @@ exclude = [
   "tests/**", "docker/**", "bosn.toml", ".github/**", "ci/**", "tools/**", "scripts/**", ".claude/**",
   "src/**", "install", "install.sh", "lint", "test", "clean", "package.json", "uv.lock",
 ]
-keep = ["tests/fixtures/**", "src/soldr/_bundle_bins.py", "ci/wine_lane.py", "docker/wine-test/**"]
+keep = ["tests/fixtures/**", "src/soldr/_bundle_bins.py", "ci/wine_lane.py", "ci/crate_graph.py", "docker/wine-test/**"]
 
 # zackees/ci.yml#202: the Windows-MSVC target-run partition, replayed natively
 # in a warm local dockur/windows VM (ci/winvm_lane.py + ci/winvm_guest.ps1).
@@ -137,7 +137,10 @@ keep = [
 # The test suite, in bosn: the Rust world plus the harness it runs under.
 # zackees/ci.yml#399: it builds in the bosn container's own target dir, never
 # the host target/, so it is its own heavy group and runs beside the host
-# chain (rust, cross, wine, winvm) instead of after it.
+# chain (rust, cross, wine, winvm) instead of after it. soldr#3731: the lane
+# narrows itself to the changed crates' reverse-dependency closure plus
+# soldr-cli when the diff is crate source only (ci/bosn_workspace_test.py
+# select_packages), and logs the selection.
 [gate.lanes.tests]
 run = ["uv", "run", "--no-project", "--python", "3.13", "python", "ci/local_gate.py", "--lane", "tests"]
 group = "isolated"
@@ -149,7 +152,7 @@ exclude = [
 ]
 keep = [
   "tests/fixtures/**", "src/soldr/_bundle_bins.py", ".github/scripts/nextest*",
-  "ci/bosn_workspace_test.py",
+  "ci/bosn_workspace_test.py", "ci/crate_graph.py",
 ]
 
 # zackees/ci.yml#190 (GATE-008, pilot #189): an attested PR head skips the
