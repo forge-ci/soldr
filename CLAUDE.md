@@ -350,6 +350,12 @@ exactly what the gate just ran. The policy is `[gate.trust]` in
 - a `ci-full` label, a fork, or an author without write access;
 - the 1-in-10 audit sample.
 
+The `tests` lane attests the tests the change can reach (soldr#3731): for a
+crate-source-only diff it runs the changed crates' reverse-dependency closure
+plus `soldr-cli`, logged as `tests lane: SELECTED [...]`; any root, lockfile,
+toolchain, test-infra, unknown path, dirty tree or git error runs the full
+workspace. See [CI modes](docs/CI_MODES.md) "Local gate: proven lane skips".
+
 Every push to `main` runs the jobs for real, and a release candidate runs
 full CI on its exact SHA. A remote failure on an attested head is a gate
 gap: fix the gate, don't just rerun.
