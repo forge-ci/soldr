@@ -499,7 +499,16 @@ pub(crate) fn current_daemon_process(
     paths: &SoldrPaths,
     idle_timeout_secs: Option<u32>,
 ) -> Result<DaemonProcess, IdentityError> {
-    DaemonProcess::current_process(soldr_daemon_endpoint(paths), idle_timeout_secs)
+    // soldr#3736: memoize the legacy SHA-256 by content (BLAKE3) so each cold
+    // start of an already-seen image skips a full second read of it.
+    let memo = crate::daemon::image_hash::machine_scoped_cache_dir(
+        &paths.cache.join("daemon-legacy-sha256"),
+    );
+    crate::daemon::legacy_sha256_memo::current_process_memoized(
+        soldr_daemon_endpoint(paths),
+        idle_timeout_secs,
+        &memo,
+    )
 }
 
 pub(crate) fn soldr_backend_endpoint_mux(

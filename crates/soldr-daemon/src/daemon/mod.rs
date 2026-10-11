@@ -62,6 +62,7 @@ pub mod ipc;
 pub mod ipc_peer;
 /// soldr#3053 — registry of pending/recent terminate and cancel decisions.
 pub(crate) mod kill_decisions;
+pub(crate) mod legacy_sha256_memo;
 pub mod lifecycle;
 pub mod maintenance;
 pub(crate) mod other_generations;
