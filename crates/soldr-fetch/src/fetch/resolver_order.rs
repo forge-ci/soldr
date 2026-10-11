@@ -4,10 +4,10 @@
 use crate::core::SoldrError;
 
 /// Env var (issue #873) controlling which resolver hops fire. Comma-
-/// separated list of `embed`, `live`, `api`, `quickinstall` (e.g.
+/// separated list of `embed`, `live`, `api`, `binstall`, `quickinstall` (e.g.
 /// `SOLDR_RESOLVER_ORDER=live,api` to skip the embedded blob,
 /// `SOLDR_RESOLVER_ORDER=api` to skip both manifest hops). Unset or
-/// empty → all four hops fire in the default order. Tokens not in the
+/// empty → all five hops fire in the default order. Tokens not in the
 /// known-set are warned about and ignored; if no token is recognised the
 /// value falls back to all hops, so a typo can never disable the
 /// sha-pinned manifest hops. The `api` and `quickinstall` hops are gated too.
@@ -15,6 +15,8 @@ use crate::core::SoldrError;
 /// `quickinstall` (soldr#3700) runs only after the `api` hop misses (or is
 /// excluded) for an exact version; QuickInstall publishes no checksum, so
 /// its assets are trust-`unverified` unless `SOLDR_CHECKSUMS_FILE` pins them.
+/// `binstall` (soldr#3726) runs just before `quickinstall` under the same
+/// conditions and trust posture, from the crate's own binstall `pkg-url`.
 ///
 /// The `api` hop is always last when listed — there is no way to
 /// re-order the hops, only to disable them. This keeps the trust
@@ -32,16 +34,19 @@ pub struct ResolverOrder {
     pub try_api: bool,
     /// When false, the unpinned QuickInstall fallback hop (soldr#3700) is skipped.
     pub try_quickinstall: bool,
+    /// When false, the unpinned `[package.metadata.binstall]` hop (soldr#3726) is skipped.
+    pub try_binstall: bool,
 }
 
 impl ResolverOrder {
-    /// All four hops, in the canonical embed → live → api → quickinstall order.
+    /// All hops, in the canonical embed → live → api → binstall → quickinstall order.
     pub const fn all() -> Self {
         Self {
             try_embed: true,
             try_live: true,
             try_api: true,
             try_quickinstall: true,
+            try_binstall: true,
         }
     }
 
@@ -66,6 +71,7 @@ impl ResolverOrder {
             try_live: false,
             try_api: false,
             try_quickinstall: false,
+            try_binstall: false,
         };
         let mut recognised = false;
         for token in trimmed.split(',') {
@@ -87,15 +93,19 @@ impl ResolverOrder {
                     recognised = true;
                     order.try_quickinstall = true;
                 }
+                "binstall" => {
+                    recognised = true;
+                    order.try_binstall = true;
+                }
                 "" => {}
                 _ => eprintln!(
-                    "soldr: warning: {RESOLVER_ORDER_ENV_VAR}: ignoring unknown resolver hop `{tok}` (known: embed, live, api, quickinstall)"
+                    "soldr: warning: {RESOLVER_ORDER_ENV_VAR}: ignoring unknown resolver hop `{tok}` (known: embed, live, api, binstall, quickinstall)"
                 ),
             }
         }
         if !recognised {
             eprintln!(
-                "soldr: warning: {RESOLVER_ORDER_ENV_VAR}={trimmed:?} names no known hop; using all hops (embed,live,api,quickinstall)"
+                "soldr: warning: {RESOLVER_ORDER_ENV_VAR}={trimmed:?} names no known hop; using all hops (embed,live,api,binstall,quickinstall)"
             );
             return Self::all();
         }
