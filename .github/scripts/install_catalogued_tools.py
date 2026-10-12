@@ -16,8 +16,9 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, TypeGuard, TypeVar
+from typing import Any, Callable, Iterator, TypeGuard, TypeVar
 from urllib.parse import urlsplit
 
 from catalogue_http import display_url, open_url, validate_https_url
@@ -50,6 +51,53 @@ MAX_ASSET_BYTES = 8 * 1024 * 1024 * 1024 * 1024
 CATALOGUE_CAPABILITY = 2
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class JsonObject:
+    """A strictly parsed JSON object whose schema is validated field by field."""
+
+    fields: dict
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.fields.get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        return self.fields[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.fields)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self.fields
+
+
+@dataclass(frozen=True)
+class PartIdentity:
+    """Size and content identity of one published or catalogued part."""
+
+    size_bytes: int
+    ident: str
+
+
+@dataclass(frozen=True)
+class AssetIdentity:
+    """Logical catalogue identity of one release asset."""
+
+    owner: str
+    repo: str
+    tag: str
+    asset: str
+
+
+@dataclass(frozen=True)
+class InstalledTool:
+    """One verified and smoke-tested installed tool."""
+
+    tool: str
+    asset: str
+    sha256: str
+    version_output: str
 
 
 def retry_network(action: Callable[[], T], *, label: str) -> T:
@@ -107,9 +155,9 @@ def valid_generation(value: object) -> bool:
     )
 
 
-def strict_json_document(raw: bytes, *, label: str) -> dict[str, Any]:
-    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        document: dict[str, Any] = {}
+def strict_json_document(raw: bytes, *, label: str) -> JsonObject:
+    def reject_duplicate_keys(pairs: Any) -> Any:
+        document: dict = {}
         for key, value in pairs:
             if key in document:
                 raise ValueError(f"duplicate JSON key {key!r}")
@@ -129,7 +177,7 @@ def strict_json_document(raw: bytes, *, label: str) -> dict[str, Any]:
         raise SystemExit(f"{label} is not strict UTF-8 JSON: {error}") from error
     if not isinstance(payload, dict):
         raise SystemExit(f"{label} is not a JSON object")
-    return payload
+    return JsonObject(payload)
 
 
 def canonical_json_sha256(value: object) -> str:
@@ -141,14 +189,16 @@ def canonical_json_sha256(value: object) -> str:
 
 def require_exact_keys(
     value: object, *, required: set[str], optional: set[str] | None = None, label: str
-) -> dict[str, Any]:
+) -> JsonObject:
+    if isinstance(value, JsonObject):
+        value = value.fields
     if not isinstance(value, dict):
         raise SystemExit(f"{label} is not an object")
     keys = set(value)
     allowed = required | (optional or set())
     if not required <= keys or not keys <= allowed:
         raise SystemExit(f"{label} has missing or unknown fields")
-    return value
+    return JsonObject(value)
 
 
 def safe_source_path(value: object) -> bool:
@@ -157,7 +207,7 @@ def safe_source_path(value: object) -> bool:
     return not any(part in {"", ".", ".."} for part in value.split("/"))
 
 
-def validate_transport(entry: dict[str, Any], *, asset: str) -> None:  # noqa: C901
+def validate_transport(entry: JsonObject, *, asset: str) -> None:  # noqa: C901
     """Validate the catalogue-v2 direct/multipart transport union."""
     size_bytes = entry.get("size_bytes")
     if not positive_int(size_bytes) or size_bytes > MAX_ASSET_BYTES:
@@ -244,8 +294,8 @@ def validate_transport(entry: dict[str, Any], *, asset: str) -> None:  # noqa: C
 
 
 def select_entry(
-    catalogue: dict[str, Any], *, tool: str, version: str, target: str
-) -> dict[str, Any]:
+    catalogue: JsonObject, *, tool: str, version: str, target: str
+) -> JsonObject:
     expected = asset_name(tool, version, target)
     entries = catalogue.get("entries")
     if not isinstance(entries, list):
@@ -258,8 +308,9 @@ def select_entry(
     entry = matches[0]
     if not valid_sha256(entry.get("sha256")):
         raise SystemExit(f"catalogue row {expected} has no valid sha256")
-    validate_transport(entry, asset=expected)
-    return entry
+    selected = JsonObject(entry)
+    validate_transport(selected, asset=expected)
+    return selected
 
 
 def fetch_bytes(url: str, *, label: str) -> bytes:
@@ -288,7 +339,7 @@ def validate_publication_state_url(value: object, generation: str) -> str:
 
 
 def validate_publication_state(  # noqa: C901
-    state: dict[str, Any], *, generation: str, catalogue_sha256: str
+    state: JsonObject, *, generation: str, catalogue_sha256: str
 ) -> None:
     require_exact_keys(
         state,
@@ -327,7 +378,7 @@ def validate_publication_state(  # noqa: C901
     ):
         raise SystemExit("publication state has invalid source identity")
 
-    slots: list[dict[str, Any]] = []
+    slots: list[JsonObject] = []
     for slot_name in ("active", "previous"):
         slot = require_exact_keys(
             state[slot_name],
@@ -388,7 +439,7 @@ def validate_publication_state(  # noqa: C901
     ):
         raise SystemExit("publication state identity tables are invalid")
 
-    expected_part_index: dict[str, tuple[int, str]] = {}
+    expected_part_index: dict[str, PartIdentity] = {}
     for asset_sha, raw_asset in assets.items():
         published = require_exact_keys(
             raw_asset,
@@ -438,7 +489,7 @@ def validate_publication_state(  # noqa: C901
                 raise SystemExit(
                     f"publication asset {asset_sha} part {expected_number} is invalid"
                 )
-            identity = (part_size, str(part["git_blob"]))
+            identity = PartIdentity(part_size, str(part["git_blob"]))
             previous = expected_part_index.setdefault(str(part_sha), identity)
             if previous != identity:
                 raise SystemExit("publication state has conflicting part identities")
@@ -454,7 +505,10 @@ def validate_publication_state(  # noqa: C901
             required={"size_bytes", "git_blob"},
             label=f"publication part index {part_sha}",
         )
-        if (row.get("size_bytes"), row.get("git_blob")) != identity:
+        if (row.get("size_bytes"), row.get("git_blob")) != (
+            identity.size_bytes,
+            identity.ident,
+        ):
             raise SystemExit(f"publication part index {part_sha} is invalid")
 
     logical_oids: set[str] = set()
@@ -497,16 +551,16 @@ def validate_publication_state(  # noqa: C901
         raise SystemExit("publication state logical and payload identities differ")
 
 
-def bind_catalogue_entries(catalogue: dict[str, Any], state: dict[str, Any]) -> None:  # noqa: C901
+def bind_catalogue_entries(catalogue: JsonObject, state: JsonObject) -> None:  # noqa: C901
     entries = catalogue.get("entries")
     logical_assets = state["logical_assets"]
     if not isinstance(entries, list):
         raise SystemExit("catalogue has no entries list")
     source_paths: set[str] = set()
     logical_keys: set[str] = set()
-    logical_rows: set[tuple[str, str, str, str]] = set()
+    logical_rows: set[AssetIdentity] = set()
     direct_urls: set[str] = {str(catalogue["publication_state"]["url"])}
-    part_urls: dict[str, tuple[str, int]] = {}
+    part_urls: dict[str, PartIdentity] = {}
 
     for offset, raw_entry in enumerate(entries):
         entry = require_exact_keys(
@@ -525,7 +579,7 @@ def bind_catalogue_entries(catalogue: dict[str, Any], state: dict[str, Any]) -> 
             raise SystemExit(f"catalogue row {asset} has invalid min_client_version")
         validate_transport(entry, asset=asset)
 
-        identity = (
+        identity = AssetIdentity(
             str(entry["owner"]),
             str(entry["repo"]),
             str(entry["tag"]),
@@ -546,7 +600,7 @@ def bind_catalogue_entries(catalogue: dict[str, Any], state: dict[str, Any]) -> 
             continue
 
         for part in entry["parts"]:
-            part_identity = (str(part["sha256"]), int(part["size_bytes"]))
+            part_identity = PartIdentity(int(part["size_bytes"]), str(part["sha256"]))
             local_urls: set[str] = set()
             for url in part["urls"]:
                 if url in local_urls or url in direct_urls:
@@ -564,7 +618,9 @@ def bind_catalogue_entries(catalogue: dict[str, Any], state: dict[str, Any]) -> 
         if source_path in source_paths:
             raise SystemExit(f"catalogue row {asset} duplicates source_path")
         source_paths.add(source_path)
-        logical_key = "\0".join(identity)
+        logical_key = "\0".join(
+            (identity.owner, identity.repo, identity.tag, identity.asset)
+        )
         logical = logical_assets.get(logical_key)
         if not isinstance(logical, dict):
             raise SystemExit(f"publication state does not bind catalogue row {asset}")
@@ -594,7 +650,7 @@ def bind_catalogue_entries(catalogue: dict[str, Any], state: dict[str, Any]) -> 
         raise SystemExit("publication state has catalogue-orphan logical assets")
 
 
-def fetch_catalogue(url: str) -> dict[str, Any]:
+def fetch_catalogue(url: str) -> JsonObject:
     validate_https_url(url, label="toolchain catalogue")
     shown_url = display_url(url)
     raw = fetch_bytes(url, label=f"fetch toolchain catalogue {shown_url}")
@@ -621,7 +677,7 @@ def fetch_catalogue(url: str) -> dict[str, Any]:
     if payload.get("origin") is not None:
         validate_https_url(payload["origin"], label="catalogue origin")
 
-    digest = canonical_json_sha256(payload)
+    digest = canonical_json_sha256(payload.fields)
     shown_state_url = display_url(state_url)
     state_raw = fetch_bytes(
         state_url, label=f"fetch toolchain publication state {shown_state_url}"
@@ -677,7 +733,7 @@ def download_one_of(urls: list[object], expected: str, output: Path) -> str:
     raise SystemExit("catalogued asset has no download URL")
 
 
-def download_verified(entry: dict[str, Any], output: Path) -> None:
+def download_verified(entry: JsonObject, output: Path) -> None:
     asset = str(entry.get("asset") or output.name)
     validate_transport(entry, asset=asset)
     expected = str(entry["sha256"]).lower()
@@ -847,13 +903,13 @@ def smoke_version(binary: Path, *, tool: str, version: str, target: str) -> str:
 
 def install_tools(
     *,
-    catalogue: dict[str, Any],
+    catalogue: JsonObject,
     tools: list[str],
     version: str,
     target: str,
     output_dir: Path,
-) -> list[dict[str, str]]:
-    installed: list[dict[str, str]] = []
+) -> list[InstalledTool]:
+    installed: list[InstalledTool] = []
     with tempfile.TemporaryDirectory(prefix="soldr-catalogued-tools-") as temp:
         root = Path(temp)
         stage = root / "bin"
@@ -864,12 +920,12 @@ def install_tools(
             binary = extract_binary(archive, tool=tool, target=target, output_dir=stage)
             reported = smoke_version(binary, tool=tool, version=version, target=target)
             installed.append(
-                {
-                    "tool": tool,
-                    "asset": str(entry["asset"]),
-                    "sha256": str(entry["sha256"]),
-                    "version_output": reported,
-                }
+                InstalledTool(
+                    tool=tool,
+                    asset=str(entry["asset"]),
+                    sha256=str(entry["sha256"]),
+                    version_output=reported,
+                )
             )
 
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -898,7 +954,12 @@ def main() -> int:
         target=args.target,
         output_dir=args.output_dir,
     )
-    print(json.dumps({"target": args.target, "tools": result}, sort_keys=True))
+    print(
+        json.dumps(
+            {"target": args.target, "tools": [asdict(item) for item in result]},
+            sort_keys=True,
+        )
+    )
     return 0
 
 

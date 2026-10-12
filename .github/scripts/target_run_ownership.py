@@ -53,6 +53,45 @@ HOST_MARKERS = (
 )
 
 
+@dataclass(frozen=True, order=True)
+class SourceKey:
+    """One classified test source: a whole binary or one module of it."""
+
+    package: str
+    binary: str
+    module: str | None
+
+
+@dataclass(frozen=True, order=True)
+class CategoryBinary:
+    package: str
+    binary: str
+
+
+@dataclass(frozen=True, order=True)
+class InventoryTest:
+    """One test discovered in the nextest archive inventory."""
+
+    package: str
+    binary: str
+    name: str
+
+    def test_id(self) -> str:
+        return f"{self.package}::{self.binary}::{self.name}"
+
+
+@dataclass(frozen=True)
+class SelectorCount:
+    selector_id: str
+    count: int
+
+
+@dataclass(frozen=True)
+class DeclaredTest:
+    name: str
+    attributes: str
+
+
 @dataclass(frozen=True)
 class SourceClassification:
     id: str
@@ -62,10 +101,12 @@ class SourceClassification:
     reason: str
     modules: tuple[str, ...] | None = None
 
-    def source_keys(self) -> tuple[tuple[str, str, str | None], ...]:
+    def source_keys(self) -> tuple[SourceKey, ...]:
         if self.modules is None:
-            return ((self.package, self.binary, None),)
-        return tuple((self.package, self.binary, module) for module in self.modules)
+            return (SourceKey(self.package, self.binary, None),)
+        return tuple(
+            SourceKey(self.package, self.binary, module) for module in self.modules
+        )
 
     def contains_test(self, test_name: str) -> bool:
         return self.modules is None or any(
@@ -112,6 +153,13 @@ class CanonicalTarget:
 
 
 @dataclass(frozen=True)
+class CanonicalContract:
+    targets: tuple[CanonicalTarget, ...]
+    replayed: frozenset[str]
+    failures: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class HostCfgPredicate:
     operation: str
     value: str | None = None
@@ -138,6 +186,19 @@ class HostCfgPredicate:
 
 
 @dataclass(frozen=True)
+class GatedTest:
+    name: str
+    predicate: HostCfgPredicate
+
+
+@dataclass(frozen=True)
+class PlatformGatedTest:
+    source: SourceKey
+    test_name: str
+    predicate: HostCfgPredicate
+
+
+@dataclass(frozen=True)
 class OwnershipManifest:
     classifications: tuple[SourceClassification, ...]
     selectors: tuple[ReplaySelector, ...]
@@ -150,7 +211,7 @@ class Selection:
     selected_count: int
     test_ids: tuple[str, ...]
     filter_expression: str
-    selector_counts: tuple[tuple[str, int], ...]
+    selector_counts: tuple[SelectorCount, ...]
 
 
 def _require_nonempty_string(value: Any, label: str) -> str:
@@ -201,7 +262,9 @@ def _selector_patterns_overlap(left: ReplaySelector, right: ReplaySelector) -> b
     return exact.startswith(prefix)
 
 
-def parse_manifest(payload: dict[str, object]) -> OwnershipManifest:  # noqa: C901
+def parse_manifest(payload: object) -> OwnershipManifest:  # noqa: C901
+    if not isinstance(payload, dict):
+        raise ValueError("target-run ownership manifest must be a JSON object")
     if payload.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(
             f"target-run ownership schema_version must be {SCHEMA_VERSION}"
@@ -217,7 +280,7 @@ def parse_manifest(payload: dict[str, object]) -> OwnershipManifest:  # noqa: C9
 
     classifications: list[SourceClassification] = []
     classifications_by_id: dict[str, SourceClassification] = {}
-    classified_sources: dict[tuple[str, str, str | None], str] = {}
+    classified_sources: dict[SourceKey, str] = {}
     for index, raw in enumerate(raw_classifications):
         label = f"source_classifications[{index}]"
         if not isinstance(raw, dict):
@@ -380,21 +443,19 @@ def parse_manifest(payload: dict[str, object]) -> OwnershipManifest:  # noqa: C9
     return OwnershipManifest(tuple(classifications), tuple(selectors))
 
 
-def load_manifest(path: Path) -> dict[str, object]:
+def load_manifest(path: Path) -> OwnershipManifest:
     if not path.is_file():
         raise ValueError(f"target-run ownership manifest is missing: {path}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    return parse_manifest(json.loads(path.read_text(encoding="utf-8")))
+
+
+def _inventory_tests(payload: object) -> tuple[InventoryTest, ...]:
     if not isinstance(payload, dict):
-        raise ValueError("target-run ownership manifest must be a JSON object")
-    parse_manifest(payload)
-    return payload
-
-
-def _inventory_tests(payload: dict[str, object]) -> tuple[tuple[str, str, str], ...]:
+        raise ValueError("nextest list JSON must be an object")
     suites = payload.get("rust-suites")
     if not isinstance(suites, dict):
         raise ValueError("nextest list JSON is missing rust-suites object")
-    tests: list[tuple[str, str, str]] = []
+    tests: list[InventoryTest] = []
     for suite_id, raw_suite in suites.items():
         if not isinstance(raw_suite, dict):
             raise ValueError(f"nextest suite {suite_id!r} must be an object")
@@ -408,7 +469,9 @@ def _inventory_tests(payload: dict[str, object]) -> tuple[tuple[str, str, str], 
         if not isinstance(testcases, dict):
             raise ValueError(f"nextest suite {suite_id!r} is missing testcases")
         tests.extend(
-            (package, binary, name) for name in testcases if isinstance(name, str)
+            InventoryTest(package, binary, name)
+            for name in testcases
+            if isinstance(name, str)
         )
     declared_count = payload.get("test-count")
     if not isinstance(declared_count, int) or isinstance(declared_count, bool):
@@ -421,7 +484,7 @@ def _inventory_tests(payload: dict[str, object]) -> tuple[tuple[str, str, str], 
     return tuple(sorted(tests))
 
 
-def build_filter_expression(manifest: dict[str, object], target: str) -> str:
+def build_filter_expression(manifest: OwnershipManifest, target: str) -> str:
     """The ownership filter expression, without a nextest inventory.
 
     ``build_selection`` needs a real ``nextest list`` inventory only to
@@ -437,9 +500,8 @@ def build_filter_expression(manifest: dict[str, object], target: str) -> str:
     not dropped: it still runs after the guest reports back, against the
     ``nextest list`` JSON the guest itself produced, via ``build_selection``.
     """
-    parsed = parse_manifest(manifest)
     selectors = tuple(
-        selector for selector in parsed.selectors if selector.applies_to(target)
+        selector for selector in manifest.selectors if selector.applies_to(target)
     )
     if not selectors:
         raise ValueError(
@@ -450,17 +512,20 @@ def build_filter_expression(manifest: dict[str, object], target: str) -> str:
 
 
 def build_selection(
-    manifest: dict[str, object], inventory: dict[str, object], target: str
+    manifest: OwnershipManifest, inventory: object, target: str
 ) -> Selection:
-    parsed = parse_manifest(manifest)
     selectors = tuple(
-        selector for selector in parsed.selectors if selector.applies_to(target)
+        selector for selector in manifest.selectors if selector.applies_to(target)
     )
     tests = _inventory_tests(inventory)
-    selected: set[tuple[str, str, str]] = set()
-    selector_counts: list[tuple[str, int]] = []
+    selected: set[InventoryTest] = set()
+    selector_counts: list[SelectorCount] = []
     for selector in selectors:
-        matches = {test for test in tests if selector.matches(*test)}
+        matches = {
+            test
+            for test in tests
+            if selector.matches(test.package, test.binary, test.name)
+        }
         if not matches:
             raise ValueError(
                 f"target-run selector {selector.id!r} matched no tests for target {target}; "
@@ -468,16 +533,16 @@ def build_selection(
             )
         overlap = selected.intersection(matches)
         if overlap:
-            example = "::".join(sorted(overlap)[0])
+            example = sorted(overlap)[0].test_id()
             raise ValueError(
                 f"target-run selector {selector.id!r} overlaps an earlier selector at {example}"
             )
         selected.update(matches)
-        selector_counts.append((selector.id, len(matches)))
+        selector_counts.append(SelectorCount(selector.id, len(matches)))
     if not selected:
         raise ValueError(f"target-run ownership selects zero tests for target {target}")
 
-    test_ids = tuple("::".join(test) for test in sorted(selected))
+    test_ids = tuple(test.test_id() for test in sorted(selected))
     expression = " | ".join(selector.filter_expression() for selector in selectors)
     return Selection(
         target=target,
@@ -495,11 +560,11 @@ def _is_host_sensitive(source: str) -> bool:
     )
 
 
-def _declared_tests(source: str) -> tuple[tuple[str, str], ...]:
+def _declared_tests(source: str) -> tuple[DeclaredTest, ...]:
     """Return directly declared test names and their attribute blocks."""
 
     return tuple(
-        (match.group("name"), match.group("attrs"))
+        DeclaredTest(match.group("name"), match.group("attrs"))
         for match in TEST_DECLARATION.finditer(source)
         if TEST_ATTRIBUTE.search(match.group("attrs")) is not None
     )
@@ -596,13 +661,14 @@ def _attributes_host_cfg(attributes: str) -> HostCfgPredicate | None:
 
 def _platform_gated_tests(
     source: str, module: str | None, *, module_attributes: str = ""
-) -> tuple[tuple[str, HostCfgPredicate], ...]:
+) -> tuple[GatedTest, ...]:
     """Return test IDs and the host cfg that controls their compilation."""
 
     module_predicate = _attributes_host_cfg(module_attributes)
-    tests: list[tuple[str, HostCfgPredicate]] = []
-    for name, attributes in _declared_tests(source):
-        test_predicate = _attributes_host_cfg(attributes)
+    tests: list[GatedTest] = []
+    for declared in _declared_tests(source):
+        name = declared.name
+        test_predicate = _attributes_host_cfg(declared.attributes)
         predicates = tuple(
             predicate
             for predicate in (module_predicate, test_predicate)
@@ -616,7 +682,7 @@ def _platform_gated_tests(
             else HostCfgPredicate("all", children=predicates)
         )
         test_name = f"{module}::{name}" if module is not None else name
-        tests.append((test_name, predicate))
+        tests.append(GatedTest(test_name, predicate))
     return tuple(tests)
 
 
@@ -631,20 +697,18 @@ def _canonical_target(triple: str) -> CanonicalTarget:
     raise ValueError(f"unsupported canonical target triple for host cfg: {triple}")
 
 
-def _load_canonical_targets(
-    repo_root: Path,
-) -> tuple[dict[str, CanonicalTarget], set[str], list[str]]:
+def _load_canonical_targets(repo_root: Path) -> CanonicalContract:
     contract_path = repo_root / "ci" / "canonical-targets.json"
     if not contract_path.is_file():
         # Focused source fixtures need not reproduce the repository CI contract.
-        return {}, set(), []
+        return CanonicalContract((), frozenset(), ())
     payload = json.loads(contract_path.read_text(encoding="utf-8"))
     raw_targets = payload.get("targets") if isinstance(payload, dict) else None
     if not isinstance(raw_targets, list):
-        return (
-            {},
-            set(),
-            [f"canonical target contract has no targets array: {contract_path}"],
+        return CanonicalContract(
+            (),
+            frozenset(),
+            (f"canonical target contract has no targets array: {contract_path}",),
         )
 
     canonical: dict[str, CanonicalTarget] = {}
@@ -674,13 +738,15 @@ def _load_canonical_targets(
             and isinstance(ci.get("run_job"), str)
         ):
             replayed.add(triple)
-    return canonical, replayed, failures
+    return CanonicalContract(
+        tuple(canonical.values()), frozenset(replayed), tuple(failures)
+    )
 
 
 def _validate_selector_target_scopes(
     manifest: OwnershipManifest,
     canonical: dict[str, CanonicalTarget],
-    replayed: set[str],
+    replayed: frozenset[str],
 ) -> list[str]:
     """Reject target scopes that cannot reach any canonical target-run lane."""
 
@@ -703,27 +769,26 @@ def _validate_selector_target_scopes(
     return failures
 
 
-def validate_source_ownership(manifest: dict[str, object], repo_root: Path) -> None:  # noqa: C901
+def validate_source_ownership(manifest: OwnershipManifest, repo_root: Path) -> None:  # noqa: C901
     """Fail on unclassified host source or a stale/overlapping classification."""
 
-    parsed = parse_manifest(manifest)
     classifications = {
         key: classification
-        for classification in parsed.classifications
+        for classification in manifest.classifications
         for key in classification.source_keys()
     }
     crates_root = repo_root / "crates"
     failures: list[str] = []
-    observed_sources: set[tuple[str, str, str | None]] = set()
-    host_sensitive_sources: set[tuple[str, str, str | None]] = set()
-    category_binaries: set[tuple[str, str]] = set()
-    platform_gated_tests: list[
-        tuple[tuple[str, str, str | None], str, HostCfgPredicate]
-    ] = []
+    observed_sources: set[SourceKey] = set()
+    host_sensitive_sources: set[SourceKey] = set()
+    category_binaries: set[CategoryBinary] = set()
+    platform_gated_tests: list[PlatformGatedTest] = []
 
-    canonical, replayed, target_failures = _load_canonical_targets(repo_root)
-    failures.extend(target_failures)
-    failures.extend(_validate_selector_target_scopes(parsed, canonical, replayed))
+    contract = _load_canonical_targets(repo_root)
+    canonical = {target.triple: target for target in contract.targets}
+    replayed = contract.replayed
+    failures.extend(contract.failures)
+    failures.extend(_validate_selector_target_scopes(manifest, canonical, replayed))
 
     if crates_root.is_dir():
         for crate in sorted(path for path in crates_root.iterdir() if path.is_dir()):
@@ -734,14 +799,14 @@ def validate_source_ownership(manifest: dict[str, object], repo_root: Path) -> N
 
             for main_path in sorted(tests_root.glob("*/main.rs")):
                 binary = main_path.parent.name
-                category_binaries.add((package, binary))
+                category_binaries.add(CategoryBinary(package, binary))
                 main_source = main_path.read_text(encoding="utf-8")
                 for declaration in MODULE_DECLARATION.finditer(main_source):
                     module = declaration.group("name")
                     if module == "common":
                         continue
                     module_path = main_path.parent / f"{module}.rs"
-                    source_key = (package, binary, module)
+                    source_key = SourceKey(package, binary, module)
                     observed_sources.add(source_key)
                     if not module_path.is_file():
                         failures.append(
@@ -752,8 +817,8 @@ def validate_source_ownership(manifest: dict[str, object], repo_root: Path) -> N
                     if _is_host_sensitive(module_source):
                         host_sensitive_sources.add(source_key)
                     platform_gated_tests.extend(
-                        (source_key, test_name, predicate)
-                        for test_name, predicate in _platform_gated_tests(
+                        PlatformGatedTest(source_key, gated.name, gated.predicate)
+                        for gated in _platform_gated_tests(
                             module_source,
                             module,
                             module_attributes=declaration.group("attrs"),
@@ -762,43 +827,47 @@ def validate_source_ownership(manifest: dict[str, object], repo_root: Path) -> N
 
             for source_path in sorted(tests_root.glob("*.rs")):
                 binary = source_path.stem
-                source_key = (package, binary, None)
+                source_key = SourceKey(package, binary, None)
                 observed_sources.add(source_key)
                 source = source_path.read_text(encoding="utf-8")
                 if _is_host_sensitive(source):
                     host_sensitive_sources.add(source_key)
                 platform_gated_tests.extend(
-                    (source_key, test_name, predicate)
-                    for test_name, predicate in _platform_gated_tests(source, None)
+                    PlatformGatedTest(source_key, gated.name, gated.predicate)
+                    for gated in _platform_gated_tests(source, None)
                 )
 
     platform_root = repo_root / "crates" / "soldr-platform"
     if platform_root.is_dir():
-        platform_key = ("soldr-platform", "soldr_platform", None)
+        platform_key = SourceKey("soldr-platform", "soldr_platform", None)
         observed_sources.add(platform_key)
         host_sensitive_sources.add(platform_key)
 
     for source_key in sorted(host_sensitive_sources):
         if source_key not in classifications:
-            package, binary, module = source_key
-            module_note = f" module={module}" if module is not None else ""
+            module_note = (
+                f" module={source_key.module}" if source_key.module is not None else ""
+            )
             failures.append(
                 "unclassified host-sensitive test source: "
-                f"package={package} binary={binary}{module_note}"
+                f"package={source_key.package} binary={source_key.binary}{module_note}"
             )
 
-    for source_key, test_name, predicate in sorted(
-        platform_gated_tests, key=lambda item: (item[0], item[1])
+    for gated_test in sorted(
+        platform_gated_tests, key=lambda item: (item.source, item.test_name)
     ):
-        package, binary, _module = source_key
+        package = gated_test.source.package
+        binary = gated_test.source.binary
+        test_name = gated_test.test_name
+        predicate = gated_test.predicate
         matching_selectors = tuple(
             selector.matches(package, binary, test_name)
-            for selector in parsed.selectors
+            for selector in manifest.selectors
         )
         selectors = tuple(
             selector
             for selector, matches in zip(
-                parsed.selectors, matching_selectors, strict=True
+                manifest.selectors, matching_selectors, strict=True
             )
             if matches
         )
@@ -825,12 +894,13 @@ def validate_source_ownership(manifest: dict[str, object], repo_root: Path) -> N
                 f"stale source classification {classification.id}: no source for {source_key}"
             )
         if (
-            source_key[2] is None
-            and (source_key[0], source_key[1]) in category_binaries
+            source_key.module is None
+            and CategoryBinary(source_key.package, source_key.binary)
+            in category_binaries
         ):
             failures.append(
                 f"source classification {classification.id} covers category binary "
-                f"{source_key[0]}::{source_key[1]} without explicit modules"
+                f"{source_key.package}::{source_key.binary} without explicit modules"
             )
 
     if failures:
@@ -848,8 +918,8 @@ def append_summary(path: Path, selection: Selection) -> None:
             f"- Positively selected for native replay: {selection.selected_count} tests\n"
         )
         stream.write("\n| Replay selector | Tests |\n| --- | ---: |\n")
-        for selector_id, count in selection.selector_counts:
-            stream.write(f"| `{selector_id}` | {count} |\n")
+        for entry in selection.selector_counts:
+            stream.write(f"| `{entry.selector_id}` | {entry.count} |\n")
 
 
 def write_filter(path: Path, expression: str) -> None:

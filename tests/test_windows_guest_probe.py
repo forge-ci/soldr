@@ -6,6 +6,7 @@ import json
 import urllib.request
 from argparse import Namespace
 from contextlib import nullcontext
+from dataclasses import replace
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -21,19 +22,19 @@ spec.loader.exec_module(probe)
 
 def test_summary_keeps_unmeasured_capabilities_explicit():
     report = probe.make_report(
-        host={"kvm": False, "free_bytes": 20_000_000_000},
-        timings={},
+        host=probe.HostInfo(kvm=False, free_bytes=20_000_000_000),
+        timings=probe.PhaseTimings(),
         guest=None,
-        disk={},
+        disk=probe.DiskMeasure(),
     )
-    assert report["decision"] == "no-go"
-    assert report["reason"] == "KVM is unavailable on this runner"
-    assert report["nextest"]["status"] == "not-run"
-    assert report["capabilities"]["powershell"] == "not-measured"
-    assert report["timings"]["iso_download_seconds"] is None
-    assert report["timings"]["runtime_prep_seconds"] is None
-    assert report["timings"]["runtime_install_seconds"] is None
-    assert report["timings"]["git_prep_seconds"] is None
+    assert report.decision == "no-go"
+    assert report.reason == "KVM is unavailable on this runner"
+    assert report.nextest.status == "not-run"
+    assert report.capabilities.powershell == "not-measured"
+    assert report.timings.iso_download_seconds is None
+    assert report.timings.runtime_prep_seconds is None
+    assert report.timings.runtime_install_seconds is None
+    assert report.timings.git_prep_seconds is None
 
 
 def test_vc_redist_download_is_pinned_and_rejects_drift(tmp_path, monkeypatch):
@@ -69,65 +70,65 @@ def test_mingit_download_is_pinned_and_rejects_drift(tmp_path, monkeypatch):
 
 
 def test_summary_requires_real_replay_counts_for_go():
-    guest = {
-        "nextest": {"run": 8, "passed": 8, "failed": 0, "exit_code": 0},
-        "capabilities": {"powershell": "5.1", "admin": True},
-    }
-    report = probe.make_report(
-        host={"kvm": True, "free_bytes": 60_000_000_000},
-        timings={
-            "iso_download_seconds": 80,
-            "install_seconds": 400,
-            "boot_seconds": 65,
-        },
-        guest=guest,
-        disk={"image_bytes": 12_000_000_000, "compressed_bytes": 6_000_000_000},
+    guest = probe.GuestResult(
+        nextest=probe.NextestResult(run=8, passed=8, failed=0, exit_code=0),
+        capabilities=probe.GuestCapabilities(powershell="5.1", admin=True),
     )
-    assert report["decision"] == "go"
-    assert report["nextest"]["passed"] == 8
-    assert report["timings"]["usable_shell_seconds"] == 545
+    report = probe.make_report(
+        host=probe.HostInfo(kvm=True, free_bytes=60_000_000_000),
+        timings=probe.PhaseTimings(
+            iso_download_seconds=80, install_seconds=400, boot_seconds=65
+        ),
+        guest=guest,
+        disk=probe.DiskMeasure(
+            image_bytes=12_000_000_000, compressed_bytes=6_000_000_000
+        ),
+    )
+    assert report.decision == "go"
+    assert report.nextest.passed == 8
+    assert report.timings.usable_shell_seconds == 545
 
 
 def test_desktop_report_identifies_edition_and_selector():
     report = probe.make_report(
-        host={"kvm": False},
-        timings={},
+        host=probe.HostInfo(kvm=False),
+        timings=probe.PhaseTimings(),
         guest=None,
-        disk={},
+        disk=probe.DiskMeasure(),
         guest_edition="win11-enterprise",
     )
-    assert report["edition"] == "Windows 11 Enterprise evaluation"
-    assert report["dockur_version"] == "11e"
+    assert report.edition == "Windows 11 Enterprise evaluation"
+    assert report.dockur_version == "11e"
 
 
 def test_failed_replay_is_not_a_go():
-    guest = {"nextest": {"run": 1, "passed": 0, "failed": 1, "exit_code": 100}}
-    report = probe.make_report(
-        host={"kvm": True, "free_bytes": 60_000_000_000},
-        timings={
-            "iso_download_seconds": 80,
-            "install_seconds": 400,
-            "boot_seconds": 65,
-        },
-        guest=guest,
-        disk={},
+    guest = probe.GuestResult(
+        nextest=probe.NextestResult(run=1, passed=0, failed=1, exit_code=100)
     )
-    assert report["decision"] == "no-go"
+    report = probe.make_report(
+        host=probe.HostInfo(kvm=True, free_bytes=60_000_000_000),
+        timings=probe.PhaseTimings(
+            iso_download_seconds=80, install_seconds=400, boot_seconds=65
+        ),
+        guest=guest,
+        disk=probe.DiskMeasure(),
+    )
+    assert report.decision == "no-go"
 
 
 def test_guest_exception_is_named_in_no_go_report():
     report = probe.make_report(
-        host={"kvm": True},
-        timings={"observed_total_seconds": 510},
-        guest={
-            "error": "native executable could not start",
-            "nextest": {"status": "not-run", "run": 0},
-        },
-        disk={},
+        host=probe.HostInfo(kvm=True),
+        timings=probe.PhaseTimings(observed_total_seconds=510),
+        guest=probe.GuestResult(
+            error="native executable could not start",
+            nextest=probe.NextestResult(status="not-run", run=0),
+        ),
+        disk=probe.DiskMeasure(),
     )
-    assert report["decision"] == "no-go"
-    assert report["guest_error"] == "native executable could not start"
-    assert "native executable could not start" in report["reason"]
+    assert report.decision == "no-go"
+    assert report.guest_error == "native executable could not start"
+    assert "native executable could not start" in report.reason
 
 
 def test_dockur_log_timings_do_not_invent_a_boot_boundary():
@@ -140,12 +141,12 @@ def test_dockur_log_timings_do_not_invent_a_boot_boundary():
     )
     shell_ready = datetime(2026, 9, 22, 0, 5, tzinfo=timezone.utc).timestamp()
     timings = probe._phase_timings(log, shell_ready - 300, shell_ready)
-    assert timings["iso_download_seconds"] == 60
+    assert timings.iso_download_seconds == 60
     # Without firmware boot markers there is no install/first-boot boundary:
     # report only the combined interval, never a guessed split.
-    assert timings["boot_seconds"] is None
-    assert timings["install_seconds"] is None
-    assert timings["install_plus_first_boot_seconds"] == 180
+    assert timings.boot_seconds is None
+    assert timings.install_seconds is None
+    assert timings.install_plus_first_boot_seconds == 180
 
 
 def test_preflight_reports_no_go_and_removes_its_own_scratch(tmp_path, monkeypatch):
@@ -330,7 +331,7 @@ def test_shell_and_replay_have_distinct_timestamps(tmp_path, monkeypatch):  # no
         oem_dir.mkdir()
 
     monkeypatch.setattr(probe, "_stage_payload", stage)
-    monkeypatch.setattr(probe, "_disk_measure", lambda _: {})
+    monkeypatch.setattr(probe, "_disk_measure", lambda _: probe.DiskMeasure())
     inspections = 0
 
     def fake_run(*command, **_kwargs):
@@ -608,14 +609,14 @@ def _at(minute: int, second: int = 0) -> float:
 def test_firmware_boot_markers_split_install_from_first_boot():
     shell_ready = _at(11, 2)
     timings = probe._phase_timings(FIRMWARE_LOG, _at(0), shell_ready)
-    assert timings["iso_download_seconds"] == 60
-    assert timings["media_prep_seconds"] == 50
+    assert timings.iso_download_seconds == 60
+    assert timings.media_prep_seconds == 50
     # Setup media boot (00:02:02) to the last firmware boot from disk (00:09:02).
-    assert timings["install_seconds"] == 420
+    assert timings.install_seconds == 420
     # The last disk boot is the installed OS's first boot: OOBE, logon, OEM.
-    assert timings["boot_seconds"] == 120
-    assert timings["install_plus_first_boot_seconds"] == 542
-    assert timings["firmware_disk_boots"] == 2
+    assert timings.boot_seconds == 120
+    assert timings.install_plus_first_boot_seconds == 542
+    assert timings.firmware_disk_boots == 2
 
 
 def test_disk_boot_after_the_shell_is_not_the_first_boot():
@@ -623,8 +624,8 @@ def test_disk_boot_after_the_shell_is_not_the_first_boot():
         '\n2026-09-22T00:30:00Z BdsDxe: starting Boot0004 "Windows Boot Manager" from HD'
     )
     timings = probe._phase_timings(log, _at(0), _at(11, 2))
-    assert timings["boot_seconds"] == 120
-    assert timings["firmware_disk_boots"] == 2
+    assert timings.boot_seconds == 120
+    assert timings.firmware_disk_boots == 2
 
 
 def test_disk_boots_without_setup_media_are_not_called_an_install():
@@ -635,36 +636,31 @@ def test_disk_boots_without_setup_media_are_not_called_an_install():
         ]
     )
     timings = probe._phase_timings(log, _at(0), _at(4))
-    assert timings["install_seconds"] is None
-    assert timings["boot_seconds"] is None
+    assert timings.install_seconds is None
+    assert timings.boot_seconds is None
 
 
-BUDGET_MANIFEST = {
-    "budget": {
-        "total_max_bytes": 9 * 1024**3,
-        "fail_total_bytes": 10_200_547_328,
-        "families": {
-            "a": {"max_bytes": 5 * 1024**3},
-            "b": {"max_bytes": 4 * 1024**3},
-        },
-    }
-}
+BUDGET_MANIFEST = probe.CacheManifest(
+    total_max_bytes=9 * 1024**3,
+    fail_total_bytes=10_200_547_328,
+    family_max_bytes=(5 * 1024**3, 4 * 1024**3),
+)
 
 
 def test_cache_budget_rejects_an_image_with_no_unallocated_room():
     budget = probe.cache_budget(4_891_000_000, BUDGET_MANIFEST, 8_847_955_590)
-    assert budget["unallocated_bytes"] == 0
-    assert budget["fits_unallocated"] is False
-    assert budget["projected_live_bytes"] == 8_847_955_590 + 4_891_000_000
-    assert budget["projected_over_fail_total"] is True
-    assert budget["share_of_total_budget"] == round(4_891_000_000 / (9 * 1024**3), 3)
-    assert budget["cache_viable"] == "no"
+    assert budget.unallocated_bytes == 0
+    assert budget.fits_unallocated is False
+    assert budget.projected_live_bytes == 8_847_955_590 + 4_891_000_000
+    assert budget.projected_over_fail_total is True
+    assert budget.share_of_total_budget == round(4_891_000_000 / (9 * 1024**3), 3)
+    assert budget.cache_viable == "no"
 
 
 def test_cache_budget_without_live_usage_does_not_invent_a_projection():
     budget = probe.cache_budget(None, BUDGET_MANIFEST, None)
-    assert budget["projected_live_bytes"] is None
-    assert budget["cache_viable"] == "not-measured"
+    assert budget.projected_live_bytes is None
+    assert budget.cache_viable == "not-measured"
 
 
 def test_restored_boot_timings_come_from_the_restored_container_log():
@@ -676,63 +672,63 @@ def test_restored_boot_timings_come_from_the_restored_container_log():
     )
     started = datetime(2026, 9, 22, 1, 0, 0, tzinfo=timezone.utc).timestamp()
     timings = probe._restore_timings(log, started, started + 67)
-    assert timings["reinstalled"] is False
-    assert timings["restored_boot_seconds"] == 67
-    assert timings["restored_firmware_to_shell_seconds"] == 60
+    assert timings.reinstalled is False
+    assert timings.restored_boot_seconds == 67
+    assert timings.restored_firmware_to_shell_seconds == 60
 
 
 def test_restored_disk_that_boots_setup_media_is_a_reinstall():
     log = '2026-09-22T01:00:07Z BdsDxe: starting Boot0001 "UEFI QEMU DVD-ROM QM00013 "'
     started = datetime(2026, 9, 22, 1, 0, 0, tzinfo=timezone.utc).timestamp()
     timings = probe._restore_timings(log, started, None)
-    assert timings["reinstalled"] is True
+    assert timings.reinstalled is True
     report = probe.make_restore_report(
-        host={"kvm": True},
-        timings={
-            **timings,
-            "restore_download_seconds": 60,
-            "restore_extract_seconds": 30,
-        },
+        host=probe.HostInfo(kvm=True),
+        timings=replace(
+            timings, restore_download_seconds=60, restore_extract_seconds=30
+        ),
         guest=None,
         cache=probe.cache_budget(1, BUDGET_MANIFEST, 0),
     )
-    assert report["decision"] == "no-go"
-    assert "reinstall" in report["reason"].lower()
+    assert report.decision == "no-go"
+    assert "reinstall" in report.reason.lower()
 
 
 def _green_restore_timings(**overrides):
-    timings = {
-        "reinstalled": False,
-        "restore_download_seconds": 90.0,
-        "restore_extract_seconds": 40.0,
-        "restored_boot_seconds": 70.0,
-        "restored_firmware_to_shell_seconds": 60.0,
-        "restored_replay_seconds": 30.0,
-    }
-    timings.update(overrides)
-    return timings
+    return replace(
+        probe.PhaseTimings(
+            reinstalled=False,
+            restore_download_seconds=90.0,
+            restore_extract_seconds=40.0,
+            restored_boot_seconds=70.0,
+            restored_firmware_to_shell_seconds=60.0,
+            restored_replay_seconds=30.0,
+        ),
+        **overrides,
+    )
 
 
 def test_restore_go_requires_replay_time_and_budget():
-    guest = {"nextest": {"run": 220, "passed": 220, "failed": 0, "exit_code": 0}}
-    fits = {"cache_viable": "unproven-restore", "fits_unallocated": True}
-    report = probe.make_restore_report(
-        host={"kvm": True}, timings=_green_restore_timings(), guest=guest, cache=fits
+    guest = probe.GuestResult(
+        nextest=probe.NextestResult(run=220, passed=220, failed=0, exit_code=0)
     )
-    assert report["decision"] == "go"
-    assert report["timings"]["restore_to_shell_seconds"] == 200
-    no_room = {"cache_viable": "no", "fits_unallocated": False}
+    host = probe.HostInfo(kvm=True)
+    fits = probe.CacheBudget(cache_viable="unproven-restore", fits_unallocated=True)
     report = probe.make_restore_report(
-        host={"kvm": True}, timings=_green_restore_timings(), guest=guest, cache=no_room
+        host=host, timings=_green_restore_timings(), guest=guest, cache=fits
     )
-    assert report["decision"] == "no-go"
-    assert any("budget" in reason for reason in report["reasons"])
+    assert report.decision == "go"
+    assert report.timings.restore_to_shell_seconds == 200
+    no_room = probe.CacheBudget(cache_viable="no", fits_unallocated=False)
+    report = probe.make_restore_report(
+        host=host, timings=_green_restore_timings(), guest=guest, cache=no_room
+    )
+    assert report.decision == "no-go"
+    assert any("budget" in reason for reason in report.reasons)
     slow = _green_restore_timings(restore_download_seconds=700.0)
-    report = probe.make_restore_report(
-        host={"kvm": True}, timings=slow, guest=guest, cache=fits
-    )
-    assert report["decision"] == "no-go"
-    assert any("ten-minute" in reason for reason in report["reasons"])
+    report = probe.make_restore_report(host=host, timings=slow, guest=guest, cache=fits)
+    assert report.decision == "no-go"
+    assert any("ten-minute" in reason for reason in report.reasons)
 
 
 def test_export_refuses_a_disk_dockur_never_marked_installed(tmp_path):
@@ -772,8 +768,8 @@ def test_export_is_a_sparse_tar_without_the_iso(tmp_path, monkeypatch):
     assert tar[:2] == ("sudo", "tar")
     assert "--sparse" in tar and "--exclude=*.iso" in tar
     assert commands[1][0] == "zstd"
-    assert measured["export_bytes"] == len(b"tar-stream")
-    assert measured["export_seconds"] >= 0
+    assert measured.compressed_bytes == len(b"tar-stream")
+    assert measured.export_seconds >= 0
 
 
 def test_delete_artifact_removes_only_the_named_run_artifact(monkeypatch):
@@ -959,13 +955,17 @@ def test_cold_mode_exports_only_a_disk_with_the_warm_task(tmp_path, monkeypatch)
         lambda _r, _a, shared_dir, oem_dir: (shared_dir.mkdir(), oem_dir.mkdir()),
     )
     monkeypatch.setattr(
-        probe, "_disk_measure", lambda _s, compress=True: {"image_bytes": 1}
+        probe,
+        "_disk_measure",
+        lambda _s, compress=True: probe.DiskMeasure(
+            image_bytes=1, emit=("image_bytes",)
+        ),
     )
     exports = []
 
     def fake_export(storage, destination):
         exports.append(destination)
-        return {"export_bytes": 99, "export_seconds": 3.0}
+        return probe.DiskMeasure(compressed_bytes=99, export_seconds=3.0)
 
     monkeypatch.setattr(probe, "_export_disk", fake_export)
     github_output = tmp_path / "github-output"

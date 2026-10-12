@@ -7,25 +7,81 @@ import json
 import re
 import tempfile
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import target_run_ownership as ownership
 
 
-def inventory(*suites: dict[str, Any]) -> dict[str, object]:
+@dataclass(frozen=True)
+class Suite:
+    package: str
+    binary: str
+    tests: tuple[str, ...]
+
+    def payload(self) -> object:
+        return {
+            "package-name": self.package,
+            "binary-name": self.binary,
+            "testcases": {name: {"ignored": False} for name in self.tests},
+        }
+
+
+@dataclass(frozen=True)
+class Classification:
+    classification_id: str
+    package: str
+    binary: str
+    disposition: str
+    modules: tuple[str, ...] | None = None
+
+    def payload(self) -> object:
+        result = {
+            "id": self.classification_id,
+            "package": self.package,
+            "binary": self.binary,
+            "disposition": self.disposition,
+            "reason": f"Focused reason for {self.classification_id}.",
+        }
+        if self.modules is not None:
+            return {**result, "modules": list(self.modules)}
+        return result
+
+
+@dataclass(frozen=True)
+class Selector:
+    selector_id: str
+    source_id: str
+    test_name: str | None = None
+    test_prefix: str | None = None
+    targets: tuple[str, ...] | None = None
+
+    def payload(self) -> object:
+        result = {
+            "id": self.selector_id,
+            "source_id": self.source_id,
+            "reason": f"Focused reason for {self.selector_id}.",
+        }
+        if self.test_name is not None:
+            result["test_name"] = self.test_name
+        if self.test_prefix is not None:
+            result["test_prefix"] = self.test_prefix
+        if self.targets is not None:
+            return {**result, "targets": list(self.targets)}
+        return result
+
+
+def inventory(*suites: Suite) -> object:
     return {
-        "test-count": sum(len(suite["testcases"]) for suite in suites),
-        "rust-suites": {f"suite-{index}": suite for index, suite in enumerate(suites)},
+        "test-count": sum(len(suite.tests) for suite in suites),
+        "rust-suites": {
+            f"suite-{index}": suite.payload() for index, suite in enumerate(suites)
+        },
     }
 
 
-def suite(package: str, binary: str, *tests: str) -> dict[str, object]:
-    return {
-        "package-name": package,
-        "binary-name": binary,
-        "testcases": {name: {"ignored": False} for name in tests},
-    }
+def suite(package: str, binary: str, *tests: str) -> Suite:
+    return Suite(package, binary, tests)
 
 
 def classification(
@@ -35,17 +91,14 @@ def classification(
     disposition: str,
     *,
     modules: list[str] | None = None,
-) -> dict[str, object]:
-    result: dict[str, object] = {
-        "id": classification_id,
-        "package": package,
-        "binary": binary,
-        "disposition": disposition,
-        "reason": f"Focused reason for {classification_id}.",
-    }
-    if modules is not None:
-        result["modules"] = modules
-    return result
+) -> Classification:
+    return Classification(
+        classification_id,
+        package,
+        binary,
+        disposition,
+        None if modules is None else tuple(modules),
+    )
 
 
 def selector(
@@ -55,30 +108,25 @@ def selector(
     test_name: str | None = None,
     test_prefix: str | None = None,
     targets: list[str] | None = None,
-) -> dict[str, object]:
-    result: dict[str, object] = {
-        "id": selector_id,
-        "source_id": source_id,
-        "reason": f"Focused reason for {selector_id}.",
-    }
-    if test_name is not None:
-        result["test_name"] = test_name
-    if test_prefix is not None:
-        result["test_prefix"] = test_prefix
-    if targets is not None:
-        result["targets"] = targets
-    return result
+) -> Selector:
+    return Selector(
+        selector_id,
+        source_id,
+        test_name,
+        test_prefix,
+        None if targets is None else tuple(targets),
+    )
 
 
 def manifest(
-    *classifications: dict[str, object],
-    selectors: list[dict[str, object]] | None = None,
-) -> dict[str, object]:
+    *classifications: Classification,
+    selectors: list[Selector] | None = None,
+) -> object:
     return {
         "schema_version": 2,
         "policy_issue": "soldr#2999",
-        "source_classifications": list(classifications),
-        "replay_selectors": selectors or [],
+        "source_classifications": [item.payload() for item in classifications],
+        "replay_selectors": [item.payload() for item in selectors or []],
     }
 
 
@@ -120,7 +168,7 @@ class TargetRunOwnershipTests(unittest.TestCase):
         )
 
         selected = ownership.build_selection(
-            declared, discovered, "x86_64-apple-darwin"
+            ownership.parse_manifest(declared), discovered, "x86_64-apple-darwin"
         )
 
         self.assertEqual(
@@ -159,7 +207,7 @@ class TargetRunOwnershipTests(unittest.TestCase):
         )
 
         selected = ownership.build_selection(
-            declared, discovered, "x86_64-pc-windows-msvc"
+            ownership.parse_manifest(declared), discovered, "x86_64-pc-windows-msvc"
         )
 
         self.assertEqual(selected.selected_count, 2)
@@ -189,7 +237,9 @@ class TargetRunOwnershipTests(unittest.TestCase):
         discovered = inventory(suite("soldr-cli", "broker", "new_name::works"))
 
         with self.assertRaisesRegex(ValueError, "matched no tests"):
-            ownership.build_selection(declared, discovered, "aarch64-apple-darwin")
+            ownership.build_selection(
+                ownership.parse_manifest(declared), discovered, "aarch64-apple-darwin"
+            )
 
     def test_platform_specific_selector_applies_only_to_declared_targets(self) -> None:
         declared = manifest(
@@ -226,9 +276,11 @@ class TargetRunOwnershipTests(unittest.TestCase):
         )
 
         windows = ownership.build_selection(
-            declared, discovered, "x86_64-pc-windows-msvc"
+            ownership.parse_manifest(declared), discovered, "x86_64-pc-windows-msvc"
         )
-        darwin = ownership.build_selection(declared, discovered, "x86_64-apple-darwin")
+        darwin = ownership.build_selection(
+            ownership.parse_manifest(declared), discovered, "x86_64-apple-darwin"
+        )
 
         self.assertEqual(windows.selected_count, 2)
         self.assertEqual(darwin.selected_count, 1)
@@ -269,7 +321,9 @@ class TargetRunOwnershipTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "non-canonical targets"):
-                ownership.validate_source_ownership(declared, root)
+                ownership.validate_source_ownership(
+                    ownership.parse_manifest(declared), root
+                )
 
     def test_filter_file_is_one_lf_terminated_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -303,7 +357,11 @@ class TargetRunOwnershipTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "selects zero tests"):
-            ownership.build_selection(declared, discovered, "aarch64-unknown-linux-gnu")
+            ownership.build_selection(
+                ownership.parse_manifest(declared),
+                discovered,
+                "aarch64-unknown-linux-gnu",
+            )
 
     def test_inverse_guard_requires_explicit_classification_but_not_replay(
         self,
@@ -323,7 +381,9 @@ class TargetRunOwnershipTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ValueError, "unclassified host-sensitive test source"
             ):
-                ownership.validate_source_ownership(manifest(), root)
+                ownership.validate_source_ownership(
+                    ownership.parse_manifest(manifest()), root
+                )
 
             declared = manifest(
                 classification(
@@ -334,7 +394,9 @@ class TargetRunOwnershipTests(unittest.TestCase):
                     modules=["os_contract"],
                 )
             )
-            ownership.validate_source_ownership(declared, root)
+            ownership.validate_source_ownership(
+                ownership.parse_manifest(declared), root
+            )
 
     def test_platform_gated_test_in_classified_module_requires_replay_selector(
         self,
@@ -382,7 +444,9 @@ class TargetRunOwnershipTests(unittest.TestCase):
                 ValueError,
                 "platform-gated test lacks a positive replay selector.*newly_unowned",
             ):
-                ownership.validate_source_ownership(declared, root)
+                ownership.validate_source_ownership(
+                    ownership.parse_manifest(declared), root
+                )
 
     def test_platform_gated_test_selector_must_reach_compatible_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -428,7 +492,9 @@ class TargetRunOwnershipTests(unittest.TestCase):
                 ValueError,
                 "platform-gated test has no replay selector on a compatible target.*windows_only",
             ):
-                ownership.validate_source_ownership(declared, root)
+                ownership.validate_source_ownership(
+                    ownership.parse_manifest(declared), root
+                )
 
             compatible = manifest(
                 classification(
@@ -447,7 +513,9 @@ class TargetRunOwnershipTests(unittest.TestCase):
                     )
                 ],
             )
-            ownership.validate_source_ownership(compatible, root)
+            ownership.validate_source_ownership(
+                ownership.parse_manifest(compatible), root
+            )
 
     def test_module_level_host_cfg_is_propagated_to_declared_tests(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -496,7 +564,9 @@ class TargetRunOwnershipTests(unittest.TestCase):
                 ValueError,
                 "platform-gated test has no replay selector on a compatible target.*module_gated",
             ):
-                ownership.validate_source_ownership(declared, root)
+                ownership.validate_source_ownership(
+                    ownership.parse_manifest(declared), root
+                )
 
     def test_supported_host_cfg_predicates_match_canonical_target_facts(self) -> None:
         windows = ownership._canonical_target("x86_64-pc-windows-msvc")
@@ -680,7 +750,9 @@ class TargetRunOwnershipTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "stale source classification"):
-                ownership.validate_source_ownership(declared, root)
+                ownership.validate_source_ownership(
+                    ownership.parse_manifest(declared), root
+                )
 
     def test_category_classification_must_name_modules(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -696,7 +768,9 @@ class TargetRunOwnershipTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "without explicit modules"):
-                ownership.validate_source_ownership(declared, root)
+                ownership.validate_source_ownership(
+                    ownership.parse_manifest(declared), root
+                )
 
     def test_repository_manifest_covers_host_sensitive_sources(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
@@ -760,10 +834,10 @@ class TargetRunOwnershipTests(unittest.TestCase):
         )
 
         via_selection = ownership.build_selection(
-            declared, discovered, "x86_64-pc-windows-msvc"
+            ownership.parse_manifest(declared), discovered, "x86_64-pc-windows-msvc"
         ).filter_expression
         via_filter_only = ownership.build_filter_expression(
-            declared, "x86_64-pc-windows-msvc"
+            ownership.parse_manifest(declared), "x86_64-pc-windows-msvc"
         )
 
         self.assertEqual(via_selection, via_filter_only)
@@ -786,7 +860,9 @@ class TargetRunOwnershipTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "selects no selectors"):
-            ownership.build_filter_expression(declared, "aarch64-unknown-linux-gnu")
+            ownership.build_filter_expression(
+                ownership.parse_manifest(declared), "aarch64-unknown-linux-gnu"
+            )
 
     def test_filter_only_against_the_repository_manifest_matches_darwin(self) -> None:
         """Exercises the exact call the Recovery guest prep step makes."""
