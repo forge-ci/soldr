@@ -56,7 +56,7 @@ pub(super) fn maybe_apply_cargo_profile_debug_default(
     args: &[String],
     paths: &SoldrPaths,
     target: Option<&str>,
-) -> Result<Option<CargoProfileDebugDefault>, SoldrError> {
+) -> Result<Option<UnrecordedDebugWarning>, SoldrError> {
     let msvc_target = cargo_invocation_targets_msvc(args, target)?;
     let Some(default) = cargo_profile_debug_default_for_args(args, msvc_target) else {
         return Ok(None);
@@ -67,7 +67,8 @@ pub(super) fn maybe_apply_cargo_profile_debug_default(
 
     command.env(default.env_var, default.value);
     let repo_path = cargo_invocation_repo_path(args);
-    if should_emit_cargo_debug_default_warning(paths, &repo_path) {
+    let decision = cargo_debug_default_warning_decision(paths, &repo_path);
+    if decision != WarningDecision::Suppress {
         eprintln!(
             "soldr: warning: Cargo profile.{}.debug is unspecified for {}; setting {}={} for this invocation. Set `debug` explicitly under `[profile.{}]` in Cargo.toml or .cargo/config.toml to override this default.",
             default.profile,
@@ -78,7 +79,39 @@ pub(super) fn maybe_apply_cargo_profile_debug_default(
         );
     }
 
-    Ok(Some(default))
+    Ok((decision == WarningDecision::EmitUnrecorded)
+        .then_some(UnrecordedDebugWarning { repo_path }))
+}
+
+/// A debug-default warning printed while the daemon was unreachable, so
+/// nothing recorded that this repository has been warned (soldr#3740).
+///
+/// A cold first build reaches this check before any compile has started the
+/// daemon, so its warning fails open; without a record, the next build asked
+/// the now-running daemon, which had never seen the repository and warned
+/// again. The front door records it once the build has run.
+#[derive(Debug)]
+pub(super) struct UnrecordedDebugWarning {
+    repo_path: std::path::PathBuf,
+}
+
+impl UnrecordedDebugWarning {
+    /// Record the warning with the daemon the build started. Best effort:
+    /// still unreachable means the next build warns again, as before.
+    pub(super) fn record(&self, paths: &SoldrPaths) {
+        let sock = crate::daemon::client::default_sock_path(paths);
+        let _ = crate::daemon::client::should_warn_cargo_debug_default(&sock, &self.repo_path);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WarningDecision {
+    /// The daemon recorded the repository and said to warn.
+    Emit,
+    /// The daemon was unreachable: warn, but nothing recorded it.
+    EmitUnrecorded,
+    /// Already warned for this repository.
+    Suppress,
 }
 
 fn cargo_profile_debug_default_for_args(
@@ -596,19 +629,20 @@ fn find_git_root(start_dir: &std::path::Path) -> Option<std::path::PathBuf> {
     }
 }
 
-fn should_emit_cargo_debug_default_warning(
+fn cargo_debug_default_warning_decision(
     paths: &SoldrPaths,
     repo_path: &std::path::Path,
-) -> bool {
+) -> WarningDecision {
     // soldr#1814 slice 2c: ask the daemon, which owns state_db's tables,
     // rather than making every front-door invocation another opener of
     // state.sqlite3. When it is unavailable, fail open: repeating a warning is
     // preferable to making the front door a second state-database opener.
     let sock = crate::daemon::client::default_sock_path(paths);
-    if let Ok(emit) = crate::daemon::client::should_warn_cargo_debug_default(&sock, repo_path) {
-        return emit;
+    match crate::daemon::client::should_warn_cargo_debug_default(&sock, repo_path) {
+        Ok(true) => WarningDecision::Emit,
+        Ok(false) => WarningDecision::Suppress,
+        Err(_) => WarningDecision::EmitUnrecorded,
     }
-    true
 }
 
 #[cfg(test)]

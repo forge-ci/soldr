@@ -18,6 +18,7 @@ struct PreparedCargo {
     cargo_job_budget: Option<job_budget::AppliedCargoJobBudget>,
     capture_cargo_artifacts: bool,
     capture_for_diagnostics: bool,
+    unrecorded_debug_warning: Option<profile_debug::UnrecordedDebugWarning>,
     // Declared rustfmt-first so they drop in the original order.
     _rustfmt_shim_guard: Option<crate::shim_dir::ShimDirGuard>,
     _dylint_shim_guard: Option<crate::shim_dir::ShimDirGuard>,
@@ -182,6 +183,7 @@ async fn prepare_child_cargo(
         cargo_job_budget,
         capture_cargo_artifacts,
         capture_for_diagnostics,
+        unrecorded_debug_warning: child_path.unrecorded_debug_warning,
         _rustfmt_shim_guard: child_path.rustfmt_shim_guard,
         _dylint_shim_guard: child_path.dylint_shim_guard,
     })
@@ -495,6 +497,7 @@ struct ChildPathOutcome {
     dylint_shim_guard: Option<crate::shim_dir::ShimDirGuard>,
     rustfmt_shim_guard: Option<crate::shim_dir::ShimDirGuard>,
     native_cache_target: Option<String>,
+    unrecorded_debug_warning: Option<profile_debug::UnrecordedDebugWarning>,
 }
 
 async fn apply_child_path_and_target(
@@ -530,17 +533,18 @@ async fn apply_child_path_and_target(
         command.env("CARGO_BUILD_TARGET", target);
     }
     let known_cargo_target = target::known_cargo_build_target(args, explicit_target.as_deref());
-    // Applies the profile-debug default to `command`; soldr#2996 dropped the
-    // returned descriptor along with the target cache plan that consumed it,
-    // but the env mutation here is still required.
-    if spec.build_like_cargo {
+    // Applies the profile-debug default to `command`, and returns a warning
+    // the daemon could not record yet (soldr#3740).
+    let unrecorded_debug_warning = if spec.build_like_cargo {
         profile_debug::maybe_apply_cargo_profile_debug_default(
             command,
             args,
             spec.paths,
             known_cargo_target.as_deref(),
-        )?;
-    }
+        )?
+    } else {
+        None
+    };
     // soldr#1610/#1614: every cargo-backed build surface consumes the
     // same target-aware PyO3 plan. The resolver is conservative: it only
     // injects PYO3_NO_PYTHON for a proven cross ABI3 extension, never for
@@ -572,6 +576,7 @@ async fn apply_child_path_and_target(
         dylint_shim_guard,
         rustfmt_shim_guard,
         native_cache_target,
+        unrecorded_debug_warning,
     })
 }
 

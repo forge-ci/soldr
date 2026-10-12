@@ -510,8 +510,8 @@ pub fn build_log_inputs(
 /// `repo_root` (soldr#1814 slice 2c).
 ///
 /// The daemon owns the throttle state, so asking it also records the repo.
-/// Callers fall back to the local read-modify-write only when the daemon is
-/// unreachable.
+/// When the daemon is unreachable the front door warns without a record and
+/// asks again after the build has started the daemon (soldr#3740).
 pub fn should_warn_cargo_debug_default(
     sock_path: &Path,
     repo_root: &Path,
