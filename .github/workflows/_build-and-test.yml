@@ -133,6 +133,11 @@ jobs:
         shell: bash
         run: bash .github/scripts/setup_ci_swap.sh
 
+      - name: Ensure native build tools (clang, lld)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash .github/scripts/ensure_linux_build_tools.sh
+
       # soldr#1178 — dropped the dtolnay/rust-toolchain step: setup-soldr
       # below installs the same 1.98.1 toolchain, so running dtolnay
       # first duplicated ~8 s of install work per CI run. The host target
