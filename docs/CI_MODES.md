@@ -173,3 +173,31 @@ proof remain required before claiming protected merge enforcement.
   and every push to `main` still runs the full suite. The graph and change set are one
   implementation, `ci/crate_graph.py`, shared with the `wine` lane.
 
+
+## Local workflow parity: the real PR job under bosn -> act2 (soldr#3557)
+
+The local gate's lanes are fast custom tasks. When a change needs proof that the
+*actual* `ci.yml` Linux PR job passes -- its setup-soldr bootstrap, cache
+foundations, guarded Cargo route and `soldr ci-test` DAG -- replay the job
+through the published bosn -> pinned act2 engine:
+
+```bash
+bosn ci run --workflow .github/workflows/ci.yml --job build-linux-x64 --trigger pr --wait
+bosn ci report <run>          # first failing step with its log tail
+```
+
+Measured on 2026-10-12 (bosn 0.1.21, act `0.2.89-act2.15`, 4 jobs, tree
+`6707c250`): cold run 26.8 min, identical-tree warm run 19.8 min, all jobs green.
+The run conclusion is `incomplete`, not `success`, because `publish-npm` needs
+an OIDC issuer and is reported `remote_only` (GATE-012). The
+`ci-attestations` resolve step fails without a GitHub token and is
+`continue-on-error`. That is several times the gate's own `tests` lane, so the
+replay is an on-demand parity check, not a gate lane: speed of the PR push
+loop wins, and remote CI still runs the job.
+
+Running under a non-GitHub image found two places where the workflow relied on
+the runner image instead of declaring its needs. Both are fixed: the rustup
+pre-seed is skipped when no rustup is installed, because setup-soldr
+bootstraps it, and `.github/scripts/ensure_linux_build_tools.sh` installs
+clang/lld when they are absent. Missing clang made about 95 linker-driver tests
+fail under act2.
