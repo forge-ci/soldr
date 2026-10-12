@@ -306,6 +306,47 @@ def create_draft_release(
     return 1
 
 
+def _verify_module():
+    """The sibling asset gate, loaded on demand (it imports this directory)."""
+    # pylint: disable-next=import-outside-toplevel
+    import verify_github_release_assets
+
+    return verify_github_release_assets
+
+
+def publish_release(
+    repo: str,
+    tag: str,
+    run: Runner,
+    fetch: Callable[[str, str], dict] | None = None,
+) -> int:
+    """Verify the draft's full asset set, then make it public (soldr#2469 4.2).
+
+    A published immutable release can no longer gain assets, so an incomplete
+    draft must never be published.
+    """
+    verify = _verify_module()
+    failures = verify.verify_release_assets(
+        tag, (fetch or verify.fetch_release)(tag, repo), draft=True
+    )
+    if failures:
+        print(f"::error::draft {tag} is incomplete; not publishing it")
+        for failure in failures:
+            print(f"  - {failure}", file=sys.stderr)
+        return 1
+    published = retrying(logged(run))(
+        ["gh", "release", "edit", tag, "--repo", repo, "--draft=false"]
+    )
+    if published.returncode == 0:
+        return 0
+    print(
+        f"::error::could not publish the draft GitHub release {tag}. "
+        f"gh output: {gh_output_excerpt(published)}"
+    )
+    append_summary(gh_output_block(published))
+    return 1
+
+
 INFO_SCHEMA = 1
 
 
@@ -371,7 +412,9 @@ def info_name(version: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["ensure-tag", "create-draft", "write-info"])
+    parser.add_argument(
+        "command", choices=["ensure-tag", "create-draft", "write-info", "publish"]
+    )
     parser.add_argument("--tag", required=True)
     parser.add_argument("--sha", required=True)
     parser.add_argument(
@@ -395,6 +438,8 @@ def main(argv: list[str] | None = None) -> int:
         target.write_text(json.dumps(asdict(info), indent=2) + "\n", encoding="utf-8")
         print(f"wrote {target} ({len(info.files)} files)")
         return 0
+    if args.command == "publish":
+        return publish_release(args.repo, args.tag, default_runner)
     if args.command == "ensure-tag":
         return ensure_tag(args.repo, args.tag, args.sha, default_runner)
     try:

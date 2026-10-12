@@ -368,3 +368,31 @@ def test_info_json_is_an_expected_release_asset_and_written_by_the_workflow() ->
     )
     write = workflow.index("release_publish.py write-info")
     assert workflow.index("SHA256SUMS.txt") < write < workflow.index("ensure-tag")
+
+
+def complete_draft(tag: str, _repo: str) -> dict:
+    gate = MODULE.release_completeness
+    names = gate.expected_github_assets(tag, gate.included_triples())
+    return {"isDraft": True, "assets": [{"name": n, "size": 1} for n in names]}
+
+
+def test_publish_makes_a_complete_draft_public() -> None:
+    run = fake_runner([0])
+    assert MODULE.publish_release(REPO, TAG, run, complete_draft) == 0
+    assert run.calls == [
+        ["gh", "release", "edit", TAG, "--repo", REPO, "--draft=false"]
+    ]
+
+
+def test_a_failed_publish_exits_one() -> None:
+    assert MODULE.publish_release(REPO, TAG, fake_runner([1]), complete_draft) == 1
+
+
+def test_an_incomplete_draft_is_never_published() -> None:
+    run = fake_runner([0])
+
+    def empty(_tag: str, _repo: str) -> dict:
+        return {"isDraft": True, "assets": []}
+
+    assert MODULE.publish_release(REPO, TAG, run, empty) == 1
+    assert not run.calls

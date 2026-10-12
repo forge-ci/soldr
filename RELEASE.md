@@ -33,7 +33,9 @@ These controls are in place:
 - `.github/workflows/release-auto.yml` is the only release workflow
 - PyPI publication uses OIDC Trusted Publishing bound to `release-auto.yml`
 
-crates.io publication is not part of the current release direction. `soldr` is being released as a hardened binary tool, not as a promised Rust library API surface.
+crates.io publication is not part of the current release direction. `soldr` is being released as a hardened binary tool, not as a promised Rust library API surface. The completeness gate still accounts for it: `release_completeness.py` derives the publishable crates from the manifests and prints an explicit skip while every crate is `publish = false`; a crate that drops it joins the gate (soldr#3343).
+
+Every release also publishes `soldr-<tag>-info.json`: the version, tag, candidate SHA, target-contract revision, targets, and each artifact's size and SHA-256 (soldr#3343). The publish job checks the full contract-derived asset set on the **draft** before making it public, because an immutable release can no longer gain assets (soldr#2469 4.2).
 
 ## Current Release Model
 

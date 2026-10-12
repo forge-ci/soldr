@@ -39,10 +39,20 @@ def load_release_completeness() -> Any:
 RELEASE_COMPLETENESS = load_release_completeness()
 
 
-def verify_release_assets(tag: str, release: dict[str, Any]) -> list[str]:
-    """Return named failures for a draft or incomplete GitHub Release."""
+def verify_release_assets(
+    tag: str, release: dict[str, Any], *, draft: bool = False
+) -> list[str]:
+    """Return named failures for an incomplete GitHub Release.
+
+    By default the release must be published. With `draft`, it must still be
+    a draft: the publish job checks the full asset set there, before it makes
+    the release public (soldr#2469 4.2), because a published immutable release
+    can no longer gain assets.
+    """
     failures: list[str] = []
-    if release.get("isDraft") is not False:
+    if draft and release.get("isDraft") is not True:
+        failures.append(f"GitHub release {tag} is not a draft")
+    if not draft and release.get("isDraft") is not False:
         failures.append(f"GitHub release {tag} is still a draft")
 
     assets = {
@@ -80,10 +90,17 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("GITHUB_REPOSITORY", "zackees/soldr"),
         help="GitHub owner/repository (defaults to GITHUB_REPOSITORY)",
     )
+    parser.add_argument(
+        "--draft",
+        action="store_true",
+        help="verify the still-draft release before it is published (soldr#2469 4.2)",
+    )
     args = parser.parse_args(argv)
     tag = args.version if args.version.startswith("v") else f"v{args.version}"
     try:
-        failures = verify_release_assets(tag, fetch_release(tag, args.repo))
+        failures = verify_release_assets(
+            tag, fetch_release(tag, args.repo), draft=args.draft
+        )
     except (subprocess.CalledProcessError, json.JSONDecodeError) as error:
         print(f"could not inspect GitHub release {tag}: {error}", file=sys.stderr)
         return 1

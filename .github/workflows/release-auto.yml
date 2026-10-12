@@ -997,16 +997,17 @@ jobs:
           --tag '${{ needs.prepare.outputs.version }}'
           --sha '${{ needs.prepare.outputs.commit_sha }}'
 
+      # soldr#2469 4.2: `publish` checks the full asset set on the draft and
+      # only then makes it public -- an immutable release cannot gain assets.
       - name: Publish GitHub Release
         if: steps.create_release.outputs.created == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
-        run: |
-          set -euo pipefail
-          gh release edit "${{ needs.prepare.outputs.version }}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --draft=false
+        run: >-
+          uv run --no-project --python 3.13 .github/scripts/release_publish.py publish
+          --tag '${{ needs.prepare.outputs.version }}'
+          --sha '${{ needs.prepare.outputs.commit_sha }}'
 
   verify_github_release:
     name: Verify GitHub Release assets
