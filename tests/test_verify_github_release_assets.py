@@ -51,3 +51,16 @@ def test_main_reports_fixture_result(monkeypatch, capsys) -> None:
     monkeypatch.setattr(verify, "fetch_release", lambda _tag, _repo: complete_release())
     assert verify.main(["--version", "0.9.2", "--repo", "example/soldr"]) == 0
     assert "v0.9.2 has 18 expected assets" in capsys.readouterr().out
+
+
+def test_draft_mode_requires_a_complete_draft() -> None:
+    """soldr#2469 4.2: verify the draft before it becomes immutable."""
+    draft = complete_release()
+    draft["isDraft"] = True
+    assert verify.verify_release_assets("v0.9.2", draft, draft=True) == []
+    published = complete_release()
+    assert verify.verify_release_assets("v0.9.2", published, draft=True) == [
+        "GitHub release v0.9.2 is not a draft"
+    ]
+    incomplete = {"isDraft": True, "assets": []}
+    assert len(verify.verify_release_assets("v0.9.2", incomplete, draft=True)) == 18

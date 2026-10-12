@@ -167,7 +167,7 @@ This is also the nearest current equivalent to a Sigstore-style workflow for thi
 
 GitHub CLI also has `gh release verify`, which verifies release-level attestations.
 
-We do not currently document that as the primary verification path for `soldr` because immutable releases and the surrounding release-governance settings are still tracked separately. Today, the repository's official verification path is:
+Immutable releases are enabled for this repository (see `SECURITY.md`), but release-level attestation is not yet the documented path: the release attests the `SHA256SUMS` subject set, not the release object. Today, the repository's official verification path is:
 
 1. checksum verification
 2. artifact attestation verification with `gh attestation verify`
