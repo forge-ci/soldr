@@ -110,7 +110,6 @@
       "tests/test_release_completeness.py": 1,
       "tests/test_release_detect.py": 1,
       "tests/test_release_full_ci_gate.py": 1,
-      "tests/test_release_publish.py": 1,
       "tests/test_setup_soldr_action.py": 2,
       "tests/test_setup_soldr_verify_soldr.py": 1,
       "tests/test_smoke_musl_binary.py": 1,
