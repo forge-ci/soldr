@@ -27,6 +27,14 @@ auto-installed KB (KB5050575) once changed the warm image under the lane;
 `C:\\swv` is excluded from Defender. A stopped VM is started and stopped
 again afterwards; a running one is left running.
 
+Selection (soldr#3556, zackees/ci.yml policy-general "Selecting full PR
+coverage"): native VM coverage is selected for platform *implementation*
+changes only -- `crates/soldr-platform` (the one place host selection may
+live, enforced by the cfg ratchet), the toolchain/lockfile/workspace build
+inputs, and this lane's own inputs. A CI-only or shared-logic diff exits 75
+like an absent VM: not run, not attested, never a fabricated pass. Remote
+CI and the release candidate's full run keep the Windows coverage.
+
 Results land in `target/winvm-lane/` (JUnit, the nextest log, timings).
 """
 
@@ -48,6 +56,10 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# pylint: disable-next=wrong-import-position
+from crate_graph import changed_paths  # noqa: E402 -- script-relative import
+
 TARGET = "x86_64-pc-windows-msvc"
 PROFILE = "ci-nextest"
 NOT_APPLICABLE = 75  # EX_TEMPFAIL: local-gate's "not on this host"
@@ -428,7 +440,46 @@ def lane(vm: Vm, boot: Future[float] | None, timings: list[Timings]) -> int:
     return 0
 
 
+# soldr#3556: paths whose change selects native Windows coverage.
+PLATFORM_PREFIXES = ("crates/soldr-platform/", ".cargo/", "ci/windows_guest_probe")
+PLATFORM_FILES = frozenset(
+    {
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "ci/winvm_lane.py",
+        "ci/winvm_guest.ps1",
+        "ci/crate_graph.py",
+        "ci/target-run-ownership.json",
+        ".config/nextest.toml",
+        ".github/scripts/target_run_ownership.py",
+        ".github/scripts/fetch_catalogued_nextest.py",
+        ".github/scripts/download_catalogued_asset.py",
+        ".github/scripts/toolchain_asset_query.py",
+    }
+)
+
+
+def selection_reason(changed: list[str] | None) -> str | None:
+    """None to run; otherwise why native coverage is not selected."""
+    if not changed:
+        return None
+    if any(
+        path in PLATFORM_FILES or path.startswith(PLATFORM_PREFIXES) for path in changed
+    ):
+        return None
+    return (
+        f"winvm lane: not selected (soldr#3556) -- {len(changed)} changed path(s), "
+        "none a platform implementation, toolchain or lane input; "
+        f"gate {GATE} not attested (CI and the release run it)"
+    )
+
+
 def main() -> int:
+    reason = selection_reason(changed_paths(ROOT))
+    if reason is not None:
+        print(reason, flush=True)
+        return NOT_APPLICABLE
     OUT.mkdir(parents=True, exist_ok=True)
     container = os.environ.get("SOLDR_WINVM_CONTAINER", "dockur-win")
     try:
