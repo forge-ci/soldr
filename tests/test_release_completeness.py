@@ -115,3 +115,31 @@ def test_list_mode_prints_contract_assets_and_touches_no_network(capsys) -> None
         "v0.9.1", contract_triples()
     )
     assert len(lines) == 17
+
+
+def test_soldr_has_no_publishable_crates_and_says_why() -> None:
+    """soldr#3343: crates.io is accounted for, not silently absent."""
+    crates = release_completeness.publishable_crates()
+    assert crates == []
+    assert "skipped" in release_completeness.crates_io_plan(crates)
+
+
+def test_a_crate_without_publish_false_joins_the_gate(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "Cargo.toml").write_text(
+        '[workspace]\nmembers = ["a", "b"]\n', encoding="utf-8"
+    )
+    (tmp_path / "a" / "Cargo.toml").write_text(
+        '[package]\nname = "a"\npublish = false\n', encoding="utf-8"
+    )
+    (tmp_path / "b" / "Cargo.toml").write_text(
+        '[package]\nname = "b"\n', encoding="utf-8"
+    )
+    crates = release_completeness.publishable_crates(tmp_path)
+    assert crates == ["b"]
+    assert release_completeness.crates_io_plan(crates) == "crates.io: gated on b"
+    assert release_completeness.crates_io_failures("1.0.0", {"b": ["0.9.0"]}) == [
+        "crates.io b missing version: 1.0.0"
+    ]
+    assert release_completeness.crates_io_failures("1.0.0", {"b": ["1.0.0"]}) == []
