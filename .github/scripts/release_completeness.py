@@ -273,6 +273,8 @@ def expected_github_assets(tag: str, triples: list[str]) -> list[str]:
         f"soldr-{version}-py3-none-{WHEEL_TAGS[triple]}.whl" for triple in triples
     ]
     assets.append(f"soldr-{tag}-SHA256SUMS.txt")
+    # soldr#3343: the release-level record of the artifact set.
+    assets.append(f"soldr-{tag}-info.json")
     return assets
 
 

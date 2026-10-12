@@ -951,6 +951,16 @@ jobs:
         with:
           enable-cache: false
 
+      # soldr#3343: the release-level record (version, SHA, tag, target
+      # contract revision, every file's size and SHA-256), written after
+      # SHA256SUMS so it covers it, and published as a release asset.
+      - name: Write release info.json
+        shell: bash
+        run: >-
+          uv run --no-project --python 3.13 .github/scripts/release_publish.py write-info
+          --tag '${{ needs.prepare.outputs.version }}'
+          --sha '${{ needs.prepare.outputs.commit_sha }}'
+
       # Pre-create the tag via the git refs API instead of letting
       # `gh release create --target <sha>` create it implicitly.
       # Rationale: on workflow_dispatch runs (vs push) the GITHUB_TOKEN

@@ -334,3 +334,37 @@ def test_ensure_tag_retries_a_transient_create(monkeypatch) -> None:
     calls = run.calls
     assert MODULE.ensure_tag(REPO, TAG, SHA, run) == 0
     assert len(calls) == 3
+
+
+# --- soldr#3343: release-level info.json ----------------------------------
+
+
+def test_release_info_records_every_file_with_size_and_hash(tmp_path: Path) -> None:
+    dist = make_dist(tmp_path, names=("soldr-v1.2.3-x.tar.zst", "soldr-1.2.3.whl"))
+    contract = tmp_path / "contract.json"
+    contract.write_text("{}", encoding="utf-8")
+    info = MODULE.release_info(
+        dist,
+        version=TAG,
+        sha=SHA,
+        contract=contract,
+        triples=["x86_64-unknown-linux-gnu"],
+        run_id=RUN_ID,
+    )
+    assert info.tag == TAG and info.commit_sha == SHA
+    assert info.targets == ["x86_64-unknown-linux-gnu"]
+    assert [f.name for f in info.files] == ["soldr-1.2.3.whl", "soldr-v1.2.3-x.tar.zst"]
+    assert all(f.bytes == 1 and len(f.sha256) == 64 for f in info.files)
+    assert MODULE.info_name(TAG) == "soldr-v1.2.3-info.json"
+
+
+def test_info_json_is_an_expected_release_asset_and_written_by_the_workflow() -> None:
+    assert (
+        "soldr-v1.2.3-info.json"
+        in MODULE.release_completeness.expected_github_assets(TAG, [])
+    )
+    workflow = (REPO_ROOT / ".github" / "workflows" / "release-auto.yml").read_text(
+        encoding="utf-8"
+    )
+    write = workflow.index("release_publish.py write-info")
+    assert workflow.index("SHA256SUMS.txt") < write < workflow.index("ensure-tag")

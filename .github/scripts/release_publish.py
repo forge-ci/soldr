@@ -21,14 +21,21 @@ error instead, and it is tested.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import random
 import re
 import subprocess
 import sys
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Sequence
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# pylint: disable-next=wrong-import-position
+import release_completeness  # noqa: E402 -- script-relative import
 
 # Use regular-file capture without an installed Python dependency.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -299,9 +306,72 @@ def create_draft_release(
     return 1
 
 
+INFO_SCHEMA = 1
+
+
+@dataclass(frozen=True)
+class ReleaseFile:
+    name: str
+    bytes: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class ReleaseInfo:
+    """The release-level record of the artifact set (soldr#3343).
+
+    One document naming the version, candidate SHA, immutable tag, the
+    target-contract revision, and every artifact's size and SHA-256. It
+    complements the per-archive manifest.json and SHA256SUMS; a resumed or
+    re-uploaded release must match it byte for byte.
+    """
+
+    schema_version: int
+    version: str
+    tag: str
+    commit_sha: str
+    run_id: str
+    target_contract_sha256: str
+    targets: list[str]
+    files: list[ReleaseFile]
+
+
+def release_info(
+    dist: Path,
+    *,
+    version: str,
+    sha: str,
+    contract: Path,
+    triples: list[str],
+    run_id: str,
+) -> ReleaseInfo:
+    files = [
+        ReleaseFile(
+            name=Path(name).name,
+            bytes=Path(name).stat().st_size,
+            sha256=hashlib.sha256(Path(name).read_bytes()).hexdigest(),
+        )
+        for name in release_assets(dist)
+    ]
+    return ReleaseInfo(
+        schema_version=INFO_SCHEMA,
+        version=version,
+        tag=version if version.startswith("v") else f"v{version}",
+        commit_sha=sha,
+        run_id=run_id,
+        target_contract_sha256=hashlib.sha256(contract.read_bytes()).hexdigest(),
+        targets=triples,
+        files=files,
+    )
+
+
+def info_name(version: str) -> str:
+    return f"soldr-{version}-info.json"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["ensure-tag", "create-draft"])
+    parser.add_argument("command", choices=["ensure-tag", "create-draft", "write-info"])
     parser.add_argument("--tag", required=True)
     parser.add_argument("--sha", required=True)
     parser.add_argument(
@@ -311,6 +381,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
     args = parser.parse_args(argv)
 
+    if args.command == "write-info":
+        dist = Path(args.dist)
+        info = release_info(
+            dist,
+            version=args.tag,
+            sha=args.sha,
+            contract=release_completeness.CONTRACT,
+            triples=release_completeness.included_triples(),
+            run_id=args.run_id,
+        )
+        target = dist / info_name(args.tag)
+        target.write_text(json.dumps(asdict(info), indent=2) + "\n", encoding="utf-8")
+        print(f"wrote {target} ({len(info.files)} files)")
+        return 0
     if args.command == "ensure-tag":
         return ensure_tag(args.repo, args.tag, args.sha, default_runner)
     try:
