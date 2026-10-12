@@ -57,24 +57,26 @@ def test_wheel_tag_table_covers_exactly_the_contract() -> None:
     assert set(release_completeness.WHEEL_TAGS) == set(contract_triples())
 
 
-def test_expected_github_assets_are_seventeen_for_eight_targets() -> None:
+def test_expected_github_assets_are_eighteen_for_eight_targets() -> None:
     triples = contract_triples()
     assets = release_completeness.expected_github_assets("v0.9.1", triples)
-    assert len(assets) == 2 * len(triples) + 1 == 17
+    assert len(assets) == 2 * len(triples) + 2 == 18
     assert "soldr-v0.9.1-x86_64-unknown-linux-gnu.tar.zst" in assets
     assert "soldr-0.9.1-py3-none-win_arm64.whl" in assets
     assert "soldr-v0.9.1-SHA256SUMS.txt" in assets
+    assert "soldr-v0.9.1-info.json" in assets  # soldr#3343
 
 
 def test_the_0_9_0_incident_fails_the_gate() -> None:
     # PyPI and npm complete, GitHub Release missing 10 of 17: the state
-    # that concluded green in run 31487675391 must fail here.
+    # that concluded green in run 31487675391 must fail here. (0.9.0 also
+    # predates info.json, soldr#3343, the eleventh gap.)
     triples = contract_triples()
     _, pypi, npm = full_surface("v0.9.0")
     failures = release_completeness.verify_surfaces(
         "v0.9.0", triples, V090_PRESENT, pypi, npm
     )
-    assert len(failures) == 10, failures
+    assert len(failures) == 11, failures
     assert all(f.startswith("github-release missing asset:") for f in failures)
     assert any("x86_64-unknown-linux-gnu.tar.zst" in f for f in failures)
     assert any("win_arm64.whl" in f for f in failures)
@@ -114,7 +116,7 @@ def test_list_mode_prints_contract_assets_and_touches_no_network(capsys) -> None
     assert lines == release_completeness.expected_github_assets(
         "v0.9.1", contract_triples()
     )
-    assert len(lines) == 17
+    assert len(lines) == 18
 
 
 def test_soldr_has_no_publishable_crates_and_says_why() -> None:
