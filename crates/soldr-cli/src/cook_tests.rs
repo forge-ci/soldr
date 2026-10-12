@@ -539,23 +539,11 @@ fn patch_only_recipe_still_requires_the_exact_supplemental_build() {
     assert!(report.needs_exact_build());
 }
 
-// #693: this test sets up a git repo fixture and was failing reliably on
-// the `setup-soldr-action.yml` runner because `git` resolves inconsistently
-// there (the runtime `Command::new("git").output()` probe in
-// `git_available()` returns Ok, but the actual `git -C <dir> init` spawn
-// then errors with `Os { code: 2, kind: NotFound }`). The mechanism is
-// not yet diagnosed -- candidates include a PATH that changes between
-// the two spawns, a process-CWD race against another concurrent test,
-// or a subprocess-stdio quirk in the action's pwsh shell.
-//
-// The test exercises a daemon-unavailable corner case for
-// `index_cooked_artifact_with_packer` -- not a fundamental code path.
-// Gating with `#[ignore]` keeps it runnable locally via
-// `cargo test -- --ignored` while unblocking the
-// `setup-soldr-action.yml` workflow. Remove the `#[ignore]` once the
-// runner inconsistency is rooted-caused.
+// #693 once quarantined this test: `git` failed to spawn (NotFound) on the
+// pwsh leg of `setup-soldr-action.yml`. That workflow now runs on Linux only,
+// and the test passed 30/30 under `--stress-count` in bosn, so it runs by
+// default again (soldr#3741).
 #[test]
-#[ignore = "git fixture flaky on setup-soldr-action runner; see #693"]
 fn index_cooked_artifact_skips_archive_pack_when_daemon_unavailable() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
