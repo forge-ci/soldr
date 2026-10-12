@@ -54,3 +54,8 @@ pub fn page_size() -> u64 {
 pub fn returncode(status: &std::process::ExitStatus) -> i32 {
     status.code().unwrap_or(1)
 }
+
+/// Inert: only Linux gives tests a private `TMPDIR` to match on (soldr#3739).
+pub fn pids_with_env(_name: &str, _value: &std::ffi::OsStr) -> Vec<u32> {
+    Vec::new()
+}

@@ -51,9 +51,12 @@ fn unique_cache_dir() -> PathBuf {
         .as_nanos();
     // Keep this path short: zccache's Unix daemon socket lives below
     // SOLDR_CACHE_DIR, and macOS has a small sockaddr_un path limit.
-    let base = if !matches!(
+    // Linux uses TMPDIR so the Nextest wrapper's private per-test TMPDIR
+    // reclaims the root; a fixed `/tmp` leaked one `sdrc-*` per run
+    // (soldr#3739).
+    let base = if matches!(
         soldr_platform::host::facts::os(),
-        soldr_platform::host::facts::HostOs::Windows
+        soldr_platform::host::facts::HostOs::MacOs
     ) {
         PathBuf::from("/tmp")
     } else {
