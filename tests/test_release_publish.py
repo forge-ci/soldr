@@ -11,7 +11,8 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parents[1]
@@ -35,25 +36,30 @@ def load_module():
 MODULE = load_module()
 
 
-def fake_runner(
-    codes: list[int],
-) -> tuple[Callable[[Sequence[str]], subprocess.CompletedProcess], list[list[str]]]:
-    """A runner replaying scripted exit codes, plus the list it records into.
+@dataclass(frozen=True)
+class Reply:
+    """One scripted gh result."""
 
-    Returns the pair rather than a callable with a `.calls` attribute: a
-    one-method class trips pylint's `too-few-public-methods`, and hanging an
-    attribute off the closure trips mypy's `attr-defined`. An explicit tuple
-    is what both accept, and it reads no worse at the call site.
-    """
-    remaining = list(codes)
-    calls: list[list[str]] = []
+    code: int
+    stderr: str = ""
 
-    def run(args: Sequence[str]) -> subprocess.CompletedProcess:
-        calls.append(list(args))
-        code = remaining.pop(0) if remaining else 0
-        return subprocess.CompletedProcess(list(args), code, "", "")
 
-    return run, calls
+@dataclass
+class FakeGh:
+    """A runner replaying scripted gh results and recording every call."""
+
+    replies: list[Reply]
+    calls: list[list[str]] = field(default_factory=list)
+
+    def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess:
+        self.calls.append(list(args))
+        reply = self.replies.pop(0) if self.replies else Reply(0)
+        return subprocess.CompletedProcess(list(args), reply.code, "", reply.stderr)
+
+
+def fake_runner(codes: list[int]) -> FakeGh:
+    """A runner replaying scripted exit codes with empty output."""
+    return FakeGh([Reply(code) for code in codes])
 
 
 def make_dist(tmp_path: Path, names=("a.tar.zst", "b.whl")) -> Path:
@@ -104,13 +110,15 @@ def test_directories_inside_dist_are_not_uploaded(tmp_path: Path) -> None:
 
 
 def test_an_existing_tag_is_a_skip_not_a_failure() -> None:
-    run, calls = fake_runner([0])  # `gh api refs/tags/<tag>` succeeds
+    run = fake_runner([0])  # `gh api refs/tags/<tag>` succeeds
+    calls = run.calls
     assert MODULE.ensure_tag(REPO, TAG, SHA, run) == 0
     assert len(calls) == 1, "an existing tag must not attempt a create"
 
 
 def test_a_missing_tag_is_created_at_the_requested_sha() -> None:
-    run, calls = fake_runner([1, 0])  # lookup fails, create succeeds
+    run = fake_runner([1, 0])  # lookup fails, create succeeds
+    calls = run.calls
     assert MODULE.ensure_tag(REPO, TAG, SHA, run) == 0
     create = calls[1]
     assert f"ref=refs/tags/{TAG}" in create
@@ -121,7 +129,7 @@ def test_a_missing_tag_is_created_at_the_requested_sha() -> None:
 def test_a_tag_create_failure_exits_one(monkeypatch, tmp_path: Path) -> None:
     summary = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
-    run, _calls = fake_runner([1, 1])
+    run = fake_runner([1, 1])
     assert MODULE.ensure_tag(REPO, TAG, SHA, run) == 1
     text = summary.read_text(encoding="utf-8")
     assert "Manual release recovery needed (tag)" in text
@@ -137,7 +145,8 @@ def test_a_new_release_is_created_as_a_draft(monkeypatch, tmp_path: Path) -> Non
     output = tmp_path / "out.txt"
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
     dist = make_dist(tmp_path)
-    run, calls = fake_runner([1, 0])  # view fails (absent), create succeeds
+    run = fake_runner([1, 0])  # view fails (absent), create succeeds
+    calls = run.calls
 
     assert (
         MODULE.create_draft_release(REPO, TAG, SHA, run_id=RUN_ID, dist=dist, run=run)
@@ -159,7 +168,8 @@ def test_an_existing_release_re_uploads_with_clobber(
     output = tmp_path / "out.txt"
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
     dist = make_dist(tmp_path)
-    run, calls = fake_runner([0, 0])  # view succeeds (present), upload succeeds
+    run = fake_runner([0, 0])  # view succeeds (present), upload succeeds
+    calls = run.calls
 
     assert (
         MODULE.create_draft_release(REPO, TAG, SHA, run_id=RUN_ID, dist=dist, run=run)
@@ -180,7 +190,7 @@ def test_a_failed_re_upload_does_not_report_success(
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     dist = make_dist(tmp_path)
-    run, _calls = fake_runner([0, 1])  # view succeeds, upload fails
+    run = fake_runner([0, 1])  # view succeeds, upload fails
 
     assert (
         MODULE.create_draft_release(REPO, TAG, SHA, run_id=RUN_ID, dist=dist, run=run)
@@ -198,7 +208,7 @@ def test_a_failed_create_sets_created_false_and_emits_recovery(
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     dist = make_dist(tmp_path)
-    run, _calls = fake_runner([1, 1])  # view fails, create fails
+    run = fake_runner([1, 1])  # view fails, create fails
 
     assert (
         MODULE.create_draft_release(REPO, TAG, SHA, run_id=RUN_ID, dist=dist, run=run)
@@ -214,7 +224,8 @@ def test_every_asset_is_passed_to_gh(monkeypatch, tmp_path: Path) -> None:
     """The shell used to expand `dist/*`; the script must pass them all."""
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out.txt"))
     dist = make_dist(tmp_path, ("one.whl", "two.whl", "three.tar.zst"))
-    run, calls = fake_runner([1, 0])
+    run = fake_runner([1, 0])
+    calls = run.calls
     MODULE.create_draft_release(REPO, TAG, SHA, run_id=RUN_ID, dist=dist, run=run)
     create = calls[1]
     for name in ("one.whl", "two.whl", "three.tar.zst"):
@@ -239,25 +250,19 @@ def test_the_workflow_invokes_the_script_for_both_mutations() -> None:
     assert "Manual release recovery needed" not in workflow
 
 
-def failing_gh(marker: str, fail_from: int):
+def failing_gh(marker: str, fail_from: int) -> FakeGh:
     """Fake gh: calls before `fail_from` exit 1 quietly (the "exists?" probe
-    misses); the mutating call exits 1 writing `marker` to stderr."""
-    calls: list[list[str]] = []
-
-    def run(args: Sequence[str]) -> subprocess.CompletedProcess:
-        calls.append(list(args))
-        if len(calls) < fail_from:
-            return subprocess.CompletedProcess(list(args), 1, "", "")
-        return subprocess.CompletedProcess(list(args), 1, "", f"HTTP 403: {marker}\n")
-
-    return run, calls
+    misses); every later call exits 1 writing `marker` to stderr."""
+    return FakeGh(
+        [Reply(1)] * (fail_from - 1) + [Reply(1, f"HTTP 403: {marker}\n")] * 4
+    )
 
 
 def test_ensure_tag_failure_prints_gh_stderr(tmp_path, monkeypatch, capsys):
     """soldr#3385: the ::error:: line and summary carry gh's own stderr."""
     summary = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
-    run, _ = failing_gh("MARKER_TAG_3385", fail_from=2)
+    run = failing_gh("MARKER_TAG_3385", fail_from=2)
     assert MODULE.ensure_tag(REPO, TAG, SHA, run) == 1
     out = capsys.readouterr()
     error_line = next(ln for ln in out.out.splitlines() if ln.startswith("::error::"))
@@ -271,7 +276,7 @@ def test_create_draft_release_failure_prints_gh_stderr(tmp_path, monkeypatch, ca
     summary = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
-    run, _ = failing_gh("MARKER_RELEASE_3385", fail_from=2)
+    run = failing_gh("MARKER_RELEASE_3385", fail_from=2)
     rc = MODULE.create_draft_release(
         REPO, TAG, SHA, run_id=RUN_ID, dist=make_dist(tmp_path), run=run
     )
@@ -292,3 +297,40 @@ def test_gh_stderr_forwarded_on_success(capsys):
     assert "gh api repos/zackees/soldr/git/refs/tags/v1.2.3: MARKER_OK_3389" in (
         capsys.readouterr().err
     )
+
+
+# --- soldr#3343: transient retry -----------------------------------------
+
+
+def test_a_transient_failure_is_retried_until_success() -> None:
+    run = FakeGh([Reply(1, "HTTP 502: Bad Gateway"), Reply(1, "HTTP 503"), Reply(0)])
+    calls = run.calls
+    sleeps: list[float] = []
+    result = MODULE.retrying(run, sleep=sleeps.append)(["gh", "release", "upload"])
+    assert result.returncode == 0
+    assert len(calls) == 3 and len(sleeps) == 2
+    assert all(0 <= s <= 60 for s in sleeps)
+
+
+def test_transient_retries_stop_after_ten_attempts() -> None:
+    run = FakeGh([Reply(1, "connection reset by peer")] * 20)
+    calls = run.calls
+    result = MODULE.retrying(run, sleep=lambda _s: None)(["gh", "api", "x"])
+    assert result.returncode == 1
+    assert len(calls) == MODULE.RETRY_ATTEMPTS == 10
+
+
+def test_permanent_failures_are_not_retried() -> None:
+    for stderr in ("HTTP 403: Resource not accessible", "HTTP 422: immutable", ""):
+        run = FakeGh([Reply(1, stderr), Reply(0)])
+        calls = run.calls
+        result = MODULE.retrying(run, sleep=lambda _s: None)(["gh", "api", "x"])
+        assert result.returncode == 1 and len(calls) == 1, stderr
+
+
+def test_ensure_tag_retries_a_transient_create(monkeypatch) -> None:
+    monkeypatch.setattr(MODULE.time, "sleep", lambda _s: None)
+    run = FakeGh([Reply(1, "HTTP 404"), Reply(1, "HTTP 500"), Reply(0)])
+    calls = run.calls
+    assert MODULE.ensure_tag(REPO, TAG, SHA, run) == 0
+    assert len(calls) == 3

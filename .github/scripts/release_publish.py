@@ -22,8 +22,11 @@ from __future__ import annotations
 
 import argparse
 import os
+import random
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -95,6 +98,55 @@ def logged(run: Runner) -> Runner:
     return wrapper
 
 
+# soldr#3343: transient GitHub API / upload failures are retried; anything
+# else (auth, permission, 404 probes, immutable-release 422, conflicts) is
+# returned at once, so it fails fast instead of burning ten attempts.
+RETRY_ATTEMPTS = 10
+TRANSIENT = re.compile(
+    r"HTTP 5\d\d|HTTP 429|rate limit|timed? ?out|timeout|connection reset"
+    r"|connection refused|EOF|temporar(il)?y unavailable|bad gateway"
+    r"|service unavailable|gateway time-?out",
+    re.IGNORECASE,
+)
+
+
+def is_transient(completed: subprocess.CompletedProcess) -> bool:
+    text = f"{completed.stderr or ''}\n{completed.stdout or ''}"
+    return completed.returncode != 0 and TRANSIENT.search(text) is not None
+
+
+def backoff_delay(attempt: int) -> float:
+    """Bounded exponential backoff with full jitter: <= min(60, 2**attempt) s."""
+    return random.uniform(0, min(60.0, 2.0**attempt))
+
+
+def retrying(
+    run: Runner,
+    *,
+    attempts: int = RETRY_ATTEMPTS,
+    sleep: Callable[[float], None] | None = None,
+) -> Runner:
+    """Retry a call while it fails transiently, logging every attempt."""
+
+    def wrapper(args: Sequence[str]) -> subprocess.CompletedProcess:
+        completed = run(args)
+        for attempt in range(1, attempts):
+            if not is_transient(completed):
+                return completed
+            delay = backoff_delay(attempt)
+            print(
+                f"transient failure ({gh_output_excerpt(completed)}); "
+                f"attempt {attempt + 1}/{attempts} of `{' '.join(list(args)[:3])}` "
+                f"in {delay:.1f}s",
+                file=sys.stderr,
+            )
+            (sleep or time.sleep)(delay)
+            completed = run(args)
+        return completed
+
+    return wrapper
+
+
 def release_assets(dist: Path) -> list[str]:
     """Files to upload, sorted for a deterministic command line.
 
@@ -157,7 +209,7 @@ def write_output(name: str, value: str) -> None:
 
 def ensure_tag(repo: str, tag: str, sha: str, run: Runner) -> int:
     """Create `tag` at `sha` unless it already exists."""
-    run = logged(run)
+    run = retrying(logged(run))
     if run(["gh", "api", f"repos/{repo}/git/refs/tags/{tag}"]).returncode == 0:
         print(f"tag {tag} already exists - skipping create")
         return 0
@@ -189,7 +241,7 @@ def create_draft_release(
 ) -> int:
     """Create the draft release, or re-upload assets if it already exists."""
     assets = release_assets(dist)
-    run = logged(run)
+    run = retrying(logged(run))
     if run(["gh", "release", "view", tag, "--repo", repo]).returncode == 0:
         print(f"release {tag} already exists; uploading/replacing assets")
         uploaded = run(
