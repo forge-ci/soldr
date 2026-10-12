@@ -2,7 +2,12 @@
 #
 # Before every push, from a clean, committed tree:
 #
-#   uvx --from git+https://github.com/zackees/ci.yml@29087cb90ddebb84cd5f4b2e0f85380e76c743e5 ci-lint local-gate run
+#   uvx --from git+https://github.com/zackees/ci.yml@<CI_LINT_REF> ci-lint local-gate run
+#
+# <CI_LINT_REF> is the SHA in ci.toml's `linter`, the one canonical pin
+# (soldr#3616). It is not repeated here: this file is a mandatory input of
+# every lane, and a second copy is one more file a pin bump must edit
+# (soldr#3556).
 #
 # runs `run` below and, on success, stamps HEAD with a tree-bound
 # `Local-Gate:` trailer. CI's `ci-mode` job (`verify`) fails a PR whose head
@@ -128,7 +133,8 @@ exclude = [
 ]
 keep = [
   "tests/fixtures/**", "src/soldr/_bundle_bins.py",
-  "ci/winvm_lane.py", "ci/winvm_guest.ps1", "ci/windows_guest_probe.py", "ci/windows_guest_probe/**",
+  "ci/winvm_lane.py", "ci/winvm_guest.ps1", "ci/crate_graph.py",
+  "ci/windows_guest_probe.py", "ci/windows_guest_probe/**",
   "ci/target-run-ownership.json", ".github/scripts/target_run_ownership.py",
   ".github/scripts/fetch_catalogued_nextest.py", ".github/scripts/download_catalogued_asset.py",
   ".github/scripts/toolchain_asset_query.py",

@@ -31,7 +31,6 @@ CI_LINT_PIN_SITES = (
     ".github/workflows/ci.yml",
     ".github/workflows/ci-pre.yml",
     ".github/workflows/_build-and-test.yml",
-    "local-gate.toml",
 )
 
 
@@ -50,6 +49,15 @@ def test_one_ci_lint_ref_everywhere() -> None:
     for wf in (ROOT / ".github" / "workflows").glob("*.y*ml"):
         if "repository: zackees/ci.yml" in wf.read_text(encoding="utf-8"):
             assert f".github/workflows/{wf.name}" in CI_LINT_PIN_SITES, wf.name
+
+
+def test_local_gate_toml_does_not_repeat_the_pin() -> None:
+    """soldr#3556: local-gate.toml is a mandatory input of every lane; ci.toml
+    is the one canonical pin (soldr#3616), so no copy may live here."""
+    declaration = (ROOT / "local-gate.toml").read_text(encoding="utf-8")
+    assert not re.search(r"[0-9a-f]{40}", declaration), (
+        "local-gate.toml duplicates a pin"
+    )
 
 
 def test_ci_lint_ref_rejects_malformed_linter(tmp_path: Path) -> None:
