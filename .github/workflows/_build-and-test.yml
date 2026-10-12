@@ -165,7 +165,9 @@ jobs:
 
       - name: Install rustup 1.98.1 to ~/.rustup (if not cached)
         if: steps.rustup_cache.outputs.cache-hit != 'true'
-        run: rustup toolchain install 1.98.1 --profile minimal --no-self-update  # ci-lint: allow RUST-001 bootstrap: pre-seeds ~/.rustup before setup-soldr puts soldr on PATH (soldr#1340)
+        # soldr#3557: a pure pre-seed. Runner images without rustup (act2's
+        # catthehacker image) skip it; setup-soldr bootstraps rustup itself.
+        run: command -v rustup >/dev/null || { echo "rustup not preinstalled; setup-soldr bootstraps it"; exit 0; }; rustup toolchain install 1.98.1 --profile minimal --no-self-update  # ci-lint: allow RUST-001 bootstrap: pre-seeds ~/.rustup before setup-soldr puts soldr on PATH (soldr#1340)
 
       # zackees/ci.yml#6: an immutable download shared with main -- a PR
       # restores main's entry but never saves its own copy.
