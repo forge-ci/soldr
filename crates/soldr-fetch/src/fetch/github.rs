@@ -453,8 +453,14 @@ pub(super) fn match_asset_for_binaries<'a>(
     for asset in assets {
         let name = asset.name.to_lowercase();
 
-        // Must match OS and arch.
+        // Must match OS and arch. soldr#3742: the Windows keyword `win` is a
+        // substring of `darwin`, so without the exclusion an
+        // `aarch64-apple-darwin` archive matched `aarch64-pc-windows-msvc`
+        // and a Mach-O binary was installed on Windows ARM.
         if !os_keywords.iter().any(|k| name.contains(k)) {
+            continue;
+        }
+        if target.os == Os::Windows && name.contains("darwin") {
             continue;
         }
         if !arch_keywords.iter().any(|k| name.contains(k)) {
@@ -714,6 +720,109 @@ mod tests {
             &wrong_sibling.name,
             &["dylint-link"]
         ));
+    }
+
+    /// soldr#3742: the release assets `known_tools` documents per tool,
+    /// as audited on 2026-10-12. Each `(target, Some(asset))` pins which
+    /// prebuilt the matcher picks; `None` pins a real upstream gap that falls
+    /// through to the next resolver (binstall, QuickInstall, then source).
+    /// Re-audit with `gh release view --repo <owner/repo>` when bumping.
+    #[test]
+    fn known_tools_audited_release_assets_select_documented_targets() {
+        let machete = [
+            "cargo-machete-v0.9.2-aarch64-apple-darwin.tar.gz",
+            "cargo-machete-v0.9.2-aarch64-unknown-linux-gnu.tar.gz",
+            "cargo-machete-v0.9.2-x86_64-apple-darwin.tar.gz",
+            "cargo-machete-v0.9.2-x86_64-pc-windows-msvc.tar.gz",
+            "cargo-machete-v0.9.2-x86_64-unknown-linux-musl.tar.gz",
+        ];
+        let just = [
+            "just-1.58.0-aarch64-apple-darwin.tar.gz",
+            "just-1.58.0-aarch64-pc-windows-msvc.zip",
+            "just-1.58.0-aarch64-unknown-linux-musl.tar.gz",
+            "just-1.58.0-x86_64-apple-darwin.tar.gz",
+            "just-1.58.0-x86_64-pc-windows-msvc.zip",
+            "just-1.58.0-x86_64-unknown-linux-musl.tar.gz",
+        ];
+        let typos = [
+            "typos-v1.51.1-aarch64-apple-darwin.tar.gz",
+            "typos-v1.51.1-aarch64-pc-windows-msvc.zip",
+            "typos-v1.51.1-aarch64-unknown-linux-musl.tar.gz",
+            "typos-v1.51.1-x86_64-apple-darwin.tar.gz",
+            "typos-v1.51.1-x86_64-pc-windows-msvc.zip",
+            "typos-v1.51.1-x86_64-unknown-linux-musl.tar.gz",
+        ];
+        // bacon ships one multi-platform archive with no triple in its name.
+        let bacon = ["bacon_3.26.0.zip"];
+        let cases: &[(&[&str], &str, Option<&str>)] = &[
+            (
+                &machete,
+                "x86_64-unknown-linux-gnu",
+                Some("x86_64-unknown-linux-musl"),
+            ),
+            (
+                &machete,
+                "aarch64-unknown-linux-gnu",
+                Some("aarch64-unknown-linux-gnu"),
+            ),
+            (&machete, "aarch64-pc-windows-msvc", None),
+            (
+                &just,
+                "x86_64-unknown-linux-gnu",
+                Some("x86_64-unknown-linux-musl"),
+            ),
+            (
+                &just,
+                "aarch64-unknown-linux-gnu",
+                Some("aarch64-unknown-linux-musl"),
+            ),
+            (
+                &just,
+                "aarch64-pc-windows-msvc",
+                Some("aarch64-pc-windows-msvc"),
+            ),
+            (
+                &typos,
+                "x86_64-unknown-linux-gnu",
+                Some("x86_64-unknown-linux-musl"),
+            ),
+            (
+                &typos,
+                "aarch64-unknown-linux-gnu",
+                Some("aarch64-unknown-linux-musl"),
+            ),
+            (
+                &typos,
+                "aarch64-pc-windows-msvc",
+                Some("aarch64-pc-windows-msvc"),
+            ),
+            (&bacon, "x86_64-unknown-linux-gnu", None),
+        ];
+        for (names, triple, expected) in cases {
+            let assets: Vec<AssetInfo> = names.iter().map(|name| asset(name)).collect();
+            let target = TargetTriple::from_triple(triple).unwrap();
+            let selected = match_asset(&assets, &target)
+                .ok()
+                .map(|asset| asset.name.as_str());
+            match expected {
+                Some(fragment) => assert!(
+                    selected.is_some_and(|name| name.contains(fragment)),
+                    "{triple}: expected an asset containing {fragment}, got {selected:?}"
+                ),
+                None => assert_eq!(selected, None, "{triple}: expected no prebuilt"),
+            }
+        }
+    }
+
+    #[test]
+    fn match_asset_never_selects_darwin_for_windows() {
+        let assets = vec![
+            asset("tool-aarch64-apple-darwin.tar.gz"),
+            asset("tool-x86_64-pc-windows-msvc.zip"),
+        ];
+        let target = TargetTriple::from_triple("aarch64-pc-windows-msvc").unwrap();
+
+        assert!(match_asset(&assets, &target).is_err());
     }
 
     #[test]

@@ -230,10 +230,11 @@ pub const KNOWN_TOOLS: &[ToolSpec] = &[
     // `cargo-machete` — https://github.com/bnjbvr/cargo-machete.
     // Tags are `vX.Y.Z`; asset names embed the version
     // (`cargo-machete-vX.Y.Z-<triple>.tar.gz`).
-    // TODO(#598): upstream does not currently publish
-    // `aarch64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`
-    // (musl-only), or `aarch64-unknown-linux-musl` assets — those
-    // targets fall through to the source-build path.
+    // Audited 2026-10-12 (v0.9.2): x86_64 Linux is musl-only, which the
+    // asset matcher accepts for a gnu target; there is no
+    // `aarch64-pc-windows-msvc` asset, so that target falls through to the
+    // next resolver. Pinned by `github::tests::
+    // known_tools_audited_release_assets_select_documented_targets`.
     ToolSpec {
         crate_name: "cargo-machete",
         cargo_subcommand: Some("machete"),
@@ -319,11 +320,10 @@ pub const KNOWN_TOOLS: &[ToolSpec] = &[
     // Mindshare top-level tools (issue #598 child). Invoked as
     // `soldr bacon`, `soldr just`, `soldr typos`.
     // `bacon` — https://github.com/Canop/bacon. Tags are `vX.Y.Z`.
-    // TODO(#598): upstream does NOT publish prebuilt binary assets on
-    // its GitHub Releases (audited through v3.16.0..v3.23.0 — all
-    // empty asset lists). Registering still wins the explicit
-    // (owner, repo) override; the fetch falls through to the
-    // source-build path until upstream starts shipping prebuilts.
+    // Audited 2026-10-12 (v3.26.0): upstream ships one multi-platform
+    // `bacon_<version>.zip` with no target triple in its name, so no asset
+    // matches and the fetch falls through to the next resolver.
+    // Registering still wins the explicit (owner, repo) override.
     ToolSpec {
         crate_name: "bacon",
         cargo_subcommand: None,
@@ -336,10 +336,9 @@ pub const KNOWN_TOOLS: &[ToolSpec] = &[
     // `just` — https://github.com/casey/just. Tags are bare
     // `X.Y.Z` (no `v` prefix). Asset names embed the version
     // (`just-X.Y.Z-<triple>.{tar.gz,zip}`).
-    // TODO(#598): upstream ships musl-only on Linux (no
-    // `x86_64-unknown-linux-gnu` / `aarch64-unknown-linux-gnu`
-    // assets); glibc consumers either pick up the musl build or
-    // fall through to source.
+    // Audited 2026-10-12 (1.58.0): Linux is musl-only, which the asset
+    // matcher accepts for gnu targets, so every documented target has a
+    // prebuilt.
     ToolSpec {
         crate_name: "just",
         cargo_subcommand: None,
@@ -352,10 +351,9 @@ pub const KNOWN_TOOLS: &[ToolSpec] = &[
     // `typos` — https://github.com/crate-ci/typos (the `typos-cli`
     // crate). Tags are `vX.Y.Z`; asset names embed the version
     // (`typos-vX.Y.Z-<triple>.{tar.gz,zip}`).
-    // TODO(#598): upstream omits `aarch64-pc-windows-msvc`,
-    // `aarch64-unknown-linux-gnu`, and ships musl-only on
-    // `x86_64-unknown-linux`. Those targets fall through to the
-    // source-build path.
+    // Audited 2026-10-12 (v1.51.1): Linux is musl-only, which the asset
+    // matcher accepts for gnu targets, and `aarch64-pc-windows-msvc` now
+    // ships, so every documented target has a prebuilt.
     ToolSpec {
         crate_name: "typos",
         cargo_subcommand: None,
