@@ -10,7 +10,9 @@ hard-fail unless EVERY public surface is complete for the release ref —
   1. GitHub Release: all archives + wheels + SHA256SUMS derived from
      ci/canonical-targets.json (never a hand-maintained list),
   2. PyPI: every expected wheel filename present for the version,
-  3. npm: the version exists for the package.
+  3. npm: the version exists for the package,
+  4. crates.io: every publishable workspace crate's version exists, or an
+     explicit skip reason when every crate is `publish = false` (soldr#3343).
 
 Verification logic is pure (lists in, failure strings out) so tests
 reproduce the 0.9.0 false-green without any network. Network fetchers use
@@ -27,6 +29,7 @@ import json
 import os
 import re
 import sys
+import tomllib
 import urllib.request
 from pathlib import Path
 
@@ -301,6 +304,50 @@ def verify_surfaces(
     return failures
 
 
+def publishable_crates(root: Path = REPO_ROOT) -> list[str]:
+    """Workspace member crates that crates.io would accept (soldr#3343).
+
+    A member is publishable unless its manifest says `publish = false` (or an
+    empty registry list). Detected from the manifests, never hand-listed, so
+    a crate that drops `publish = false` immediately joins the release gate.
+    """
+    workspace = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+    names = []
+    for member in workspace.get("workspace", {}).get("members", []):
+        manifest = tomllib.loads(
+            (root / member / "Cargo.toml").read_text(encoding="utf-8")
+        )
+        package = manifest.get("package", {})
+        if package.get("publish", True) in (False, []):
+            continue
+        names.append(package["name"])
+    return sorted(names)
+
+
+def crates_io_plan(crates: list[str]) -> str:
+    """The crates.io line of the release summary: what is gated, or why not."""
+    if not crates:
+        return "crates.io: skipped -- every workspace crate is `publish = false`"
+    return f"crates.io: gated on {', '.join(crates)}"
+
+
+def crates_io_failures(version: str, published: dict[str, list[str]]) -> list[str]:
+    """One failure per publishable crate whose `version` is not on crates.io."""
+    return [
+        f"crates.io {crate} missing version: {version}"
+        for crate, versions in sorted(published.items())
+        if version not in versions
+    ]
+
+
+def fetch_crate_versions(crate: str) -> list[str]:
+    data = fetch_json(
+        f"https://crates.io/api/v1/crates/{crate}",
+        {"User-Agent": f"{GITHUB_REPO} release-completeness"},
+    )
+    return [entry["num"] for entry in data.get("versions", [])]
+
+
 def fetch_json(url: str, headers: dict[str, str] | None = None) -> dict:
     request = urllib.request.Request(url, headers=headers or {})
     with urllib.request.urlopen(request, timeout=30) as response:
@@ -381,6 +428,11 @@ def main(argv: list[str] | None = None) -> int:
         fetch_github_assets(tag),
         fetch_pypi_files(tag.lstrip("v")),
         fetch_npm_versions(),
+    )
+    crates = publishable_crates()
+    print(crates_io_plan(crates))
+    failures += crates_io_failures(
+        tag.lstrip("v"), {crate: fetch_crate_versions(crate) for crate in crates}
     )
     if failures:
         print(f"release {tag} is INCOMPLETE ({len(failures)} gaps):", file=sys.stderr)
