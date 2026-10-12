@@ -11,7 +11,7 @@
 
 pub use crate::platform_imp::process::test_child::{
     configure_test_child, create_private_dir, install_termination_flag, page_size, pid_alive,
-    received_termination, returncode, signal_group, signal_process,
+    pids_with_env, received_termination, returncode, signal_group, signal_process,
 };
 
 /// The signals the wrapper sends or reacts to.

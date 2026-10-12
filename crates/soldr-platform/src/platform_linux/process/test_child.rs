@@ -148,3 +148,28 @@ pub fn returncode(status: &std::process::ExitStatus) -> i32 {
         .or_else(|| status.signal().map(|signal| -signal))
         .unwrap_or(1)
 }
+
+/// Every live process whose environment carries `name=value` exactly.
+///
+/// soldr#3739: the wrapper gives each test a private `TMPDIR`, so a process
+/// still carrying that value after the test exited is something the test
+/// left behind -- typically a daemon it auto-started, which `setsid` and
+/// double-forking have detached from the test's process group. Processes
+/// whose environment we may not read are skipped.
+pub fn pids_with_env(name: &str, value: &std::ffi::OsStr) -> Vec<u32> {
+    let mut needle = Vec::with_capacity(name.len() + 1 + value.len());
+    needle.extend_from_slice(name.as_bytes());
+    needle.push(b'=');
+    needle.extend_from_slice(value.as_bytes());
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| {
+            std::fs::read(format!("/proc/{pid}/environ"))
+                .is_ok_and(|environ| environ.split(|byte| *byte == 0).any(|var| var == needle))
+        })
+        .collect()
+}

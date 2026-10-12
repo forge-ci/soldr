@@ -7,7 +7,8 @@
 //! tests). For each test:
 //!
 //! * the test gets a private `TMPDIR`, removed afterwards (soldr#3079;
-//!   Linux only);
+//!   Linux only), and any process still carrying it -- a daemon the test
+//!   auto-started -- is terminated first (soldr#3739);
 //! * it refuses toolchain downloads and names its own binary for the
 //!   target-dir tripwire (soldr#3195, soldr#3203);
 //! * it runs in its own session, dies with the wrapper, and may be traced;
@@ -18,6 +19,7 @@
 mod dump;
 mod guard;
 mod memory;
+mod reap;
 mod tail;
 
 use guard::{ProcessGuard, CONTROL_ENVS};
@@ -90,6 +92,9 @@ fn private_tmpdir() -> Option<PathBuf> {
 
 fn remove_private_tmpdir(path: Option<&PathBuf>) {
     if let Some(path) = path {
+        // soldr#3739: stop daemons the test auto-started before deleting the
+        // directory their state lives in.
+        reap::reap_tmpdir_holders(path.as_os_str());
         if !soldr_core::core::flag(KEEP_TMPDIR_ENV) {
             let _ = std::fs::remove_dir_all(path);
         }
