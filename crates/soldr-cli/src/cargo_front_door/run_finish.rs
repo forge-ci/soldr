@@ -290,6 +290,9 @@ fn complete_cargo_run(
     if !daemon_finalized {
         persist_build_session_end_fallback(paths, session_id, effective_exit_code, ended_at_ms);
     }
+    if let Some(warning) = &prepared.unrecorded_debug_warning {
+        warning.record(paths);
+    }
     let post_cargo_result = publish_cargo_outputs(
         &status,
         &strip_outcome,
