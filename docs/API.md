@@ -1602,6 +1602,28 @@ Notes on the schema:
   were known, `error` set to the message, and `smoke_verify.ok = false`, and
   the process exits `1`. Previously stdout was empty in that case.
 
+
+##### Build drivers that look up the toolchain themselves (soldr#3716)
+
+`soldr cargo ...` never relies on rustup's lazy auto-install: before
+Cargo runs, the front door installs the `rust-toolchain.toml` channel and
+its declared components and targets (`ensure_cargo_toolchain`), so the
+cost of a toolchain soldr has not seen is a slower first build, not a
+failure.
+
+A driver that locates Rust *before* any `soldr cargo` call does not get
+that guarantee. CMake with [corrosion](https://github.com/corrosion-rs/corrosion)
+is the common case: `FindRust` queries rustup during configure, and on a
+fresh host or container the pinned channel is not installed yet, so
+configure fails with `Could not find toolchain '<channel>'`. Run
+`soldr toolchain ensure` first:
+
+```bash
+soldr toolchain ensure          # install the pinned channel + components + targets
+cmake -S . -B build             # corrosion now finds the installed toolchain
+cmake --build build
+```
+
 #### `soldr toolchain link`
 
 Write PATH shim files into `--shim-dir` so a child process that
