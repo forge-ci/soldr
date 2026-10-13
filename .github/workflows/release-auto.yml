@@ -3,6 +3,8 @@ name: Autonomous Release
 # canonical Windows GNU target uses the shipped Windows x64 host artifact;
 # it is a supported cross-build ABI, not a ninth host-distribution archive.
 
+run-name: "Release ${{ inputs.dry_run && 'dry run ' || '' }}${{ inputs.candidate_sha }}"
+
 on:
   workflow_dispatch:
     inputs:
@@ -27,7 +29,12 @@ on:
         description: Build, smoke and verify the full production matrix on candidate_sha, publishing nothing (soldr#2469 3.1).
         type: boolean
         default: false
+      promote_run_id:
+        description: Promote the exact artifacts of this earlier release-auto run for candidate_sha instead of rebuilding (soldr#2469 4.1).
+        type: string
+        default: ""
 permissions:
+  actions: read
   contents: write
   attestations: write
   id-token: write
@@ -134,12 +141,22 @@ jobs:
           CI_RUN_ID: ${{ inputs.full_ci_run_id }}
         run: uv run --no-project --python 3.13 python .github/scripts/release_full_ci_gate.py --candidate-sha "$CANDIDATE_SHA" --ci-run-id "$CI_RUN_ID" --repository "$GITHUB_REPOSITORY"
 
+      # soldr#2469 4.1: a promotion publishes another run's artifacts, so that
+      # run must be this candidate's, with every build and smoke green.
+      - name: Verify promotion source run
+        if: inputs.promote_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          uv run --no-project --python 3.13 .github/scripts/release_promotion_gate.py
+          --run-id '${{ inputs.promote_run_id }}' --candidate-sha '${{ inputs.candidate_sha }}'
+          --build-matrix '${{ needs.prepare.outputs.build_matrix }}'
   build:
     name: ${{ matrix.name }}
     needs:
       - prepare
       - full_ci_gate
-    if: needs.prepare.outputs.should_release == 'true' && needs.full_ci_gate.result == 'success'
+    if: needs.prepare.outputs.should_release == 'true' && needs.full_ci_gate.result == 'success' && inputs.promote_run_id == ''
     runs-on: ${{ matrix.runner }}
     # Windows x64's Linux cross-wheel takes roughly 37 minutes cold in the
     # Docker reproduction. Ninety minutes leaves room for runner variance.
@@ -708,8 +725,9 @@ jobs:
     name: Smoke Intel macOS release artifacts
     needs:
       - prepare
+      - full_ci_gate
       - build
-    if: needs.prepare.outputs.should_release == 'true'
+    if: always() && needs.prepare.outputs.should_release == 'true' && needs.full_ci_gate.result == 'success' && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.promote_run_id != ''))
     runs-on: macos-15-intel
     timeout-minutes: 30
     steps:
@@ -726,11 +744,15 @@ jobs:
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
+          run-id: ${{ inputs.promote_run_id || github.run_id }}
+          github-token: ${{ github.token }}
           name: release-soldr-x86_64-apple-darwin
           path: dist
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
+          run-id: ${{ inputs.promote_run_id || github.run_id }}
+          github-token: ${{ github.token }}
           name: pypi-soldr-x86_64-apple-darwin
           path: dist
 
@@ -747,8 +769,9 @@ jobs:
     name: Smoke ARM64 macOS release artifacts
     needs:
       - prepare
+      - full_ci_gate
       - build
-    if: needs.prepare.outputs.should_release == 'true'
+    if: always() && needs.prepare.outputs.should_release == 'true' && needs.full_ci_gate.result == 'success' && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.promote_run_id != ''))
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -761,10 +784,14 @@ jobs:
           enable-cache: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
+          run-id: ${{ inputs.promote_run_id || github.run_id }}
+          github-token: ${{ github.token }}
           name: release-soldr-aarch64-apple-darwin
           path: dist
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
+          run-id: ${{ inputs.promote_run_id || github.run_id }}
+          github-token: ${{ github.token }}
           name: pypi-soldr-aarch64-apple-darwin
           path: dist
       - name: Smoke shipped archive and install/import shipped wheel
@@ -781,8 +808,9 @@ jobs:
     name: Smoke Windows release artifacts (${{ matrix.arch }})
     needs:
       - prepare
+      - full_ci_gate
       - build
-    if: needs.prepare.outputs.should_release == 'true'
+    if: always() && needs.prepare.outputs.should_release == 'true' && needs.full_ci_gate.result == 'success' && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.promote_run_id != ''))
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -805,11 +833,15 @@ jobs:
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
+          run-id: ${{ inputs.promote_run_id || github.run_id }}
+          github-token: ${{ github.token }}
           name: release-soldr-${{ matrix.target }}
           path: dist
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
+          run-id: ${{ inputs.promote_run_id || github.run_id }}
+          github-token: ${{ github.token }}
           name: pypi-soldr-${{ matrix.target }}
           path: dist
 
@@ -899,7 +931,7 @@ jobs:
       - release_execution_contract
     # The separate Recovery replay remains advisory (soldr#3088). Both native
     # macOS release smoke jobs above gate publication of shipped artifacts.
-    if: needs.prepare.outputs.should_publish_github_release == 'true' && needs.smoke_macos_x64.result == 'success' && needs.smoke_macos_arm64.result == 'success' && needs.smoke_windows.result == 'success' && needs.release_execution_contract.result == 'success'
+    if: always() && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.promote_run_id != '')) && needs.prepare.outputs.should_publish_github_release == 'true' && needs.smoke_macos_x64.result == 'success' && needs.smoke_macos_arm64.result == 'success' && needs.smoke_windows.result == 'success' && needs.release_execution_contract.result == 'success'
     runs-on: ubuntu-24.04
     # Artifact download + attestation; observed max 0.6 min.
     timeout-minutes: 30
@@ -916,6 +948,8 @@ jobs:
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
+          run-id: ${{ inputs.promote_run_id || github.run_id }}
+          github-token: ${{ github.token }}
           path: dist
           pattern: release-soldr-*
           merge-multiple: true
@@ -927,6 +961,8 @@ jobs:
       # covered via the same SHA256SUMS file below.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
+          run-id: ${{ inputs.promote_run_id || github.run_id }}
+          github-token: ${{ github.token }}
           path: dist
           pattern: pypi-soldr-*
           merge-multiple: true
@@ -1022,7 +1058,7 @@ jobs:
       - prepare
       - build
       - publish
-    if: always() && needs.prepare.outputs.should_release == 'true' && needs.build.result == 'success' && needs.prepare.outputs.github_release_immutable != 'true' && needs.prepare.outputs.dry_run != 'true'
+    if: always() && needs.prepare.outputs.should_release == 'true' && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.promote_run_id != '')) && needs.prepare.outputs.github_release_immutable != 'true' && needs.prepare.outputs.dry_run != 'true'
     runs-on: ubuntu-24.04
     # Asset-set assertion against the GitHub API; observed max 0.1 min.
     timeout-minutes: 15
@@ -1077,6 +1113,8 @@ jobs:
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
+          run-id: ${{ inputs.promote_run_id || github.run_id }}
+          github-token: ${{ github.token }}
           path: dist
           pattern: pypi-soldr-*
           merge-multiple: true
