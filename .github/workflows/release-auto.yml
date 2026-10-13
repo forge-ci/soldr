@@ -1074,18 +1074,6 @@ jobs:
           pattern: pypi-soldr-*
           merge-multiple: true
 
-      - name: Show Python distributions
-        shell: bash
-        run: |
-          set -euo pipefail
-          ls -1 dist
-
-      - name: Publish wheel set to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
-        with:
-          packages-dir: dist
-          skip-existing: true
-
       # soldr#2763: pin the interpreter this job's scripts run under. The
       # runner image's `python3` drifts per platform -- v0.9.3 died on macOS
       # ARM64, whose python3 predates `Path.hardlink_to` (3.10+).
@@ -1098,6 +1086,16 @@ jobs:
         uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
         with:
           enable-cache: false
+
+      # soldr#3343: per-file and project-quota preflight; fails before upload.
+      - name: Preflight wheel sizes against PyPI limits
+        run: uv run --no-project --python 3.13 .github/scripts/pypi_preflight.py --dist dist
+
+      - name: Publish wheel set to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
 
       - name: Verify all wheels visible on PyPI
         # Poll until all sequential uploads are visible so downstream
