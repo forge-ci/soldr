@@ -522,12 +522,64 @@ fn wait_for_breach_summary(
         }
         assert!(
             Instant::now() < deadline,
-            "no memory-breach dump appeared under {} or {} before the deadline (soldr#3057)",
+            "no memory-breach dump appeared under {} or {} before the deadline (soldr#3057)\n{}",
             cache_root.display(),
             home_root.display(),
+            breach_diagnostics(cache_root, home_root),
         );
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// soldr#3762: what a missing dump leaves behind -- the watchdog's last
+/// status (did the daemon sample? breach?), any `memory-breach-*` directory
+/// at ANY depth (a dump the finder's depth limit missed), and the tail of
+/// every log under both roots (the daemon's own account of its exit).
+fn breach_diagnostics(cache_root: &Path, home_root: &Path) -> String {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > 12 {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                walk(&path, depth + 1, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut report = String::from("--- soldr#3762 diagnostics ---\n");
+    let paths = SoldrPaths::with_root(cache_root.to_path_buf());
+    report.push_str(&format!(
+        "watchdog status: {:?}\n",
+        rss_ceiling::read_status(&paths)
+    ));
+    let mut files = Vec::new();
+    walk(cache_root, 0, &mut files);
+    walk(home_root, 0, &mut files);
+    for file in &files {
+        let text = file.to_string_lossy();
+        if text.contains("memory-breach") {
+            report.push_str(&format!("breach artifact: {}\n", file.display()));
+        }
+    }
+    for file in files
+        .iter()
+        .filter(|f| f.extension().is_some_and(|e| e == "log"))
+    {
+        let bytes = fs::read(file).unwrap_or_default();
+        let tail = &bytes[bytes.len().saturating_sub(4096)..];
+        report.push_str(&format!(
+            "--- tail of {} ---\n{}\n",
+            file.display(),
+            String::from_utf8_lossy(tail)
+        ));
+    }
+    report
 }
 
 #[test]
@@ -922,12 +974,19 @@ fn daemon_rss_retention_rate_per_compile_stays_within_budget() {
     drop(cleanup);
 }
 
-/// Deliberately below the daemon's own real compile-driven peak while
-/// serving [`write_workload_workspace`]'s 12-crate chained build (~78-93
-/// MiB, measured directly while building this reproduction on a real host)
-/// but comfortably above a cold daemon's startup baseline, so the breach
-/// happens once real compiles are underway, not before.
-const GUARANTEED_BREACH_CEILING_BYTES: u64 = 32 * 1024 * 1024;
+/// Below any soldr-daemon's own resident footprint, so the breach is
+/// guaranteed no matter how lean the daemon gets.
+///
+/// soldr#3762: this used to be 32 MiB, chosen to sit between a cold daemon's
+/// startup baseline and its compile-driven peak (~78-93 MiB when measured).
+/// Daemon memory work since then (#3713's bounded event batcher, among
+/// others) brought a whole 12-crate build on macOS Intel down to a 31.4 MiB
+/// peak, so the daemon sampled 12 times, never breached, and the test failed
+/// with "no memory-breach dump appeared". A ceiling tuned between two
+/// moving measurements is a test that fails when the product gets better.
+/// The breach no longer has to land mid-compile: the dump assertions below
+/// already allow an empty in-flight compile list.
+const GUARANTEED_BREACH_CEILING_BYTES: u64 = 8 * 1024 * 1024;
 
 /// soldr#3057: reproduces the reversed decision -- on breach, the daemon
 /// dumps its memory state and exits immediately, and a caller driving a
