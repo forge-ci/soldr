@@ -85,3 +85,12 @@ def test_the_workflow_wires_promotion_end_to_end() -> None:
     assert "&& inputs.promote_run_id == ''" in workflow  # build skipped
     assert workflow.count("run-id: ${{ inputs.promote_run_id || github.run_id }}") == 9
     assert "release_promotion_gate.py" in workflow
+
+
+def test_a_skipped_post_publish_smoke_does_not_block_promotion() -> None:
+    """Dry runs skip "Smoke published Dylint"; it is not an artifact smoke."""
+    job_list = [
+        *jobs(),
+        GATE.SourceJob("Smoke published Dylint on Windows x64", "skipped"),
+    ]
+    check(source(), job_list)
