@@ -359,9 +359,28 @@ fn darwin_prepare_exports_blessed_env_for_deferred_cook() {
         "darwin CC env missing blessed clang target: {body}"
     );
     assert!(
-        body.contains("CFLAGS_x86_64_apple_darwin=--target=x86_64-apple-darwin")
-            && body.contains("-fuse-ld=lld"),
-        "darwin CFLAGS must route cc-rs probes through clang/lld: {body}"
+        body.contains("CFLAGS_x86_64_apple_darwin=--target=x86_64-apple-darwin"),
+        "darwin CFLAGS must target darwin: {body}"
+    );
+    // soldr#3776: lld is selected link-only through a clang config file, never
+    // as a raw `-fuse-ld=lld` that warns on every `-c` compile under -Werror.
+    for key in [
+        "CFLAGS_x86_64_apple_darwin=",
+        "CXXFLAGS_x86_64_apple_darwin=",
+    ] {
+        let line = body
+            .lines()
+            .find(|line| line.starts_with(key))
+            .unwrap_or_else(|| panic!("{key} missing: {body}"));
+        assert!(!line.contains("-fuse-ld"), "{line}");
+        assert!(line.contains("--config="), "{line}");
+    }
+    assert!(
+        body.lines().any(
+            |l| l.starts_with("CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS=")
+                && l.contains("-fuse-ld=lld")
+        ),
+        "Rust links still select lld: {body}"
     );
     assert!(
         body.contains("CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER=clang"),

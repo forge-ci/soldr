@@ -292,7 +292,7 @@ pub async fn prepare(
                 let clangxx_base = format!(
                     "clang++ --target={clang_arch_target} -isysroot {sdk_str} -mmacosx-version-min={min_os} -stdlib=libc++"
                 );
-                // `-fuse-ld=lld` is critical for the C/C++ flags too:
+                // lld selection is critical for the C/C++ flags too:
                 // cmake-based -sys crates (libz-ng-sys, etc.) test the
                 // compiler with a tiny .c + link round-trip. Without it
                 // they invoke clang → /usr/bin/ld which is the host's
@@ -307,7 +307,14 @@ pub async fn prepare(
                 // and this is strictly better than falling back to GNU
                 // ld, which cannot link Mach-O at all.
                 let use_lld_linker = darwin_should_use_lld(managed_llvm_available);
-                let lld_flag = if use_lld_linker { " -fuse-ld=lld" } else { "" };
+                // soldr#3776: link-only, via a clang config file, so `-c`
+                // compiles stay clean under -Werror.
+                let lld_flag = if use_lld_linker {
+                    let cfg = crate::darwin_lld_config::ensure_lld_config(paths)?;
+                    crate::darwin_lld_config::link_only_lld_flag(&cfg)
+                } else {
+                    String::new()
+                };
                 let cflags = format!(
                     "--target={clang_arch_target} -isysroot {sdk_str} \
                      -mmacosx-version-min={min_os}{lld_flag}"

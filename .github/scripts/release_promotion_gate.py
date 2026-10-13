@@ -22,6 +22,9 @@ from dataclasses import dataclass
 
 WORKFLOW_PATH = ".github/workflows/release-auto.yml"
 SMOKE_PREFIX = "Smoke "
+# Only the release-artifact smokes: post-publish checks such as "Smoke
+# published Dylint" are skipped on a dry run, which is the run promoted.
+SMOKE_MARKER = "release artifacts"
 SHA = re.compile(r"[0-9a-f]{40}")
 
 
@@ -46,7 +49,11 @@ class SourceJob:
 
 def required_jobs(jobs: list[SourceJob], build_names: list[str]) -> list[str]:
     """Names of the jobs that must have succeeded: every build and every smoke."""
-    smokes = [job.name for job in jobs if job.name.startswith(SMOKE_PREFIX)]
+    smokes = [
+        job.name
+        for job in jobs
+        if job.name.startswith(SMOKE_PREFIX) and SMOKE_MARKER in job.name
+    ]
     return build_names + smokes
 
 
@@ -73,7 +80,11 @@ def validate(
             f"source run '{run.title}' was not for candidate {sha}: {run.html_url}"
         )
     by_name = {job.name: job.conclusion for job in jobs}
-    smokes = [job.name for job in jobs if job.name.startswith(SMOKE_PREFIX)]
+    smokes = [
+        job.name
+        for job in jobs
+        if job.name.startswith(SMOKE_PREFIX) and SMOKE_MARKER in job.name
+    ]
     if not smokes:
         raise PromotionError(
             f"source run ran no release-artifact smoke: {run.html_url}"

@@ -60,6 +60,7 @@ pub mod llvm;
 /// soldr#997 Phase A — LLVM-tools bundle from soldr-toolchain
 /// `recipes/llvm-tools-linux-x64/`. See module doc for why this is
 /// distinct from [`llvm`].
+pub mod llvm_host_libs;
 pub mod llvm_tools_bundle;
 pub mod manifest_lookup;
 pub mod manifest_v6;
