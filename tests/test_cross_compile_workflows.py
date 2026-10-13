@@ -1262,3 +1262,23 @@ def test_cross_compile_docs_match_current_blessed_surfaces() -> None:
     assert "runs_on: macos-15" in ci
     assert "soldr#1237" not in release
     assert "x86_64-apple-darwin: **intentionally omitted**" not in release
+
+
+def test_every_artifact_consumer_derives_soldr_daemon() -> None:
+    """soldr#3539: soldr-ci-e2e artifacts ship `soldr` once.
+
+    A job that uses `package/soldr-daemon` from a downloaded artifact must
+    first derive it with `cp ... soldr ... soldr-daemon`; the reld live-fetch
+    jobs were missed the first time and failed with `No such file`.
+    """
+    workflows = Path(__file__).parents[1] / ".github" / "workflows"
+    derive = re.compile(r"cp \S*soldr\S* +\S*(soldr-daemon|daemon_bin)")
+    for workflow in sorted(workflows.glob("*.yml")):
+        text = workflow.read_text(encoding="utf-8")
+        for job in re.split(r"\n  [A-Za-z0-9_-]+:\n", text):
+            uses = "package/soldr-daemon" in job or "$daemon_bin" in job
+            downloads = "soldr-ci-e2e" in job or "download-artifact" in job
+            if uses and downloads:
+                assert derive.search(job), (
+                    f"{workflow.name}: a job uses soldr-daemon without deriving it"
+                )
