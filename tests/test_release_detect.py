@@ -233,3 +233,32 @@ def test_every_output_the_workflow_consumes_is_produced() -> None:
         "An unwritten output is the empty string in Actions, which silently "
         "disables the job that gates on it."
     )
+
+
+def test_a_dry_run_builds_everything_and_publishes_nothing() -> None:
+    """soldr#2469 3.1: the full production matrix runs; no surface is written."""
+    decisions = detect.decide(make_state(), dry_run=True)
+    assert decisions.should_release and decisions.dry_run
+    assert not decisions.should_publish_github_release
+    assert not decisions.should_publish_pypi
+    assert not decisions.should_publish_npm
+    outputs = detect.render_outputs(make_state(), decisions, "0" * 40)
+    assert "dry_run=true" in outputs and "should_publish_pypi=false" in outputs
+
+
+def test_a_dry_run_skips_every_post_publish_verifier() -> None:
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "release-auto.yml"
+    ).read_text(encoding="utf-8")
+    for job in (
+        "verify_github_release",
+        "smoke-published-dylint",
+        "release-completeness",
+    ):
+        start = workflow.index(f"\n  {job}:")
+        condition = workflow[start : workflow.index("\n    runs-on:", start)]
+        assert "dry_run != 'true'" in condition, job
+    contract = workflow.index("\n  release_execution_contract:")
+    assert (
+        "dry_run == 'true'" in workflow[contract : workflow.index("runs-on:", contract)]
+    )

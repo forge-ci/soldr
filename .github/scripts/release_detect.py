@@ -100,13 +100,17 @@ class Decisions:
     should_publish_github_release: bool
     should_publish_pypi: bool
     should_publish_npm: bool
+    # soldr#2469 3.1: build, smoke and verify the full production matrix on
+    # the exact candidate, publishing nothing.
+    dry_run: bool = False
     should_release: bool = field(init=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
             "should_release",
-            self.should_publish_github_release
+            self.dry_run
+            or self.should_publish_github_release
             or self.should_publish_pypi
             or self.should_publish_npm,
         )
@@ -180,7 +184,14 @@ def github_release_state(
     )
 
 
-def decide(state: ReleaseState) -> Decisions:
+def decide(state: ReleaseState, *, dry_run: bool = False) -> Decisions:
+    if dry_run:
+        return Decisions(
+            should_publish_github_release=False,
+            should_publish_pypi=False,
+            should_publish_npm=False,
+            dry_run=True,
+        )
     return Decisions(
         # Never touch an immutable release: GitHub answers asset mutation on
         # one with HTTP 422, which is how 0.9.0 became unrecoverable.
@@ -198,6 +209,7 @@ def render_outputs(state: ReleaseState, decisions: Decisions, commit_sha: str) -
         ("should_publish_github_release", decisions.should_publish_github_release),
         ("should_publish_pypi", decisions.should_publish_pypi),
         ("should_publish_npm", decisions.should_publish_npm),
+        ("dry_run", decisions.dry_run),
         ("tag_exists", state.tag_exists),
         ("github_release_complete", state.github.complete),
         ("github_release_immutable", state.github.immutable),
@@ -229,6 +241,7 @@ def render_summary(state: ReleaseState, decisions: Decisions) -> str:
         ("publish GitHub release assets", decisions.should_publish_github_release),
         ("publish PyPI wheels", decisions.should_publish_pypi),
         ("publish npm package", decisions.should_publish_npm),
+        ("dry run (build and smoke only)", decisions.dry_run),
     ]
     body = "\n".join(f"- {label}: `{_render(value)}`" for label, value in rows)
     return f"### Release detection\n\n{body}\n"
@@ -328,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
         print(str(error), file=sys.stderr)
         return 1
 
-    decisions = decide(state)
+    decisions = decide(state, dry_run=truthy(os.environ.get("RELEASE_DRY_RUN")))
     outputs = render_outputs(state, decisions, args.commit_sha)
     summary = render_summary(state, decisions)
 

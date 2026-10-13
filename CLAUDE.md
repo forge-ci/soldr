@@ -258,7 +258,7 @@ Two traps when gathering that telemetry:
 | `cook-size-gate.yml` cook step | `ZCCACHE_DISABLE=1`: no admission gate. Step-scoped. |
 | `setup-soldr-action.yml` "Test through soldr" | `--no-cache`: no admission gate. Step-scoped. |
 | `macos-universal2-probe.yml` `build-slice` | Job-scoped, `workflow_dispatch` only; its job comment records the soldr-daemon `codegen-units=1` kill (soldr#2781). `tests/test_compile_caps_step_scoped.py` lists it as a named job-scope exception. |
-| `release-auto.yml` build steps | Swap is in place (soldr#3148 step 1), so rung 3 exists, but the workflow has no dry-run path: its build jobs run only for an unpublished version bump, so a lift can be canaried only by a real release. A lift is verified from the job log's `soldr: daemon compile concurrency =` line (soldr#3206). |
+| `release-auto.yml` build steps | Swap is in place (soldr#3148 step 1), so rung 3 exists. Since soldr#2469 3.1 a `dry_run=true` dispatch builds and smokes the full production matrix on an exact candidate and publishes nothing, so a lift can be canaried without a release; until one has been, the cap stays. A lift is verified from the job log's `soldr: daemon compile concurrency =` line (soldr#3206). |
 
 Every entry names a reason. A cap with no reason beside it is a bug report
 waiting to be written.
