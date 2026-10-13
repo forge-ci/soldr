@@ -283,6 +283,7 @@ pub mod daemon_entry;
 /// soldr#2023 — `soldr daemon status` rendering, split out of
 /// `soldr_main.rs` so that file could stop growing.
 pub(crate) mod daemon_status_render;
+mod darwin_lld_config;
 pub mod docker_cross;
 pub mod doctor;
 pub(crate) mod doctor_cook;
