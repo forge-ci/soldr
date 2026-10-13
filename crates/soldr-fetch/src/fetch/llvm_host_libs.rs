@@ -172,6 +172,13 @@ pub fn verify_lld_self_contained(bin_dir: &Path) -> Result<(), SoldrError> {
 mod tests {
     use super::*;
 
+    /// Runtime host check: cfg-based host selection is reserved for the
+    /// soldr-platform boundary.
+    fn linux_gnu_host() -> bool {
+        use crate::platform::host::facts::{libc, os, HostLibc, HostOs};
+        os() == HostOs::Linux && libc() == HostLibc::Gnu
+    }
+
     #[test]
     fn slugs_cover_only_linux_gnu_hosts() {
         assert_eq!(
@@ -213,9 +220,11 @@ mod tests {
 
     /// A real ELF: this test binary is dynamically linked against libc on a
     /// GNU host, so the parser must find it among the DT_NEEDED entries.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     #[test]
     fn elf_needed_reads_a_real_binary() {
+        if !linux_gnu_host() {
+            return;
+        }
         let exe = std::env::current_exe().unwrap();
         let needed = elf_needed(&exe).unwrap();
         assert!(
@@ -226,9 +235,11 @@ mod tests {
 
     /// End to end on a real ELF standing in for `lld`: a NEEDED the bundle
     /// lacks fails verification by name, and providing it in `lib/` passes.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     #[test]
     fn verify_requires_every_non_glibc_needed_in_the_bundle_lib() {
+        if !linux_gnu_host() {
+            return;
+        }
         let exe = std::env::current_exe().unwrap();
         let extra: Vec<String> =
             unresolved_needed(&elf_needed(&exe).unwrap(), Path::new("/nonexistent"));
