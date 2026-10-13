@@ -291,7 +291,10 @@ def test_windows_msvc_ci_builds_and_archives_real_tests() -> None:
     assert "artifact/package/soldr$suffix" in target_run
     assert "artifact/package/soldr-daemon$suffix" in target_run
     assert 'echo "SOLDR_INTERNAL_DAEMON_EXE=$daemon_bin"' in target_run
-    assert 'cp "dist/package/soldr$suffix" "dist/package/soldr-daemon$suffix"' in cross
+    # soldr#3539: soldr-daemon is derived on the target-run side, never
+    # uploaded as a second copy of the same bytes.
+    assert "dist/package/soldr-daemon" not in cross
+    assert 'cp "$soldr_bin" "$daemon_bin"' in target_run
     assert "cargo_bin=$(python .github/scripts/run_target_command.py" in target_run
     assert "rustc_bin=$(python .github/scripts/run_target_command.py" in target_run
     assert 'echo "CARGO=$cargo_bin"' in target_run
