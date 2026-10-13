@@ -92,6 +92,7 @@ pub mod bzip2_sysroot;
 pub mod catalogue_linux_host;
 pub mod cmake_tools;
 pub mod gnu_linux_toolchain;
+pub mod libuuid_sysroot;
 pub mod lzma_sysroot;
 pub mod mimalloc_sysroot;
 pub mod mingw_w64_gcc;

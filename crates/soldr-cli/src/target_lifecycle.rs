@@ -246,6 +246,12 @@ pub(crate) async fn prepare_target(
             format!("CARGO_TARGET_{upper}_RUSTFLAGS"),
             format!("-C link-arg=--sysroot={sysroot}"),
         ));
+        // soldr#3771: the conda glibc 2.17 sysroot has no libuuid. Layer the
+        // catalogue bundle onto it; a miss is logged, never fatal.
+        match crate::fetch::libuuid_sysroot::ensure_libuuid_sysroot(paths, base).await {
+            Ok(root) => crate::fetch::libuuid_sysroot::overlay_env(&mut env, base, &root),
+            Err(err) => eprintln!("soldr: managed libuuid unavailable for {base}: {err}"),
+        }
         prep.env.extend(env);
         add_link_self_contained_flag(&mut prep, base, &upper);
     } else if musl_uses_catalogue_toolchain {

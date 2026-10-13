@@ -64,6 +64,21 @@ GitHub Release, PyPI upload or npm publish is made, and the post-publish
 verifiers are skipped. Use it to canary a release-workflow change, or a
 lifted concurrency cap, before a real release.
 
+## Promotion: publish a dry run's exact artifacts (soldr#2469 4.1)
+
+A green dry run for a candidate can be promoted instead of rebuilt. Dispatch
+`release-auto.yml` again with the same `candidate_sha` and `full_ci_run_id`,
+plus `promote_run_id=<the dry run's id>`:
+- `build` is skipped, so nothing is compiled.
+- Every artifact download reads from the promoted run.
+- `release_promotion_gate.py` first proves that run is this candidate's
+  `release-auto.yml` dispatch (its run-name names the SHA), with every
+  production build and release-artifact smoke green.
+
+The smokes then run again against those exact artifacts before anything is
+published. A promotion combined with `dry_run=true` exercises the whole
+promotion path without publishing.
+
 ## Current Release Model
 
 Since soldr#3346 (2026-09-24) a release is a deliberate two-dispatch act on

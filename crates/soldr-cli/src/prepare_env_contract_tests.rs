@@ -588,3 +588,135 @@ fn exported_encoded_rustflags_keep_caller_target_flags() {
         "caller's global RUSTFLAGS was dropped from {tokens:?}"
     );
 }
+
+/// A stamped, stub `gnu-linux-toolchain` bundle that passes `validate()`.
+fn seed_fake_gnu_bundle(paths: &crate::core::SoldrPaths, slug: &str, target_prefix: &str) {
+    let gnu = paths
+        .bin
+        .join("syslib")
+        .join("gnu-linux-toolchain")
+        .join(crate::fetch::gnu_linux_toolchain::GNU_LINUX_TOOLCHAIN_VERSION)
+        .join(slug);
+    let managed_bin = gnu.join("package").join("bin");
+    let sysroot = gnu.join("package").join(target_prefix).join("sysroot");
+    std::fs::create_dir_all(&managed_bin).expect("create managed bin");
+    std::fs::create_dir_all(sysroot.join("usr/include")).expect("create sysroot includes");
+    std::fs::create_dir_all(sysroot.join("usr/lib")).expect("create sysroot libraries");
+    for tool in ["gcc", "g++", "ar", "ranlib", "ld", "readelf"] {
+        write_executable(
+            &managed_bin.join(format!("{target_prefix}-{tool}")),
+            "#!/bin/sh\nexit 0\n",
+        );
+    }
+    std::fs::write(gnu.join(".complete"), "test bundle").expect("stamp gnu bundle");
+}
+
+/// A stamped libuuid bundle; returns its `package` root.
+fn seed_fake_libuuid_bundle(paths: &crate::core::SoldrPaths, slug: &str) -> std::path::PathBuf {
+    let uuid = paths
+        .bin
+        .join("syslib")
+        .join("libuuid")
+        .join(crate::fetch::libuuid_sysroot::MANAGED_LIBUUID_VERSION)
+        .join(slug);
+    let root = uuid.join("package");
+    std::fs::create_dir_all(root.join("include/uuid")).expect("create uuid include");
+    std::fs::create_dir_all(root.join("lib")).expect("create uuid lib");
+    std::fs::write(root.join("include/uuid/uuid.h"), "").expect("write uuid.h");
+    std::fs::write(root.join("lib/libuuid.a"), "!<arch>\n").expect("write libuuid.a");
+    std::fs::write(uuid.join(".complete"), "test bundle").expect("stamp uuid bundle");
+    root
+}
+
+/// soldr#3771: the catalogue glibc 2.17 sysroot ships no libuuid, so a
+/// `cc` build that includes `<uuid/uuid.h>` and emits
+/// `cargo:rustc-link-lib=uuid` (obs-rust/obs-studio#516) failed for
+/// `--target *-unknown-linux-gnu`. When the managed libuuid bundle is
+/// materialized, preparation must layer its include and link-search
+/// directories onto the same target-scoped flags that carry `--sysroot`.
+#[test]
+fn managed_gnu_target_layers_libuuid_onto_the_sysroot() {
+    if crate::platform::host::facts::os() != crate::platform::host::facts::HostOs::Linux {
+        return;
+    }
+    let _lock = TEST_PROCESS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (target, target_prefix, slug) = if crate::platform::host::facts::arch()
+        == crate::platform::host::facts::HostArch::Aarch64
+    {
+        (
+            "x86_64-unknown-linux-gnu",
+            "x86_64-conda-linux-gnu",
+            "linux-x64-gnu",
+        )
+    } else {
+        (
+            "aarch64-unknown-linux-gnu",
+            "aarch64-conda-linux-gnu",
+            "linux-arm64-gnu",
+        )
+    };
+    let target_u = target.replace('-', "_");
+    let rustflags_key = format!("CARGO_TARGET_{}_RUSTFLAGS", target_u.to_ascii_uppercase());
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake_rustup = dir.path().join("rustup");
+    write_executable(&fake_rustup, "#!/bin/sh\nexit 0\n");
+    let _rustup = EnvVarGuard::set(crate::TEST_RUSTUP_BIN_ENV_VAR, &fake_rustup);
+    let _cross_guard = EnvVarGuard::set("SOLDR_WINDOWS_LINUX_CROSS_GUARD", "off");
+    let _no_network = EnvVarGuard::set("SOLDR_TEST_NO_NETWORK", "1");
+    let _legacy_sys = EnvVarGuard::set(crate::blessed_build::USE_LEGACY_VENDORED_SYS_ENV_VAR, "1");
+    let _system_cmake = EnvVarGuard::set(crate::blessed_build::USE_SYSTEM_CMAKE_ENV_VAR, "1");
+    let _manifest = EnvVarGuard::set("SOLDR_MANIFEST_DISABLE", "1");
+    let _ambient_flags: Vec<_> = [
+        "RUSTFLAGS".to_string(),
+        "CARGO_ENCODED_RUSTFLAGS".to_string(),
+        rustflags_key.clone(),
+    ]
+    .into_iter()
+    .map(DynamicEnvVarGuard::remove)
+    .collect();
+
+    let paths = crate::core::SoldrPaths::with_root(dir.path().join("soldr"));
+    seed_fake_gnu_bundle(&paths, slug, target_prefix);
+    let uuid_root = seed_fake_libuuid_bundle(&paths, slug);
+
+    let prep = tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(crate::target_lifecycle::prepare_target(&paths, target, &[]))
+        .expect("prepare managed GNU target");
+    let value = |key: &str| {
+        prep.env
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| panic!("{key} missing from {:?}", prep.env))
+    };
+    let include = format!("-isystem {}", uuid_root.join("include").display());
+    let link_arg = format!("link-arg=-L{}", uuid_root.join("lib").display());
+    for key in [format!("CFLAGS_{target_u}"), format!("CXXFLAGS_{target_u}")] {
+        let flags = value(&key);
+        assert!(
+            flags.contains("--sysroot="),
+            "{key} lost --sysroot: {flags}"
+        );
+        assert!(
+            flags.contains(&include),
+            "{key} lacks libuuid include: {flags}"
+        );
+    }
+    let rustflags = value(&rustflags_key);
+    assert!(rustflags.contains("link-arg=--sysroot="), "{rustflags}");
+    // What rustc actually receives: the search path must survive encoding
+    // as its own `-C link-arg=` pair, not glued onto `--sysroot`.
+    let encoded = crate::target_lifecycle::encoded_rustflags_for_prep(&prep)
+        .expect("prepared target rustflags are encoded");
+    let tokens: Vec<_> = encoded.split('\u{1f}').collect();
+    assert!(
+        tokens
+            .windows(2)
+            .any(|pair| pair == ["-C", link_arg.as_str()]),
+        "encoded rustflags lack a standalone libuuid search path: {tokens:?}"
+    );
+}
