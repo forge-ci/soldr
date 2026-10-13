@@ -43,8 +43,8 @@ import subprocess
 import sys
 import time
 from collections import deque
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IMAGE = "soldr-cook-dev"
@@ -342,7 +342,7 @@ echo "TIMING_MS cold=$((cold_end - cold_start)) warm=$((warm_end - warm_start))"
 """
 
 
-def _counter_lines(report: dict[str, Any]) -> list[str]:
+def _counter_lines(report: object) -> list[str]:
     """Non-zero staged counters, largest first.
 
     These are the closest thing the pipeline has to a per-unit reason:
@@ -356,7 +356,7 @@ def _counter_lines(report: dict[str, Any]) -> list[str]:
     printed while something is already failing. It must degrade to a note
     rather than raise a second error on top of the first.
     """
-    session = report.get("last_session")
+    session = report.get("last_session") if isinstance(report, dict) else None
     if not isinstance(session, dict):
         return ["  (no last_session in the report)"]
     profile = session.get("phase_profile")
@@ -375,8 +375,8 @@ def _counter_lines(report: dict[str, Any]) -> list[str]:
     return [f"  {name} = {value}" for name, value in nonzero]
 
 
-def _diagnosis_lines(report: dict[str, Any]) -> list[str]:
-    entries = report.get("diagnoses")
+def _diagnosis_lines(report: object) -> list[str]:
+    entries = report.get("diagnoses") if isinstance(report, dict) else None
     if not isinstance(entries, list) or not entries:
         return ["  (none)"]
     lines = []
@@ -391,7 +391,7 @@ def _diagnosis_lines(report: dict[str, Any]) -> list[str]:
     return lines
 
 
-def explain_report(label: str, report: dict[str, Any]) -> list[str]:
+def explain_report(label: str, report: object) -> list[str]:
     """The reasons a cacheability failure has, rendered for a CI log.
 
     soldr#2824/#2825: the harness printed which units missed and then said the
@@ -400,9 +400,10 @@ def explain_report(label: str, report: dict[str, Any]) -> list[str]:
     captured; none of it was being read.
     """
     lines = [f"## {label} report evidence"]
+    fields = report if isinstance(report, dict) else {}
 
-    journal = report.get("journal_path") or "(absent)"
-    present = report.get("journal_present")
+    journal = fields.get("journal_path") or "(absent)"
+    present = fields.get("journal_present")
     lines.append(f"  journal_path: {journal}")
     lines.append(f"  journal_present: {present}")
 
@@ -412,14 +413,14 @@ def explain_report(label: str, report: dict[str, Any]) -> list[str]:
     lines.append(f"## {label} diagnoses")
     lines.extend(_diagnosis_lines(report))
 
-    notes = report.get("notes")
+    notes = fields.get("notes")
     lines.append(f"## {label} notes")
     if isinstance(notes, list) and notes:
         lines.extend(f"  {note}" for note in notes)
     else:
         lines.append("  (none)")
 
-    rollups = report.get("rollups")
+    rollups = fields.get("rollups")
     lines.append(f"## {label} rollups (zccache analyze over that journal)")
     if rollups is None:
         # Distinguished from "absent" on purpose: a null rollups with a note
@@ -508,8 +509,36 @@ def classify_warm_misses(
     return sorted(set(dependency)), sorted(set(expected))
 
 
+@dataclass(frozen=True)
+class WarmResult:
+    """The ``CACHEABILITY_RESULT`` counters the harness emits as JSON."""
+
+    cold_hits: int = 0
+    cold_misses: int = 0
+    cold_non_cacheable: int = 0
+    cold_hit_rate: float = 0.0
+    warm_hits: int = 0
+    warm_misses: int = 0
+    warm_non_cacheable: int = 0
+    warm_hit_rate: float = 0.0
+
+    @classmethod
+    def from_json(cls, raw: object) -> "WarmResult":
+        fields = raw if isinstance(raw, dict) else {}
+        return cls(
+            cold_hits=int(fields.get("cold_hits", 0)),
+            cold_misses=int(fields.get("cold_misses", 0)),
+            cold_non_cacheable=int(fields.get("cold_non_cacheable", 0)),
+            cold_hit_rate=float(fields.get("cold_hit_rate", 0.0)),
+            warm_hits=int(fields.get("warm_hits", 0)),
+            warm_misses=int(fields.get("warm_misses", 0)),
+            warm_non_cacheable=int(fields.get("warm_non_cacheable", 0)),
+            warm_hit_rate=float(fields.get("warm_hit_rate", 0.0)),
+        )
+
+
 def evaluate_warm_result(
-    result: dict[str, Any],
+    result: WarmResult,
     warm_miss_units: "list[str] | None",
     first_party: "frozenset[str] | None",
 ) -> "list[str]":
@@ -535,7 +564,7 @@ def evaluate_warm_result(
     """
     failures: list[str] = []
 
-    if int(result.get("warm_hits", 0)) <= 0:
+    if result.warm_hits <= 0:
         failures.append(
             "warm run reported zero compiler-cache hits: dependency "
             "compilation is not warm at all"
@@ -613,26 +642,40 @@ def _bytes_line(label: str, raw: str | None) -> str:
     return f"  {label}: {_human_bytes(value)} ({value})"
 
 
-def parse_memory_events(raw: str | None) -> dict[str, int]:
-    """``memory.events`` as a mapping. Unparsable lines are skipped.
+@dataclass(frozen=True)
+class MemoryEvent:
+    """One ``<key> <count>`` line of ``memory.events``."""
+
+    name: str
+    count: int
+
+
+def event_count(events: tuple[MemoryEvent, ...], name: str) -> int:
+    """The count recorded for ``name`` (the last such line), or 0."""
+    matches = [event.count for event in events if event.name == name]
+    return matches[-1] if matches else 0
+
+
+def parse_memory_events(raw: str | None) -> tuple[MemoryEvent, ...]:
+    """``memory.events`` as records. Unparsable lines are skipped.
 
     The file is ``<key> <count>`` per line. ``oom_kill`` is the one that
     settles the question this harness keeps asking: cgroup v2 counts every
     process in the cgroup killed by *any* OOM killer, so a zero there rules
     memory out rather than merely failing to confirm it.
     """
-    events: dict[str, int] = {}
+    events: list[MemoryEvent] = []
     if not raw:
-        return events
+        return ()
     for line in raw.splitlines():
         parts = line.split()
         if len(parts) != 2:
             continue
         try:
-            events[parts[0]] = int(parts[1])
+            events.append(MemoryEvent(parts[0], int(parts[1])))
         except ValueError:
             continue
-    return events
+    return tuple(events)
 
 
 def _meminfo_line(label: str, raw: str | None) -> str:
@@ -644,7 +687,7 @@ def _meminfo_line(label: str, raw: str | None) -> str:
     return f"  {label}: (absent)"
 
 
-def oom_verdict(events: dict[str, int], events_readable: bool) -> str:
+def oom_verdict(events: tuple[MemoryEvent, ...], events_readable: bool) -> str:
     """The one line worth reading, stated as a determination.
 
     soldr#2781/#2817: soldr's own message says a signal kill "can indicate an
@@ -658,7 +701,7 @@ def oom_verdict(events: dict[str, int], events_readable: bool) -> str:
             "  VERDICT: unknown -- memory.events is unreadable, so this run "
             "cannot say whether an OOM kill happened"
         )
-    killed = events.get("oom_kill", 0) + events.get("oom_group_kill", 0)
+    killed = event_count(events, "oom_kill") + event_count(events, "oom_group_kill")
     if killed:
         return (
             f"  VERDICT: the kernel OOM-killed {killed} process(es) in this "
@@ -695,7 +738,8 @@ def memory_pressure_lines(
     raw_events = _read_text(cgroup_root / "memory.events")
     events = parse_memory_events(raw_events)
     if events:
-        rendered = " ".join(f"{k}={v}" for k, v in sorted(events.items()))
+        latest = {event.name: event.count for event in events}
+        rendered = " ".join(f"{k}={v}" for k, v in sorted(latest.items()))
     else:
         rendered = "(unreadable)" if raw_events is None else "(empty)"
     lines.append(f"  memory.events: {rendered}")
@@ -764,6 +808,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+@dataclass(frozen=True)
+class PhaseRecord:
+    """One timed harness phase."""
+
+    name: str
+    seconds: float
+
+
 class PhaseTracker:
     """Turn the harness's ``## <name>`` markers into observable phases.
 
@@ -800,7 +852,7 @@ class PhaseTracker:
         self._emit_groups = emit_groups
         self._started_at: float | None = None
         self.current: str | None = None
-        self.phases: list[tuple[str, float]] = []
+        self.phases: list[PhaseRecord] = []
         self.failed: str | None = None
 
     def feed(self, line: str) -> str | None:
@@ -829,21 +881,21 @@ class PhaseTracker:
     def _close(self) -> str | None:
         if self.current is None or self._started_at is None:
             return None
-        self.phases.append((self.current, self._clock() - self._started_at))
+        self.phases.append(PhaseRecord(self.current, self._clock() - self._started_at))
         self.current = None
         self._started_at = None
         return "::endgroup::\n" if self._emit_groups else None
 
     def record(self, name: str, seconds: float) -> None:
         """Record a phase measured outside the harness stream."""
-        self.phases.append((name, seconds))
+        self.phases.append(PhaseRecord(name, seconds))
 
     def summary_markdown(self, failed_phase: str | None = None) -> str:
         """A phase-timing table for the job summary."""
         lines = ["### Cacheability phases", "", "| phase | duration |", "|---|---:|"]
-        for name, seconds in self.phases:
-            lines.append(f"| {name} | {format_duration(seconds)} |")
-        total = sum(seconds for _, seconds in self.phases)
+        for phase in self.phases:
+            lines.append(f"| {phase.name} | {format_duration(phase.seconds)} |")
+        total = sum(phase.seconds for phase in self.phases)
         lines.append(f"| **total** | **{format_duration(total)}** |")
         if failed_phase:
             lines += ["", f"**Failed during:** `{failed_phase}`"]
@@ -907,7 +959,7 @@ def _diagnostic_list(line: str, prefix: str) -> "list[str] | None":
 
 def run_harness(  # noqa: C901
     image: str, volumes: list[str], tracker: "PhaseTracker | None" = None
-) -> "tuple[int, dict[str, Any] | None, list[str] | None, frozenset[str] | None]":
+) -> "tuple[int, WarmResult | None, list[str] | None, frozenset[str] | None]":
     cmd = [
         "docker",
         "run",
@@ -950,7 +1002,7 @@ def run_harness(  # noqa: C901
     except BrokenPipeError:
         pass
 
-    result: dict[str, object] | None = None
+    result: WarmResult | None = None
     warm_miss_units: list[str] | None = None
     first_party: frozenset[str] | None = None
     tail: deque[str] = deque(maxlen=80)
@@ -964,7 +1016,7 @@ def run_harness(  # noqa: C901
         tail.append(line)
         if line.startswith("CACHEABILITY_RESULT "):
             payload = line.removeprefix("CACHEABILITY_RESULT ").strip()
-            result = json.loads(payload)
+            result = WarmResult.from_json(json.loads(payload))
         elif line.startswith("CACHEABILITY_WARM_MISSES "):
             warm_miss_units = _diagnostic_list(line, "CACHEABILITY_WARM_MISSES ")
         elif line.startswith("CACHEABILITY_WORKSPACE_METADATA "):
@@ -1037,7 +1089,7 @@ def main(argv: list[str]) -> int:  # noqa: C901
             print("CACHEABILITY_FAILURE dependency compilation is not warm")
             for failure in failures:
                 print(f"error: {failure}", file=sys.stderr)
-            print(f"error: report was {result}", file=sys.stderr)
+            print(f"error: report was {asdict(result)}", file=sys.stderr)
             return 6
         print(
             "CACHEABILITY_OK dependency units reused the compiler cache; "

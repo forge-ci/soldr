@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from conftest import load_script_module
 
+JsonObject = dict[str, Any]
 REPO_ROOT = Path(__file__).resolve().parents[1]
 validate = load_script_module(
     REPO_ROOT / ".github" / "scripts" / "validate_npm_release_recovery.py"
@@ -36,7 +37,7 @@ def _source(tmp_path: Path, version: str = "0.9.0") -> Path:
     return tmp_path
 
 
-def _release(version: str = "0.9.0") -> dict[str, Any]:
+def _release(version: str = "0.9.0") -> JsonObject:
     names = completeness.expected_github_assets(
         f"v{version}", completeness.included_triples()
     )
@@ -49,7 +50,7 @@ def _release(version: str = "0.9.0") -> dict[str, Any]:
     }
 
 
-def _pypi(version: str = "0.9.0") -> dict[str, Any]:
+def _pypi(version: str = "0.9.0") -> JsonObject:
     return {
         "info": {"version": version},
         "urls": [
@@ -66,8 +67,8 @@ def _git(_source_dir: Path, arguments: list[str]) -> str:
     return "a" * 40
 
 
-def _fetcher(release: dict[str, Any], pypi: dict[str, Any]):
-    def fetch(url: str, _token: str | None) -> dict[str, Any]:
+def _fetcher(release: JsonObject, pypi: JsonObject):
+    def fetch(url: str, _token: str | None) -> JsonObject:
         return release if "api.github.com" in url else pypi
 
     return fetch

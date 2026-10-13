@@ -107,8 +107,16 @@ class Runner:
     venv: str
 
     @property
-    def volumes(self) -> tuple[str, str, str, str, str]:
+    def volumes(self) -> tuple[str, ...]:
         return (self.target, self.cargo_home, self.soldr_home, self.uv_cache, self.venv)
+
+
+@dataclass(frozen=True)
+class VolumeRow:
+    """A runner volume and where docker mounts it."""
+
+    name: str
+    mountpoint: str
 
 
 class GcCandidate(TypedDict):
@@ -534,21 +542,61 @@ def container_argv(argv: list[str]) -> list[str]:
     return argv
 
 
-def expected_labels(source_root: Path, image_id: str) -> dict[str, str]:
-    return {
-        f"{LABEL_PREFIX}.managed": "true",
-        f"{LABEL_PREFIX}.schema": RUNNER_SCHEMA,
-        f"{LABEL_PREFIX}.image-id": image_id,
-        f"{LABEL_PREFIX}.source-root": str(source_root.resolve()),
-        f"{LABEL_PREFIX}.ptrace": "1" if ptrace_enabled() else "0",
-    }
+@dataclass(frozen=True)
+class Label:
+    """One docker label."""
+
+    key: str
+    value: str
+
+
+@dataclass(frozen=True)
+class InspectedObject:
+    """The fields of `docker inspect` output this module consults."""
+
+    image_id: str | None
+    labels: tuple[Label, ...] | None
+
+    def label_value(self, key: str) -> str | None:
+        for label in self.labels or ():
+            if label.key == key:
+                return label.value
+        return None
+
+
+def inspected_object(raw: object) -> InspectedObject:
+    """Parse one `docker inspect` JSON object, tolerating absent sections."""
+    fields = raw if isinstance(raw, dict) else {}
+    config = fields.get("Config")
+    raw_labels = config.get("Labels") if isinstance(config, dict) else None
+    labels = (
+        tuple(
+            Label(key, value)
+            for key, value in raw_labels.items()
+            if isinstance(value, str)
+        )
+        if isinstance(raw_labels, dict)
+        else None
+    )
+    image_id = fields.get("Id")
+    return InspectedObject(str(image_id) if image_id else None, labels)
+
+
+def expected_labels(source_root: Path, image_id: str) -> tuple[Label, ...]:
+    return (
+        Label(f"{LABEL_PREFIX}.managed", "true"),
+        Label(f"{LABEL_PREFIX}.schema", RUNNER_SCHEMA),
+        Label(f"{LABEL_PREFIX}.image-id", image_id),
+        Label(f"{LABEL_PREFIX}.source-root", str(source_root.resolve())),
+        Label(f"{LABEL_PREFIX}.ptrace", "1" if ptrace_enabled() else "0"),
+    )
 
 
 def dockerfile_digest(repo_root: Path) -> str:
     return hashlib.sha256((repo_root / DOCKERFILE).read_bytes()).hexdigest()
 
 
-def image_info() -> dict[str, object] | None:
+def image_info() -> InspectedObject | None:
     inspected = run_captured(
         ["docker", "image", "inspect", IMAGE],
         capture_output=True,
@@ -558,7 +606,7 @@ def image_info() -> dict[str, object] | None:
     if inspected.returncode != 0:
         return None
     decoded = json.loads(inspected.stdout)
-    return decoded[0] if decoded else None
+    return inspected_object(decoded[0]) if decoded else None
 
 
 def ensure_image(repo_root: Path) -> str:
@@ -566,11 +614,8 @@ def ensure_image(repo_root: Path) -> str:
     digest_label = f"{LABEL_PREFIX}.dockerfile-sha256"
     info = image_info()
     if info is not None:
-        config = info.get("Config")
-        labels = config.get("Labels") if isinstance(config, dict) else None
-        image_id = info.get("Id")
-        if isinstance(labels, dict) and labels.get(digest_label) == digest and image_id:
-            return str(image_id)
+        if info.label_value(digest_label) == digest and info.image_id:
+            return info.image_id
 
     if _ensure_builder():
         build_command = [
@@ -602,19 +647,15 @@ def ensure_image(repo_root: Path) -> str:
     if build.returncode != 0:
         raise RuntimeError(f"docker build failed with exit code {build.returncode}")
     info = image_info()
-    image_id = info.get("Id") if info is not None else None
+    image_id = info.image_id if info is not None else None
     if not image_id:
         raise RuntimeError(f"unable to inspect image {IMAGE} after build")
     return str(image_id)
 
 
-def runner_matches(info: dict[str, object], labels: dict[str, str]) -> bool:
-    config = info.get("Config")
-    if not isinstance(config, dict):
-        return False
-    actual = config.get("Labels")
-    return isinstance(actual, dict) and all(
-        actual.get(key) == value for key, value in labels.items()
+def runner_matches(info: InspectedObject, labels: tuple[Label, ...]) -> bool:
+    return info.labels is not None and all(
+        info.label_value(label.key) == label.value for label in labels
     )
 
 
@@ -622,8 +663,8 @@ def create_command(runner: Runner, image_id: str) -> list[str]:
     command = ["docker", "create", "--name", runner.container, "--init"]
     if ptrace_enabled():
         command.extend(["--cap-add=SYS_PTRACE", "--security-opt", "seccomp=unconfined"])
-    for key, value in expected_labels(runner.source_root, image_id).items():
-        command.extend(["--label", f"{key}={value}"])
+    for label in expected_labels(runner.source_root, image_id):
+        command.extend(["--label", f"{label.key}={label.value}"])
     command.extend(
         [
             "--mount",
@@ -697,7 +738,7 @@ def ensure_runner(runner: Runner, image_id: str) -> None:
     )
     exists = inspected.returncode == 0
     if exists:
-        info = json.loads(inspected.stdout)[0]
+        info = inspected_object(json.loads(inspected.stdout)[0])
         # A name collision is now impossible across roots, so a mismatch only
         # means a stale image or schema for THIS root — safe to recreate.
         if not runner_matches(info, labels):
@@ -841,15 +882,15 @@ def status(runner: Runner) -> int:
     )
     print(f"root: {runner.source_root}")
     print(f"{runner.container}  {state}")
-    rows: list[tuple[str, str]] = []
+    rows: list[VolumeRow] = []
     for name in runner.volumes:
         mountpoint = docker_output(
             ["volume", "inspect", "--format", "{{.Mountpoint}}", name]
         )
-        rows.append((name, mountpoint or "(absent)"))
-    width = max(len(name) for name, _ in rows)
-    for name, info in rows:
-        print(f"{name:<{width}}  {info}")
+        rows.append(VolumeRow(name, mountpoint or "(absent)"))
+    width = max(len(row.name) for row in rows)
+    for row in rows:
+        print(f"{row.name:<{width}}  {row.mountpoint}")
     report_shared_resources()
     return 0
 

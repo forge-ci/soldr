@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from _script_loader import load_sibling_script
 
@@ -37,15 +38,14 @@ def _estimate(args: list[str], estimate: int, **extra) -> dict:
 
 
 def _journal(args: list[str], outcome: str, peak: int | None) -> dict:
-    row: dict[str, object] = {
+    peak_field = {} if peak is None else {"child_peak_rss_bytes": peak}
+    return {
         "outcome": outcome,
         "compiler": "/r/rustc",
         "args": args,
         "cwd": "/w",
+        **peak_field,
     }
-    if peak is not None:
-        row["child_peak_rss_bytes"] = peak
-    return row
 
 
 class ArgsDigestTests(unittest.TestCase):
@@ -80,9 +80,9 @@ class UnitKeyTests(unittest.TestCase):
                 root / "compile_journal.jsonl", [_journal(journaled, "miss", 400)]
             )
             report = fit.analyze([root / "admission-estimate.jsonl"], [root])
-            self.assertEqual(report["joined"], 1)
-            self.assertEqual(report["unjoined"], 0)
-            self.assertEqual(report["under_predicted"], 1)
+            self.assertEqual(report.joined, 1)
+            self.assertEqual(report.unjoined, 0)
+            self.assertEqual(report.under_predicted, 1)
 
 
 class TreePeakAndHistoryTests(unittest.TestCase):
@@ -95,7 +95,7 @@ class TreePeakAndHistoryTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._stack.close()
 
-    def _write(self, estimates: list[dict], journal: list[dict]) -> dict:
+    def _write(self, estimates: list[dict], journal: list[dict]) -> Any:
         _write_jsonl(self.root / "admission-estimate.jsonl", estimates)
         _write_jsonl(self.root / "compile_journal.jsonl", journal)
         return fit.analyze([self.root / "admission-estimate.jsonl"], [self.root])
@@ -109,9 +109,9 @@ class TreePeakAndHistoryTests(unittest.TestCase):
         journal = _journal(args, "miss", 800)
         journal["tree_peak_rss_bytes"] = 5_000
         report = self._write([row], [journal])
-        self.assertEqual(report["measured_source"], "tree")
-        worst = report["worst_under_predictions"][0]
-        self.assertEqual(worst["measured_bytes"], 5_000)
+        self.assertEqual(report.measured_source, "tree")
+        worst = report.worst_under_predictions[0]
+        self.assertEqual(worst.measured_bytes, 5_000)
 
     def test_history_rows_are_scored_against_the_measured_peak(self) -> None:
         heavy = ["--crate-name", "zccache", "-C", "metadata=bbbb"]
@@ -134,11 +134,11 @@ class TreePeakAndHistoryTests(unittest.TestCase):
             entry["tree_peak_rss_bytes"] = tree
             journal.append(entry)
         report = self._write(rows, journal)
-        history = report["history"]
-        self.assertEqual(history["joined"], 2)
-        self.assertEqual(history["without_history"], 1)
-        self.assertEqual(history["under_predicted"], 1)
-        self.assertAlmostEqual(history["max_measured_over_history"], 1.4)
+        history = report.history
+        self.assertEqual(history.joined, 2)
+        self.assertEqual(history.without_history, 1)
+        self.assertEqual(history.under_predicted, 1)
+        self.assertAlmostEqual(history.max_measured_over_history, 1.4)
 
 
 class JoinTests(unittest.TestCase):
@@ -174,20 +174,20 @@ class JoinTests(unittest.TestCase):
 
     def test_pairs_each_estimate_with_the_measured_compile(self) -> None:
         report = fit.analyze([self.root / "admission-estimate.jsonl"], [self.root])
-        self.assertEqual(report["estimates"], 4)
-        self.assertEqual(report["joined"], 2)
-        self.assertEqual(report["unmeasured"], 1)
-        self.assertEqual(report["unjoined"], 1)
+        self.assertEqual(report.estimates, 4)
+        self.assertEqual(report.joined, 2)
+        self.assertEqual(report.unmeasured, 1)
+        self.assertEqual(report.unjoined, 1)
 
     def test_under_prediction_is_counted_and_ranked(self) -> None:
         report = fit.analyze([self.root / "admission-estimate.jsonl"], [self.root])
-        self.assertEqual(report["under_predicted"], 1)
-        worst = report["worst_under_predictions"][0]
-        self.assertEqual(worst["crate_name"], "broker")
-        self.assertEqual(worst["measured_bytes"], 4_000)
-        self.assertEqual(worst["estimate_bytes"], 1_000)
-        self.assertAlmostEqual(worst["measured_over_estimate"], 4.0)
-        self.assertEqual(report["max_measured_over_estimate"], 4.0)
+        self.assertEqual(report.under_predicted, 1)
+        worst = report.worst_under_predictions[0]
+        self.assertEqual(worst.crate_name, "broker")
+        self.assertEqual(worst.measured_bytes, 4_000)
+        self.assertEqual(worst.estimate_bytes, 1_000)
+        self.assertAlmostEqual(worst.measured_over_estimate, 4.0)
+        self.assertEqual(report.max_measured_over_estimate, 4.0)
 
     def test_cli_emits_the_report_as_json(self) -> None:
         out = io.StringIO()

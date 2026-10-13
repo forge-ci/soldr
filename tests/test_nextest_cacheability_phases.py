@@ -46,7 +46,7 @@ def test_markers_become_phases_with_durations() -> None:
     clock.advance(90)
     tracker.finish()
 
-    assert tracker.phases == [
+    assert [(p.name, p.seconds) for p in tracker.phases] == [
         ("bootstrap soldr", 12),
         ("cold nextest archive build", 600),
         ("warm nextest archive build after cargo clean", 90),
@@ -89,7 +89,7 @@ def test_grouping_markers_are_suppressed_off_actions() -> None:
     assert tracker.feed("## cold nextest archive build\n") is None
     # Timings are still collected -- only the Actions control lines are off.
     tracker.finish()
-    assert [name for name, _ in tracker.phases] == [
+    assert [phase.name for phase in tracker.phases] == [
         "bootstrap soldr",
         "cold nextest archive build",
     ]
@@ -121,7 +121,7 @@ def test_finish_is_idempotent() -> None:
     clock.advance(5)
     tracker.finish()
     tracker.finish()
-    assert tracker.phases == [("bootstrap soldr", 5)]
+    assert [(p.name, p.seconds) for p in tracker.phases] == [("bootstrap soldr", 5)]
 
 
 def test_summary_lists_every_phase_and_a_total() -> None:

@@ -140,24 +140,48 @@ EXPERIMENT_WORKFLOWS: frozenset[str] = frozenset(
     }
 )
 
+
+@dataclass(frozen=True, order=True)
+class PrefixCacheKey:
+    """Identity of an appending prefix-fallback restore step."""
+
+    workflow: str
+    restore_step: str
+
+
+@dataclass(frozen=True)
+class PrefixCache:
+    """A registered prefix-fallback cache and the step that prunes it.
+
+    `note` is the prune step's name for `PRUNED_PREFIX_CACHES`; for the
+    ratchet it names the issue that adds a prune step.
+    """
+
+    key: PrefixCacheKey
+    note: str
+
+
 # R8 (soldr#3396): appending prefix-fallback caches, keyed by
 # (workflow file, restore step name), mapped to the name of the step in the
 # same job that prunes or trims the restored directory before it is saved.
-PRUNED_PREFIX_CACHES: dict[tuple[str, str], str] = {
-    (
-        "_build-and-test.yml",
-        "Restore Tier-2 zccache object store (soldr#3039)",
-    ): "Measure, prune and trim the Tier-2 zccache store (soldr#3120, soldr#3252)",
-    (
-        "setup-soldr-action.yml",
-        "Restore dogfood build cache",
-    ): "Measure, prune and trim the dogfood zccache store (soldr#3398)",
-}
+PRUNED_PREFIX_CACHES: tuple[PrefixCache, ...] = (
+    PrefixCache(
+        PrefixCacheKey(
+            "_build-and-test.yml",
+            "Restore Tier-2 zccache object store (soldr#3039)",
+        ),
+        "Measure, prune and trim the Tier-2 zccache store (soldr#3120, soldr#3252)",
+    ),
+    PrefixCache(
+        PrefixCacheKey("setup-soldr-action.yml", "Restore dogfood build cache"),
+        "Measure, prune and trim the dogfood zccache store (soldr#3398)",
+    ),
+)
 
 # R8 ratchet: appending prefix-fallback caches that predate the rule and have
 # no prune step yet, each with the issue that adds one. Entries may only be
 # removed; one whose restore step no longer exists is itself a failure.
-UNPRUNED_PREFIX_CACHES_RATCHET: dict[tuple[str, str], str] = {}
+UNPRUNED_PREFIX_CACHES_RATCHET: tuple[PrefixCache, ...] = ()
 
 PREFIX_CACHE_ACTIONS: frozenset[str] = frozenset(
     {"actions/cache", "actions/cache/restore"}
@@ -197,19 +221,34 @@ ARTIFACT_MECHANISMS: frozenset[str] = frozenset(
     {"actions/upload-artifact", "actions/download-artifact"}
 )
 
+
 # Tier 3 shapes, named so the error message says what was found rather than
 # which regex fired. Matched against a step's `path` / `flags` / `key` text.
-TEST_PRODUCT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("a nextest test archive", re.compile(r"tests?\.tar", re.IGNORECASE)),
-    ("a nextest archive", re.compile(r"nextest[-_ ]archive", re.IGNORECASE)),
-    (
+@dataclass(frozen=True)
+class ProductShape:
+    """A named Tier 3 shape and the regex that recognises it."""
+
+    label: str
+    pattern: re.Pattern[str]
+
+
+TEST_PRODUCT_PATTERNS: tuple[ProductShape, ...] = (
+    ProductShape("a nextest test archive", re.compile(r"tests?\.tar", re.IGNORECASE)),
+    ProductShape(
+        "a nextest archive", re.compile(r"nextest[-_ ]archive", re.IGNORECASE)
+    ),
+    ProductShape(
         "compiled test/bench/example unit outputs",
         re.compile(r"target/[^\s'\"]*/(deps|examples|benches)(/|\b)", re.IGNORECASE),
     ),
-    ("cargo incremental state", re.compile(r"\bincremental\b", re.IGNORECASE)),
-    ("doctest products", re.compile(r"doctest", re.IGNORECASE)),
-    ("test debug sidecars", re.compile(r"\.(pdb|dsym|dwp)\b", re.IGNORECASE)),
-    (
+    ProductShape(
+        "cargo incremental state", re.compile(r"\bincremental\b", re.IGNORECASE)
+    ),
+    ProductShape("doctest products", re.compile(r"doctest", re.IGNORECASE)),
+    ProductShape(
+        "test debug sidecars", re.compile(r"\.(pdb|dsym|dwp)\b", re.IGNORECASE)
+    ),
+    ProductShape(
         "linked test binaries",
         re.compile(r"test[-_]?(bin|binaries|harness|exe)", re.IGNORECASE),
     ),
@@ -685,8 +724,9 @@ def banned_product_problems(steps: list[PersistedStep]) -> list[str]:
     for step in steps:
         if step.workflow in EXPERIMENT_WORKFLOWS or not step.durable:
             continue
-        for label, pattern in TEST_PRODUCT_PATTERNS:
-            match = pattern.search(step.text)
+        for shape in TEST_PRODUCT_PATTERNS:
+            label = shape.label
+            match = re.search(shape.pattern, step.text)
             if match is None:
                 continue
             problems.append(
@@ -724,16 +764,25 @@ def is_broad_target_restore(step: PersistedStep) -> bool:
     return any(line.strip() in BROAD_TARGET_PATHS for line in step.text.splitlines())
 
 
+@dataclass(frozen=True, order=True)
+class JobKey:
+    """A job within a workflow file."""
+
+    workflow: str
+    job: str
+
+
 def cook_ordering_problems(steps: list[PersistedStep]) -> list[str]:
     """Broad `target/` restores that land after a cook restore in the same job."""
     problems: list[str] = []
-    jobs: dict[tuple[str, str], list[PersistedStep]] = {}
+    jobs: dict[JobKey, list[PersistedStep]] = {}
     for step in steps:
         if step.workflow in EXPERIMENT_WORKFLOWS:
             continue
-        jobs.setdefault((step.workflow, step.job), []).append(step)
+        jobs.setdefault(JobKey(step.workflow, step.job), []).append(step)
 
-    for (workflow, job), job_steps in sorted(jobs.items()):
+    for job_key, job_steps in sorted(jobs.items()):
+        workflow, job = job_key.workflow, job_key.job
         ordered = sorted(job_steps, key=lambda s: s.index)
         cook = next(
             (
@@ -774,10 +823,22 @@ def _path_lines(step: dict) -> frozenset[str]:
     )
 
 
-def prefix_cache_problems(workflow_dir: pathlib.Path) -> list[str]:  # noqa: C901
+def prefix_cache_problems(  # noqa: C901
+    workflow_dir: pathlib.Path,
+    pruned: tuple[PrefixCache, ...] | None = None,
+    ratchet: tuple[PrefixCache, ...] | None = None,
+) -> list[str]:
     """Appending `restore-keys` caches without a registered prune step (R8)."""
+    pruned_by_key = {
+        entry.key: entry.note
+        for entry in (PRUNED_PREFIX_CACHES if pruned is None else pruned)
+    }
+    ratchet_keys = {
+        entry.key
+        for entry in (UNPRUNED_PREFIX_CACHES_RATCHET if ratchet is None else ratchet)
+    }
     problems: list[str] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[PrefixCacheKey] = set()
     paths = sorted(workflow_dir.glob("*.yml")) + sorted(workflow_dir.glob("*.yaml"))
     for path in paths:
         if path.name in EXPERIMENT_WORKFLOWS:
@@ -801,12 +862,12 @@ def prefix_cache_problems(workflow_dir: pathlib.Path) -> list[str]:  # noqa: C90
                 if not str(with_block.get("restore-keys") or "").strip():
                     continue
                 name = str(step.get("name") or "")
-                key = (path.name, name)
+                key = PrefixCacheKey(path.name, name)
                 seen.add(key)
                 where = f"{path.name}: job '{job_id}' step '{name or index}'"
-                if key in UNPRUNED_PREFIX_CACHES_RATCHET:
+                if key in ratchet_keys:
                     continue
-                prune_name = PRUNED_PREFIX_CACHES.get(key)
+                prune_name = pruned_by_key.get(key)
                 if prune_name is None:
                     problems.append(
                         f"R8 {where} restores through a `restore-keys` prefix "
@@ -849,8 +910,9 @@ def prefix_cache_problems(workflow_dir: pathlib.Path) -> list[str]:  # noqa: C90
                             f"the restored path before the prune step "
                             f"'{prune_name}' runs."
                         )
-    registered = set(PRUNED_PREFIX_CACHES) | set(UNPRUNED_PREFIX_CACHES_RATCHET)
-    for workflow, name in sorted(registered - seen):
+    registered = set(pruned_by_key) | ratchet_keys
+    for missing in sorted(registered - seen):
+        workflow, name = missing.workflow, missing.restore_step
         # A registration for a workflow outside this tree is not stale here.
         if not (workflow_dir / workflow).is_file():
             continue

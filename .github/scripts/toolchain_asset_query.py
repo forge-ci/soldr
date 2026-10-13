@@ -24,6 +24,7 @@ import json
 import time
 import urllib.error
 import urllib.request
+from dataclasses import asdict, dataclass, replace
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urljoin
@@ -58,6 +59,237 @@ ARCH_ALIASES: dict[str, str] = {
     "aarch64": "aarch64",
     "universal2": "universal2",
 }
+
+
+@dataclass(frozen=True)
+class Platform:
+    """A catalogue platform selector: `os`/`arch` plus optional `libc`/`abi`.
+
+    Used both for the candidates `platform_candidates` produces and for the
+    platform recorded on each catalogue entry. A `None` field is absent.
+    """
+
+    os: str | None = None
+    arch: str | None = None
+    libc: str | None = None
+    abi: str | None = None
+
+    @classmethod
+    def from_wire(cls, raw: Any) -> Platform:
+        """Build from a decoded catalogue platform object."""
+        return cls(
+            os=raw.get("os"),
+            arch=raw.get("arch"),
+            libc=raw.get("libc"),
+            abi=raw.get("abi"),
+        )
+
+    def matches(self, expected: Platform) -> bool:
+        """True when this (actual) platform satisfies the `expected` candidate."""
+        for key in ("os", "arch", "libc", "abi"):
+            wanted = getattr(expected, key)
+            actual = getattr(self, key)
+            if wanted is not None:
+                if actual != wanted:
+                    return False
+            elif actual is not None:
+                return False
+        return True
+
+    def label(self) -> str:
+        """`os-arch-libc-abi` with the absent parts left out."""
+        return "-".join(
+            str(part) for part in (self.os, self.arch, self.libc, self.abi) if part
+        )
+
+    def to_dict(self) -> dict:
+        """Wire form: only the keys that are present."""
+        return {key: value for key, value in asdict(self).items() if value is not None}
+
+
+@dataclass(frozen=True)
+class CataloguePart:
+    """One multipart chunk as published, before validation."""
+
+    number: Any
+    size_bytes: Any
+    sha256: Any
+    urls: Any
+
+    @classmethod
+    def from_wire(cls, raw: Any) -> CataloguePart:
+        """Build from a decoded part object (`raw` must be a dict)."""
+        return cls(
+            number=raw.get("number"),
+            size_bytes=raw.get("size_bytes"),
+            sha256=raw.get("sha256", ""),
+            urls=raw.get("urls") or [],
+        )
+
+
+@dataclass(frozen=True)
+class CatalogueAsset:
+    """One asset as published, before validation.
+
+    Fields hold whatever the JSON carried; `normalize_catalogue_asset` is the
+    single place that checks them.
+    """
+
+    filename: Any
+    size_bytes: Any
+    sha256: Any
+    urls: Any
+    parts: Any
+
+    @classmethod
+    def from_wire(cls, raw: Any) -> CatalogueAsset:
+        """Build from a decoded asset object (`raw` must be a dict).
+
+        `parts` stays the raw decoded value: its shape (list of objects) is
+        one of the things `normalize_catalogue_asset` validates.
+        """
+        return cls(
+            filename=raw.get("filename"),
+            size_bytes=raw.get("size_bytes"),
+            sha256=raw.get("sha256", ""),
+            urls=raw.get("urls") or [],
+            parts=raw.get("parts") or [],
+        )
+
+
+@dataclass(frozen=True)
+class AssetPart:
+    """A validated multipart chunk."""
+
+    number: int
+    sha256: str
+    size_bytes: int
+    urls: list[str]
+
+
+@dataclass(frozen=True)
+class Asset:
+    """A validated asset: exactly one of `urls` / `parts` is non-empty."""
+
+    platform: Platform
+    filename: str
+    urls: list[str]
+    parts: list[AssetPart]
+    sha256: str
+    size_bytes: Any
+
+    def to_dict(self) -> dict:
+        """Wire form used by the JSON consumers."""
+        wire = asdict(self)
+        wire["platform"] = self.platform.to_dict()
+        return wire
+
+
+@dataclass(frozen=True)
+class PlatformEntry:
+    """One `platforms[]` row; either half is `None` when not an object."""
+
+    platform: Platform | None
+    asset: CatalogueAsset | None
+
+
+@dataclass(frozen=True)
+class Release:
+    """One release; `platforms` is `None` when the manifest had no list."""
+
+    version: Any
+    platforms: list[PlatformEntry] | None
+
+    @classmethod
+    def from_wire(cls, raw: Any) -> Release:
+        """Build from a decoded release object (`raw` must be a dict)."""
+        raw_platforms = raw.get("platforms")
+        platforms: list[PlatformEntry] | None = None
+        if isinstance(raw_platforms, list):
+            platforms = []
+            for entry in raw_platforms:
+                if not isinstance(entry, dict):
+                    continue
+                platform = entry.get("platform")
+                asset = entry.get("asset")
+                platforms.append(
+                    PlatformEntry(
+                        platform=(
+                            Platform.from_wire(platform)
+                            if isinstance(platform, dict)
+                            else None
+                        ),
+                        asset=(
+                            CatalogueAsset.from_wire(asset)
+                            if isinstance(asset, dict)
+                            else None
+                        ),
+                    )
+                )
+        return cls(version=raw.get("version"), platforms=platforms)
+
+
+@dataclass(frozen=True)
+class ToolManifest:
+    """A per-tool catalogue manifest: its releases and release channels."""
+
+    releases: list[Release]
+    latest_stable: Any
+    stable: Any
+
+
+@dataclass(frozen=True)
+class LoadedManifest:
+    """A tool manifest together with the URL it was loaded from."""
+
+    url: str
+    manifest: ToolManifest
+
+
+@dataclass(frozen=True)
+class ToolMetadata:
+    """What `--json` prints: the selected asset plus where it came from."""
+
+    tool: str
+    version: Any
+    asset: Asset
+    manifest_url: str
+    schema_version: int = 1
+
+    def to_dict(self) -> dict:
+        """Wire form (the JSON schema CI consumers read)."""
+        asset = self.asset.to_dict()
+        return {
+            "schema_version": self.schema_version,
+            "tool": self.tool,
+            "version": self.version,
+            "platform": asset["platform"],
+            "filename": asset["filename"],
+            "urls": asset["urls"],
+            "parts": asset["parts"],
+            "sha256": asset["sha256"],
+            "size_bytes": asset["size_bytes"],
+            "manifest_url": self.manifest_url,
+        }
+
+
+def parse_manifest(payload: Any, url: str) -> ToolManifest:
+    """Decode a tool manifest; `url` is only used in the error message."""
+    if not isinstance(payload, dict):
+        raise SystemExit(f"tool manifest at {url} is not a JSON object")
+    raw_releases = payload.get("releases")
+    releases = (
+        [Release.from_wire(r) for r in raw_releases if isinstance(r, dict)]
+        if isinstance(raw_releases, list)
+        else []
+    )
+    raw_channels = payload.get("channels")
+    channels = raw_channels if isinstance(raw_channels, dict) else {}
+    return ToolManifest(
+        releases=releases,
+        latest_stable=channels.get("latest-stable"),
+        stable=channels.get("stable"),
+    )
 
 
 def fetch_bytes(url: str) -> bytes:
@@ -99,7 +331,7 @@ def fetch_json(url: str) -> Any:
     return decode_json(fetch_bytes(url), url)
 
 
-def load_tool_manifest(origin: str, tool: str) -> tuple[str, dict[str, Any]]:  # noqa: C901
+def load_tool_manifest(origin: str, tool: str) -> LoadedManifest:
     """Follow and verify a tool descriptor from the published root index."""
     root = f"{origin.rstrip('/')}/manifest.json"
     index = decode_json(fetch_bytes(root), root)
@@ -143,10 +375,7 @@ def load_tool_manifest(origin: str, tool: str) -> tuple[str, dict[str, Any]]:  #
             f"catalogue descriptor sha256 mismatch for {tool}: "
             f"expected {expected_sha}, got {actual_sha}"
         )
-    payload = decode_json(raw, url)
-    if not isinstance(payload, dict):
-        raise SystemExit(f"tool manifest at {url} is not a JSON object")
-    return url, payload
+    return LoadedManifest(url, parse_manifest(decode_json(raw, url), url))
 
 
 def normalize_os(value: str) -> str:
@@ -169,30 +398,28 @@ def normalize_arch(value: str) -> str:
 
 def platform_candidates(
     os_key: str, arch_key: str, extra: str | None
-) -> list[dict[str, str]]:
-    base = {"os": os_key, "arch": arch_key}
+) -> list[Platform]:
+    base = Platform(os=os_key, arch=arch_key)
     if extra:
         normalized = extra.lower()
         if os_key == "linux":
             libc = "glibc" if normalized in {"gnu", "glibc"} else normalized
             if libc == "glibc":
-                return [base | {"libc": "glibc"}, base | {"libc": "musl"}]
-            return [base | {"libc": libc}]
-        if os_key == "windows":
-            return [base | {"abi": normalized}]
-        return [base | {"abi": normalized}]
+                return [replace(base, libc="glibc"), replace(base, libc="musl")]
+            return [replace(base, libc=libc)]
+        return [replace(base, abi=normalized)]
 
     if os_key == "linux":
-        return [base | {"libc": "glibc"}, base | {"libc": "musl"}, base]
+        return [replace(base, libc="glibc"), replace(base, libc="musl"), base]
     if os_key == "windows":
         return [
-            base | {"abi": "msvc"},
-            base | {"abi": "gnu"},
-            base | {"abi": "gnullvm"},
+            replace(base, abi="msvc"),
+            replace(base, abi="gnu"),
+            replace(base, abi="gnullvm"),
             base,
         ]
     if os_key == "darwin" and arch_key != "universal2":
-        return [base, {"os": "darwin", "arch": "universal2"}]
+        return [base, Platform(os="darwin", arch="universal2")]
     return [base]
 
 
@@ -203,63 +430,50 @@ def version_forms(value: str) -> set[str]:
     return {value, bare, f"v{bare}"}
 
 
-def find_release(payload: dict[str, Any], requested: str) -> dict[str, Any]:
-    releases = payload.get("releases")
-    if not isinstance(releases, list) or not releases:
+def find_release(manifest: ToolManifest, requested: str) -> Release:
+    releases = manifest.releases
+    if not releases:
         raise SystemExit("tool manifest has no releases")
 
     selected = requested
     if requested in {"", "latest"}:
-        raw_channels = payload.get("channels")
-        channels = raw_channels if isinstance(raw_channels, dict) else {}
         selected = (
-            channels.get("latest-stable")
-            or channels.get("stable")
-            or releases[0].get("version")
-            or ""
+            manifest.latest_stable or manifest.stable or releases[0].version or ""
         )
 
     accepted = version_forms(str(selected))
     for release in releases:
-        if not isinstance(release, dict):
-            continue
-        version = str(release.get("version", ""))
+        version = str(release.version if release.version is not None else "")
         if version in accepted:
             return release
 
     known = ", ".join(
-        str(r.get("version", "?")) for r in releases[:8] if isinstance(r, dict)
+        str(r.version if r.version is not None else "?") for r in releases[:8]
     )
     raise SystemExit(
         f"no release '{requested}' in tool manifest. Known versions: {known}"
     )
 
 
-def platform_matches(actual: dict[str, Any], expected: dict[str, str]) -> bool:
-    for key in ("os", "arch", "libc", "abi"):
-        if key in expected:
-            if actual.get(key) != expected[key]:
-                return False
-        elif key in actual:
-            return False
-    return True
+def platform_matches(actual: Platform, expected: Platform) -> bool:
+    return actual.matches(expected)
 
 
-def find_asset_url(release: dict[str, Any], candidates: list[dict[str, str]]) -> str:
+def find_asset_url(release: Release, candidates: list[Platform]) -> str:
     asset = find_asset(release, candidates, require_sha256=False)
-    if not asset["urls"]:
+    if not asset.urls:
         raise SystemExit("matched asset is multipart; use --json and a materializer")
-    return str(asset["urls"][0])
+    return str(asset.urls[0])
 
 
-def normalize_asset(  # noqa: C901
-    platform: dict[str, Any], asset: dict[str, Any], *, require_sha256: bool
-) -> dict[str, Any]:
-    urls = asset.get("urls") or []
-    parts = asset.get("parts") or []
+def normalize_catalogue_asset(  # noqa: C901
+    platform: Platform, asset: CatalogueAsset, *, require_sha256: bool
+) -> Asset:
+    urls = asset.urls
+    parts = asset.parts
     if bool(urls) == bool(parts):
         raise SystemExit("matched asset must contain exactly one transport shape")
-    filename = asset.get("filename")
+    filename = asset.filename
     if (
         not isinstance(filename, str)
         or not filename
@@ -274,24 +488,25 @@ def normalize_asset(  # noqa: C901
         or PureWindowsPath(filename).root
     ):
         raise SystemExit("matched asset has unsafe filename")
-    digest = str(asset.get("sha256", "")).lower()
+    digest = str(asset.sha256).lower()
     if require_sha256 and (
         len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest)
     ):
         raise SystemExit("matched asset has no valid sha256")
-    normalized_parts: list[dict[str, Any]] = []
+    normalized_parts: list[AssetPart] = []
     if parts:
         if not isinstance(parts, list):
             raise SystemExit("matched asset has invalid multipart data")
         total_size = 0
-        for expected_number, part in enumerate(parts, start=1):
-            if not isinstance(part, dict):
+        for expected_number, raw_part in enumerate(parts, start=1):
+            if not isinstance(raw_part, dict):
                 raise SystemExit("matched asset has invalid multipart data")
-            part_digest = str(part.get("sha256", "")).lower()
-            part_size = part.get("size_bytes")
-            part_urls = part.get("urls") or []
+            part = CataloguePart.from_wire(raw_part)
+            part_digest = str(part.sha256).lower()
+            part_size = part.size_bytes
+            part_urls = part.urls
             if (
-                part.get("number") != expected_number
+                part.number != expected_number
                 or not isinstance(part_size, int)
                 or isinstance(part_size, bool)
                 or part_size <= 0
@@ -302,80 +517,85 @@ def normalize_asset(  # noqa: C901
             ):
                 raise SystemExit("matched asset has invalid multipart data")
             total_size += part_size
-            normalized_urls = [
+            normalized_part_urls = [
                 validate_https_url(
                     url, label=f"matched asset part {expected_number} URL"
                 )
                 for url in part_urls
             ]
             normalized_parts.append(
-                {
-                    "number": expected_number,
-                    "sha256": part_digest,
-                    "size_bytes": part_size,
-                    "urls": normalized_urls,
-                }
+                AssetPart(
+                    number=expected_number,
+                    sha256=part_digest,
+                    size_bytes=part_size,
+                    urls=normalized_part_urls,
+                )
             )
-        if total_size != asset.get("size_bytes"):
+        if total_size != asset.size_bytes:
             raise SystemExit("matched asset multipart size mismatch")
     if urls and not isinstance(urls, list):
         raise SystemExit("matched asset has invalid URLs")
     normalized_urls = [
         validate_https_url(url, label="matched asset URL") for url in urls
     ]
-    return {
-        "platform": platform,
-        "filename": filename,
-        "urls": normalized_urls,
-        "parts": normalized_parts,
-        "sha256": digest,
-        "size_bytes": asset.get("size_bytes"),
-    }
+    return Asset(
+        platform=platform,
+        filename=filename,
+        urls=normalized_urls,
+        parts=normalized_parts,
+        sha256=digest,
+        size_bytes=asset.size_bytes,
+    )
+
+
+def normalize_asset(platform: dict, asset: dict, *, require_sha256: bool) -> dict:
+    """Wire-dict entry point for callers that hold raw catalogue JSON.
+
+    Typed callers use `normalize_catalogue_asset`; this decodes the two
+    objects, delegates, and re-encodes the validated asset.
+    """
+    return normalize_catalogue_asset(
+        Platform.from_wire(platform),
+        CatalogueAsset.from_wire(asset),
+        require_sha256=require_sha256,
+    ).to_dict()
 
 
 def find_asset(
-    release: dict[str, Any],
-    candidates: list[dict[str, str]],
+    release: Release,
+    candidates: list[Platform],
     *,
     require_sha256: bool = True,
-) -> dict[str, Any]:
-    platforms = release.get("platforms")
-    if not isinstance(platforms, list):
+) -> Asset:
+    platforms = release.platforms
+    if platforms is None:
         raise SystemExit("release has no platforms list")
 
     for candidate in candidates:
         for entry in platforms:
-            if not isinstance(entry, dict):
+            if entry.platform is None or entry.asset is None:
                 continue
-            platform = entry.get("platform")
-            asset = entry.get("asset")
-            if not isinstance(platform, dict) or not isinstance(asset, dict):
-                continue
-            if platform_matches(platform, candidate):
-                return normalize_asset(platform, asset, require_sha256=require_sha256)
-
-    wanted = " or ".join(
-        "-".join(
-            candidate.get(k, "")
-            for k in ("os", "arch", "libc", "abi")
-            if candidate.get(k)
-        )
-        for candidate in candidates
-    )
-    available = []
-    for entry in platforms:
-        platform = entry.get("platform") if isinstance(entry, dict) else None
-        if isinstance(platform, dict):
-            available.append(
-                "-".join(
-                    str(platform.get(k))
-                    for k in ("os", "arch", "libc", "abi")
-                    if platform.get(k)
+            if entry.platform.matches(candidate):
+                return normalize_catalogue_asset(
+                    entry.platform, entry.asset, require_sha256=require_sha256
                 )
-            )
+
+    wanted = " or ".join(candidate.label() for candidate in candidates)
+    available = [
+        entry.platform.label() for entry in platforms if entry.platform is not None
+    ]
     raise SystemExit(
         f"no platform match for {wanted}; available: {', '.join(sorted(available))}"
     )
+
+
+def _load_manifest(
+    *, tool: str, origin: str, tool_manifest_url_override: str | None
+) -> LoadedManifest:
+    if tool_manifest_url_override:
+        url = tool_manifest_url_override
+        return LoadedManifest(url, parse_manifest(fetch_json(url), display_url(url)))
+    return load_tool_manifest(origin, tool)
 
 
 def resolve_url(
@@ -388,18 +608,45 @@ def resolve_url(
     extra: str | None,
     version: str,
 ) -> str:
-    if tool_manifest_url_override:
-        url = tool_manifest_url_override
-        payload = fetch_json(url)
-    else:
-        url, payload = load_tool_manifest(origin, tool)
-    if not isinstance(payload, dict):
-        raise SystemExit(f"tool manifest at {display_url(url)} is not a JSON object")
-    release = find_release(payload, version)
+    loaded = _load_manifest(
+        tool=tool,
+        origin=origin,
+        tool_manifest_url_override=tool_manifest_url_override,
+    )
+    release = find_release(loaded.manifest, version)
     candidates = platform_candidates(
         normalize_os(platform), normalize_arch(arch), extra
     )
     return find_asset_url(release, candidates)
+
+
+def resolve_tool_metadata(
+    *,
+    tool: str,
+    origin: str,
+    tool_manifest_url_override: str | None,
+    platform: str,
+    arch: str,
+    extra: str | None,
+    version: str,
+) -> ToolMetadata:
+    loaded = _load_manifest(
+        tool=tool,
+        origin=origin,
+        tool_manifest_url_override=tool_manifest_url_override,
+    )
+    release = find_release(loaded.manifest, version)
+    os_key = normalize_os(platform)
+    arch_key = normalize_arch(arch)
+    asset = find_asset(
+        release, platform_candidates(os_key, arch_key, extra), require_sha256=True
+    )
+    return ToolMetadata(
+        tool=tool,
+        version=release.version,
+        asset=asset,
+        manifest_url=display_url(loaded.url),
+    )
 
 
 def resolve_metadata(
@@ -411,32 +658,17 @@ def resolve_metadata(
     arch: str,
     extra: str | None,
     version: str,
-) -> dict[str, Any]:
-    if tool_manifest_url_override:
-        url = tool_manifest_url_override
-        payload = fetch_json(url)
-    else:
-        url, payload = load_tool_manifest(origin, tool)
-    if not isinstance(payload, dict):
-        raise SystemExit(f"tool manifest at {display_url(url)} is not a JSON object")
-    release = find_release(payload, version)
-    os_key = normalize_os(platform)
-    arch_key = normalize_arch(arch)
-    asset = find_asset(
-        release, platform_candidates(os_key, arch_key, extra), require_sha256=True
-    )
-    return {
-        "schema_version": 1,
-        "tool": tool,
-        "version": release.get("version"),
-        "platform": asset["platform"],
-        "filename": asset["filename"],
-        "urls": asset["urls"],
-        "parts": asset["parts"],
-        "sha256": asset["sha256"],
-        "size_bytes": asset.get("size_bytes"),
-        "manifest_url": display_url(url),
-    }
+) -> dict:
+    """Wire-dict form of `resolve_tool_metadata` for the JSON consumers."""
+    return resolve_tool_metadata(
+        tool=tool,
+        origin=origin,
+        tool_manifest_url_override=tool_manifest_url_override,
+        platform=platform,
+        arch=arch,
+        extra=extra,
+        version=version,
+    ).to_dict()
 
 
 def main(argv: list[str] | None = None) -> int:

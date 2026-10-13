@@ -11,6 +11,7 @@ run red; real failures do).
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -35,16 +36,16 @@ def test_full_matrix_has_every_host_and_arch(mod):
 def test_no_host_ever_targets_its_own_os(mod):
     cells = mod.build_cells("both", include_known_gaps=True)
     for cell in cells:
-        target_os = mod.target_spec(cell["target"])[0]
-        assert target_os != cell["host_os"], cell
+        target_os = mod.target_spec(cell.target).target_os
+        assert target_os != cell.host_os, cell
 
 
 def test_windows_targets_span_arch_and_abi(mod):
     cells = mod.build_cells("both", include_known_gaps=True)
     win_targets = {
-        c["target"]
+        c.target
         for c in cells
-        if c["host_os"] == "linux" and c["target"].endswith(("msvc", "gnu", "gnullvm"))
+        if c.host_os == "linux" and c.target.endswith(("msvc", "gnu", "gnullvm"))
     }
     assert win_targets == {
         "x86_64-pc-windows-msvc",
@@ -56,7 +57,7 @@ def test_windows_targets_span_arch_and_abi(mod):
 
 def test_runner_mapping_matches_table(mod):
     cells = mod.build_cells("both", include_known_gaps=True)
-    seen = {(c["host_os"], c["host_arch"]): c["runner"] for c in cells}
+    seen = {(c.host_os, c.host_arch): c.runner for c in cells}
     assert seen[("linux", "arm64")] == "ubuntu-24.04-arm"
     assert seen[("macos", "x64")] == "macos-15-intel"
     assert seen[("windows", "arm64")] == "windows-11-arm"
@@ -65,7 +66,7 @@ def test_runner_mapping_matches_table(mod):
 def test_host_arch_filter_narrows_to_one_arch(mod):
     cells = mod.build_cells("x64", include_known_gaps=True)
     assert cells, "x64 selector must still produce cells"
-    assert {c["host_arch"] for c in cells} == {"x64"}
+    assert {c.host_arch for c in cells} == {"x64"}
 
 
 def test_invalid_host_arch_is_rejected(mod):
@@ -76,7 +77,7 @@ def test_invalid_host_arch_is_rejected(mod):
 def test_excluding_known_gaps_drops_gnu_and_gnullvm(mod):
     cells = mod.build_cells("both", include_known_gaps=False)
     for cell in cells:
-        assert mod.known_gap(cell["host_os"], cell["target"]) == "", cell
+        assert mod.known_gap(cell.host_os, cell.target) == "", cell
     # The 8 gap cells (win-gnu + gnullvm from linux/macos x both arches) go.
     assert len(cells) == 32 - 8
 
@@ -140,8 +141,8 @@ def test_matching_binary_passes(mod, tmp_path):
     row = mod.evaluate_cell(
         "macos", "arm64", "x86_64-unknown-linux-gnu", binary, "success"
     )
-    assert row["status"] == "pass"
-    assert row["format_ok"] is True
+    assert row.status == "pass"
+    assert row.format_ok is True
 
 
 def test_wrong_format_is_a_real_failure(mod, tmp_path):
@@ -150,19 +151,19 @@ def test_wrong_format_is_a_real_failure(mod, tmp_path):
     row = mod.evaluate_cell(
         "macos", "arm64", "x86_64-unknown-linux-gnu", binary, "success"
     )
-    assert row["status"] == "fail"
+    assert row.status == "fail"
 
 
 def test_failed_build_of_a_gap_is_a_known_gap_fail(mod):
     row = mod.evaluate_cell("linux", "x64", "x86_64-pc-windows-gnu", None, "failure")
-    assert row["status"] == "known-gap-fail"
-    assert row["known_gap"] is True
+    assert row.status == "known-gap-fail"
+    assert row.known_gap is True
 
 
 def test_a_gap_that_builds_is_flagged_as_resolved(mod, tmp_path):
     binary = _write(tmp_path / "soldr.exe", b"MZ\x90\x00")
     row = mod.evaluate_cell("linux", "x64", "x86_64-pc-windows-gnu", binary, "success")
-    assert row["status"] == "known-gap-pass"
+    assert row.status == "known-gap-pass"
 
 
 # --- summary + exit code --------------------------------------------------
@@ -175,15 +176,15 @@ def test_summary_is_green_when_only_known_gaps_fail(mod):
             "linux", "x64", "aarch64-pc-windows-gnullvm", None, "failure"
         ),
     ]
-    _summary, code = mod.render_summary(rows)
-    assert code == 0
+    assert mod.render_summary(rows).exit_code == 0
 
 
 def test_summary_is_red_on_a_real_failure(mod):
     rows = [
         mod.evaluate_cell("macos", "x64", "x86_64-unknown-linux-gnu", None, "failure"),
     ]
-    summary, code = mod.render_summary(rows)
+    result = mod.render_summary(rows)
+    summary, code = result.markdown, result.exit_code
     assert code == 1
     assert "1 unexpected failure" in summary
 
@@ -193,7 +194,8 @@ def test_summary_calls_out_a_resolved_gap(mod, tmp_path):
     rows = [
         mod.evaluate_cell("linux", "x64", "x86_64-pc-windows-gnu", binary, "success"),
     ]
-    summary, code = mod.render_summary(rows)
+    result = mod.render_summary(rows)
+    summary, code = result.markdown, result.exit_code
     assert code == 0
     assert "known gap now builds" in summary.lower() or "now passing" in summary
 
@@ -250,8 +252,10 @@ def test_verify_binary_cli_writes_a_result_row(mod, tmp_path):
 def test_summarize_cli_reads_result_dir(mod, tmp_path):
     (tmp_path / "a.json").write_text(
         json.dumps(
-            mod.evaluate_cell(
-                "macos", "x64", "x86_64-unknown-linux-gnu", None, "failure"
+            asdict(
+                mod.evaluate_cell(
+                    "macos", "x64", "x86_64-unknown-linux-gnu", None, "failure"
+                )
             )
         ),
         encoding="utf-8",

@@ -218,6 +218,8 @@ import json
 import pathlib
 import re
 import sys
+from collections import Counter
+from dataclasses import asdict, dataclass
 from typing import Any, TypeVar
 
 # Loaded with importlib.util.spec_from_file_location rather than a package
@@ -364,7 +366,166 @@ def _percentile(values: list[T], quantile: float) -> T:
     return values[idx]
 
 
-def _wall_ms_stats(records: list[Any]) -> dict[str, Any]:
+@dataclass(frozen=True)
+class WallStats:
+    """min/p50/p90/max/mean/total wall milliseconds over `latency_ns`."""
+
+    min: float | None
+    p50: float | None
+    p90: float | None
+    max: float | None
+    mean: float | None
+    total: float | None
+    excluded: int
+
+
+@dataclass(frozen=True)
+class RssStats:
+    """min/p50/max/samples for one raw-JSON peak-RSS field."""
+
+    min: int | None
+    p50: int | None
+    max: int | None
+    samples: int
+
+
+@dataclass(frozen=True)
+class JournalEntry:
+    """One accepted journal line: its `Record` plus the two raw RSS fields.
+
+    `Record` drops `child_peak_rss_bytes` / `tree_peak_rss_bytes`, so they are
+    read from the raw decoded object when the line is accepted; `None` when
+    the field is absent or not a (non-bool) integer.
+    """
+
+    record: Any
+    child_peak_rss_bytes: int | None
+    tree_peak_rss_bytes: int | None
+
+
+@dataclass(frozen=True)
+class JournalRead:
+    """Result of `_read_journals_with_raw`."""
+
+    entries: list[JournalEntry]
+    malformed: int
+    deduped_lines: int
+
+
+@dataclass(frozen=True)
+class ContextGroup:
+    """Every journal entry sharing one `context_key`."""
+
+    context_key: str
+    members: list[JournalEntry]
+
+
+@dataclass(frozen=True)
+class Grouping:
+    """Entries grouped by `context_key`, plus keyed/unkeyed record counts."""
+
+    groups: list[ContextGroup]
+    with_key: int
+    without_key: int
+
+
+@dataclass(frozen=True)
+class Flavours:
+    """Concurrent / sequential / cross-generation duplicate counts."""
+
+    concurrent: int = 0
+    sequential: int = 0
+    cross_generation: int = 0
+
+
+@dataclass(frozen=True)
+class ClassificationCount:
+    """How many members of a group classified as one invocation class."""
+
+    name: str
+    count: int
+
+
+@dataclass(frozen=True)
+class Identity:
+    """One duplicated `context_key` group."""
+
+    context_key: str
+    crate: str
+    count: int
+    classification: str
+    classification_counts: list[ClassificationCount]
+    native: bool
+    dylint_link: bool
+    tree: str
+    compilers: list[str]
+    distinct_argv: int
+    distinct_out_dirs: int
+    argv: list[str]
+    cwd: str
+    flavours: Flavours
+    wall_ms: WallStats
+    child_peak_rss_bytes: RssStats
+    tree_peak_rss_bytes: RssStats
+    coalescable_wall_seconds: float
+
+    def to_dict(self) -> dict:
+        """JSON-ready dict; `classification_counts` is keyed by class name."""
+        wire = asdict(self)
+        wire["classification_counts"] = {
+            row.name: row.count for row in self.classification_counts
+        }
+        return wire
+
+
+@dataclass(frozen=True)
+class Totals:
+    """Journal-wide totals."""
+
+    journal_files: list[str]
+    records: int
+    malformed: int
+    deduped_lines: int
+    records_with_context_key: int
+    records_without_context_key: int
+    duplicate_groups: int
+    duplicate_records: int
+    excess_records: int
+    concurrent: int
+    sequential: int
+    cross_generation: int
+    total_wall_seconds: float
+    coalescable_wall_seconds_total: float
+    coalescable_wall_seconds_probe: float
+    coalescable_wall_seconds_real: float
+    coalescable_wall_seconds_unknown: float
+    coalescable_fraction_real: float
+
+
+@dataclass(frozen=True)
+class Summary:
+    """What `build_summary()` returns; `to_dict()` is the JSON schema."""
+
+    totals: Totals
+    identities: list[Identity]
+
+    def to_dict(self) -> dict:
+        """JSON-ready dict, identical to the pre-dataclass schema."""
+        return {
+            "totals": asdict(self.totals),
+            "identities": [identity.to_dict() for identity in self.identities],
+        }
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """Mechanical verdict: a code and the sentence carrying its numbers."""
+
+    code: str
+    sentence: str
+
+
+def _wall_ms_stats(records: list[Any]) -> WallStats:
     """min/p50/p90/max/mean/total (milliseconds) over `latency_ns`, None-safe.
 
     `latency_ns` is WALL latency -- see schema fact (a) in the module
@@ -376,46 +537,42 @@ def _wall_ms_stats(records: list[Any]) -> dict[str, Any]:
     )
     excluded = len(records) - len(values)
     if not values:
-        return {
-            "min": None,
-            "p50": None,
-            "p90": None,
-            "max": None,
-            "mean": None,
-            "total": None,
-            "excluded": excluded,
-        }
-    return {
-        "min": values[0],
-        "p50": _percentile(values, 0.5),
-        "p90": _percentile(values, 0.9),
-        "max": values[-1],
-        "mean": sum(values) / len(values),
-        "total": sum(values),
-        "excluded": excluded,
-    }
+        return WallStats(None, None, None, None, None, None, excluded)
+    return WallStats(
+        min=values[0],
+        p50=_percentile(values, 0.5),
+        p90=_percentile(values, 0.9),
+        max=values[-1],
+        mean=sum(values) / len(values),
+        total=sum(values),
+        excluded=excluded,
+    )
 
 
-def _rss_stats(objs: list[dict[str, Any]], field: str) -> dict[str, Any]:
+def _rss_stats(readings: list[int | None]) -> RssStats:
     """min/p50/max/samples for one raw-JSON RSS field, per schema fact (b).
 
-    `Record` drops `child_peak_rss_bytes` / `tree_peak_rss_bytes`, so this
-    reads straight from the raw decoded journal objects. All four values are
-    None/0 when no member of the group carries the field at all.
+    `Record` drops `child_peak_rss_bytes` / `tree_peak_rss_bytes`, so these
+    come from the raw decoded journal objects (see `JournalEntry`). All four
+    values are None/0 when no member of the group carries the field at all.
     """
-    values = sorted(
-        obj[field]
-        for obj in objs
-        if isinstance(obj.get(field), int) and not isinstance(obj.get(field), bool)
-    )
+    values = sorted(value for value in readings if value is not None)
     if not values:
-        return {"min": None, "p50": None, "max": None, "samples": 0}
-    return {
-        "min": values[0],
-        "p50": _percentile(values, 0.5),
-        "max": values[-1],
-        "samples": len(values),
-    }
+        return RssStats(None, None, None, 0)
+    return RssStats(
+        min=values[0],
+        p50=_percentile(values, 0.5),
+        max=values[-1],
+        samples=len(values),
+    )
+
+
+def _int_field(obj: Any, field: str) -> int | None:
+    """`obj[field]` when it is a real (non-bool) integer, else None."""
+    value = obj.get(field)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
 
 
 def _truncate_argv(args: list[str]) -> list[str]:
@@ -429,13 +586,13 @@ def _truncate_argv(args: list[str]) -> list[str]:
 
 def _read_journals_with_raw(
     journal_files: list[pathlib.Path], dedupe: bool
-) -> tuple[list[tuple[Any, dict[str, Any]]], int, int]:
-    """Read journals into `(record, raw_obj)` pairs, mirroring `_read_journals`.
+) -> JournalRead:
+    """Read journals into `JournalEntry` rows, mirroring `_read_journals`.
 
     A raw JSON object is only kept once `record_from_json` accepts it (which
     requires `isinstance(obj, dict)`), so every `obj` here is a `dict`.
     """
-    pairs: list[tuple[Any, dict[str, Any]]] = []
+    entries: list[JournalEntry] = []
     malformed = 0
     deduped_lines = 0
     seen: set[str] = set()
@@ -462,36 +619,40 @@ def _read_journals_with_raw(
             if record is None:
                 malformed += 1
                 continue
-            pairs.append((record, obj))
-    return pairs, malformed, deduped_lines
+            entries.append(
+                JournalEntry(
+                    record=record,
+                    child_peak_rss_bytes=_int_field(obj, "child_peak_rss_bytes"),
+                    tree_peak_rss_bytes=_int_field(obj, "tree_peak_rss_bytes"),
+                )
+            )
+    return JournalRead(entries, malformed, deduped_lines)
 
 
-def _group_by_context_key(
-    pairs: list[tuple[Any, dict[str, Any]]],
-) -> tuple[dict[str, list[tuple[Any, dict[str, Any]]]], int, int]:
-    groups: dict[str, list[tuple[Any, dict[str, Any]]]] = {}
+def _group_by_context_key(entries: list[JournalEntry]) -> Grouping:
+    by_key: dict[str, list[JournalEntry]] = {}
     with_key = 0
     without_key = 0
-    for record, obj in pairs:
-        if record.context_key:
-            groups.setdefault(record.context_key, []).append((record, obj))
+    for entry in entries:
+        if entry.record.context_key:
+            by_key.setdefault(entry.record.context_key, []).append(entry)
             with_key += 1
         else:
             without_key += 1
-    return groups, with_key, without_key
+    groups = [ContextGroup(key, members) for key, members in by_key.items()]
+    return Grouping(groups, with_key, without_key)
 
 
 def _build_identity(
     context_key: str,
-    members: list[tuple[Any, dict[str, Any]]],
+    members: list[JournalEntry],
     *,
-    flavours: dict[str, int],
+    flavours: Flavours,
     classification: str,
     classification_counts: dict[str, int],
     coalescable_wall_seconds: float,
-) -> dict[str, Any]:
-    records = [record for record, _ in members]
-    objs = [obj for _, obj in members]
+) -> Identity:
+    records = [entry.record for entry in members]
     first_record = records[0]
     compilers = sorted(
         {
@@ -500,27 +661,30 @@ def _build_identity(
             if record.compiler
         }
     )
-    return {
-        "context_key": context_key,
-        "crate": first_record.crate_name,
-        "count": len(members),
-        "classification": classification,
-        "classification_counts": classification_counts,
+    return Identity(
+        context_key=context_key,
+        crate=first_record.crate_name,
+        count=len(members),
+        classification=classification,
+        classification_counts=[
+            ClassificationCount(name, count)
+            for name, count in classification_counts.items()
+        ],
         # pylint: disable-next=protected-access
-        "native": analyze_compile_journal._is_native_compiler(first_record.compiler),
-        "dylint_link": any(record.dylint_link for record in records),
-        "tree": first_record.tree,
-        "compilers": compilers,
-        "distinct_argv": len({tuple(record.args) for record in records}),
-        "distinct_out_dirs": len({record.out_dir for record in records}),
-        "argv": _truncate_argv(first_record.args),
-        "cwd": first_record.cwd,
-        "flavours": flavours,
-        "wall_ms": _wall_ms_stats(records),
-        "child_peak_rss_bytes": _rss_stats(objs, "child_peak_rss_bytes"),
-        "tree_peak_rss_bytes": _rss_stats(objs, "tree_peak_rss_bytes"),
-        "coalescable_wall_seconds": coalescable_wall_seconds,
-    }
+        native=analyze_compile_journal._is_native_compiler(first_record.compiler),
+        dylint_link=any(record.dylint_link for record in records),
+        tree=first_record.tree,
+        compilers=compilers,
+        distinct_argv=len({tuple(record.args) for record in records}),
+        distinct_out_dirs=len({record.out_dir for record in records}),
+        argv=_truncate_argv(first_record.args),
+        cwd=first_record.cwd,
+        flavours=flavours,
+        wall_ms=_wall_ms_stats(records),
+        child_peak_rss_bytes=_rss_stats([e.child_peak_rss_bytes for e in members]),
+        tree_peak_rss_bytes=_rss_stats([e.tree_peak_rss_bytes for e in members]),
+        coalescable_wall_seconds=coalescable_wall_seconds,
+    )
 
 
 def build_summary(
@@ -528,42 +692,48 @@ def build_summary(
     dedupe: bool = True,
     top: int = 10,
     min_count: int = 2,
-) -> dict[str, Any]:
+) -> Summary:
     """Read `journal_files` and compute the full totals + identities summary."""
-    pairs, malformed, deduped_lines = _read_journals_with_raw(journal_files, dedupe)
-    groups, with_key, without_key = _group_by_context_key(pairs)
+    journal = _read_journals_with_raw(journal_files, dedupe)
+    grouping = _group_by_context_key(journal.entries)
 
-    qualifying = {
-        key: members
-        for key, members in groups.items()
-        if len(members) > 1 and len(members) >= min_count
-    }
+    qualifying = [
+        group
+        for group in grouping.groups
+        if len(group.members) > 1 and len(group.members) >= min_count
+    ]
     sorted_groups = sorted(
-        qualifying.items(), key=lambda entry: (-len(entry[1]), entry[0])
+        qualifying, key=lambda group: (-len(group.members), group.context_key)
     )
 
     duplicate_groups = len(sorted_groups)
-    duplicate_records = sum(len(members) for _, members in sorted_groups)
-    excess_records = sum(len(members) - 1 for _, members in sorted_groups)
+    duplicate_records = sum(len(group.members) for group in sorted_groups)
+    excess_records = sum(len(group.members) - 1 for group in sorted_groups)
 
-    flavour_totals = {"concurrent": 0, "sequential": 0, "cross_generation": 0}
+    flavour_totals: Counter[str] = Counter()
     coalescable_total = 0.0
     coalescable_probe = 0.0
     coalescable_real = 0.0
     coalescable_unknown = 0.0
-    identities: list[dict[str, Any]] = []
+    identities: list[Identity] = []
 
-    for rank, (context_key, members) in enumerate(sorted_groups):
-        records = [record for record, _ in members]
-        flavours = {"concurrent": 0, "sequential": 0, "cross_generation": 0}
+    for rank, group in enumerate(sorted_groups):
+        context_key, members = group.context_key, group.members
+        records = [entry.record for entry in members]
+        flavour_counts: Counter[str] = Counter()
         for record in records:
             others = [other for other in records if other is not record]
             # Reuses the analyzer's own concurrent/sequential/cross_generation
             # classifier rather than duplicating it.
             # pylint: disable-next=protected-access
             flavour = analyze_compile_journal._classify_duplicate(record, others)
-            flavours[flavour] += 1
+            flavour_counts[flavour] += 1
             flavour_totals[flavour] += 1
+        flavours = Flavours(
+            concurrent=flavour_counts["concurrent"],
+            sequential=flavour_counts["sequential"],
+            cross_generation=flavour_counts["cross_generation"],
+        )
 
         latencies = [
             record.latency_ns for record in records if record.latency_ns is not None
@@ -578,7 +748,7 @@ def build_summary(
             classification_counts[cls] = classification_counts.get(cls, 0) + 1
         classification = _group_classification(classification_counts)
 
-        if flavours["concurrent"] > 0:
+        if flavours.concurrent > 0:
             coalescable_total += coalescable_wall_seconds
             if classification == "probe":
                 coalescable_probe += coalescable_wall_seconds
@@ -599,36 +769,38 @@ def build_summary(
                 )
             )
 
-    total_wall_seconds = sum((record.latency_ns or 0) for record, _ in pairs) / 1e9
+    total_wall_seconds = (
+        sum((entry.record.latency_ns or 0) for entry in journal.entries) / 1e9
+    )
     coalescable_fraction_real = (
         coalescable_real / total_wall_seconds if total_wall_seconds > 0 else 0.0
     )
 
-    totals = {
-        "journal_files": sorted(str(path) for path in journal_files),
-        "records": len(pairs),
-        "malformed": malformed,
-        "deduped_lines": deduped_lines,
-        "records_with_context_key": with_key,
-        "records_without_context_key": without_key,
-        "duplicate_groups": duplicate_groups,
-        "duplicate_records": duplicate_records,
-        "excess_records": excess_records,
-        "concurrent": flavour_totals["concurrent"],
-        "sequential": flavour_totals["sequential"],
-        "cross_generation": flavour_totals["cross_generation"],
-        "total_wall_seconds": total_wall_seconds,
-        "coalescable_wall_seconds_total": coalescable_total,
-        "coalescable_wall_seconds_probe": coalescable_probe,
-        "coalescable_wall_seconds_real": coalescable_real,
-        "coalescable_wall_seconds_unknown": coalescable_unknown,
-        "coalescable_fraction_real": coalescable_fraction_real,
-    }
+    totals = Totals(
+        journal_files=sorted(str(path) for path in journal_files),
+        records=len(journal.entries),
+        malformed=journal.malformed,
+        deduped_lines=journal.deduped_lines,
+        records_with_context_key=grouping.with_key,
+        records_without_context_key=grouping.without_key,
+        duplicate_groups=duplicate_groups,
+        duplicate_records=duplicate_records,
+        excess_records=excess_records,
+        concurrent=flavour_totals["concurrent"],
+        sequential=flavour_totals["sequential"],
+        cross_generation=flavour_totals["cross_generation"],
+        total_wall_seconds=total_wall_seconds,
+        coalescable_wall_seconds_total=coalescable_total,
+        coalescable_wall_seconds_probe=coalescable_probe,
+        coalescable_wall_seconds_real=coalescable_real,
+        coalescable_wall_seconds_unknown=coalescable_unknown,
+        coalescable_fraction_real=coalescable_fraction_real,
+    )
 
-    return {"totals": totals, "identities": identities}
+    return Summary(totals=totals, identities=identities)
 
 
-def verdict(totals: dict) -> tuple[str, str]:
+def verdict(totals: Totals) -> Verdict:
     """Mechanical verdict from `coalescable_fraction_real`.
 
     < 0.05 -> "negligible" (recommend closing soldr#3045, but that call
@@ -641,10 +813,10 @@ def verdict(totals: dict) -> tuple[str, str]:
     itself >= 5% of `total_wall_seconds` becomes "need-better-data", because
     that close would be resting on work the classifier never classified.
     """
-    real_seconds = totals.get("coalescable_wall_seconds_real", 0.0)
-    unknown_seconds = totals.get("coalescable_wall_seconds_unknown", 0.0)
-    total_wall = totals.get("total_wall_seconds", 0.0)
-    fraction = totals.get("coalescable_fraction_real", 0.0)
+    real_seconds = totals.coalescable_wall_seconds_real
+    unknown_seconds = totals.coalescable_wall_seconds_unknown
+    total_wall = totals.total_wall_seconds
+    fraction = totals.coalescable_fraction_real
     percentage = fraction * 100.0
     unknown_fraction = unknown_seconds / total_wall if total_wall > 0 else 0.0
     numbers = (
@@ -666,7 +838,7 @@ def verdict(totals: dict) -> tuple[str, str]:
 
     if fraction < 0.05:
         if unknown_fraction >= 0.05:
-            return (
+            return Verdict(
                 "need-better-data",
                 "Cannot call this negligible: "
                 + numbers
@@ -678,7 +850,7 @@ def verdict(totals: dict) -> tuple[str, str]:
                 "Teach the classifier the shapes in this journal, then "
                 "re-run -- do not close soldr#3045 on this data.",
             )
-        return (
+        return Verdict(
             "negligible",
             "Negligible measured payoff: "
             + numbers
@@ -689,7 +861,7 @@ def verdict(totals: dict) -> tuple[str, str]:
             "call, not this tool's.",
         )
     if fraction >= 0.15:
-        return (
+        return Verdict(
             "proceed",
             "Meaningful measured payoff: "
             + numbers
@@ -697,7 +869,7 @@ def verdict(totals: dict) -> tuple[str, str]:
             + unknown_note
             + " soldr#3045 is worth proceeding past step 0.",
         )
-    return (
+    return Verdict(
         "need-better-data",
         "Ambiguous measured payoff: "
         + numbers
@@ -714,71 +886,67 @@ def _section(lines: list[str], title: str) -> None:
     lines.append(f"-- {title} --")
 
 
-def render_text(summary: dict[str, Any], top: int = 10) -> str:
-    """Render `summary` (the dict `build_summary()` returns) as a console table."""
+def render_text(summary: Summary, top: int = 10) -> str:
+    """Render `summary` (the `Summary` `build_summary()` returns) as a console table."""
     lines: list[str] = []
-    totals = summary["totals"]
+    totals = summary.totals
     lines.append("== Duplicate identity cost verification (soldr#3045 step 0) ==")
     lines.append(
-        f"journals: {len(totals['journal_files'])} files, {totals['records']} records, "
-        f"{totals['malformed']} malformed, {totals['deduped_lines']} deduped lines"
+        f"journals: {len(totals.journal_files)} files, {totals.records} records, "
+        f"{totals.malformed} malformed, {totals.deduped_lines} deduped lines"
     )
 
     _section(lines, "totals")
-    lines.append(f"records_with_context_key: {totals['records_with_context_key']}")
+    lines.append(f"records_with_context_key: {totals.records_with_context_key}")
+    lines.append(f"records_without_context_key: {totals.records_without_context_key}")
+    lines.append(f"duplicate_groups: {totals.duplicate_groups}")
+    lines.append(f"duplicate_records: {totals.duplicate_records}")
+    lines.append(f"excess_records: {totals.excess_records}")
     lines.append(
-        f"records_without_context_key: {totals['records_without_context_key']}"
+        f"flavours: concurrent={totals.concurrent} sequential={totals.sequential} "
+        f"cross_generation={totals.cross_generation}"
     )
-    lines.append(f"duplicate_groups: {totals['duplicate_groups']}")
-    lines.append(f"duplicate_records: {totals['duplicate_records']}")
-    lines.append(f"excess_records: {totals['excess_records']}")
-    lines.append(
-        f"flavours: concurrent={totals['concurrent']} sequential={totals['sequential']} "
-        f"cross_generation={totals['cross_generation']}"
-    )
-    lines.append(f"total_wall_seconds: {totals['total_wall_seconds']:.3f}")
+    lines.append(f"total_wall_seconds: {totals.total_wall_seconds:.3f}")
 
     _section(lines, "coalescable wall seconds (ceiling on in-flight coalescing)")
-    lines.append(f"total: {totals['coalescable_wall_seconds_total']:.3f}")
-    lines.append(f"probe: {totals['coalescable_wall_seconds_probe']:.3f}")
-    lines.append(f"real-compile: {totals['coalescable_wall_seconds_real']:.3f}")
-    lines.append(f"unknown: {totals['coalescable_wall_seconds_unknown']:.3f}")
-    lines.append(
-        f"coalescable_fraction_real: {totals['coalescable_fraction_real']:.4f}"
-    )
+    lines.append(f"total: {totals.coalescable_wall_seconds_total:.3f}")
+    lines.append(f"probe: {totals.coalescable_wall_seconds_probe:.3f}")
+    lines.append(f"real-compile: {totals.coalescable_wall_seconds_real:.3f}")
+    lines.append(f"unknown: {totals.coalescable_wall_seconds_unknown:.3f}")
+    lines.append(f"coalescable_fraction_real: {totals.coalescable_fraction_real:.4f}")
 
     _section(lines, f"top {top} duplicate identities")
-    for rank, identity in enumerate(summary["identities"][:top], start=1):
-        p50 = identity["wall_ms"]["p50"]
+    for rank, identity in enumerate(summary.identities[:top], start=1):
+        p50 = identity.wall_ms.p50
         p50_display = "n/a" if p50 is None else f"{p50:.1f}"
         lines.append(
-            f"  {rank:>2}. {identity['count']:>5}x  {identity['crate']}  "
-            f"[{identity['classification']}]  tree={identity['tree']}  "
-            f"dylint_link={identity['dylint_link']}  p50_wall_ms={p50_display}  "
-            f"coalescable_wall_seconds={identity['coalescable_wall_seconds']:.3f}"
+            f"  {rank:>2}. {identity.count:>5}x  {identity.crate}  "
+            f"[{identity.classification}]  tree={identity.tree}  "
+            f"dylint_link={identity.dylint_link}  p50_wall_ms={p50_display}  "
+            f"coalescable_wall_seconds={identity.coalescable_wall_seconds:.3f}"
         )
-        lines.append(f"      context_key={identity['context_key']}")
+        lines.append(f"      context_key={identity.context_key}")
 
-    code, sentence = verdict(totals)
+    result = verdict(totals)
     _section(lines, "verdict")
-    lines.append(f"[{code}] {sentence}")
+    lines.append(f"[{result.code}] {result.sentence}")
 
     return "\n".join(lines)
 
 
-def render_markdown(summary: dict[str, Any]) -> str:
+def render_markdown(summary: Summary) -> str:
     """Render `summary` as a `gh issue comment 3045 --body-file`-ready markdown body."""
-    totals = summary["totals"]
-    identities = summary["identities"]
+    totals = summary.totals
+    identities = summary.identities
     lines: list[str] = []
 
     lines.append("### soldr#3045 step 0 -- duplicate identity cost verification")
     lines.append("")
     lines.append(
-        f"Read {totals['records']} records from {len(totals['journal_files'])} "
+        f"Read {totals.records} records from {len(totals.journal_files)} "
         "journal file(s):"
     )
-    for path in totals["journal_files"]:
+    for path in totals.journal_files:
         lines.append(f"- `{path}`")
     lines.append("")
 
@@ -786,38 +954,38 @@ def render_markdown(summary: dict[str, Any]) -> str:
     lines.append("")
     lines.append("| metric | value |")
     lines.append("| --- | --- |")
-    lines.append(f"| records | {totals['records']} |")
-    lines.append(f"| malformed | {totals['malformed']} |")
-    lines.append(f"| deduped_lines | {totals['deduped_lines']} |")
-    lines.append(f"| records_with_context_key | {totals['records_with_context_key']} |")
+    lines.append(f"| records | {totals.records} |")
+    lines.append(f"| malformed | {totals.malformed} |")
+    lines.append(f"| deduped_lines | {totals.deduped_lines} |")
+    lines.append(f"| records_with_context_key | {totals.records_with_context_key} |")
     lines.append(
-        f"| records_without_context_key | {totals['records_without_context_key']} |"
+        f"| records_without_context_key | {totals.records_without_context_key} |"
     )
-    lines.append(f"| duplicate_groups | {totals['duplicate_groups']} |")
-    lines.append(f"| duplicate_records | {totals['duplicate_records']} |")
-    lines.append(f"| excess_records | {totals['excess_records']} |")
-    lines.append(f"| concurrent | {totals['concurrent']} |")
-    lines.append(f"| sequential | {totals['sequential']} |")
-    lines.append(f"| cross_generation | {totals['cross_generation']} |")
-    lines.append(f"| total_wall_seconds | {totals['total_wall_seconds']:.3f} |")
+    lines.append(f"| duplicate_groups | {totals.duplicate_groups} |")
+    lines.append(f"| duplicate_records | {totals.duplicate_records} |")
+    lines.append(f"| excess_records | {totals.excess_records} |")
+    lines.append(f"| concurrent | {totals.concurrent} |")
+    lines.append(f"| sequential | {totals.sequential} |")
+    lines.append(f"| cross_generation | {totals.cross_generation} |")
+    lines.append(f"| total_wall_seconds | {totals.total_wall_seconds:.3f} |")
     lines.append(
         "| coalescable_wall_seconds_total | "
-        f"{totals['coalescable_wall_seconds_total']:.3f} |"
+        f"{totals.coalescable_wall_seconds_total:.3f} |"
     )
     lines.append(
         "| coalescable_wall_seconds_probe | "
-        f"{totals['coalescable_wall_seconds_probe']:.3f} |"
+        f"{totals.coalescable_wall_seconds_probe:.3f} |"
     )
     lines.append(
         "| coalescable_wall_seconds_real | "
-        f"{totals['coalescable_wall_seconds_real']:.3f} |"
+        f"{totals.coalescable_wall_seconds_real:.3f} |"
     )
     lines.append(
         "| coalescable_wall_seconds_unknown | "
-        f"{totals['coalescable_wall_seconds_unknown']:.3f} |"
+        f"{totals.coalescable_wall_seconds_unknown:.3f} |"
     )
     lines.append(
-        f"| coalescable_fraction_real | {totals['coalescable_fraction_real']:.4f} |"
+        f"| coalescable_fraction_real | {totals.coalescable_fraction_real:.4f} |"
     )
     lines.append("")
 
@@ -829,22 +997,22 @@ def render_markdown(summary: dict[str, Any]) -> str:
     )
     lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for rank, identity in enumerate(identities, start=1):
-        wall = identity["wall_ms"]
-        p50 = "n/a" if wall["p50"] is None else f"{wall['p50']:.1f}"
-        total_s = "n/a" if wall["total"] is None else f"{wall['total'] / 1000.0:.3f}"
-        flavours = identity["flavours"]
+        wall = identity.wall_ms
+        p50 = "n/a" if wall.p50 is None else f"{wall.p50:.1f}"
+        total_s = "n/a" if wall.total is None else f"{wall.total / 1000.0:.3f}"
+        flavours = identity.flavours
         lines.append(
-            f"| {rank} | {identity['crate']} | {identity['count']} | "
-            f"{identity['classification']} | {identity['dylint_link']} | "
-            f"{identity['tree']} | {flavours['concurrent']}/{flavours['sequential']} | "
-            f"{p50} | {total_s} | {identity['coalescable_wall_seconds']:.3f} |"
+            f"| {rank} | {identity.crate} | {identity.count} | "
+            f"{identity.classification} | {identity.dylint_link} | "
+            f"{identity.tree} | {flavours.concurrent}/{flavours.sequential} | "
+            f"{p50} | {total_s} | {identity.coalescable_wall_seconds:.3f} |"
         )
     lines.append("")
 
     lines.append("#### Identity detail")
     lines.append("")
     for rank, identity in enumerate(identities, start=1):
-        lines.append(f"`#{rank}` {identity['crate']} (`{identity['context_key']}`)")
+        lines.append(f"`#{rank}` {identity.crate} (`{identity.context_key}`)")
         lines.append("")
         lines.append("```")
         # `compiler` and `native` are the decisive evidence for soldr#3045's
@@ -855,22 +1023,22 @@ def render_markdown(summary: dict[str, Any]) -> str:
         # `distinct_argv` is here for the same reason: it is how a reader
         # knows whether the single argv printed below represents the whole
         # group or just its first member.
-        compilers = ", ".join(identity["compilers"]) or "(none recorded)"
+        compilers = ", ".join(identity.compilers) or "(none recorded)"
         lines.append(f"compiler: {compilers}")
-        lines.append(f"native compiler: {identity['native']}")
-        lines.append(f"distinct argv in group: {identity['distinct_argv']}")
-        lines.append(f"distinct out dirs in group: {identity['distinct_out_dirs']}")
+        lines.append(f"native compiler: {identity.native}")
+        lines.append(f"distinct argv in group: {identity.distinct_argv}")
+        lines.append(f"distinct out dirs in group: {identity.distinct_out_dirs}")
         # Rendered as `key=value` pairs rather than the dict itself: a dict
         # repr would put braces in the comment body, and the markdown is
         # pinned brace-free so no unrendered format placeholder can survive
         # into a posted comment.
         counts = " ".join(
-            f"{name}={count}"
-            for name, count in sorted(identity["classification_counts"].items())
+            f"{row.name}={row.count}"
+            for row in sorted(identity.classification_counts, key=lambda r: r.name)
         )
         lines.append(f"classification counts: {counts or '(none)'}")
-        lines.append(f"cwd: {identity['cwd']}")
-        for arg in identity["argv"]:
+        lines.append(f"cwd: {identity.cwd}")
+        for arg in identity.argv:
             lines.append(arg)
         lines.append("```")
         lines.append("")
@@ -908,10 +1076,10 @@ def render_markdown(summary: dict[str, Any]) -> str:
     )
     lines.append("")
 
-    code, sentence = verdict(totals)
+    result = verdict(totals)
     lines.append("#### Recommendation")
     lines.append("")
-    lines.append(f"**[{code}]** {sentence}")
+    lines.append(f"**[{result.code}]** {result.sentence}")
     lines.append("")
 
     return "\n".join(lines)
@@ -1007,7 +1175,7 @@ def main(argv: list[str] | None = None) -> int:
     written = True
     if args.json_out:
         written &= _write_output(
-            args.json_out, json.dumps(summary, indent=2) + "\n", "--json-out"
+            args.json_out, json.dumps(summary.to_dict(), indent=2) + "\n", "--json-out"
         )
     if args.markdown_out:
         written &= _write_output(
@@ -1018,7 +1186,7 @@ def main(argv: list[str] | None = None) -> int:
     # operator needs them on stdout to see what the unwritable file would have
     # said.
     if args.json:
-        print(json.dumps(summary, indent=2))
+        print(json.dumps(summary.to_dict(), indent=2))
     elif args.markdown:
         print(render_markdown(summary))
     else:

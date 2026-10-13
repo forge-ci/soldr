@@ -127,7 +127,7 @@ import sys
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterator
+from typing import Any
 
 SCHEMA_VERSION = 1
 
@@ -237,19 +237,12 @@ def _named_counts(mapping: Counter[str]) -> list[NamedCount]:
     return [NamedCount(name, count) for name, count in sorted(mapping.items())]
 
 
-@dataclass(frozen=True, order=True)
+@dataclass(frozen=True)
 class Interval:
-    """A derived `[start, end]` compile interval in nanoseconds.
-
-    Iterable so callers that unpack `start, end = interval` keep working.
-    """
+    """A derived `[start, end]` compile interval in nanoseconds."""
 
     start: int
     end: int
-
-    def __iter__(self) -> Iterator[int]:
-        yield self.start
-        yield self.end
 
 
 @dataclass(frozen=True)
@@ -288,16 +281,11 @@ class ParsedCargoLog:
 
 @dataclass(frozen=True)
 class JournalRead:
-    """Result of reading journal files. Iterable as `(records, malformed, dropped)`."""
+    """Result of reading journal files."""
 
     records: list["Record"]
     malformed: int
     dropped: int
-
-    def __iter__(self) -> Iterator[Any]:
-        yield self.records
-        yield self.malformed
-        yield self.dropped
 
 
 @dataclass(frozen=True)
@@ -1404,9 +1392,10 @@ def analyze_summary(
     lockfile_paths = [Path(p) for p in (lockfiles or [])]
 
     journal_files = discover_journal_files(journal_paths)
-    records, malformed_lines, duplicate_lines_dropped = _read_journals(
-        journal_files, dedupe
-    )
+    journal = _read_journals(journal_files, dedupe)
+    records = journal.records
+    malformed_lines = journal.malformed
+    duplicate_lines_dropped = journal.dropped
 
     workspace_names = workspace_crate_names(resolved_root)
     for record in records:

@@ -46,13 +46,16 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 
 # Use regular-file capture without an installed Python dependency.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 # pylint: disable-next=wrong-import-position
-from soldr._process import run_captured  # noqa: E402 -- source-relative bootstrap precedes this import
+from soldr._process import (  # noqa: E402 -- source-relative bootstrap precedes this import
+    run_captured,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_DIR = Path(__file__).resolve().parent / "dylint_fixture"
@@ -78,7 +81,9 @@ DIAGNOSTIC_MARKERS = ("forbidden_marker_fn", "ban_forbidden_fn", "BAN_FORBIDDEN_
 
 def load_perf_local() -> ModuleType:
     """Import ci/perf_local.py by path — it's a script, not a package."""
-    spec = importlib.util.spec_from_file_location("perf_local", REPO_ROOT / "ci" / "perf_local.py")
+    spec = importlib.util.spec_from_file_location(
+        "perf_local", REPO_ROOT / "ci" / "perf_local.py"
+    )
     if spec is None or spec.loader is None:
         raise RuntimeError("unable to load ci/perf_local.py")
     module = importlib.util.module_from_spec(spec)
@@ -92,14 +97,39 @@ def load_perf_local() -> ModuleType:
     return module
 
 
+@dataclass(frozen=True)
+class DisplayPaths:
+    """The three locations a cold run clears, as shown to the operator."""
+
+    target_dir: str
+    soldr_home: str
+    driver_dir: str
+
+
+@dataclass(frozen=True)
+class TimedRun:
+    """One timed lint invocation."""
+
+    elapsed: float
+    result: subprocess.CompletedProcess[str]
+
+
+@dataclass(frozen=True)
+class Scenario:
+    """A named wall-clock measurement."""
+
+    name: str
+    elapsed: float
+
+
 class HostRunner:
     """Runs the lint command directly on the host."""
 
     def __init__(self) -> None:
         self.target_dir = FIXTURE_DIR / "target"
 
-    def display_paths(self, soldr_home: str, driver_dir: str) -> tuple[str, str, str]:
-        return (str(self.target_dir), soldr_home, driver_dir)
+    def display_paths(self, soldr_home: str, driver_dir: str) -> DisplayPaths:
+        return DisplayPaths(str(self.target_dir), soldr_home, driver_dir)
 
     def run(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
@@ -136,11 +166,13 @@ class DockerRunner:
         # Runners are per-checkout-root since #1835, so the container name has
         # to be derived rather than read off a module-level constant.
         self.container = perf_local.runner_for(source_root).container
-        self.container_fixture_dir = perf_local.container_workdir(source_root, FIXTURE_DIR)
+        self.container_fixture_dir = perf_local.container_workdir(
+            source_root, FIXTURE_DIR
+        )
         self.target_dir = f"{self.container_fixture_dir}/target"
 
-    def display_paths(self, soldr_home: str, driver_dir: str) -> tuple[str, str, str]:
-        return (self.target_dir, soldr_home, driver_dir)
+    def display_paths(self, soldr_home: str, driver_dir: str) -> DisplayPaths:
+        return DisplayPaths(self.target_dir, soldr_home, driver_dir)
 
     def _exec(
         self,
@@ -155,7 +187,9 @@ class DockerRunner:
         # rather than passing `-e PATH=...` keeps the image's own PATH (cargo,
         # rustup) intact instead of forcing us to restate it here.
         wrapped = ["sh", "-c", f'PATH="{SOLDR_BIN_DIR}:$PATH"; exec "$@"', "sh", *argv]
-        command.extend(["-w", workdir or self.container_fixture_dir, self.container, *wrapped])
+        command.extend(
+            ["-w", workdir or self.container_fixture_dir, self.container, *wrapped]
+        )
         return run_captured(command, capture_output=True, text=True, check=False)
 
     def ensure_soldr(self) -> None:
@@ -217,62 +251,69 @@ class DockerRunner:
         self._rm_rf(self.target_dir)
 
 
-def _run_and_time(runner, label: str) -> tuple[float, subprocess.CompletedProcess[str]]:
+def _run_and_time(runner, label: str) -> TimedRun:
     print(f"[{label}] running: {' '.join(DYLINT_CMD)}", file=sys.stderr)
     start = time.monotonic()
     result = runner.run(DYLINT_CMD)
     elapsed = time.monotonic() - start
-    return elapsed, result
+    return TimedRun(elapsed, result)
 
 
 def _fail(label: str, result: subprocess.CompletedProcess[str]) -> int:
-    print(f"error: [{label}] soldr cargo dylint failed (exit {result.returncode})", file=sys.stderr)
+    print(
+        f"error: [{label}] soldr cargo dylint failed (exit {result.returncode})",
+        file=sys.stderr,
+    )
     print(result.stdout, file=sys.stderr)
     print(result.stderr, file=sys.stderr)
     return 1
 
 
-def run_bench(runner, soldr_home: str, driver_dir: str, include_warm_clean_target: bool) -> int:
-    target_display, soldr_home_display, driver_dir_display = runner.display_paths(
-        soldr_home, driver_dir
-    )
-    scenarios: list[tuple[str, float]] = []
+def run_bench(
+    runner, soldr_home: str, driver_dir: str, include_warm_clean_target: bool
+) -> int:
+    paths = runner.display_paths(soldr_home, driver_dir)
+    scenarios: list[Scenario] = []
 
     print(
-        f"[cold] clearing: {target_display}, {soldr_home_display}, {driver_dir_display}",
+        f"[cold] clearing: {paths.target_dir}, {paths.soldr_home}, {paths.driver_dir}",
         file=sys.stderr,
     )
     runner.clear_cold_state(soldr_home, driver_dir)
-    elapsed, result = _run_and_time(runner, "cold")
+    timed = _run_and_time(runner, "cold")
+    result = timed.result
     if result.returncode != 0:
         return _fail("cold", result)
-    scenarios.append(("cold", elapsed))
+    scenarios.append(Scenario("cold", timed.elapsed))
 
-    elapsed, result = _run_and_time(runner, "warm")
+    timed = _run_and_time(runner, "warm")
+
+    result = timed.result
     if result.returncode != 0:
         return _fail("warm", result)
-    scenarios.append(("warm", elapsed))
+    scenarios.append(Scenario("warm", timed.elapsed))
 
     if include_warm_clean_target:
-        print(f"[warm-clean-target] clearing: {target_display}", file=sys.stderr)
+        print(f"[warm-clean-target] clearing: {paths.target_dir}", file=sys.stderr)
         runner.clear_target_only()
-        elapsed, result = _run_and_time(runner, "warm-clean-target")
+        timed = _run_and_time(runner, "warm-clean-target")
+        result = timed.result
         if result.returncode != 0:
             return _fail("warm-clean-target", result)
-        scenarios.append(("warm-clean-target", elapsed))
+        scenarios.append(Scenario("warm-clean-target", timed.elapsed))
 
     print_table(scenarios)
     return 0
 
 
-def print_table(scenarios: list[tuple[str, float]]) -> None:
-    label_width = max(len(name) for name, _ in scenarios)
+def print_table(scenarios: list[Scenario]) -> None:
+    label_width = max(len(scenario.name) for scenario in scenarios)
     print()
     print(f"{'scenario':<{label_width}}  wall seconds")
-    for name, elapsed in scenarios:
-        print(f"{name:<{label_width}}  {elapsed:>12.2f}")
+    for scenario in scenarios:
+        print(f"{scenario.name:<{label_width}}  {scenario.elapsed:>12.2f}")
 
-    by_name = dict(scenarios)
+    by_name = {scenario.name: scenario.elapsed for scenario in scenarios}
     cold = by_name.get("cold")
     warm = by_name.get("warm")
     if cold is not None and warm is not None and warm > 0:
@@ -284,7 +325,8 @@ def run_expect_fail(runner) -> int:
     violation = VIOLATION_FILE.read_text()
     try:
         APP_MAIN.write_text(violation)
-        elapsed, result = _run_and_time(runner, "expect-fail")
+        timed = _run_and_time(runner, "expect-fail")
+        result = timed.result
         combined = f"{result.stdout}\n{result.stderr}"
         if result.returncode == 0:
             print(
@@ -303,7 +345,9 @@ def run_expect_fail(runner) -> int:
             )
             print(combined, file=sys.stderr)
             return 1
-        print(f"expect-fail OK ({elapsed:.2f}s): ban_forbidden_fn fired as expected")
+        print(
+            f"expect-fail OK ({timed.elapsed:.2f}s): ban_forbidden_fn fired as expected"
+        )
         print(combined)
         return 0
     finally:
@@ -355,7 +399,9 @@ def main(argv: list[str]) -> int:
 
     if use_docker:
         if not shutil.which("docker"):
-            print("error: docker not on PATH (use --host to skip Docker)", file=sys.stderr)
+            print(
+                "error: docker not on PATH (use --host to skip Docker)", file=sys.stderr
+            )
             return 2
         perf_local = load_perf_local()
         source_root = perf_local.shared_source_root(REPO_ROOT)
@@ -382,7 +428,8 @@ def main(argv: list[str]) -> int:
                 if detected:
                     soldr_home = detected
                     print(
-                        f"[setup] detected in-container soldr root: {soldr_home}", file=sys.stderr
+                        f"[setup] detected in-container soldr root: {soldr_home}",
+                        file=sys.stderr,
                     )
             if args.expect_fail:
                 return run_expect_fail(runner)

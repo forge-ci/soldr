@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 try:
@@ -79,21 +80,51 @@ def third_party_dependencies(manifest_path: Path) -> list[str]:
     return sorted(names)
 
 
-def observed_surface() -> dict[str, list[str]]:
-    surface: dict[str, list[str]] = {}
+@dataclass(frozen=True)
+class CrateDependencies:
+    """The third-party dependencies one workspace crate declares."""
+
+    crate: str
+    dependencies: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DependencyEdge:
+    """One (crate, third-party dependency) pair."""
+
+    crate: str
+    dependency: str
+
+
+@dataclass(frozen=True)
+class InventoryDiff:
+    """Edges the manifests declare but the inventory lacks, and vice versa."""
+
+    added: tuple[DependencyEdge, ...]
+    removed: tuple[DependencyEdge, ...]
+
+
+def observed_surface() -> tuple[CrateDependencies, ...]:
+    surface: list[CrateDependencies] = []
     for crate_dir in sorted(CRATES_DIR.iterdir()):
         manifest = crate_dir / "Cargo.toml"
         if manifest.is_file():
-            surface[crate_dir.name] = third_party_dependencies(manifest)
-    return surface
+            surface.append(
+                CrateDependencies(
+                    crate_dir.name, tuple(third_party_dependencies(manifest))
+                )
+            )
+    return tuple(surface)
 
 
-def load_inventory() -> dict[str, list[str]]:
+def load_inventory() -> tuple[CrateDependencies, ...]:
     data = json.loads(INVENTORY_PATH.read_text(encoding="utf-8"))
-    return {crate: list(deps) for crate, deps in data["crates"].items()}
+    return tuple(
+        CrateDependencies(crate, tuple(deps)) for crate, deps in data["crates"].items()
+    )
 
 
-def write_inventory(surface: dict[str, list[str]]) -> None:
+def write_inventory(surface: tuple[CrateDependencies, ...]) -> None:
     payload = {
         "schema_version": 1,
         "comment": (
@@ -103,7 +134,7 @@ def write_inventory(surface: dict[str, list[str]]) -> None:
             "and expect the diff to be reviewed: adding an entry is adding a "
             "dependency."
         ),
-        "crates": surface,
+        "crates": {entry.crate: list(entry.dependencies) for entry in surface},
     }
     INVENTORY_PATH.write_text(
         json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8"
@@ -111,17 +142,19 @@ def write_inventory(surface: dict[str, list[str]]) -> None:
 
 
 def diff(
-    surface: dict[str, list[str]], inventory: dict[str, list[str]]
-) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
-    """(added, removed) as (crate, dependency) pairs."""
-    added: list[tuple[str, str]] = []
-    removed: list[tuple[str, str]] = []
-    for crate in sorted(set(surface) | set(inventory)):
-        have = set(surface.get(crate, []))
-        listed = set(inventory.get(crate, []))
-        added.extend((crate, dep) for dep in sorted(have - listed))
-        removed.extend((crate, dep) for dep in sorted(listed - have))
-    return added, removed
+    surface: tuple[CrateDependencies, ...], inventory: tuple[CrateDependencies, ...]
+) -> InventoryDiff:
+    """The edges added to and removed from the manifests since the inventory."""
+    observed = {entry.crate: set(entry.dependencies) for entry in surface}
+    listed_by_crate = {entry.crate: set(entry.dependencies) for entry in inventory}
+    added: list[DependencyEdge] = []
+    removed: list[DependencyEdge] = []
+    for crate in sorted(set(observed) | set(listed_by_crate)):
+        have = observed.get(crate, set())
+        listed = listed_by_crate.get(crate, set())
+        added.extend(DependencyEdge(crate, dep) for dep in sorted(have - listed))
+        removed.extend(DependencyEdge(crate, dep) for dep in sorted(listed - have))
+    return InventoryDiff(tuple(added), tuple(removed))
 
 
 def main() -> int:
@@ -136,7 +169,7 @@ def main() -> int:
     surface = observed_surface()
     if args.write:
         write_inventory(surface)
-        total = sum(len(deps) for deps in surface.values())
+        total = sum(len(entry.dependencies) for entry in surface)
         print(
             f"dependency inventory: wrote {total} third-party edge(s) across "
             f"{len(surface)} crate(s)"
@@ -147,9 +180,9 @@ def main() -> int:
         print(f"dependency inventory: missing {INVENTORY_PATH}", file=sys.stderr)
         return 1
 
-    added, removed = diff(surface, load_inventory())
-    if not added and not removed:
-        total = sum(len(deps) for deps in surface.values())
+    changes = diff(surface, load_inventory())
+    if not changes.added and not changes.removed:
+        total = sum(len(entry.dependencies) for entry in surface)
         print(
             f"dependency inventory: {total} third-party edge(s) across "
             f"{len(surface)} crate(s), all accounted for"
@@ -157,14 +190,14 @@ def main() -> int:
         return 0
 
     print("dependency inventory: FAIL", file=sys.stderr)
-    for crate, dep in added:
+    for edge in changes.added:
         print(
-            f"  + {crate} declares `{dep}`, which the inventory does not list.",
+            f"  + {edge.crate} declares `{edge.dependency}`, which the inventory does not list.",
             file=sys.stderr,
         )
-    for crate, dep in removed:
+    for edge in changes.removed:
         print(
-            f"  - {crate} no longer declares `{dep}`, but the inventory still "
+            f"  - {edge.crate} no longer declares `{edge.dependency}`, but the inventory still "
             "lists it.",
             file=sys.stderr,
         )

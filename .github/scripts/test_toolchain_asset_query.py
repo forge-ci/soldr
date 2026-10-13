@@ -8,12 +8,17 @@ import json
 import unittest
 import urllib.error
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from _script_loader import load_script_module
 
 SCRIPT = Path(__file__).with_name("toolchain_asset_query.py")
 taq = load_script_module(SCRIPT, "toolchain_asset_query")
+
+
+def parsed(raw: dict) -> Any:
+    return taq.parse_manifest(raw, "https://example.test/manifest.json")
 
 
 def sample_manifest() -> dict:
@@ -153,8 +158,8 @@ class ToolchainAssetQueryTests(unittest.TestCase):
             taq.load_tool_manifest("https://example.test", "demo")
 
     def test_single_multipart_chunk_preserves_multipart_transport(self) -> None:
-        release = taq.find_release(sample_manifest(), "latest")
-        asset = release["platforms"][0]["asset"]
+        manifest = sample_manifest()
+        asset = manifest["releases"][0]["platforms"][0]["asset"]
         asset["parts"] = [
             {
                 "number": 1,
@@ -164,41 +169,42 @@ class ToolchainAssetQueryTests(unittest.TestCase):
             }
         ]
         del asset["urls"]
+        release = taq.find_release(parsed(manifest), "latest")
 
         selected = taq.find_asset(
             release, taq.platform_candidates("linux", "x86_64", "gnu")
         )
-        self.assertEqual(selected["urls"], [])
-        self.assertEqual(selected["parts"][0]["urls"], ["https://example.test/part"])
+        self.assertEqual(selected.urls, [])
+        self.assertEqual(selected.parts[0].urls, ["https://example.test/part"])
 
     def test_latest_uses_channel(self) -> None:
-        release = taq.find_release(sample_manifest(), "latest")
-        self.assertEqual(release["version"], "v1.2.3")
+        release = taq.find_release(parsed(sample_manifest()), "latest")
+        self.assertEqual(release.version, "v1.2.3")
 
     def test_version_accepts_bare_or_v_prefixed(self) -> None:
-        payload = sample_manifest()
-        self.assertEqual(taq.find_release(payload, "1.2.3")["version"], "v1.2.3")
-        self.assertEqual(taq.find_release(payload, "v1.2.3")["version"], "v1.2.3")
+        payload = parsed(sample_manifest())
+        self.assertEqual(taq.find_release(payload, "1.2.3").version, "v1.2.3")
+        self.assertEqual(taq.find_release(payload, "v1.2.3").version, "v1.2.3")
 
     def test_linux_gnu_prefers_glibc_then_musl(self) -> None:
         candidates = taq.platform_candidates("linux", "x86_64", "gnu")
         self.assertEqual(
             candidates,
             [
-                {"os": "linux", "arch": "x86_64", "libc": "glibc"},
-                {"os": "linux", "arch": "x86_64", "libc": "musl"},
+                taq.Platform(os="linux", arch="x86_64", libc="glibc"),
+                taq.Platform(os="linux", arch="x86_64", libc="musl"),
             ],
         )
 
     def test_default_linux_prefers_glibc(self) -> None:
-        release = taq.find_release(sample_manifest(), "latest")
+        release = taq.find_release(parsed(sample_manifest()), "latest")
         url = taq.find_asset_url(
             release, taq.platform_candidates("linux", "x86_64", None)
         )
         self.assertTrue(url.endswith("demo-linux-gnu.tar.xz"))
 
     def test_darwin_arch_can_fallback_to_universal2(self) -> None:
-        release = taq.find_release(sample_manifest(), "latest")
+        release = taq.find_release(parsed(sample_manifest()), "latest")
         url = taq.find_asset_url(
             release, taq.platform_candidates("darwin", "x86_64", None)
         )
@@ -206,28 +212,26 @@ class ToolchainAssetQueryTests(unittest.TestCase):
 
     def test_json_metadata_includes_digest_and_platform(self) -> None:
         metadata = taq.find_asset(
-            taq.find_release(sample_manifest(), "latest"),
+            taq.find_release(parsed(sample_manifest()), "latest"),
             taq.platform_candidates("linux", "x86_64", "gnu"),
         )
-        self.assertEqual(metadata["sha256"], "0" * 64)
-        self.assertEqual(metadata["platform"]["libc"], "glibc")
+        self.assertEqual(metadata.sha256, "0" * 64)
+        self.assertEqual(metadata.platform.libc, "glibc")
 
     def test_json_metadata_preserves_multipart_transport(self) -> None:
         metadata = taq.find_asset(
-            taq.find_release(sample_manifest(), "latest"),
+            taq.find_release(parsed(sample_manifest()), "latest"),
             taq.platform_candidates("darwin", "aarch64", None),
         )
-        self.assertEqual(metadata["urls"], [])
-        self.assertEqual([part["number"] for part in metadata["parts"]], [1, 2])
+        self.assertEqual(metadata.urls, [])
+        self.assertEqual([part.number for part in metadata.parts], [1, 2])
         with self.assertRaisesRegex(SystemExit, "multipart"):
             taq.find_asset_url(
-                taq.find_release(sample_manifest(), "latest"),
+                taq.find_release(parsed(sample_manifest()), "latest"),
                 taq.platform_candidates("darwin", "aarch64", None),
             )
 
     def test_metadata_rejects_filename_escape_shapes(self) -> None:
-        release = taq.find_release(sample_manifest(), "latest")
-        asset = release["platforms"][0]["asset"]
         for filename in (
             "../outside.tar.gz",
             "/tmp/outside.tar.gz",
@@ -237,7 +241,9 @@ class ToolchainAssetQueryTests(unittest.TestCase):
             ".",
             "..",
         ):
-            asset["filename"] = filename
+            manifest = sample_manifest()
+            manifest["releases"][0]["platforms"][0]["asset"]["filename"] = filename
+            release = taq.find_release(parsed(manifest), "latest")
             with self.assertRaisesRegex(SystemExit, "unsafe filename"):
                 taq.find_asset(
                     release,

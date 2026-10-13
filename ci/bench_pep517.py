@@ -25,8 +25,8 @@ import sys
 import tempfile
 import time
 from collections.abc import Iterable
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
 
 # Use regular-file capture without an installed Python dependency.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -41,6 +41,112 @@ PHASE_PATTERNS = {
     "cache": re.compile(r"zccache|cache hit|cache miss|cached|reuse", re.I),
     "linking": re.compile(r"linker|linking|rust-lld|lld|mold|link\.exe", re.I),
 }
+
+
+@dataclass(frozen=True)
+class PhaseCounts:
+    """Install-log lines matching each build-phase pattern."""
+
+    packaging: int
+    cargo: int
+    cache: int
+    linking: int
+
+
+@dataclass(frozen=True)
+class Sample:
+    """One timed install and where its complete log was written."""
+
+    scenario: str
+    repetition: int
+    elapsed_s: float
+    returncode: int
+    command: list[str]
+    log: str
+    phase_lines: PhaseCounts
+
+
+@dataclass(frozen=True)
+class ScenarioResult:
+    """Median wall-clock seconds over the successful samples, plus the samples."""
+
+    median_s: float | None
+    samples: list[Sample]
+
+
+@dataclass(frozen=True)
+class KindResults:
+    """The three measured scenarios for one install kind."""
+
+    cold: ScenarioResult
+    warm_noop: ScenarioResult
+    source_change: ScenarioResult
+
+
+@dataclass(frozen=True)
+class Scenarios:
+    """Results for the editable and wheel install kinds."""
+
+    editable: KindResults
+    wheel: KindResults
+
+
+@dataclass(frozen=True)
+class Versions:
+    """Tool versions reported by `<tool> --version`."""
+
+    uv: str
+    soldr: str
+
+
+@dataclass(frozen=True)
+class CacheEnvironment:
+    """The inherited cache-related environment variables (None when unset)."""
+
+    cargo_home: str | None
+    rustup_home: str | None
+    cargo_target_dir: str | None
+    rustc_wrapper: str | None
+    zccache_cache_dir: str | None
+    zccache_path_remap: str | None
+
+
+@dataclass(frozen=True)
+class Metadata:
+    """Environment and option record for one benchmark run."""
+
+    platform: str
+    python: str
+    project: str
+    versions: Versions
+    caches_preserved: bool
+    cache_environment: CacheEnvironment
+    frontend: str
+    no_build_isolation: bool
+    touch_staged_artifacts: bool
+    force_reinstall: bool
+    backend_source: str | None
+
+
+@dataclass(frozen=True)
+class BenchmarkResults:
+    """The full benchmark document written to the output JSON file."""
+
+    metadata: Metadata
+    scenarios: Scenarios
+
+    def to_json(self) -> str:
+        """Serialize, omitting unset `backend_source` and cache variables."""
+        document = asdict(self)
+        metadata = document["metadata"]
+        if self.metadata.backend_source is None:
+            del metadata["backend_source"]
+        metadata["cache_environment"] = {
+            name.upper(): value
+            for name, value in metadata["cache_environment"].items()
+            if value
+        }
+        return json.dumps(document, indent=2)
 
 
 def _python_path(venv: Path) -> Path:
@@ -63,11 +169,17 @@ def _run(
     )
 
 
-def _phase_counts(output: str) -> dict[str, int]:
-    return {
+def _phase_counts(output: str) -> PhaseCounts:
+    counts = {
         phase: sum(1 for line in output.splitlines() if pattern.search(line))
         for phase, pattern in PHASE_PATTERNS.items()
     }
+    return PhaseCounts(
+        packaging=counts["packaging"],
+        cargo=counts["cargo"],
+        cache=counts["cache"],
+        linking=counts["linking"],
+    )
 
 
 def _copy_project(source: Path, destination: Path) -> None:
@@ -134,7 +246,7 @@ def _sample(
     frontend: str,
     no_build_isolation: bool,
     backend_source: Path | None,
-) -> dict[str, Any]:
+) -> Sample:
     if frontend == "pip":
         install_args = [
             str(_python_path(venv)),
@@ -173,20 +285,20 @@ def _sample(
     log_path = output_dir / "logs" / f"{scenario}-r{repetition}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(result.stdout, encoding="utf-8")
-    return {
-        "scenario": scenario,
-        "repetition": repetition,
-        "elapsed_s": round(elapsed, 3),
-        "returncode": result.returncode,
-        "command": install_args,
-        "log": str(log_path),
-        "phase_lines": _phase_counts(result.stdout),
-    }
+    return Sample(
+        scenario=scenario,
+        repetition=repetition,
+        elapsed_s=round(elapsed, 3),
+        returncode=result.returncode,
+        command=install_args,
+        log=str(log_path),
+        phase_lines=_phase_counts(result.stdout),
+    )
 
 
 def _prepare_venv(
     root: Path, name: str, *, seed: bool, install_setuptools: bool
-) -> tuple[Path, Path]:
+) -> Path:
     venv = root / f"venv-{name}"
     args = ["uv", "venv"]
     if seed:
@@ -206,41 +318,47 @@ def _prepare_venv(
             raise RuntimeError(
                 f"could not install setuptools in benchmark venv:\n{result.stdout}"
             )
-    return venv, python
+    return venv
 
 
-def _metadata(project: Path) -> dict[str, Any]:
-    versions: dict[str, str] = {}
-    for name, command in (
-        ("uv", ["uv", "--version"]),
-        ("soldr", ["soldr", "--version"]),
-    ):
-        result = _run(command)
-        versions[name] = result.stdout.strip()
-    return {
-        "platform": sys.platform,
-        "python": sys.version.split()[0],
-        "project": str(project),
-        "versions": versions,
-        "caches_preserved": True,
-        "cache_environment": {
-            name: os.environ.get(name)
-            for name in (
-                "CARGO_HOME",
-                "RUSTUP_HOME",
-                "CARGO_TARGET_DIR",
-                "RUSTC_WRAPPER",
-                "ZCCACHE_CACHE_DIR",
-                "ZCCACHE_PATH_REMAP",
-            )
-            if os.environ.get(name)
-        },
-    }
+def _metadata(
+    project: Path,
+    *,
+    frontend: str,
+    no_build_isolation: bool,
+    touch_staged_artifacts: bool,
+    force_reinstall: bool,
+    backend_source: Path | None,
+) -> Metadata:
+    tool_versions = [
+        _run(command).stdout.strip()
+        for command in (["uv", "--version"], ["soldr", "--version"])
+    ]
+    return Metadata(
+        platform=sys.platform,
+        python=sys.version.split()[0],
+        project=str(project),
+        versions=Versions(uv=tool_versions[0], soldr=tool_versions[1]),
+        caches_preserved=True,
+        cache_environment=CacheEnvironment(
+            cargo_home=os.environ.get("CARGO_HOME"),
+            rustup_home=os.environ.get("RUSTUP_HOME"),
+            cargo_target_dir=os.environ.get("CARGO_TARGET_DIR"),
+            rustc_wrapper=os.environ.get("RUSTC_WRAPPER"),
+            zccache_cache_dir=os.environ.get("ZCCACHE_CACHE_DIR"),
+            zccache_path_remap=os.environ.get("ZCCACHE_PATH_REMAP"),
+        ),
+        frontend=frontend,
+        no_build_isolation=no_build_isolation,
+        touch_staged_artifacts=touch_staged_artifacts,
+        force_reinstall=force_reinstall,
+        backend_source=str(backend_source) if backend_source else None,
+    )
 
 
-def _median(samples: list[dict[str, Any]]) -> float | None:
+def _median(samples: list[Sample]) -> float | None:
     successful = [
-        float(sample["elapsed_s"]) for sample in samples if sample["returncode"] == 0
+        float(sample.elapsed_s) for sample in samples if sample.returncode == 0
     ]
     return round(statistics.median(successful), 3) if successful else None
 
@@ -256,35 +374,35 @@ def benchmark(
     backend_source: Path | None,
     touch_staged_artifacts: bool,
     force_reinstall: bool,
-) -> dict[str, Any]:
-    results: dict[str, Any] = {"metadata": _metadata(project), "scenarios": {}}
-    results["metadata"]["frontend"] = frontend
-    results["metadata"]["no_build_isolation"] = no_build_isolation
-    results["metadata"]["touch_staged_artifacts"] = touch_staged_artifacts
-    results["metadata"]["force_reinstall"] = force_reinstall
-    if backend_source:
-        results["metadata"]["backend_source"] = str(backend_source)
+) -> BenchmarkResults:
+    metadata = _metadata(
+        project,
+        frontend=frontend,
+        no_build_isolation=no_build_isolation,
+        touch_staged_artifacts=touch_staged_artifacts,
+        force_reinstall=force_reinstall,
+        backend_source=backend_source,
+    )
     with tempfile.TemporaryDirectory(prefix="soldr-pep517-bench-") as raw:
         temp_root = Path(raw)
+        kind_results: dict[str, KindResults] = {}
         for editable in (True, False):
             kind = "editable" if editable else "wheel"
-            samples: dict[str, list[dict[str, Any]]] = {
-                "cold": [],
-                "warm_noop": [],
-                "source_change": [],
-            }
+            cold: list[Sample] = []
+            warm_noop: list[Sample] = []
+            source_change: list[Sample] = []
             for repetition in range(1, repetitions + 1):
                 project_copy = temp_root / f"{kind}-project-{repetition}"
                 _copy_project(project, project_copy)
                 if touch_staged_artifacts:
                     _touch_staged_artifacts(project_copy)
-                venv, _ = _prepare_venv(
+                venv = _prepare_venv(
                     temp_root,
                     f"{kind}-{repetition}",
                     seed=frontend == "pip" or no_build_isolation,
                     install_setuptools=no_build_isolation,
                 )
-                samples["cold"].append(
+                cold.append(
                     _sample(
                         scenario=f"{kind}-cold",
                         repetition=repetition,
@@ -298,7 +416,7 @@ def benchmark(
                         backend_source=backend_source,
                     )
                 )
-                samples["warm_noop"].append(
+                warm_noop.append(
                     _sample(
                         scenario=f"{kind}-warm-noop",
                         repetition=repetition,
@@ -316,7 +434,7 @@ def benchmark(
                 if changed:
                     with changed.open("a", encoding="utf-8") as stream:
                         stream.write("\n")
-                    samples["source_change"].append(
+                    source_change.append(
                         _sample(
                             scenario=f"{kind}-source-change",
                             repetition=repetition,
@@ -330,11 +448,17 @@ def benchmark(
                             backend_source=backend_source,
                         )
                     )
-            results["scenarios"][kind] = {
-                name: {"median_s": _median(values), "samples": values}
-                for name, values in samples.items()
-            }
-    return results
+            kind_results[kind] = KindResults(
+                cold=ScenarioResult(_median(cold), cold),
+                warm_noop=ScenarioResult(_median(warm_noop), warm_noop),
+                source_change=ScenarioResult(_median(source_change), source_change),
+            )
+    return BenchmarkResults(
+        metadata=metadata,
+        scenarios=Scenarios(
+            editable=kind_results["editable"], wheel=kind_results["wheel"]
+        ),
+    )
 
 
 def main() -> int:
@@ -395,12 +519,19 @@ def main() -> int:
         touch_staged_artifacts=args.touch_staged_artifacts,
         force_reinstall=args.force_reinstall,
     )
-    output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    output.write_text(result.to_json() + "\n", encoding="utf-8")
     print(
         json.dumps(
             {
-                name: {case: value["median_s"] for case, value in cases.items()}
-                for name, cases in result["scenarios"].items()
+                name: {
+                    "cold": cases.cold.median_s,
+                    "warm_noop": cases.warm_noop.median_s,
+                    "source_change": cases.source_change.median_s,
+                }
+                for name, cases in (
+                    ("editable", result.scenarios.editable),
+                    ("wheel", result.scenarios.wheel),
+                )
             },
             indent=2,
         )

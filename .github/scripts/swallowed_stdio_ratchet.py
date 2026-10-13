@@ -145,6 +145,31 @@ BLOCK_SCALAR_RE = re.compile(r"^[|>][+-]?\d*\s*(#.*)?$")
 
 
 @dataclass(frozen=True)
+class Hit:
+    """One flagged source line: its 1-based line number and stripped text."""
+
+    line: int
+    text: str
+
+
+@dataclass(frozen=True)
+class ViolationKey:
+    """Line-number-independent identity of a violation (see module docs)."""
+
+    path: str
+    normalized_text: str
+    occurrence: int
+
+
+@dataclass(frozen=True)
+class EvaluationResult:
+    """Outcome of `evaluate`: the new violations and the files examined."""
+
+    new: list["Violation"]
+    checked: int
+
+
+@dataclass(frozen=True)
 class Violation:
     path: str
     line: int
@@ -152,8 +177,8 @@ class Violation:
     text: str
     occurrence: int
 
-    def key(self) -> tuple[str, str, int]:
-        return (self.path, "".join(self.text.split()), self.occurrence)
+    def key(self) -> ViolationKey:
+        return ViolationKey(self.path, "".join(self.text.split()), self.occurrence)
 
     def describe(self) -> str:
         marker = (
@@ -242,13 +267,13 @@ def _has_marker(lines: list[str], start: int, end: int) -> bool:
     return False
 
 
-def python_hits(source: str) -> list[tuple[int, str]]:
+def python_hits(source: str) -> list[Hit]:
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
         return []
     lines = source.splitlines()
-    hits: list[tuple[int, str]] = []
+    hits: list[Hit] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -262,8 +287,8 @@ def python_hits(source: str) -> list[tuple[int, str]]:
             if _has_marker(lines, start, end):
                 continue
             segment = ast.get_source_segment(source, kw) or f"{kw.arg}=..."
-            hits.append((kw.lineno, segment.strip()))
-    hits.sort()
+            hits.append(Hit(kw.lineno, segment.strip()))
+    hits.sort(key=lambda hit: (hit.line, hit.text))
     return hits
 
 
@@ -283,17 +308,17 @@ def _shell_line_hit(line: str) -> str | None:
     return line.strip()
 
 
-def shell_hits(source: str) -> list[tuple[int, str]]:
-    hits = []
+def shell_hits(source: str) -> list[Hit]:
+    hits: list[Hit] = []
     for lineno, line in enumerate(source.splitlines(), start=1):
         text = _shell_line_hit(line)
         if text:
-            hits.append((lineno, text))
+            hits.append(Hit(lineno, text))
     return hits
 
 
-def yaml_shell_lines(lines: list[str]) -> list[tuple[int, str]]:
-    """(line number, text) for every physical line inside a `run:` step.
+def yaml_shell_lines(lines: list[str]) -> list[Hit]:
+    """A `Hit` (line number, text) for every physical line inside a `run:` step.
 
     Text-based rather than a full YAML parse: GitHub Actions' `run:` block
     scalars follow a fixed indentation convention (content is indented
@@ -302,7 +327,7 @@ def yaml_shell_lines(lines: list[str]) -> list[tuple[int, str]]:
     number-tracking loader for a check that only needs the raw text.
     """
 
-    result: list[tuple[int, str]] = []
+    result: list[Hit] = []
     index = 0
     total = len(lines)
     while index < total:
@@ -313,7 +338,7 @@ def yaml_shell_lines(lines: list[str]) -> list[tuple[int, str]]:
         indent = len(match.group("indent"))
         rest = match.group("rest").strip()
         if rest and not BLOCK_SCALAR_RE.match(rest):
-            result.append((index + 1, rest))
+            result.append(Hit(index + 1, rest))
             index += 1
             continue
         index += 1
@@ -325,17 +350,17 @@ def yaml_shell_lines(lines: list[str]) -> list[tuple[int, str]]:
             candidate_indent = len(candidate) - len(candidate.lstrip(" \t"))
             if candidate_indent <= indent:
                 break
-            result.append((index + 1, candidate))
+            result.append(Hit(index + 1, candidate))
             index += 1
     return result
 
 
-def workflow_hits(source: str) -> list[tuple[int, str]]:
-    hits = []
-    for lineno, text in yaml_shell_lines(source.splitlines()):
-        offending = _shell_line_hit(text)
+def workflow_hits(source: str) -> list[Hit]:
+    hits: list[Hit] = []
+    for shell_line in yaml_shell_lines(source.splitlines()):
+        offending = _shell_line_hit(shell_line.text)
         if offending:
-            hits.append((lineno, offending))
+            hits.append(Hit(shell_line.line, offending))
     return hits
 
 
@@ -351,7 +376,7 @@ def _rust_marker_reason(line: str) -> str | None:
     return None
 
 
-def rust_hits(source: str) -> list[tuple[int, str]]:  # noqa: C901
+def rust_hits(source: str) -> list[Hit]:  # noqa: C901
     # `mask_comments_and_strings` is exactly length-preserving (every branch
     # consumes as many input characters as it appends), so an offset into
     # `masked` is always the same offset into `source` -- but it is NOT
@@ -363,7 +388,7 @@ def rust_hits(source: str) -> list[tuple[int, str]]:  # noqa: C901
     # matching offset into the ORIGINAL `source` sidesteps that entirely.
     masked = mask_comments_and_strings(source)
     lines = source.splitlines()
-    hits: list[tuple[int, str]] = []
+    hits: list[Hit] = []
     for match in ALLOW_EXPECT_RE.finditer(masked):
         match_line = source[: match.start()].count("\n")
         if match_line >= len(lines):
@@ -407,7 +432,7 @@ def rust_hits(source: str) -> list[tuple[int, str]]:  # noqa: C901
         if exempt:
             continue
 
-        hits.append((match_line + 1, lines[match_line].strip()))
+        hits.append(Hit(match_line + 1, lines[match_line].strip()))
     return hits
 
 
@@ -416,7 +441,7 @@ def rust_hits(source: str) -> list[tuple[int, str]]:  # noqa: C901
 # --------------------------------------------------------------------------
 
 
-def file_hits(lang: str, source: str) -> list[tuple[int, str]]:
+def file_hits(lang: str, source: str) -> list[Hit]:
     if lang == "python":
         return python_hits(source)
     if lang == "shell":
@@ -429,10 +454,11 @@ def file_hits(lang: str, source: str) -> list[tuple[int, str]]:
 
 
 def file_violations(path: str, lang: str, source: str) -> list[Violation]:
-    hits = sorted(file_hits(lang, source), key=lambda item: item[0])
+    hits = sorted(file_hits(lang, source), key=lambda item: item.line)
     counts: dict[str, int] = {}
     violations = []
-    for lineno, text in hits:
+    for hit in hits:
+        lineno, text = hit.line, hit.text
         normalized = "".join(text.split())
         occurrence = counts.get(normalized, 0)
         counts[normalized] = occurrence + 1
@@ -444,15 +470,13 @@ def file_violations(path: str, lang: str, source: str) -> list[Violation]:
     return violations
 
 
-def file_violation_map(
-    path: str, source: str | None
-) -> dict[tuple[str, str, int], Violation]:
+def source_violations(path: str, source: str | None) -> list[Violation]:
     if source is None:
-        return {}
+        return []
     lang = classify(path, source)
     if lang is None:
-        return {}
-    return {v.key(): v for v in file_violations(path, lang, source)}
+        return []
+    return file_violations(path, lang, source)
 
 
 # --------------------------------------------------------------------------
@@ -498,7 +522,7 @@ def read_at_ref(ref: str, path: str) -> str | None:
 # --------------------------------------------------------------------------
 
 
-def evaluate(base_ref: str, base_sha: str | None = None) -> tuple[list[Violation], int]:
+def evaluate(base_ref: str, base_sha: str | None = None) -> EvaluationResult:
     base = resolve_base(base_ref, base_sha)
     new: list[Violation] = []
     checked = 0
@@ -510,13 +534,14 @@ def evaluate(base_ref: str, base_sha: str | None = None) -> tuple[list[Violation
         if lang is None:
             continue
         checked += 1
-        current_map = file_violation_map(path, current_source)
-        baseline_map = file_violation_map(path, read_at_ref(base, path))
-        for key, violation in current_map.items():
-            if key not in baseline_map:
+        baseline_keys = {
+            v.key() for v in source_violations(path, read_at_ref(base, path))
+        }
+        for violation in source_violations(path, current_source):
+            if violation.key() not in baseline_keys:
                 new.append(violation)
     new.sort(key=lambda v: (v.path, v.line))
-    return new, checked
+    return EvaluationResult(new, checked)
 
 
 def full_inventory() -> list[Violation]:
@@ -568,7 +593,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        new, checked = evaluate(args.base_ref, args.base_sha)
+        result = evaluate(args.base_ref, args.base_sha)
+        new, checked = result.new, result.checked
     except NoMergeBase:
         print(
             f"swallowed_stdio_ratchet: skipped — no merge base with {args.base_ref} "

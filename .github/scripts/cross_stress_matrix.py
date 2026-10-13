@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 SCHEMA_VERSION = 1
@@ -46,7 +47,7 @@ SCHEMA_VERSION = 1
 # cross-build for. A host never targets itself — that is a native build, not a
 # cross one, and it is covered by the ordinary CI lanes.
 HOST_OSES: tuple[str, ...] = ("linux", "macos", "windows")
-CROSS_TARGET_OSES: dict[str, tuple[str, str]] = {
+CROSS_TARGET_OSES: dict[str, tuple[str, ...]] = {
     "linux": ("macos", "windows"),
     "macos": ("linux", "windows"),
     "windows": ("linux", "macos"),
@@ -54,27 +55,111 @@ CROSS_TARGET_OSES: dict[str, tuple[str, str]] = {
 
 HOST_ARCHES: tuple[str, ...] = ("x64", "arm64")
 
-# (host_os, host_arch) -> GitHub-hosted runner label. Kept in step with the
+
+@dataclass(frozen=True)
+class HostKey:
+    """A host machine class: its OS and CPU architecture."""
+
+    os: str
+    arch: str
+
+
+# HostKey -> GitHub-hosted runner label. Kept in step with the
 # runners `ci/canonical-targets.json` already names for the same machines.
-RUNNERS: dict[tuple[str, str], str] = {
-    ("linux", "x64"): "ubuntu-24.04",
-    ("linux", "arm64"): "ubuntu-24.04-arm",
-    ("macos", "x64"): "macos-15-intel",
-    ("macos", "arm64"): "macos-15",
-    ("windows", "x64"): "windows-2025",
-    ("windows", "arm64"): "windows-11-arm",
+RUNNERS: dict[HostKey, str] = {
+    HostKey("linux", "x64"): "ubuntu-24.04",
+    HostKey("linux", "arm64"): "ubuntu-24.04-arm",
+    HostKey("macos", "x64"): "macos-15-intel",
+    HostKey("macos", "arm64"): "macos-15",
+    HostKey("windows", "x64"): "windows-2025",
+    HostKey("windows", "arm64"): "windows-11-arm",
 }
 
-# target_os -> (triple, alias, arch, abi, exe_suffix, expected_format).
+
+@dataclass(frozen=True)
+class TargetSpec:
+    """One sweep target: triple, alias, arch, abi, exe suffix, binary format."""
+
+    target_os: str
+    triple: str
+    alias: str
+    arch: str
+    abi: str
+    exe_suffix: str
+    expected_format: str
+
+
+@dataclass(frozen=True)
+class MatrixCell:
+    """One build-matrix `include` entry (string values only, per GitHub)."""
+
+    host_os: str
+    host_arch: str
+    runner: str
+    target: str
+    alias: str
+    exe_suffix: str
+    name: str
+
+
+@dataclass(frozen=True)
+class CellResult:
+    """One cell's verdict row, serialized as the per-cell result JSON."""
+
+    schema_version: int
+    host_os: str
+    host_arch: str
+    target: str
+    target_os: str
+    target_arch: str
+    abi: str
+    alias: str
+    known_gap: bool
+    gap_reason: str
+    build_outcome: str
+    expected_format: str
+    detected_format: str
+    format_ok: bool
+    status: str
+
+
+@dataclass(frozen=True)
+class Summary:
+    """Rendered Markdown grid plus the process exit code it implies."""
+
+    markdown: str
+    exit_code: int
+
+
+# target_os -> TargetSpec rows.
 #
 # The Windows row is deliberately the full `{x64, arm} x {msvc, gnu}` grid. The
 # arm GNU-family triple is `-gnullvm`: there is no plain `aarch64-pc-windows-gnu`.
-TARGETS: dict[str, tuple[tuple[str, str, str, str, str, str], ...]] = {
+TARGETS: dict[str, tuple[TargetSpec, ...]] = {
     "windows": (
-        ("x86_64-pc-windows-msvc", "win-x64", "x64", "msvc", ".exe", "pe"),
-        ("aarch64-pc-windows-msvc", "win-arm64", "arm64", "msvc", ".exe", "pe"),
-        ("x86_64-pc-windows-gnu", "win-x64-gnu", "x64", "gnu", ".exe", "pe"),
-        (
+        TargetSpec(
+            "windows", "x86_64-pc-windows-msvc", "win-x64", "x64", "msvc", ".exe", "pe"
+        ),
+        TargetSpec(
+            "windows",
+            "aarch64-pc-windows-msvc",
+            "win-arm64",
+            "arm64",
+            "msvc",
+            ".exe",
+            "pe",
+        ),
+        TargetSpec(
+            "windows",
+            "x86_64-pc-windows-gnu",
+            "win-x64-gnu",
+            "x64",
+            "gnu",
+            ".exe",
+            "pe",
+        ),
+        TargetSpec(
+            "windows",
             "aarch64-pc-windows-gnullvm",
             "win-arm64-gnullvm",
             "arm64",
@@ -84,12 +169,24 @@ TARGETS: dict[str, tuple[tuple[str, str, str, str, str, str], ...]] = {
         ),
     ),
     "macos": (
-        ("x86_64-apple-darwin", "mac-x64", "x64", "", "", "macho"),
-        ("aarch64-apple-darwin", "mac-arm64", "arm64", "", "", "macho"),
+        TargetSpec("macos", "x86_64-apple-darwin", "mac-x64", "x64", "", "", "macho"),
+        TargetSpec(
+            "macos", "aarch64-apple-darwin", "mac-arm64", "arm64", "", "", "macho"
+        ),
     ),
     "linux": (
-        ("x86_64-unknown-linux-gnu", "linux-x64", "x64", "gnu", "", "elf"),
-        ("aarch64-unknown-linux-gnu", "linux-arm64", "arm64", "gnu", "", "elf"),
+        TargetSpec(
+            "linux", "x86_64-unknown-linux-gnu", "linux-x64", "x64", "gnu", "", "elf"
+        ),
+        TargetSpec(
+            "linux",
+            "aarch64-unknown-linux-gnu",
+            "linux-arm64",
+            "arm64",
+            "gnu",
+            "",
+            "elf",
+        ),
     ),
 }
 
@@ -114,17 +211,17 @@ GNULLVM_GAP = (
 )
 
 
-def target_spec(target: str) -> tuple[str, str, str, str, str, str]:
-    """Return `(target_os, alias, arch, abi, exe_suffix, expected_format)`.
+def target_spec(target: str) -> TargetSpec:
+    """Return the `TargetSpec` for the *target* triple.
 
     Raises `KeyError` naming the triple when it is not one of the sweep's
     targets, so a typo in a workflow argument fails loudly rather than
     classifying an unknown binary as a silent pass.
     """
-    for target_os, specs in TARGETS.items():
-        for triple, alias, arch, abi, suffix, fmt in specs:
-            if triple == target:
-                return target_os, alias, arch, abi, suffix, fmt
+    for specs in TARGETS.values():
+        for spec in specs:
+            if spec.triple == target:
+                return spec
     raise KeyError(f"unknown target triple: {target}")
 
 
@@ -134,10 +231,10 @@ def known_gap(host_os: str, target: str) -> str:
     win-gnu is only a gap from a non-Windows host — the blessed Windows-hosted
     path works — but `gnullvm` is unsupported from every host.
     """
-    target_os, _alias, _arch, abi, _suffix, _fmt = target_spec(target)
-    if abi == "gnullvm":
+    spec = target_spec(target)
+    if spec.abi == "gnullvm":
         return GNULLVM_GAP
-    if abi == "gnu" and target_os == "windows" and host_os != "windows":
+    if spec.abi == "gnu" and spec.target_os == "windows" and host_os != "windows":
         return GNU_FROM_NON_WINDOWS_GAP
     return ""
 
@@ -154,32 +251,32 @@ def _host_arches(host_arch: str) -> tuple[str, ...]:
     )
 
 
-def build_cells(host_arch: str, include_known_gaps: bool) -> list[dict[str, str]]:
+def build_cells(host_arch: str, include_known_gaps: bool) -> list[MatrixCell]:
     """Expand the dispatch inputs into the list of matrix cells.
 
-    Each cell is a flat `dict[str, str]` because a GitHub Actions matrix
+    Each cell is a flat string-only record because a GitHub Actions matrix
     `include` entry carries string values only. `verify-binary` re-derives the
     format/gap facts from `(host_os, target)` rather than trusting fields
     threaded through the matrix, so the tables here stay the single source.
     """
-    cells: list[dict[str, str]] = []
+    cells: list[MatrixCell] = []
     for host_os in HOST_OSES:
         for arch in _host_arches(host_arch):
-            runner = RUNNERS[(host_os, arch)]
+            runner = RUNNERS[HostKey(host_os, arch)]
             for target_os in CROSS_TARGET_OSES[host_os]:
-                for triple, alias, _arch, _abi, suffix, _fmt in TARGETS[target_os]:
-                    if known_gap(host_os, triple) and not include_known_gaps:
+                for spec in TARGETS[target_os]:
+                    if known_gap(host_os, spec.triple) and not include_known_gaps:
                         continue
                     cells.append(
-                        {
-                            "host_os": host_os,
-                            "host_arch": arch,
-                            "runner": runner,
-                            "target": triple,
-                            "alias": alias,
-                            "exe_suffix": suffix,
-                            "name": f"{host_os}-{arch} -> {alias}",
-                        }
+                        MatrixCell(
+                            host_os=host_os,
+                            host_arch=arch,
+                            runner=runner,
+                            target=spec.triple,
+                            alias=spec.alias,
+                            exe_suffix=spec.exe_suffix,
+                            name=f"{host_os}-{arch} -> {spec.alias}",
+                        )
                     )
     return cells
 
@@ -199,7 +296,7 @@ def evaluate_cell(
     target: str,
     binary: Path | None,
     build_outcome: str,
-) -> dict[str, object]:
+) -> CellResult:
     """Classify one cell's outcome into a result row.
 
     `build_outcome` is the GitHub `steps.<id>.outcome` of the build step
@@ -208,7 +305,8 @@ def evaluate_cell(
     host-target fallthrough is exactly the gap this sweep hunts, and it shows
     up as the wrong format rather than a missing file.
     """
-    target_os, alias, target_arch, abi, _suffix, expected = target_spec(target)
+    spec = target_spec(target)
+    expected = spec.expected_format
     gap = known_gap(host_os, target)
 
     detected: str | None = None
@@ -222,23 +320,23 @@ def evaluate_cell(
     else:
         status = "pass" if ok else "fail"
 
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "host_os": host_os,
-        "host_arch": host_arch,
-        "target": target,
-        "target_os": target_os,
-        "target_arch": target_arch,
-        "abi": abi,
-        "alias": alias,
-        "known_gap": bool(gap),
-        "gap_reason": gap,
-        "build_outcome": build_outcome,
-        "expected_format": expected,
-        "detected_format": detected or "",
-        "format_ok": format_ok,
-        "status": status,
-    }
+    return CellResult(
+        schema_version=SCHEMA_VERSION,
+        host_os=host_os,
+        host_arch=host_arch,
+        target=target,
+        target_os=spec.target_os,
+        target_arch=spec.arch,
+        abi=spec.abi,
+        alias=spec.alias,
+        known_gap=bool(gap),
+        gap_reason=gap,
+        build_outcome=build_outcome,
+        expected_format=expected,
+        detected_format=detected or "",
+        format_ok=format_ok,
+        status=status,
+    )
 
 
 _STATUS_ICON = {
@@ -249,7 +347,7 @@ _STATUS_ICON = {
 }
 
 
-def render_summary(results: list[dict[str, object]]) -> tuple[str, int]:
+def render_summary(results: list[CellResult]) -> Summary:
     """Render the result rows as a Markdown grid and compute the exit code.
 
     Exit code is 1 when any non-gap cell failed (a real regression) and 0
@@ -259,7 +357,7 @@ def render_summary(results: list[dict[str, object]]) -> tuple[str, int]:
     """
     rows = sorted(
         results,
-        key=lambda r: (str(r["host_os"]), str(r["host_arch"]), str(r["target"])),
+        key=lambda r: (r.host_os, r.host_arch, r.target),
     )
     lines = [
         "## Cross-compilation stress matrix",
@@ -270,15 +368,15 @@ def render_summary(results: list[dict[str, object]]) -> tuple[str, int]:
     real_failures = 0
     resolved_gaps = 0
     for row in rows:
-        status = str(row["status"])
+        status = row.status
         if status == "fail":
             real_failures += 1
         if status == "known-gap-pass":
             resolved_gaps += 1
         icon = _STATUS_ICON.get(status, "?")
-        detail = str(row["gap_reason"]) if row["known_gap"] else _detail(row)
-        host = f"{row['host_os']}-{row['host_arch']}"
-        lines.append(f"| {host} | {row['target']} | {icon} {status} | {detail} |")
+        detail = row.gap_reason if row.known_gap else _detail(row)
+        host = f"{row.host_os}-{row.host_arch}"
+        lines.append(f"| {host} | {row.target} | {icon} {status} | {detail} |")
 
     lines += [
         "",
@@ -290,28 +388,46 @@ def render_summary(results: list[dict[str, object]]) -> tuple[str, int]:
             "> A known gap now builds. Update the classification in "
             "`.github/scripts/cross_stress_matrix.py` and close the tracking issue."
         )
-    return "\n".join(lines) + "\n", 1 if real_failures else 0
+    return Summary("\n".join(lines) + "\n", 1 if real_failures else 0)
 
 
-def _detail(row: dict[str, object]) -> str:
+def _detail(row: CellResult) -> str:
     """One-line explanation of a non-gap row's outcome for the grid."""
-    if row["status"] == "pass":
-        return f"built {row['detected_format']}"
-    if row["build_outcome"] != "success":
+    if row.status == "pass":
+        return f"built {row.detected_format}"
+    if row.build_outcome != "success":
         return "build step failed"
     return (
-        f"format mismatch: expected {row['expected_format']}, "
-        f"got {row['detected_format'] or 'no binary'}"
+        f"format mismatch: expected {row.expected_format}, "
+        f"got {row.detected_format or 'no binary'}"
     )
 
 
-def load_results(results_dir: Path) -> list[dict[str, object]]:
+def load_results(results_dir: Path) -> list[CellResult]:
     """Load every `*.json` result row beneath *results_dir*."""
-    rows: list[dict[str, object]] = []
+    rows: list[CellResult] = []
     for path in sorted(results_dir.rglob("*.json")):
         payload = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(payload, dict):
-            rows.append(payload)
+            rows.append(
+                CellResult(
+                    schema_version=payload["schema_version"],
+                    host_os=payload["host_os"],
+                    host_arch=payload["host_arch"],
+                    target=payload["target"],
+                    target_os=payload["target_os"],
+                    target_arch=payload["target_arch"],
+                    abi=payload["abi"],
+                    alias=payload["alias"],
+                    known_gap=payload["known_gap"],
+                    gap_reason=payload["gap_reason"],
+                    build_outcome=payload["build_outcome"],
+                    expected_format=payload["expected_format"],
+                    detected_format=payload["detected_format"],
+                    format_ok=payload["format_ok"],
+                    status=payload["status"],
+                )
+            )
     return rows
 
 
@@ -339,7 +455,9 @@ def cmd_matrix(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"cross_stress_matrix: {exc}", file=sys.stderr)
         return 1
-    payload = json.dumps({"include": cells}, separators=(",", ":"))
+    payload = json.dumps(
+        {"include": [asdict(cell) for cell in cells]}, separators=(",", ":")
+    )
     print(f"matrix={payload}")
     _append_output(args.output, f"matrix={payload}")
     return 0
@@ -362,8 +480,8 @@ def cmd_verify_binary(args: argparse.Namespace) -> int:
     except KeyError as exc:
         print(f"cross_stress_matrix: {exc}", file=sys.stderr)
         return 2
-    payload = json.dumps(row, separators=(",", ":"))
-    print(f"{row['host_os']}-{row['host_arch']} {row['target']}: {row['status']}")
+    payload = json.dumps(asdict(row), separators=(",", ":"))
+    print(f"{row.host_os}-{row.host_arch} {row.target}: {row.status}")
     if args.output:
         Path(args.output).write_text(payload + "\n", encoding="utf-8")
     return 0
@@ -375,12 +493,12 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     if not results:
         print("cross_stress_matrix: no result rows found", file=sys.stderr)
         return 1
-    summary, code = render_summary(results)
-    print(summary)
+    summary = render_summary(results)
+    print(summary.markdown)
     if args.output:
         with open(args.output, "a", encoding="utf-8") as handle:
-            handle.write(summary)
-    return code
+            handle.write(summary.markdown)
+    return summary.exit_code
 
 
 def build_parser() -> argparse.ArgumentParser:

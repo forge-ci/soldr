@@ -33,37 +33,45 @@ def gate():
     return load_script_module(SCRIPT, "check_dependency_inventory")
 
 
-def test_an_unlisted_dependency_is_reported(gate) -> None:
-    added, removed = gate.diff(
-        {"soldr-core": ["serde", "regex"]},
-        {"soldr-core": ["serde"]},
+def _surface(gate, crates: dict) -> tuple:
+    return tuple(
+        gate.CrateDependencies(crate, tuple(deps)) for crate, deps in crates.items()
     )
-    assert added == [("soldr-core", "regex")]
-    assert removed == []
+
+
+def _edge(gate, crate: str, dep: str) -> tuple:
+    return (gate.DependencyEdge(crate, dep),)
+
+
+def test_an_unlisted_dependency_is_reported(gate) -> None:
+    changes = gate.diff(
+        _surface(gate, {"soldr-core": ["serde", "regex"]}),
+        _surface(gate, {"soldr-core": ["serde"]}),
+    )
+    assert changes.added == _edge(gate, "soldr-core", "regex")
+    assert changes.removed == ()
 
 
 def test_a_stale_entry_is_reported(gate) -> None:
     """The list shrinks with the surface, or it becomes folklore."""
-    added, removed = gate.diff(
-        {"soldr-core": ["serde"]},
-        {"soldr-core": ["serde", "regex"]},
+    changes = gate.diff(
+        _surface(gate, {"soldr-core": ["serde"]}),
+        _surface(gate, {"soldr-core": ["serde", "regex"]}),
     )
-    assert added == []
-    assert removed == [("soldr-core", "regex")]
+    assert changes.added == ()
+    assert changes.removed == _edge(gate, "soldr-core", "regex")
 
 
 def test_a_matching_surface_is_silent(gate) -> None:
-    added, removed = gate.diff(
-        {"soldr-core": ["serde"], "soldr-cli": []},
-        {"soldr-core": ["serde"], "soldr-cli": []},
-    )
-    assert (added, removed) == ([], [])
+    surface = _surface(gate, {"soldr-core": ["serde"], "soldr-cli": []})
+    changes = gate.diff(surface, surface)
+    assert (changes.added, changes.removed) == ((), ())
 
 
 def test_a_new_crate_is_not_invisible(gate) -> None:
     """A crate absent from the inventory must surface its whole edge set."""
-    added, _ = gate.diff({"soldr-new": ["tokio"]}, {})
-    assert added == [("soldr-new", "tokio")]
+    changes = gate.diff(_surface(gate, {"soldr-new": ["tokio"]}), ())
+    assert changes.added == _edge(gate, "soldr-new", "tokio")
 
 
 def test_workspace_internal_edges_are_not_third_party(gate, tmp_path) -> None:
@@ -107,8 +115,8 @@ def test_dev_dependencies_are_out_of_scope(gate, tmp_path) -> None:
 
 def test_the_checked_in_inventory_matches_the_workspace(gate) -> None:
     """The repo's own state must be clean, or the gate is already noise."""
-    added, removed = gate.diff(gate.observed_surface(), gate.load_inventory())
-    assert (added, removed) == ([], []), (
+    changes = gate.diff(gate.observed_surface(), gate.load_inventory())
+    assert (changes.added, changes.removed) == ((), ()), (
         "run `python .github/scripts/check_dependency_inventory.py --write` "
         "and commit ci/dependency-inventory.json"
     )
@@ -117,6 +125,6 @@ def test_the_checked_in_inventory_matches_the_workspace(gate) -> None:
 def test_the_inventory_records_the_measured_surface(gate) -> None:
     """A sanity floor: soldr#2752 measured 40 distinct third-party crates."""
     surface = gate.observed_surface()
-    distinct = {dep for deps in surface.values() for dep in deps}
-    assert len(surface) >= 6, surface.keys()
+    distinct = {dep for entry in surface for dep in entry.dependencies}
+    assert len(surface) >= 6, [entry.crate for entry in surface]
     assert len(distinct) >= 30, sorted(distinct)

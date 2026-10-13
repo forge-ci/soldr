@@ -50,7 +50,9 @@ def test_only_files_touched_after_the_marker_count(tmp_path: Path) -> None:
 
     assert (walk.total_files, walk.total_bytes) == (3, 450)
     assert (walk.touched_files, walk.touched_bytes) == (1, 100)
-    assert walk.by_version == {"v1.13.21": [300, 0], "v1.13.22": [150, 100]}
+    assert {
+        stats.name: (stats.total_bytes, stats.touched_bytes) for stats in walk.versions
+    } == {"v1.13.21": (300, 0), "v1.13.22": (150, 100)}
 
 
 def test_a_hardlinked_inode_inside_the_store_counts_once(tmp_path: Path) -> None:
@@ -331,7 +333,7 @@ def test_prune_removes_only_version_trees_this_run_never_touched(
 
     pruned = measure.prune_dead_version_dirs(measure.walk_store(store, since))
 
-    assert pruned == [("v1.13.21", 300)]
+    assert pruned == [measure.PrunedTree("v1.13.21", 300)]
     assert not (store / "embedded-v1" / "v1.13.21").exists()
     assert (store / "embedded-v1" / "v1.13.22" / "artifacts" / "cold").exists()
 

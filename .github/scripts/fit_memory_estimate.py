@@ -53,8 +53,9 @@ import argparse
 import hashlib
 import json
 import sys
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterable, Iterator
 
 JOURNAL_NAME = "compile_journal.jsonl"
 
@@ -68,18 +69,122 @@ def args_digest(args: Iterable[str]) -> str:
     return hasher.hexdigest()
 
 
-def _read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
+@dataclass(frozen=True)
+class JournalRow:
+    """The fields of one zccache journal row that the join needs."""
+
+    args: tuple[str, ...]
+    child_peak_rss_bytes: object
+    tree_peak_rss_bytes: object
+
+
+@dataclass(frozen=True)
+class EstimateRow:
+    """One admission-estimate row that carries a usable estimate and join key."""
+
+    key: str
+    estimate_bytes: int
+    schema_version: int
+    history_tree_peak_bytes: object
+    crate_name: object
+    is_test: object
+    lto: object
+    exclusive: object
+
+
+@dataclass(frozen=True)
+class PeakRecord:
+    """Largest measured peaks for one join key; None when never measured."""
+
+    key: str
+    child_peak: int | None
+    tree_peak: int | None
+
+
+@dataclass(frozen=True)
+class PeakPair:
+    crate_name: object
+    is_test: object
+    lto: object
+    exclusive: object
+    estimate_bytes: int
+    measured_bytes: int
+    measured_over_estimate: float | None
+
+
+@dataclass(frozen=True)
+class HistoryPair:
+    history: int
+    measured: int
+
+
+@dataclass(frozen=True)
+class HistoryReport:
+    joined: int
+    without_history: int
+    under_predicted: int
+    max_measured_over_history: float | None
+
+
+@dataclass(frozen=True)
+class Report:
+    estimates: int
+    joined: int
+    unmeasured: int
+    unjoined: int
+    measured_source: str
+    under_predicted: int
+    max_measured_over_estimate: float | None
+    worst_under_predictions: tuple[PeakPair, ...]
+    history: HistoryReport
+
+
+def _read_jsonl(path: Path) -> Iterator[object]:
+    """Every JSON value on a line of `path`; unparseable lines are skipped."""
     with path.open(encoding="utf-8", errors="replace") as handle:
         for line in handle:
             line = line.strip()
             if not line:
                 continue
             try:
-                row = json.loads(line)
+                yield json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(row, dict):
-                yield row
+
+
+def _read_journal(path: Path) -> Iterator[JournalRow]:
+    for row in _read_jsonl(path):
+        if not isinstance(row, dict):
+            continue
+        args = row.get("args")
+        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            continue
+        yield JournalRow(
+            args=tuple(args),
+            child_peak_rss_bytes=row.get("child_peak_rss_bytes"),
+            tree_peak_rss_bytes=row.get("tree_peak_rss_bytes"),
+        )
+
+
+def _read_estimates(path: Path) -> Iterator[EstimateRow]:
+    for row in _read_jsonl(path):
+        if not isinstance(row, dict):
+            continue
+        estimate = row.get("estimate_bytes")
+        key = row.get("unit_key") or row.get("args_digest")
+        if not isinstance(estimate, int) or not isinstance(key, str):
+            continue
+        schema_version = row.get("schema_version", 1)
+        yield EstimateRow(
+            key=key,
+            estimate_bytes=estimate,
+            schema_version=schema_version if isinstance(schema_version, int) else 1,
+            history_tree_peak_bytes=row.get("history_tree_peak_bytes"),
+            crate_name=row.get("crate_name"),
+            is_test=row.get("is_test"),
+            lto=row.get("lto"),
+            exclusive=row.get("exclusive"),
+        )
 
 
 def unit_key(args: list[str]) -> str | None:
@@ -129,133 +234,128 @@ def _merge_peak(peaks: dict[str, int | None], key: str, peak: object) -> None:
         peaks.setdefault(key, None)
 
 
-def _journal_peaks(
-    journals: Iterable[Path],
-) -> tuple[dict[str, int | None], dict[str, int | None]]:
-    """(child peaks, tree peaks) per join key; None when never measured.
+def _journal_peaks(journals: Iterable[Path]) -> tuple[PeakRecord, ...]:
+    """Child and tree peaks per join key; None when never measured.
 
     Each journal row is indexed under both its `args_digest` and, when cargo
     supplied one, its `unit_key`, so every estimate schema joins from the same
-    maps.
+    records.
     """
     child: dict[str, int | None] = {}
     tree: dict[str, int | None] = {}
     for journal in journals:
-        for row in _read_jsonl(journal):
-            args = row.get("args")
-            if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
-                continue
+        for row in _read_journal(journal):
+            args = list(row.args)
             keys = [args_digest(args)]
             key = unit_key(args)
             if key is not None:
                 keys.append(key)
             for join_key in keys:
-                _merge_peak(child, join_key, row.get("child_peak_rss_bytes"))
-                _merge_peak(tree, join_key, row.get("tree_peak_rss_bytes"))
-    return child, tree
+                _merge_peak(child, join_key, row.child_peak_rss_bytes)
+                _merge_peak(tree, join_key, row.tree_peak_rss_bytes)
+    return tuple(PeakRecord(key, peak, tree[key]) for key, peak in child.items())
 
 
-def measured_peaks(journals: Iterable[Path]) -> dict[str, int | None]:
-    """Largest measured compiler-child peak per join key (schema-1/2 view)."""
-    return _journal_peaks(journals)[0]
+def measured_peaks(journals: Iterable[Path]) -> tuple[PeakRecord, ...]:
+    """Largest measured peaks per join key."""
+    return _journal_peaks(journals)
 
 
 def analyze(
     estimate_logs: Iterable[Path], journal_paths: Iterable[Path], top: int = 10
-) -> dict[str, Any]:
+) -> Report:
     """Join estimates to measured peaks and summarise prediction error."""
-    child_peaks, tree_peaks = _journal_peaks(discover_journals(journal_paths))
+    peaks = {
+        record.key: record
+        for record in _journal_peaks(discover_journals(journal_paths))
+    }
     estimates = 0
     joined = 0
     unmeasured = 0
     unjoined = 0
     used_tree = False
-    pairs: list[dict[str, Any]] = []
-    history_pairs: list[tuple[int, int]] = []
+    pairs: list[PeakPair] = []
+    history_pairs: list[HistoryPair] = []
     without_history = 0
     for log in estimate_logs:
-        for row in _read_jsonl(log):
-            estimate = row.get("estimate_bytes")
-            key = row.get("unit_key") or row.get("args_digest")
-            if not isinstance(estimate, int) or not isinstance(key, str):
-                continue
+        for row in _read_estimates(log):
+            estimate = row.estimate_bytes
             estimates += 1
-            if key not in child_peaks:
+            record = peaks.get(row.key)
+            if record is None:
                 unjoined += 1
                 continue
-            tree = tree_peaks.get(key)
-            measured = tree if tree is not None else child_peaks[key]
+            tree = record.tree_peak
+            measured = tree if tree is not None else record.child_peak
             if measured is None:
                 unmeasured += 1
                 continue
             used_tree = used_tree or tree is not None
             joined += 1
-            if row.get("schema_version", 1) >= 3:
-                history = row.get("history_tree_peak_bytes")
+            if row.schema_version >= 3:
+                history = row.history_tree_peak_bytes
                 if isinstance(history, int) and history > 0:
-                    history_pairs.append((history, measured))
+                    history_pairs.append(HistoryPair(history, measured))
                 else:
                     without_history += 1
             pairs.append(
-                {
-                    "crate_name": row.get("crate_name"),
-                    "is_test": row.get("is_test"),
-                    "lto": row.get("lto"),
-                    "exclusive": row.get("exclusive"),
-                    "estimate_bytes": estimate,
-                    "measured_bytes": measured,
-                    "measured_over_estimate": measured / estimate if estimate else None,
-                }
+                PeakPair(
+                    crate_name=row.crate_name,
+                    is_test=row.is_test,
+                    lto=row.lto,
+                    exclusive=row.exclusive,
+                    estimate_bytes=estimate,
+                    measured_bytes=measured,
+                    measured_over_estimate=measured / estimate if estimate else None,
+                )
             )
 
-    under = [p for p in pairs if p["measured_bytes"] > p["estimate_bytes"]]
-    under.sort(key=lambda p: p["measured_over_estimate"] or 0.0, reverse=True)
-    ratios = [p["measured_over_estimate"] for p in pairs if p["measured_over_estimate"]]
-    history_ratios = [measured / history for history, measured in history_pairs]
-    return {
-        "estimates": estimates,
-        "joined": joined,
-        "unmeasured": unmeasured,
-        "unjoined": unjoined,
-        "measured_source": "tree" if used_tree else "child",
-        "under_predicted": len(under),
-        "max_measured_over_estimate": max(ratios) if ratios else None,
-        "worst_under_predictions": under[:top],
-        "history": {
-            "joined": len(history_pairs),
-            "without_history": without_history,
-            "under_predicted": sum(
-                1 for history, measured in history_pairs if measured > history
+    under = [p for p in pairs if p.measured_bytes > p.estimate_bytes]
+    under.sort(key=lambda p: p.measured_over_estimate or 0.0, reverse=True)
+    ratios = [p.measured_over_estimate for p in pairs if p.measured_over_estimate]
+    history_ratios = [pair.measured / pair.history for pair in history_pairs]
+    return Report(
+        estimates=estimates,
+        joined=joined,
+        unmeasured=unmeasured,
+        unjoined=unjoined,
+        measured_source="tree" if used_tree else "child",
+        under_predicted=len(under),
+        max_measured_over_estimate=max(ratios) if ratios else None,
+        worst_under_predictions=tuple(under[:top]),
+        history=HistoryReport(
+            joined=len(history_pairs),
+            without_history=without_history,
+            under_predicted=sum(
+                1 for pair in history_pairs if pair.measured > pair.history
             ),
-            "max_measured_over_history": (
-                max(history_ratios) if history_ratios else None
-            ),
-        },
-    }
-
-
-def _format_text(report: dict[str, Any]) -> str:
-    lines = [
-        f"estimates: {report['estimates']}",
-        f"joined (measured peak): {report['joined']}",
-        f"unmeasured (no peak on any matching journal row): {report['unmeasured']}",
-        f"unjoined (no matching journal row): {report['unjoined']}",
-        f"measured source: {report['measured_source']}",
-        f"under-predicted: {report['under_predicted']}",
-        f"max measured/estimate: {report['max_measured_over_estimate']}",
-    ]
-    history = report["history"]
-    lines.append(
-        f"history: joined {history['joined']}, first sightings "
-        f"{history['without_history']}, under-predicted "
-        f"{history['under_predicted']}, max measured/history "
-        f"{history['max_measured_over_history']}"
+            max_measured_over_history=max(history_ratios) if history_ratios else None,
+        ),
     )
-    for pair in report["worst_under_predictions"]:
+
+
+def _format_text(report: Report) -> str:
+    lines = [
+        f"estimates: {report.estimates}",
+        f"joined (measured peak): {report.joined}",
+        f"unmeasured (no peak on any matching journal row): {report.unmeasured}",
+        f"unjoined (no matching journal row): {report.unjoined}",
+        f"measured source: {report.measured_source}",
+        f"under-predicted: {report.under_predicted}",
+        f"max measured/estimate: {report.max_measured_over_estimate}",
+    ]
+    history = report.history
+    lines.append(
+        f"history: joined {history.joined}, first sightings "
+        f"{history.without_history}, under-predicted "
+        f"{history.under_predicted}, max measured/history "
+        f"{history.max_measured_over_history}"
+    )
+    for pair in report.worst_under_predictions:
         lines.append(
-            f"  {pair['crate_name']}: measured {pair['measured_bytes']} > "
-            f"estimate {pair['estimate_bytes']} "
-            f"(x{pair['measured_over_estimate']:.2f})"
+            f"  {pair.crate_name}: measured {pair.measured_bytes} > "
+            f"estimate {pair.estimate_bytes} "
+            f"(x{pair.measured_over_estimate:.2f})"
         )
     return "\n".join(lines)
 
@@ -281,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     report = analyze(args.estimates, args.journal, top=args.top)
     if args.json:
-        print(json.dumps(report, indent=2))
+        print(json.dumps(asdict(report), indent=2))
     else:
         print(_format_text(report))
     return 0

@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import tempfile
 import unittest
@@ -27,9 +28,9 @@ class TargetRunSummaryTests(unittest.TestCase):
 
     def test_setup_summary_exists_before_nextest_runs(self) -> None:
         summary = target_run_summary.build_summary("aarch64-apple-darwin")
-        self.assertEqual(summary["phase"], "setup")
-        self.assertIsNone(summary["discovered"])
-        self.assertIsNone(summary["executed"])
+        self.assertEqual(summary.phase, "setup")
+        self.assertIsNone(summary.discovered)
+        self.assertIsNone(summary.executed)
 
     def test_list_and_junit_counts_are_combined(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:
@@ -64,7 +65,7 @@ class TargetRunSummaryTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            summary,
+            dataclasses.asdict(summary),
             {
                 "schema_version": 1,
                 "target": "x86_64-unknown-linux-musl",
@@ -127,9 +128,9 @@ class TargetRunSummaryTests(unittest.TestCase):
                 "aarch64-apple-darwin", test_list, junit
             )
 
-        self.assertEqual(summary["discovered"], 2)
-        self.assertEqual(summary["ignored"], 1)
-        self.assertEqual(summary["executed"], 1)
+        self.assertEqual(summary.discovered, 2)
+        self.assertEqual(summary.ignored, 1)
+        self.assertEqual(summary.executed, 1)
 
     def test_junit_suite_children_are_aggregated(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:
@@ -143,7 +144,8 @@ class TargetRunSummaryTests(unittest.TestCase):
             )
             counts = target_run_summary.read_junit(junit)
         self.assertEqual(
-            counts, {"executed": 5, "passed": 3, "failed": 2, "skipped": 0}
+            counts,
+            target_run_summary.JunitCounts(executed=5, passed=3, failed=2, skipped=0),
         )
 
     def test_completed_summary_requires_junit_when_requested(self) -> None:
@@ -225,10 +227,10 @@ class TargetRunSummaryTests(unittest.TestCase):
             summary = target_run_summary.build_summary(
                 "x86_64-pc-windows-msvc", test_list, junit
             )
-        self.assertEqual(summary["phase"], "completed")
-        self.assertEqual(summary["discovered"], 8)
-        self.assertEqual(summary["executed"], 4)
-        self.assertEqual(summary["failed"], 2)
+        self.assertEqual(summary.phase, "completed")
+        self.assertEqual(summary.discovered, 8)
+        self.assertEqual(summary.executed, 4)
+        self.assertEqual(summary.failed, 2)
 
     def test_over_execution_still_raises_even_with_failures(self) -> None:
         """An early stop can only ever run *fewer* tests.
@@ -261,8 +263,8 @@ class TargetRunSummaryTests(unittest.TestCase):
                 junit,
                 partition="hash:1/3",
             )
-        self.assertEqual(summary["partition"], "hash:1/3")
-        self.assertEqual(summary["executed"], 3)
+        self.assertEqual(summary.partition, "hash:1/3")
+        self.assertEqual(summary.executed, 3)
 
     def test_boolean_discovered_count_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:

@@ -27,6 +27,7 @@ import json
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -43,25 +44,48 @@ GROUPS: dict[str, list[str]] = {
 COLLECTED_BINARIES = ("soldr", "soldr-daemon")
 
 
-def load_canonical_aliases(path: Path = CANONICAL_TARGETS) -> dict[str, str]:
+@dataclass(frozen=True)
+class CanonicalTarget:
+    """A friendly target alias and the triple it resolves to."""
+
+    alias: str
+    triple: str
+
+
+@dataclass(frozen=True)
+class ArtifactMove:
+    """Where one built executable is collected from and to."""
+
+    source: Path
+    destination: Path
+
+
+def load_canonical_aliases(
+    path: Path = CANONICAL_TARGETS,
+) -> tuple[CanonicalTarget, ...]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    return {entry["alias"]: entry["triple"] for entry in data["targets"]}
+    return tuple(
+        CanonicalTarget(entry["alias"], entry["triple"]) for entry in data["targets"]
+    )
 
 
-def resolve_group(group: str, aliases: dict[str, str]) -> list[tuple[str, str]]:
-    """Expand a group name into ordered (alias, triple) pairs."""
+def resolve_group(
+    group: str, aliases: tuple[CanonicalTarget, ...]
+) -> tuple[CanonicalTarget, ...]:
+    """Expand a group name into ordered canonical targets."""
     if group not in GROUPS:
         known = ", ".join(sorted(GROUPS))
         raise KeyError(f"unknown group {group!r}; known groups: {known}")
+    triples = {target.alias: target.triple for target in aliases}
     plan = []
     for alias in GROUPS[group]:
-        if alias not in aliases:
+        if alias not in triples:
             raise KeyError(
                 f"group {group!r} names alias {alias!r} not present in "
                 f"{CANONICAL_TARGETS.name}"
             )
-        plan.append((alias, aliases[alias]))
-    return plan
+        plan.append(CanonicalTarget(alias, triples[alias]))
+    return tuple(plan)
 
 
 def build_command(alias: str, passthrough: list[str]) -> list[str]:
@@ -70,21 +94,21 @@ def build_command(alias: str, passthrough: list[str]) -> list[str]:
 
 def artifact_moves(
     group: str, alias: str, triple: str, out_dir: Path
-) -> list[tuple[Path, Path]]:
-    """(source, destination) pairs for a target's built executables."""
+) -> list[ArtifactMove]:
+    """Source/destination moves for a target's built executables."""
     suffix = ".exe" if "windows" in triple else ""
     release_dir = Path("target") / triple / "release"
     dest_dir = out_dir / group / alias
     return [
-        (release_dir / f"{name}{suffix}", dest_dir / f"{name}{suffix}")
+        ArtifactMove(release_dir / f"{name}{suffix}", dest_dir / f"{name}{suffix}")
         for name in COLLECTED_BINARIES
     ]
 
 
-def windows_host_warning(plan: list[tuple[str, str]]) -> str | None:
+def windows_host_warning(plan: tuple[CanonicalTarget, ...]) -> str | None:
     if sys.platform != "win32":
         return None
-    blocked = [alias for alias, triple in plan if "linux" in triple]
+    blocked = [target.alias for target in plan if "linux" in target.triple]
     if not blocked:
         return None
     return (
@@ -96,16 +120,16 @@ def windows_host_warning(plan: list[tuple[str, str]]) -> str | None:
 
 def print_plan(
     group: str,
-    plan: list[tuple[str, str]],
+    plan: tuple[CanonicalTarget, ...],
     out_dir: Path,
     passthrough: list[str],
 ) -> None:
     print(f"group {group}: {len(plan)} targets")
-    for alias, triple in plan:
-        print(f"  {alias} -> {triple}")
-        print(f"    $ {' '.join(build_command(alias, passthrough))}")
-        for src, dest in artifact_moves(group, alias, triple, out_dir):
-            print(f"    {src} -> {dest}")
+    for target in plan:
+        print(f"  {target.alias} -> {target.triple}")
+        print(f"    $ {' '.join(build_command(target.alias, passthrough))}")
+        for move in artifact_moves(group, target.alias, target.triple, out_dir):
+            print(f"    {move.source} -> {move.destination}")
 
 
 def run_target(
@@ -122,7 +146,8 @@ def run_target(
         print(f"error: {alias} build exited {result.returncode}", file=sys.stderr)
         return False
     missing = []
-    for src, dest in artifact_moves(group, alias, triple, out_dir):
+    for move in artifact_moves(group, alias, triple, out_dir):
+        src, dest = move.source, move.destination
         src_abs = REPO_ROOT / src
         if not src_abs.is_file():
             missing.append(str(src))
@@ -179,10 +204,12 @@ def main(argv: list[str] | None = None) -> int:
         print(warning, file=sys.stderr)
 
     failures = []
-    for alias, triple in plan:
-        if run_target(opts.group, alias, triple, opts.out_dir, passthrough):
+    for target in plan:
+        if run_target(
+            opts.group, target.alias, target.triple, opts.out_dir, passthrough
+        ):
             continue
-        failures.append(alias)
+        failures.append(target.alias)
         if not opts.keep_going:
             break
 

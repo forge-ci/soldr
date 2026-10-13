@@ -43,19 +43,24 @@ MEMINFO = "MemTotal:       16384000 kB\nMemAvailable:    2048000 kB\nSwapTotal: 
 
 def test_events_are_parsed_into_counts() -> None:
     parsed = parse_memory_events("low 0\nhigh 12\nmax 412\noom 3\noom_kill 1\n")
-    assert parsed == {"low": 0, "high": 12, "max": 412, "oom": 3, "oom_kill": 1}
+    assert [(e.name, e.count) for e in parsed] == [
+        ("low", 0),
+        ("high", 12),
+        ("max", 412),
+        ("oom", 3),
+        ("oom_kill", 1),
+    ]
 
 
 def test_unparsable_event_lines_are_skipped_not_raised() -> None:
     # This runs while something else is already failing; a malformed line must
     # not become a second traceback stacked on the first.
-    assert parse_memory_events("oom_kill notanumber\nhigh\n\noom_kill 2\n") == {
-        "oom_kill": 2
-    }
+    parsed = parse_memory_events("oom_kill notanumber\nhigh\n\noom_kill 2\n")
+    assert [(e.name, e.count) for e in parsed] == [("oom_kill", 2)]
 
 
 def test_a_recorded_kill_is_stated_as_a_determination() -> None:
-    verdict = oom_verdict({"oom_kill": 1}, events_readable=True)
+    verdict = oom_verdict(parse_memory_events("oom_kill 1"), events_readable=True)
     assert "IS a memory kill" in verdict
     assert "1 process" in verdict
 
@@ -64,12 +69,12 @@ def test_group_kills_count_toward_the_verdict() -> None:
     # oom_group_kill is how a cgroup with memory.oom.group set reports it; a
     # reader that only looked at oom_kill would call that case "no OOM".
     assert "IS a memory kill" in oom_verdict(
-        {"oom_kill": 0, "oom_group_kill": 1}, events_readable=True
+        parse_memory_events("oom_kill 0\noom_group_kill 1"), events_readable=True
     )
 
 
 def test_zero_kills_rules_memory_out_rather_than_staying_silent() -> None:
-    verdict = oom_verdict({"oom_kill": 0}, events_readable=True)
+    verdict = oom_verdict(parse_memory_events("oom_kill 0"), events_readable=True)
     assert "NOT the memory limit" in verdict
     assert "look elsewhere" in verdict
 
@@ -78,7 +83,7 @@ def test_an_unreadable_events_file_says_unknown_not_no_kill() -> None:
     # The failure mode this guards: reporting "no OOM kill" because the file
     # could not be read would be a false exoneration, which is worse than the
     # hedge it replaces.
-    verdict = oom_verdict({}, events_readable=False)
+    verdict = oom_verdict(parse_memory_events(None), events_readable=False)
     assert "unknown" in verdict
     assert "NOT the memory limit" not in verdict
 

@@ -48,6 +48,7 @@ beside its target and cache trees for postmortem diagnosis.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import shutil
@@ -55,7 +56,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, is_dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -95,14 +96,89 @@ class ProcessCounts:
 
 
 @dataclass(frozen=True)
+class MemoryEvent:
+    """One ``<key> <count>`` line of ``memory.events`` (or a delta of one)."""
+
+    name: str
+    count: int
+
+
+@dataclass(frozen=True)
+class MemoryEvents:
+    """The cgroup ``memory.events`` counters; serialized as ``{name: count}``."""
+
+    entries: tuple[MemoryEvent, ...] = ()
+
+    def get(self, name: str, default: int = 0) -> int:
+        for event in self.entries:
+            if event.name == name:
+                return event.count
+        return default
+
+
+@dataclass(frozen=True)
+class CgroupMount:
+    """A cgroup-v2 mount: where it is visible and which cgroup it is rooted at."""
+
+    mountpoint: Path
+    root: Path
+
+
+@dataclass(frozen=True)
+class Maxima:
+    """Per-invocation maxima over a case's samples."""
+
+    max_memory_current_bytes: int | None
+    max_memory_peak_bytes: int | None
+    max_memory_swap_current_bytes: int | None
+    max_pids_current: int | None
+    max_cargo_processes: int
+    max_compiler_processes: int
+    max_soldr_processes: int
+    max_toolchain_processes: int
+
+
+@dataclass(frozen=True)
 class Snapshot:
     monotonic_seconds: float
     memory_current_bytes: int | None
     memory_peak_bytes: int | None
     memory_swap_current_bytes: int | None
     pids_current: int | None
-    memory_events: dict[str, int]
+    memory_events: MemoryEvents
     processes: ProcessCounts
+
+
+@dataclass(frozen=True)
+class CaseResult:
+    """The evidence recorded for one job-count case."""
+
+    requested_jobs: int | str
+    case_root: str
+    command_log: str
+    returncode: int
+    timed_out: bool
+    wall_time_ms: int
+    start: Snapshot
+    end: Snapshot
+    memory_events_delta: MemoryEvents
+    maxima: Maxima
+    samples: int
+    first_compiler_offset_ms: int | None
+    failure_phase: str
+    enomem_in_log: bool
+
+
+def _json_default(value: object) -> object:
+    """``json.dumps`` hook: records serialize as the dicts the report always had."""
+    if isinstance(value, MemoryEvents):
+        return {event.name: event.count for event in value.entries}
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: getattr(value, field.name)
+            for field in dataclasses.fields(value)
+        }
+    raise TypeError(f"not JSON serializable: {type(value).__name__}")
 
 
 def _read_text(path: Path) -> str | None:
@@ -122,10 +198,10 @@ def _read_int(path: Path) -> int | None:
         return None
 
 
-def _read_memory_events(cgroup_root: Path) -> dict[str, int]:
+def _read_memory_events(cgroup_root: Path) -> MemoryEvents:
     raw = _read_text(cgroup_root / "memory.events")
     if raw is None:
-        return {}
+        return MemoryEvents()
     events: dict[str, int] = {}
     for line in raw.splitlines():
         fields = line.split()
@@ -135,7 +211,7 @@ def _read_memory_events(cgroup_root: Path) -> dict[str, int]:
             events[fields[0]] = int(fields[1])
         except ValueError:
             continue
-    return events
+    return MemoryEvents(tuple(MemoryEvent(name, n) for name, n in events.items()))
 
 
 def _unescape_mountinfo(raw: str) -> str:
@@ -150,8 +226,8 @@ def _unescape_mountinfo(raw: str) -> str:
     return raw
 
 
-def cgroup_v2_mount_from(mountinfo: str) -> tuple[Path, Path] | None:
-    """Return ``(mountpoint, mount-root)`` for the process-visible v2 mount."""
+def cgroup_v2_mount_from(mountinfo: str) -> CgroupMount | None:
+    """Return the mountpoint and mount-root of the process-visible v2 mount."""
     for line in mountinfo.splitlines():
         before, separator, after = line.partition(" - ")
         if not separator or after.split()[:1] != ["cgroup2"]:
@@ -160,8 +236,8 @@ def cgroup_v2_mount_from(mountinfo: str) -> tuple[Path, Path] | None:
         # mountinfo: id parent major:minor root mountpoint options ...
         if len(fields) < 5:
             continue
-        return Path(_unescape_mountinfo(fields[4])), Path(
-            _unescape_mountinfo(fields[3])
+        return CgroupMount(
+            Path(_unescape_mountinfo(fields[4])), Path(_unescape_mountinfo(fields[3]))
         )
     return None
 
@@ -176,7 +252,7 @@ def cgroup_v2_dir_from(membership: str, mountinfo: str) -> Path | None:
     mount = cgroup_v2_mount_from(mountinfo)
     if mount is None:
         return None
-    mountpoint, mount_root = mount
+    mountpoint, mount_root = mount.mountpoint, mount.root
     for line in membership.splitlines():
         if not line.startswith("0::"):
             continue
@@ -255,7 +331,7 @@ def snapshot(
             memory_peak_bytes=None,
             memory_swap_current_bytes=None,
             pids_current=None,
-            memory_events={},
+            memory_events=MemoryEvents(),
             processes=process_counts(proc_root),
         )
     return Snapshot(
@@ -274,34 +350,34 @@ def _max_or_none(values: Iterable[int | None]) -> int | None:
     return max(numeric) if numeric else None
 
 
-def _event_deltas(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
-    return {
-        name: value - before.get(name, 0)
-        for name, value in after.items()
-        if value != before.get(name, 0)
-    }
+def _event_deltas(before: MemoryEvents, after: MemoryEvents) -> MemoryEvents:
+    return MemoryEvents(
+        tuple(
+            MemoryEvent(event.name, event.count - before.get(event.name))
+            for event in after.entries
+            if event.count != before.get(event.name)
+        )
+    )
 
 
-def summarize_samples(samples: list[Snapshot]) -> dict[str, int | None]:
+def summarize_samples(samples: list[Snapshot]) -> Maxima:
     """Return per-invocation maxima, never confusing them with cgroup lifetime peak."""
-    return {
-        "max_memory_current_bytes": _max_or_none(
+    return Maxima(
+        max_memory_current_bytes=_max_or_none(
             sample.memory_current_bytes for sample in samples
         ),
-        "max_memory_peak_bytes": _max_or_none(
+        max_memory_peak_bytes=_max_or_none(
             sample.memory_peak_bytes for sample in samples
         ),
-        "max_memory_swap_current_bytes": _max_or_none(
+        max_memory_swap_current_bytes=_max_or_none(
             sample.memory_swap_current_bytes for sample in samples
         ),
-        "max_pids_current": _max_or_none(sample.pids_current for sample in samples),
-        "max_cargo_processes": max(sample.processes.cargo for sample in samples),
-        "max_compiler_processes": max(sample.processes.compiler for sample in samples),
-        "max_soldr_processes": max(sample.processes.soldr for sample in samples),
-        "max_toolchain_processes": max(
-            sample.processes.toolchain for sample in samples
-        ),
-    }
+        max_pids_current=_max_or_none(sample.pids_current for sample in samples),
+        max_cargo_processes=max(sample.processes.cargo for sample in samples),
+        max_compiler_processes=max(sample.processes.compiler for sample in samples),
+        max_soldr_processes=max(sample.processes.soldr for sample in samples),
+        max_toolchain_processes=max(sample.processes.toolchain for sample in samples),
+    )
 
 
 def prepared_cargo_or_rustup_available(
@@ -359,7 +435,7 @@ def run_case(  # noqa: C901
     run: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
-) -> dict[str, object]:
+) -> CaseResult:
     """Run one explicit fan-out value and collect samples through process exit."""
     if isinstance(jobs, str):
         if jobs != "auto":
@@ -435,26 +511,26 @@ def run_case(  # noqa: C901
         process.returncode, timed_out, first_compiler_offset_ms
     )
     enomem_in_log = log_reports_enomem(command_log)
-    return {
-        "requested_jobs": jobs,
-        "case_root": str(case_root),
-        "command_log": str(command_log),
-        "returncode": process.returncode,
-        "timed_out": timed_out,
-        "wall_time_ms": round(
+    return CaseResult(
+        requested_jobs=jobs,
+        case_root=str(case_root),
+        command_log=str(command_log),
+        returncode=process.returncode,
+        timed_out=timed_out,
+        wall_time_ms=round(
             (finished.monotonic_seconds - started.monotonic_seconds) * 1000
         ),
-        "start": asdict(started),
-        "end": asdict(finished),
-        "memory_events_delta": _event_deltas(
+        start=started,
+        end=finished,
+        memory_events_delta=_event_deltas(
             started.memory_events, finished.memory_events
         ),
-        "maxima": summarize_samples(samples),
-        "samples": len(samples),
-        "first_compiler_offset_ms": first_compiler_offset_ms,
-        "failure_phase": failure_phase,
-        "enomem_in_log": enomem_in_log,
-    }
+        maxima=summarize_samples(samples),
+        samples=len(samples),
+        first_compiler_offset_ms=first_compiler_offset_ms,
+        failure_phase=failure_phase,
+        enomem_in_log=enomem_in_log,
+    )
 
 
 def parse_jobs(raw: str) -> list[int | str]:
@@ -479,27 +555,24 @@ def parse_jobs(raw: str) -> list[int | str]:
     return values
 
 
-def format_markdown(results: list[dict[str, object]]) -> str:
+def format_markdown(results: list[CaseResult]) -> str:
     """Compact human rendering; JSON remains the authoritative evidence."""
     lines = [
         "| jobs | result | phase | ENOMEM | wall | max current | max PIDs | max Cargo/compiler/tools | OOM delta |",
         "| ---: | :--- | :--- | :--- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for result in results:
-        maxima = result["maxima"]
-        assert isinstance(maxima, dict)
-        events = result["memory_events_delta"]
-        assert isinstance(events, dict)
-        outcome = "timeout" if result["timed_out"] else str(result["returncode"])
-        phase = str(result.get("failure_phase", "?"))
-        enomem = "yes" if result.get("enomem_in_log", False) else "no"
+        maxima = result.maxima
+        events = result.memory_events_delta
+        outcome = "timeout" if result.timed_out else str(result.returncode)
+        enomem = "yes" if result.enomem_in_log else "no"
         lines.append(
-            f"| {result['requested_jobs']} | {outcome} | {phase} | {enomem} | "
-            f"{result['wall_time_ms']} ms | "
-            f"{maxima['max_memory_current_bytes']} | {maxima['max_pids_current']} | "
-            f"{maxima['max_cargo_processes']}/{maxima['max_compiler_processes']}/"
-            f"{maxima['max_toolchain_processes']} | "
-            f"{events.get('oom_kill', 0) + events.get('oom_group_kill', 0)} |"
+            f"| {result.requested_jobs} | {outcome} | {result.failure_phase} | "
+            f"{enomem} | {result.wall_time_ms} ms | "
+            f"{maxima.max_memory_current_bytes} | {maxima.max_pids_current} | "
+            f"{maxima.max_cargo_processes}/{maxima.max_compiler_processes}/"
+            f"{maxima.max_toolchain_processes} | "
+            f"{events.get('oom_kill') + events.get('oom_group_kill')} |"
         )
     return "\n".join(lines)
 
@@ -607,7 +680,9 @@ def main(argv: list[str] | None = None) -> int:
             "auto rows leave CARGO_BUILD_JOBS/SOLDR_JOBS unset so Soldr's automatic decision is recorded.",
         ],
     }
-    rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    rendered = (
+        json.dumps(report, indent=2, sort_keys=True, default=_json_default) + "\n"
+    )
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered, encoding="utf-8")
@@ -617,9 +692,7 @@ def main(argv: list[str] | None = None) -> int:
     print(format_markdown(results), file=sys.stderr)
     return (
         0
-        if all(
-            result["returncode"] == 0 and not result["timed_out"] for result in results
-        )
+        if all(result.returncode == 0 and not result.timed_out for result in results)
         else 1
     )
 

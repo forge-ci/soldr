@@ -70,14 +70,14 @@ def _write_manifest_fixture(root: Path, *, windows: bool = False) -> dict[str, A
             "embedded": True,
         },
         "crgx": {
-            "version": module.CONTRACT["crgx"]["managed_version"],
+            "version": module.CONTRACT.crgx_managed_version,
             "target": "x86_64-unknown-linux-gnu",
             "binary": f"crgx{suffix}",
             "sha256": _sha256(payloads[f"crgx{suffix}"]),
             "source_commit": "def456",
         },
         "cargo_chef": {
-            "version": module.CONTRACT["cargo_chef"]["managed_version"],
+            "version": module.CONTRACT.cargo_chef_managed_version,
             "target": "x86_64-unknown-linux-gnu",
             "binary": f"cargo-chef{suffix}",
             "sha256": _sha256(payloads[f"cargo-chef{suffix}"]),
@@ -85,9 +85,7 @@ def _write_manifest_fixture(root: Path, *, windows: bool = False) -> dict[str, A
         },
         "archive": {
             "format": module.ARCHIVE_EXT,
-            "compression_level": module.CONTRACT["release_archive"][
-                "compression_level"
-            ],
+            "compression_level": module.CONTRACT.compression_level,
         },
         "built_at": "2026-05-27T00:00:00Z",
     }

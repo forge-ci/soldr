@@ -508,14 +508,16 @@ def test_root_slug_survives_names_docker_would_reject(tmp_path: Path) -> None:
 
 def test_runner_match_requires_schema_image_and_source_root(tmp_path: Path) -> None:
     labels = perf_local.expected_labels(tmp_path, "sha256:new")
-    info = {"Config": {"Labels": dict(labels)}}
+    raw = {label.key: label.value for label in labels}
+    info = perf_local.inspected_object({"Config": {"Labels": raw}})
     assert perf_local.runner_matches(info, labels)
 
-    stale = {
-        "Config": {"Labels": {**labels, f"{perf_local.LABEL_PREFIX}.image-id": "old"}}
-    }
+    stale = perf_local.inspected_object(
+        {"Config": {"Labels": {**raw, f"{perf_local.LABEL_PREFIX}.image-id": "old"}}}
+    )
     assert not perf_local.runner_matches(stale, labels)
-    assert not perf_local.runner_matches({"Config": {"Labels": None}}, labels)
+    no_labels = perf_local.inspected_object({"Config": {"Labels": None}})
+    assert not perf_local.runner_matches(no_labels, labels)
 
 
 def test_exec_command_reuses_runner_and_changes_only_workdir(tmp_path: Path) -> None:
