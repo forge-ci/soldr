@@ -158,36 +158,42 @@ mod tests {
             ),
         ];
         overlay_env(&mut env, "x86_64-unknown-linux-gnu", root);
+        // Built through `Path::join` so the expectation holds on a Windows
+        // host too, where the separator differs.
+        let include = format!("--sysroot=/s -isystem {}", root.join("include").display());
+        let link = format!(
+            "-C link-arg=--sysroot=/s -C link-arg=-L{}",
+            root.join("lib").display()
+        );
         assert_eq!(
             value(&env, "CFLAGS_x86_64_unknown_linux_gnu"),
-            Some("--sysroot=/s -isystem /opt/uuid/package/include")
+            Some(include.as_str())
         );
         assert_eq!(
             value(&env, "CXXFLAGS_x86_64_unknown_linux_gnu"),
-            Some("--sysroot=/s -isystem /opt/uuid/package/include")
+            Some(include.as_str())
         );
         assert_eq!(
             value(&env, "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS"),
-            Some("-C link-arg=--sysroot=/s -C link-arg=-L/opt/uuid/package/lib")
+            Some(link.as_str())
         );
         assert_eq!(env.len(), 3, "overlay must not add new keys: {env:?}");
     }
 
     #[test]
     fn overlay_creates_missing_target_flags() {
+        let root = Path::new("/u/package");
         let mut env = Vec::new();
-        overlay_env(
-            &mut env,
-            "aarch64-unknown-linux-gnu",
-            Path::new("/u/package"),
-        );
+        overlay_env(&mut env, "aarch64-unknown-linux-gnu", root);
+        let include = format!("-isystem {}", root.join("include").display());
+        let link = format!("-C link-arg=-L{}", root.join("lib").display());
         assert_eq!(
             value(&env, "CFLAGS_aarch64_unknown_linux_gnu"),
-            Some("-isystem /u/package/include")
+            Some(include.as_str())
         );
         assert_eq!(
             value(&env, "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS"),
-            Some("-C link-arg=-L/u/package/lib")
+            Some(link.as_str())
         );
     }
 }
