@@ -23,6 +23,11 @@ version and never touches a tag: the workflow mints the tag.
 
 ``release-auto.yml`` itself skips surfaces that are already complete, so a
 second release dispatch for the same SHA only retries what is missing.
+
+Every ``start`` also keeps the attempt's live control record: one open issue
+per (version, SHA), titled ``release attempt v<version> @ <sha12>``, whose body
+is the frozen directive (SHA, tag, mode, targets, destinations) and whose
+comments are the timestamped state transitions.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ import sys
 import tomllib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -212,6 +218,102 @@ def execute(plan: Plan, sha: str, run: Runner) -> str:
     return f"dispatched full CI for v{plan.version} at {sha}; run `start` again once it succeeds"
 
 
+def attempt_title(version: str, sha: str) -> str:
+    return f"release attempt v{version} @ {sha[:12]}"
+
+
+def attempt_directive(version: str, sha: str, targets: list[str]) -> str:
+    """The attempt issue's body: the live control record (soldr#3343).
+
+    It is written once, when the attempt starts, and never edited: the
+    scope (SHA, tag, mode, targets, destinations) is frozen for the life of
+    the attempt. State transitions are appended as comments.
+    """
+    target_lines = "\n".join(f"  - {triple}" for triple in targets)
+    return (
+        f"Release attempt for `v{version}` on exact SHA `{sha}`, driven by "
+        "`ci/release.py` (soldr#3343). Do not edit the directive; the script "
+        "appends state transitions as comments.\n\n"
+        "```yaml\n"
+        f"candidate_sha: {sha}\n"
+        f"tag: v{version}\n"
+        "mode: full\n"
+        "destinations: [github-release, pypi, npm]\n"
+        "crates_io: skipped while every workspace crate is publish = false\n"
+        "targets:\n"
+        f"{target_lines}\n"
+        "```\n"
+    )
+
+
+def find_or_open_attempt(version: str, sha: str, run: Runner) -> int:
+    """The open attempt issue for (version, SHA), opened when there is none."""
+    title = attempt_title(version, sha)
+    out = _ok(
+        run,
+        [
+            "gh",
+            "issue",
+            "list",
+            "--repo",
+            REPO,
+            "--state",
+            "open",
+            "--search",
+            f'"{title}" in:title',
+            "--json",
+            "number,title",
+        ],
+    )
+    for item in json.loads(out):
+        if item.get("title") == title:
+            return int(item["number"])
+    url = _ok(
+        run,
+        [
+            "gh",
+            "issue",
+            "create",
+            "--repo",
+            REPO,
+            "--title",
+            title,
+            "--body",
+            attempt_directive(version, sha, release_targets()),
+        ],
+    ).strip()
+    return int(url.rsplit("/", 1)[-1])
+
+
+def release_targets() -> list[str]:
+    """The canonical release targets (ci/canonical-targets.json)."""
+    contract = json.loads(
+        (ROOT / "ci" / "canonical-targets.json").read_text(encoding="utf-8")
+    )
+    return [
+        entry["triple"]
+        for entry in contract["targets"]
+        if entry["release"]["status"] == "included"
+    ]
+
+
+def record_transition(issue: int, message: str, run: Runner) -> None:
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _ok(
+        run,
+        [
+            "gh",
+            "issue",
+            "comment",
+            str(issue),
+            "--repo",
+            REPO,
+            "--body",
+            f"`{stamp}` {message}",
+        ],
+    )
+
+
 def status(sha: str, run: Runner) -> str:
     validate_sha(sha, run)
     version = version_at(sha, run)
@@ -238,7 +340,11 @@ def main(argv: list[str] | None = None, run: Runner = default_runner) -> int:
         if args.command == "status":
             print(status(args.sha, run))
         else:
-            print(execute(plan_start(args.sha, run), args.sha, run))
+            plan = plan_start(args.sha, run)
+            issue = find_or_open_attempt(plan.version, args.sha, run)
+            message = execute(plan, args.sha, run)
+            record_transition(issue, message, run)
+            print(f"{message} (attempt #{issue})")
     except ReleaseError as error:
         print(f"release: refused: {error}", file=sys.stderr)
         return 1
