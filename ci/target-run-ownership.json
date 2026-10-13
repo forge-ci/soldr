@@ -110,6 +110,7 @@
         "cli_front_door_cold_start",
         "cli_wrapper",
         "cli_wrapper_identity",
+        "cold_first_compile",
         "zccache_trampoline_gate"
       ],
       "disposition": "target-replay",
@@ -423,6 +424,30 @@
       "source_id": "cargo-front-target-replay",
       "test_prefix": "cli_cargo_linker::",
       "reason": "All four tests distinguish default, mold, and rust-lld target linker behavior."
+    },
+    {
+      "id": "cold-first-compile-cargo-build-cold-on-the-default-root",
+      "source_id": "cargo-front-target-replay",
+      "test_name": "cold_first_compile::cargo_build_cold_on_the_default_root",
+      "reason": "soldr#2424 P0: a real cold first compile through the broker and daemon on each native target."
+    },
+    {
+      "id": "cold-first-compile-cargo-build-cold-on-an-explicit-root",
+      "source_id": "cargo-front-target-replay",
+      "test_name": "cold_first_compile::cargo_build_cold_on_an_explicit_root",
+      "reason": "soldr#2424 P0: a real cold first compile through the broker and daemon on each native target."
+    },
+    {
+      "id": "cold-first-compile-bare-build-verb-cold-on-the-default-root",
+      "source_id": "cargo-front-target-replay",
+      "test_name": "cold_first_compile::bare_build_verb_cold_on_the_default_root",
+      "reason": "soldr#2424 P0: a real cold first compile through the broker and daemon on each native target."
+    },
+    {
+      "id": "cold-first-compile-bare-test-verb-cold-on-an-explicit-root",
+      "source_id": "cargo-front-target-replay",
+      "test_name": "cold_first_compile::bare_test_verb_cold_on_an_explicit_root",
+      "reason": "soldr#2424 P0: a real cold first compile through the broker and daemon on each native target."
     },
     {
       "id": "cargo-native-cc-injects-zccache-wrapped-cc-and-cxx-by-default",

@@ -30,5 +30,6 @@ mod cli_toolchain_download_guard;
 mod cli_wrapper;
 mod cli_wrapper_identity;
 mod cli_wrapper_perf;
+mod cold_first_compile;
 mod fixture_daemon_isolation;
 mod zccache_trampoline_gate;

@@ -380,12 +380,12 @@ test-group = 'soldr-cargo-cold-builds'
 # they join the one-thread `soldr-cargo-cold-builds` group they share a shape
 # with.
 [[profile.default.overrides]]
-filter = '(binary(cargo_front_door) & test(/^(cli_cargo_clippy_fixture|cli_cargo_dylint_link|cli_cargo_native_cc|cli_cargo_zccache_mode)::/)) + (binary(daemon) & test(/^cli_debug_trace_observer::/)) + (binary(fetch_tools) & test(/^(cli_maturin|cli_rust_analyzer|cli_wheel)::/)) + (binary(toolchain_env) & test(/^cli_save::/))'
+filter = '(binary(cargo_front_door) & test(/^(cli_cargo_clippy_fixture|cli_cargo_dylint_link|cli_cargo_native_cc|cli_cargo_zccache_mode|cold_first_compile)::/)) + (binary(daemon) & test(/^cli_debug_trace_observer::/)) + (binary(fetch_tools) & test(/^(cli_maturin|cli_rust_analyzer|cli_wheel)::/)) + (binary(toolchain_env) & test(/^cli_save::/))'
 platform = { target = 'cfg(target_os = "linux")' }
 test-group = 'soldr-cold-start-linux'
 
 [[profile.default.overrides]]
-filter = '(binary(cargo_front_door) & test(/^(cli_cargo_clippy_fixture|cli_cargo_dylint_link|cli_cargo_native_cc|cli_cargo_zccache_mode)::/)) + (binary(daemon) & test(/^cli_debug_trace_observer::/)) + (binary(fetch_tools) & test(/^(cli_maturin|cli_rust_analyzer|cli_wheel)::/)) + (binary(toolchain_env) & test(/^cli_save::/))'
+filter = '(binary(cargo_front_door) & test(/^(cli_cargo_clippy_fixture|cli_cargo_dylint_link|cli_cargo_native_cc|cli_cargo_zccache_mode|cold_first_compile)::/)) + (binary(daemon) & test(/^cli_debug_trace_observer::/)) + (binary(fetch_tools) & test(/^(cli_maturin|cli_rust_analyzer|cli_wheel)::/)) + (binary(toolchain_env) & test(/^cli_save::/))'
 test-group = 'soldr-cargo-cold-builds'
 
 # The run-wrapper is the native `soldr-nextest-wrapper`
