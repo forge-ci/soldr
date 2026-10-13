@@ -37,6 +37,23 @@ crates.io publication is not part of the current release direction. `soldr` is b
 
 Every release also publishes `soldr-<tag>-info.json`: the version, tag, candidate SHA, target-contract revision, targets, and each artifact's size and SHA-256 (soldr#3343). The publish job checks the full contract-derived asset set on the **draft** before making it public, because an immutable release can no longer gain assets (soldr#2469 4.2).
 
+## Front door: `ci/release.py` (soldr#3343)
+
+`ci/release.py` drives the two dispatches below for one exact merged SHA:
+
+```bash
+uv run --no-project python ci/release.py status --sha <40-hex merged SHA>
+uv run --no-project python ci/release.py start  --sha <40-hex merged SHA>
+```
+
+`start` does one step per run, and re-running it is the resume path:
+- It refuses a SHA that isn't on `origin/main`.
+- It refuses when `vX.Y.Z` already tags a different commit; a released version is never moved.
+- It dispatches full CI when the SHA has no `CI full <sha>` run, and waits while one is running.
+- Once that run has succeeded, it dispatches `release-auto.yml` with the SHA and the run's id.
+
+It never bumps a version or creates a tag.
+
 ## Current Release Model
 
 Since soldr#3346 (2026-09-24) a release is a deliberate two-dispatch act on
