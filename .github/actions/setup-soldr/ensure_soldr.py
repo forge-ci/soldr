@@ -11,8 +11,8 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 # The sibling module lives beside this file, which is executed as a script by
 # the action rather than imported as a package -- so sys.path must be extended
@@ -37,7 +37,33 @@ def _normalize_version(value: str) -> str:
     return value[1:] if value.startswith("v") else value
 
 
-def _detect_target() -> tuple[str, str]:
+@dataclass(frozen=True)
+class HostTarget:
+    """The release target triple and the soldr binary name for this host."""
+
+    triple: str
+    binary_name: str
+
+
+@dataclass(frozen=True)
+class HttpHeader:
+    name: str
+    value: str
+
+
+@dataclass(frozen=True)
+class ReleaseAsset:
+    name: str
+    download_url: str | None
+
+
+@dataclass(frozen=True)
+class Release:
+    tag_name: str
+    assets: tuple[ReleaseAsset, ...]
+
+
+def _detect_target() -> HostTarget:
     machine = platform.machine().lower()
     if machine in {"x86_64", "amd64"}:
         arch = "x86_64"
@@ -51,11 +77,11 @@ def _detect_target() -> tuple[str, str]:
         # Linux gnu variant runs everywhere this action runs (the
         # GitHub-hosted Linux runners are glibc). musl variant exists
         # too but isn't needed here.
-        return f"{arch}-unknown-linux-gnu", "soldr"
+        return HostTarget(f"{arch}-unknown-linux-gnu", "soldr")
     if system == "Darwin":
-        return f"{arch}-apple-darwin", "soldr"
+        return HostTarget(f"{arch}-apple-darwin", "soldr")
     if system == "Windows":
-        return f"{arch}-pc-windows-msvc", "soldr.exe"
+        return HostTarget(f"{arch}-pc-windows-msvc", "soldr.exe")
 
     raise RuntimeError(f"unsupported operating system: {system}")
 
@@ -82,25 +108,41 @@ def _auth_token_for_repo(repo: str) -> str:
     return ""
 
 
-def _request_headers(repo: str) -> dict[str, str]:
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "setup-soldr-action",
-    }
+def _request_headers(repo: str) -> tuple[HttpHeader, ...]:
+    headers = [
+        HttpHeader("Accept", "application/vnd.github+json"),
+        HttpHeader("X-GitHub-Api-Version", "2022-11-28"),
+        HttpHeader("User-Agent", "setup-soldr-action"),
+    ]
     token = _auth_token_for_repo(repo)
     if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
+        headers.append(HttpHeader("Authorization", f"Bearer {token}"))
+    return tuple(headers)
 
 
-def _fetch_release(repo: str, version: str) -> dict[str, object]:
-    request = urllib.request.Request(
-        _release_url(repo, version),
-        headers=_request_headers(repo),
-    )
+def _parse_release(raw: object) -> Release:
+    if not isinstance(raw, dict):
+        raise RuntimeError("release response was not a JSON object")
+    assets: list[ReleaseAsset] = []
+    for asset in raw.get("assets") or []:
+        if not isinstance(asset, dict):
+            continue
+        url = asset.get("browser_download_url")
+        assets.append(
+            ReleaseAsset(
+                name=str(asset.get("name", "")),
+                download_url=None if url is None else str(url),
+            )
+        )
+    return Release(tag_name=str(raw["tag_name"]), assets=tuple(assets))
+
+
+def _fetch_release(repo: str, version: str) -> Release:
+    request = urllib.request.Request(_release_url(repo, version))
+    for header in _request_headers(repo):
+        request.add_header(header.name, header.value)
     with urllib.request.urlopen(request, timeout=30) as response:
-        return json.load(response)
+        return _parse_release(json.load(response))
 
 
 def _installed_version(binary_path: Path) -> str | None:
@@ -122,15 +164,13 @@ def _installed_version(binary_path: Path) -> str | None:
     return str(payload["soldr_version"])
 
 
-def _select_asset(release: dict[str, Any], target: str) -> tuple[str, str]:
-    assets = release.get("assets") or []
+def _select_asset(release: Release, target: str) -> ReleaseAsset:
     suffix = f"-{target}.{ARCHIVE_EXT}"
-    for asset in assets:
-        if not isinstance(asset, dict):
-            continue
-        name = str(asset.get("name", ""))
-        if name.endswith(suffix):
-            return name, str(asset["browser_download_url"])
+    for asset in release.assets:
+        if asset.name.endswith(suffix):
+            if asset.download_url is None:
+                raise RuntimeError(f"release asset {asset.name} has no download url")
+            return asset
     raise RuntimeError(
         f"no release asset found for target {target} (looking for *{suffix})"
     )
@@ -233,10 +273,12 @@ def main() -> None:  # noqa: C901
             return
 
     repo = os.environ.get("SOLDR_REPO", "zackees/soldr").strip() or "zackees/soldr"
-    target, binary_name = _detect_target()
+    host = _detect_target()
+    target, binary_name = host.triple, host.binary_name
     release = _fetch_release(repo, requested_version)
-    asset_name, download_url = _select_asset(release, target)
-    tag_name = str(release["tag_name"])
+    asset = _select_asset(release, target)
+    asset_name, download_url = asset.name, str(asset.download_url)
+    tag_name = release.tag_name
     binary_ext = ".exe" if os.name == "nt" else ""
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -263,8 +305,8 @@ def main() -> None:  # noqa: C901
                 binary_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
             )
         for entry in soldr_debug_info_entries(manifest):
-            debug_src = _locate_binary(extract_dir, str(entry["name"]))
-            shutil.copy2(debug_src, install_dir / str(entry["name"]))
+            debug_src = _locate_binary(extract_dir, entry.name)
+            shutil.copy2(debug_src, install_dir / entry.name)
 
         # Stage soldr-owned companion binaries next to soldr. zccache
         # itself is embedded; there is no standalone zccache binary to copy.

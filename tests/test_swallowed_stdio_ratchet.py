@@ -63,7 +63,11 @@ def test_new_devnull_stderr_fails(mod, repo):
     _write(repo, "tool.py", PY_STDERR_DEVNULL)
     commit_all(repo, "swallow stderr")
 
-    new, checked = _evaluate(mod, repo)
+    result = _evaluate(mod, repo)
+
+    new = result.new
+
+    checked = result.checked
     assert checked == 1
     assert len(new) == 1
     assert new[0].path == "tool.py"
@@ -77,7 +81,9 @@ def test_stdin_devnull_passes(mod, repo):
     _write(repo, "tool.py", PY_STDIN_DEVNULL)
     commit_all(repo, "close stdin only")
 
-    new, _ = _evaluate(mod, repo)
+    result = _evaluate(mod, repo)
+
+    new = result.new
     assert new == []
 
 
@@ -90,7 +96,11 @@ def test_preexisting_baseline_violation_passes(mod, repo):
     _write(repo, "tool.py", PY_STDERR_DEVNULL + "\n# unrelated comment\n")
     commit_all(repo, "unrelated edit")
 
-    new, checked = _evaluate(mod, repo)
+    result = _evaluate(mod, repo)
+
+    new = result.new
+
+    checked = result.checked
     assert checked == 1
     assert new == [], "a violation already on main must not be reported as new"
 
@@ -102,7 +112,9 @@ def test_removal_passes(mod, repo):
     _write(repo, "tool.py", "import subprocess\n")
     commit_all(repo, "fix it")
 
-    new, _ = _evaluate(mod, repo)
+    result = _evaluate(mod, repo)
+
+    new = result.new
     assert new == []
 
 
@@ -114,7 +126,9 @@ def test_line_shift_of_existing_violation_is_not_new(mod, repo):
     _write(repo, "tool.py", shifted)
     commit_all(repo, "push the violation down")
 
-    new, _ = _evaluate(mod, repo)
+    result = _evaluate(mod, repo)
+
+    new = result.new
     assert new == [], "an unrelated insertion above must not look like a new violation"
 
 
@@ -134,7 +148,9 @@ def test_stdio_ok_marker_exempts_python(mod, repo):
     _write(repo, "tool.py", content)
     commit_all(repo, "marked exception")
 
-    new, _ = _evaluate(mod, repo)
+    result = _evaluate(mod, repo)
+
+    new = result.new
     assert new == []
 
 
@@ -154,7 +170,9 @@ def test_stdio_ok_marker_with_empty_reason_does_not_exempt(mod, repo):
     _write(repo, "tool.py", content)
     commit_all(repo, "empty marker")
 
-    new, _ = _evaluate(mod, repo)
+    result = _evaluate(mod, repo)
+
+    new = result.new
     assert len(new) == 1
 
 
@@ -169,7 +187,11 @@ def test_shell_command_dash_v_presence_check_exempt(mod, repo):
     )
     commit_all(repo, "presence check")
 
-    new, checked = _evaluate(mod, repo)
+    result = _evaluate(mod, repo)
+
+    new = result.new
+
+    checked = result.checked
     assert checked == 1
     assert new == []
 
@@ -181,7 +203,11 @@ def test_shell_devnull_redirect_in_sh_file_fails_when_new(mod, repo):
     _write(repo, "script.sh", "#!/bin/sh\nrm -rf build 2>/dev/null\n")
     commit_all(repo, "swallow stderr")
 
-    new, checked = _evaluate(mod, repo)
+    result = _evaluate(mod, repo)
+
+    new = result.new
+
+    checked = result.checked
     assert checked == 1
     assert len(new) == 1
     assert new[0].path == "script.sh"
@@ -206,7 +232,11 @@ def test_workflow_run_block_devnull_fails_when_new(mod, repo):
     _write(repo, ".github/workflows/ci.yml", new_workflow)
     commit_all(repo, "swallow stderr in workflow")
 
-    new, checked = _evaluate(mod, repo)
+    result = _evaluate(mod, repo)
+
+    new = result.new
+
+    checked = result.checked
     assert checked == 1
     assert len(new) == 1
     assert new[0].path == ".github/workflows/ci.yml"
@@ -242,7 +272,11 @@ def test_rust_allow_without_reason_fails_when_new(mod, repo):
     _write(repo, "crates/a/src/lib.rs", RUST_ALLOW_NO_REASON)
     commit_all(repo, "add unreasoned allow")
 
-    new, checked = _evaluate(mod, repo)
+    result = _evaluate(mod, repo)
+
+    new = result.new
+
+    checked = result.checked
     assert checked == 1
     assert len(new) == 1
     assert new[0].lang == "rust"
@@ -255,7 +289,9 @@ def test_rust_allow_with_reason_passes(mod, repo):
     _write(repo, "crates/a/src/lib.rs", RUST_ALLOW_WITH_REASON)
     commit_all(repo, "add reasoned allow")
 
-    new, _ = _evaluate(mod, repo)
+    result = _evaluate(mod, repo)
+
+    new = result.new
     assert new == []
 
 

@@ -25,6 +25,7 @@ got the schema wrong.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
@@ -106,6 +107,31 @@ def _walk_no_cpu_numbers(value: Any, path: str = "") -> None:
     elif isinstance(value, list):
         for index, item in enumerate(value):
             _walk_no_cpu_numbers(item, f"{path}[{index}]")
+
+
+def _totals(**overrides: Any) -> Any:
+    """A `Totals` with every field zeroed except the overrides."""
+    defaults = tool.Totals(
+        journal_files=[],
+        records=0,
+        malformed=0,
+        deduped_lines=0,
+        records_with_context_key=0,
+        records_without_context_key=0,
+        duplicate_groups=0,
+        duplicate_records=0,
+        excess_records=0,
+        concurrent=0,
+        sequential=0,
+        cross_generation=0,
+        total_wall_seconds=0.0,
+        coalescable_wall_seconds_total=0.0,
+        coalescable_wall_seconds_probe=0.0,
+        coalescable_wall_seconds_real=0.0,
+        coalescable_wall_seconds_unknown=0.0,
+        coalescable_fraction_real=0.0,
+    )
+    return dataclasses.replace(defaults, **overrides)
 
 
 NATIVE_CC = "/run/current-system/sw/bin/cc"
@@ -363,12 +389,13 @@ def test_verdict_boundaries() -> None:
         # fraction and the verdict are both defined on: `_total` also carries
         # probe and unknown groups, which are exactly what this step-0 check
         # exists to subtract out.
-        totals = {
-            "coalescable_fraction_real": fraction,
-            "coalescable_wall_seconds_real": seconds,
-            "total_wall_seconds": seconds / fraction,
-        }
-        code, sentence = tool.verdict(totals)
+        totals = _totals(
+            coalescable_fraction_real=fraction,
+            coalescable_wall_seconds_real=seconds,
+            total_wall_seconds=seconds / fraction,
+        )
+        result = tool.verdict(totals)
+        code, sentence = result.code, result.sentence
         assert code == expected_code
         # Integer substring matching, so the assertion survives a change in
         # decimal places.
@@ -382,29 +409,29 @@ def test_verdict_unknown_bucket_blocks_a_negligible_close() -> None:
     # coalescable-but-unclassified bucket above the same 5% threshold means
     # the classifier did not recognise this journal, not that there is
     # nothing here.
-    blocked = {
-        "coalescable_fraction_real": 0.01,
-        "coalescable_wall_seconds_real": 1.0,
-        "coalescable_wall_seconds_unknown": 20.0,
-        "total_wall_seconds": 100.0,
-    }
-    code, sentence = tool.verdict(blocked)
-    assert code == "need-better-data"
-    assert "20.00s" in sentence
+    blocked = _totals(
+        coalescable_fraction_real=0.01,
+        coalescable_wall_seconds_real=1.0,
+        coalescable_wall_seconds_unknown=20.0,
+        total_wall_seconds=100.0,
+    )
+    blocked_verdict = tool.verdict(blocked)
+    assert blocked_verdict.code == "need-better-data"
+    assert "20.00s" in blocked_verdict.sentence
 
     # Control: the same fraction with a small unknown bucket still closes.
-    allowed = dict(blocked, coalescable_wall_seconds_unknown=1.0)
-    assert tool.verdict(allowed)[0] == "negligible"
+    allowed = dataclasses.replace(blocked, coalescable_wall_seconds_unknown=1.0)
+    assert tool.verdict(allowed).code == "negligible"
 
     # The override only ever weakens a close -- it can never touch "proceed",
     # so it cannot hide payoff.
-    proceeding = {
-        "coalescable_fraction_real": 0.30,
-        "coalescable_wall_seconds_real": 30.0,
-        "coalescable_wall_seconds_unknown": 60.0,
-        "total_wall_seconds": 100.0,
-    }
-    assert tool.verdict(proceeding)[0] == "proceed"
+    proceeding = _totals(
+        coalescable_fraction_real=0.30,
+        coalescable_wall_seconds_real=30.0,
+        coalescable_wall_seconds_unknown=60.0,
+        total_wall_seconds=100.0,
+    )
+    assert tool.verdict(proceeding).code == "proceed"
 
 
 def test_verdict_sentence_does_not_claim_elapsed_build_time() -> None:
@@ -412,14 +439,14 @@ def test_verdict_sentence_does_not_claim_elapsed_build_time() -> None:
     # compiles, not the build's elapsed time. This sentence gets quoted into
     # an issue comment away from the docstring that explains it, so it has to
     # carry the qualifier itself.
-    _, sentence = tool.verdict(
-        {
-            "coalescable_fraction_real": 0.01,
-            "coalescable_wall_seconds_real": 1.0,
-            "coalescable_wall_seconds_unknown": 0.0,
-            "total_wall_seconds": 100.0,
-        }
-    )
+    sentence = tool.verdict(
+        _totals(
+            coalescable_fraction_real=0.01,
+            coalescable_wall_seconds_real=1.0,
+            coalescable_wall_seconds_unknown=0.0,
+            total_wall_seconds=100.0,
+        )
+    ).sentence
     assert "not the build's elapsed time" in sentence
 
 
@@ -501,13 +528,13 @@ def test_render_markdown_negligible_case(tmp_path: Path) -> None:
     journal_path = _write_journal(tmp_path, records)
     summary = tool.build_summary([journal_path])
 
-    totals = summary["totals"]
+    totals = summary.totals
     # Concurrent, so the wall time IS coalescable in principle -- but it is
     # probe work, so none of it counts toward the payoff the verdict is about.
-    assert totals["coalescable_wall_seconds_total"] == pytest.approx(10.0)
-    assert totals["coalescable_wall_seconds_probe"] == pytest.approx(10.0)
-    assert totals["coalescable_wall_seconds_real"] == pytest.approx(0.0)
-    assert summary["identities"][0]["classification"] == "probe"
+    assert totals.coalescable_wall_seconds_total == pytest.approx(10.0)
+    assert totals.coalescable_wall_seconds_probe == pytest.approx(10.0)
+    assert totals.coalescable_wall_seconds_real == pytest.approx(0.0)
+    assert summary.identities[0].classification == "probe"
 
     markdown = tool.render_markdown(summary)
     assert "negligible" in markdown

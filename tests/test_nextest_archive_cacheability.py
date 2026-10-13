@@ -20,6 +20,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from conftest import docker_available, load_script_module
@@ -45,13 +46,13 @@ FIRST_PARTY = first_party_units(
 )
 
 
-def warm(hits: int = 100, misses: int = 0) -> dict[str, int]:
-    return {
-        "cold_hits": 0,
-        "cold_misses": 900,
-        "warm_hits": hits,
-        "warm_misses": misses,
-    }
+def warm(hits: int = 100, misses: int = 0) -> Any:
+    return cacheability.WarmResult(
+        cold_hits=0,
+        cold_misses=900,
+        warm_hits=hits,
+        warm_misses=misses,
+    )
 
 
 # --------------------------------------------------------------------------

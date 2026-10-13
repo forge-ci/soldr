@@ -46,7 +46,8 @@ def test_snapshot_reads_transient_resource_inputs_and_process_census(
     assert sample.memory_current_bytes == 1024**3
     assert sample.memory_peak_bytes == 3 * 1024**3
     assert sample.pids_current == 37
-    assert sample.memory_events == {"oom_kill": 1, "oom_group_kill": 2}
+    assert sample.memory_events.get("oom_kill") == 1
+    assert sample.memory_events.get("oom_group_kill") == 2
     assert sample.processes.cargo == 1
     assert sample.processes.compiler == 1
     assert sample.processes.soldr == 1
@@ -141,9 +142,9 @@ def test_case_uses_a_fresh_target_and_soldr_cache_tree(tmp_path: Path) -> None:
         interval_seconds=0.001,
     )
 
-    assert result["returncode"] == 0
-    assert result["case_root"] == str(case_root)
-    assert result["command_log"] == str(case_root / "command.log")
+    assert result.returncode == 0
+    assert result.case_root == str(case_root)
+    assert result.command_log == str(case_root / "command.log")
     assert (case_root / "target").is_dir()
     assert (case_root / "soldr-cache").is_dir()
     assert (case_root / "command.log").read_text(encoding="utf-8") == "case output\n"
@@ -208,7 +209,7 @@ def test_summary_uses_sampled_peak_not_only_post_failure_state() -> None:
         memory_peak_bytes=9,
         memory_swap_current_bytes=0,
         pids_current=2,
-        memory_events={},
+        memory_events=telemetry.MemoryEvents(),
         processes=telemetry.ProcessCounts(0, 0, 0, 0),
     )
     transient = telemetry.Snapshot(
@@ -217,7 +218,7 @@ def test_summary_uses_sampled_peak_not_only_post_failure_state() -> None:
         memory_peak_bytes=9,
         memory_swap_current_bytes=3,
         pids_current=12,
-        memory_events={},
+        memory_events=telemetry.MemoryEvents(),
         processes=telemetry.ProcessCounts(2, 4, 1, 7),
     )
     post_failure = telemetry.Snapshot(
@@ -226,17 +227,17 @@ def test_summary_uses_sampled_peak_not_only_post_failure_state() -> None:
         memory_peak_bytes=9,
         memory_swap_current_bytes=0,
         pids_current=2,
-        memory_events={},
+        memory_events=telemetry.MemoryEvents(),
         processes=telemetry.ProcessCounts(0, 0, 0, 0),
     )
 
     maxima = telemetry.summarize_samples([baseline, transient, post_failure])
 
-    assert maxima["max_memory_current_bytes"] == 8
-    assert maxima["max_pids_current"] == 12
-    assert maxima["max_cargo_processes"] == 2
-    assert maxima["max_compiler_processes"] == 4
-    assert maxima["max_toolchain_processes"] == 7
+    assert maxima.max_memory_current_bytes == 8
+    assert maxima.max_pids_current == 12
+    assert maxima.max_cargo_processes == 2
+    assert maxima.max_compiler_processes == 4
+    assert maxima.max_toolchain_processes == 7
 
 
 def test_parse_jobs_accepts_auto_alongside_positive_ints_and_dedupes() -> None:
@@ -275,8 +276,8 @@ def test_run_case_auto_removes_job_env_and_marks_the_telemetry_var(
         interval_seconds=0.001,
     )
 
-    assert result["returncode"] == 0
-    assert result["requested_jobs"] == "auto"
+    assert result.returncode == 0
+    assert result.requested_jobs == "auto"
     assert (case_root / "command.log").read_text(encoding="utf-8") == "auto\n"
 
 
@@ -302,7 +303,7 @@ def test_run_case_explicit_int_still_stamps_cargo_build_jobs(
         interval_seconds=0.001,
     )
 
-    assert result["requested_jobs"] == 3
+    assert result.requested_jobs == 3
     assert (case_root / "command.log").read_text(encoding="utf-8") == "3\n"
 
 
@@ -356,29 +357,51 @@ def test_run_case_classifies_pre_compiler_enomem_failure(tmp_path: Path) -> None
         interval_seconds=0.001,
     )
 
-    assert result["returncode"] == 101
-    assert result["first_compiler_offset_ms"] is None
-    assert result["failure_phase"] == "pre_compiler"
-    assert result["enomem_in_log"] is True
+    assert result.returncode == 101
+    assert result.first_compiler_offset_ms is None
+    assert result.failure_phase == "pre_compiler"
+    assert result.enomem_in_log is True
 
 
 def test_markdown_includes_the_required_cross_run_metrics() -> None:
+    snapshot = telemetry.Snapshot(
+        monotonic_seconds=0,
+        memory_current_bytes=None,
+        memory_peak_bytes=None,
+        memory_swap_current_bytes=None,
+        pids_current=None,
+        memory_events=telemetry.MemoryEvents(),
+        processes=telemetry.ProcessCounts(0, 0, 0, 0),
+    )
     rendered = telemetry.format_markdown(
         [
-            {
-                "requested_jobs": 8,
-                "returncode": 1,
-                "timed_out": False,
-                "wall_time_ms": 1234,
-                "memory_events_delta": {"oom_kill": 1},
-                "maxima": {
-                    "max_memory_current_bytes": 9,
-                    "max_pids_current": 12,
-                    "max_cargo_processes": 2,
-                    "max_compiler_processes": 3,
-                    "max_toolchain_processes": 6,
-                },
-            }
+            telemetry.CaseResult(
+                requested_jobs=8,
+                case_root="/case",
+                command_log="/case/command.log",
+                returncode=1,
+                timed_out=False,
+                wall_time_ms=1234,
+                start=snapshot,
+                end=snapshot,
+                memory_events_delta=telemetry.MemoryEvents(
+                    (telemetry.MemoryEvent("oom_kill", 1),)
+                ),
+                maxima=telemetry.Maxima(
+                    max_memory_current_bytes=9,
+                    max_memory_peak_bytes=None,
+                    max_memory_swap_current_bytes=None,
+                    max_pids_current=12,
+                    max_cargo_processes=2,
+                    max_compiler_processes=3,
+                    max_soldr_processes=1,
+                    max_toolchain_processes=6,
+                ),
+                samples=2,
+                first_compiler_offset_ms=None,
+                failure_phase="?",
+                enomem_in_log=False,
+            )
         ]
     )
 

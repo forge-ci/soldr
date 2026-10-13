@@ -8,12 +8,23 @@ import hashlib
 import json
 import os
 import runpy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
 COVERAGE = runpy.run_path(str(Path(__file__).with_name("ci_full_coverage.py")))
 SELECTOR = runpy.run_path(str(Path(__file__).with_name("ci_mode.py")))
 SCHEMA = "fleet-ci-summary/v1"
+
+
+@dataclass(frozen=True)
+class JsonDocument:
+    """A parsed JSON object whose schema the consumers validate field by field."""
+
+    fields: dict
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.fields.get(key, default)
 
 
 class Selection(TypedDict):
@@ -29,8 +40,8 @@ class Selection(TypedDict):
 
 
 def required_jobs(
-    adapter: dict[str, Any],
-    full: dict[str, Any],
+    adapter: JsonDocument,
+    full: JsonDocument,
     mode: str,
     docs_only: bool,
     trusted: bool = False,
@@ -60,16 +71,16 @@ def required_jobs(
             jobs
             | groups["minimal_jobs"]
             | groups["test_jobs"]
-            | COVERAGE["required_jobs"](full)
+            | COVERAGE["required_jobs"](full.fields)
             | {"full-coverage"}
         )
     raise ValueError("missing or unknown CI mode")
 
 
 def summary_failures(
-    adapter: dict[str, Any],
-    full: dict[str, Any],
-    needs: dict[str, Any],
+    adapter: JsonDocument,
+    full: JsonDocument,
+    needs: JsonDocument,
     *,
     mode: str,
     docs_only: bool,
@@ -103,14 +114,17 @@ def summary_failures(
     jobs = required_jobs(adapter, full, mode, docs_only, trusted)
     failures += COVERAGE["coverage_failures"](
         {"schema_version": 1, "required_jobs": sorted(jobs), "targets": []},
-        needs,
+        needs.fields,
         expected_sha=expected_sha,
         selected_sha=selected_sha,
     )
     if mode == "full":
         # Retain the canonical refusal of build-only/blocked execution cells.
         failures += COVERAGE["coverage_failures"](
-            full, needs, expected_sha=expected_sha, selected_sha=selected_sha
+            full.fields,
+            needs.fields,
+            expected_sha=expected_sha,
+            selected_sha=selected_sha,
         )
     return sorted(set(failures))
 
@@ -153,8 +167,9 @@ def main() -> int:
     args = parser.parse_args()
     adapter_raw = args.adapter.read_bytes()
     full_raw = args.full_contract.read_bytes()
-    adapter, full = json.loads(adapter_raw), json.loads(full_raw)
-    needs = json.loads(os.environ["CI_NEEDS_JSON"])
+    adapter = JsonDocument(json.loads(adapter_raw))
+    full = JsonDocument(json.loads(full_raw))
+    needs = JsonDocument(json.loads(os.environ["CI_NEEDS_JSON"]))
     inputs: Selection = {
         "mode": os.environ.get("CI_MODE", ""),
         "docs_only": os.environ.get("DOCS_ONLY", "") == "true",
@@ -240,7 +255,7 @@ def main() -> int:
         "required_jobs": jobs,
         "outcomes": {
             job: (
-                needs[job].get("result", "missing")
+                needs.fields[job].get("result", "missing")
                 if isinstance(needs.get(job), dict)
                 else "missing"
             )

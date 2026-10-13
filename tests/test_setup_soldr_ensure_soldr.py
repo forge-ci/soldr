@@ -20,8 +20,9 @@ def test_request_headers_include_github_token_when_present(monkeypatch) -> None:
 
     headers = module._request_headers("zackees/soldr")
 
-    assert headers["Authorization"] == "Bearer test-token"
-    assert headers["User-Agent"] == "setup-soldr-action"
+    values = {header.name: header.value for header in headers}
+    assert values["Authorization"] == "Bearer test-token"
+    assert values["User-Agent"] == "setup-soldr-action"
 
 
 def test_request_headers_omit_authorization_when_token_missing(monkeypatch) -> None:
@@ -31,7 +32,7 @@ def test_request_headers_omit_authorization_when_token_missing(monkeypatch) -> N
 
     headers = module._request_headers("zackees/soldr")
 
-    assert "Authorization" not in headers
+    assert "Authorization" not in [header.name for header in headers]
 
 
 def test_request_headers_skip_repo_scoped_token_for_cross_repo(monkeypatch) -> None:
@@ -42,7 +43,7 @@ def test_request_headers_skip_repo_scoped_token_for_cross_repo(monkeypatch) -> N
 
     headers = module._request_headers("zackees/soldr")
 
-    assert "Authorization" not in headers
+    assert "Authorization" not in [header.name for header in headers]
 
 
 def test_request_headers_allow_explicit_setup_token_for_cross_repo(monkeypatch) -> None:
@@ -53,7 +54,8 @@ def test_request_headers_allow_explicit_setup_token_for_cross_repo(monkeypatch) 
 
     headers = module._request_headers("zackees/soldr")
 
-    assert headers["Authorization"] == "Bearer explicit-token"
+    authorization = [h.value for h in headers if h.name == "Authorization"]
+    assert authorization == ["Bearer explicit-token"]
 
 
 def test_export_bundle_env_writes_local_dirs_when_bundle_present(

@@ -3,31 +3,67 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONTRACT_PATH = REPO_ROOT / "contracts" / "zccache-runtime.v1.json"
 
 
-def load_contract(path: Path = CONTRACT_PATH) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+@dataclass(frozen=True)
+class Contract:
+    """The slice of ``zccache-runtime.v1.json`` this action consumes."""
+
+    archive_extension: str
+    manifest_name: str
+    manifest_min_schema_version: int
+    compression_level: int
+    release_required_binaries: tuple[str, ...]
+    linux_zccache_target_libc: str
+    zccache_embedded: bool
+    zccache_required_binaries: tuple[str, ...]
+    crgx_managed_version: str
+    crgx_local_dir_env: str
+    crgx_required_binaries: tuple[str, ...]
+    cargo_chef_managed_version: str
+    cargo_chef_local_dir_env: str
+    cargo_chef_required_binaries: tuple[str, ...]
+
+
+def load_contract(path: Path = CONTRACT_PATH) -> Contract:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    archive = raw["release_archive"]
+    zccache = raw.get("zccache", {})
+    crgx = raw["crgx"]
+    cargo_chef = raw["cargo_chef"]
+    return Contract(
+        archive_extension=str(archive["extension"]),
+        manifest_name=str(archive["manifest_name"]),
+        manifest_min_schema_version=int(archive["manifest_min_schema_version"]),
+        compression_level=int(archive["compression_level"]),
+        release_required_binaries=tuple(archive["required_binaries"]),
+        linux_zccache_target_libc=str(archive["linux_zccache_target_libc"]),
+        zccache_embedded=bool(zccache.get("embedded")),
+        zccache_required_binaries=tuple(zccache.get("required_binaries", ())),
+        crgx_managed_version=str(crgx["managed_version"]),
+        crgx_local_dir_env=str(crgx["local_dir_env"]),
+        crgx_required_binaries=tuple(crgx["required_binaries"]),
+        cargo_chef_managed_version=str(cargo_chef["managed_version"]),
+        cargo_chef_local_dir_env=str(cargo_chef["local_dir_env"]),
+        cargo_chef_required_binaries=tuple(cargo_chef["required_binaries"]),
+    )
 
 
 CONTRACT = load_contract()
-ARCHIVE_EXT = str(CONTRACT["release_archive"]["extension"])
-MANIFEST_NAME = str(CONTRACT["release_archive"]["manifest_name"])
-MANIFEST_MIN_SCHEMA_VERSION = int(
-    CONTRACT["release_archive"]["manifest_min_schema_version"]
-)
-ZCCACHE_BUNDLED_BINARIES = tuple(
-    CONTRACT.get("zccache", {}).get("required_binaries", ())
-)
-CRGX_BUNDLED_BINARY = str(CONTRACT["crgx"]["required_binaries"][0])
-CARGO_CHEF_BUNDLED_BINARY = str(CONTRACT["cargo_chef"]["required_binaries"][0])
-RELEASE_BUNDLED_BINARIES = tuple(CONTRACT["release_archive"]["required_binaries"])
-CRGX_LOCAL_DIR_ENV = str(CONTRACT["crgx"]["local_dir_env"])
-CARGO_CHEF_LOCAL_DIR_ENV = str(CONTRACT["cargo_chef"]["local_dir_env"])
+ARCHIVE_EXT = CONTRACT.archive_extension
+MANIFEST_NAME = CONTRACT.manifest_name
+MANIFEST_MIN_SCHEMA_VERSION = CONTRACT.manifest_min_schema_version
+ZCCACHE_BUNDLED_BINARIES = CONTRACT.zccache_required_binaries
+CRGX_BUNDLED_BINARY = str(CONTRACT.crgx_required_binaries[0])
+CARGO_CHEF_BUNDLED_BINARY = str(CONTRACT.cargo_chef_required_binaries[0])
+RELEASE_BUNDLED_BINARIES = CONTRACT.release_required_binaries
+CRGX_LOCAL_DIR_ENV = CONTRACT.crgx_local_dir_env
+CARGO_CHEF_LOCAL_DIR_ENV = CONTRACT.cargo_chef_local_dir_env
 
 
 def binary_name(base: str, *, windows: bool) -> str:
@@ -41,12 +77,12 @@ def release_binary_names(*, windows: bool) -> tuple[str, ...]:
 
 
 def zccache_target_for_soldr_target(soldr_target: str) -> str:
-    if bool(CONTRACT.get("zccache", {}).get("embedded")):
+    if CONTRACT.zccache_embedded:
         return soldr_target
     if "-unknown-linux-" not in soldr_target:
         return soldr_target
     arch, _, _ = soldr_target.partition("-unknown-linux-")
-    libc = CONTRACT["release_archive"]["linux_zccache_target_libc"]
+    libc = CONTRACT.linux_zccache_target_libc
     return f"{arch}-unknown-linux-{libc}"
 
 
@@ -58,110 +94,161 @@ def _sha256_file(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def _manifest_binaries(manifest: dict[str, Any]) -> dict[str, str]:  # noqa: C901
-    binaries: dict[str, str] = {}
-    soldr = manifest.get("soldr", {})
-    if isinstance(soldr, dict):
-        binary = soldr.get("binary")
-        sha = soldr.get("sha256")
-        if isinstance(binary, str) and isinstance(sha, str):
-            binaries[binary] = sha
-        sidecars = soldr.get("sidecars", [])
-        if isinstance(sidecars, list):
-            for entry in sidecars:
-                if not isinstance(entry, dict):
-                    continue
-                name = entry.get("name")
-                sha = entry.get("sha256")
-                if isinstance(name, str) and isinstance(sha, str):
-                    binaries[name] = sha
-    zccache = manifest.get("zccache", {})
-    if isinstance(zccache, dict):
-        for entry in zccache.get("binaries", []):
-            if not isinstance(entry, dict):
-                continue
-            name = entry.get("name")
-            sha = entry.get("sha256")
-            if isinstance(name, str) and isinstance(sha, str):
-                binaries[name] = sha
-    crgx = manifest.get("crgx", {})
-    if isinstance(crgx, dict):
-        binary = crgx.get("binary")
-        sha = crgx.get("sha256")
-        if isinstance(binary, str) and isinstance(sha, str):
-            binaries[binary] = sha
-    cargo_chef = manifest.get("cargo_chef", {})
-    if isinstance(cargo_chef, dict):
-        binary = cargo_chef.get("binary")
-        sha = cargo_chef.get("sha256")
-        if isinstance(binary, str) and isinstance(sha, str):
-            binaries[binary] = sha
-    return binaries
+@dataclass(frozen=True)
+class BinaryRecord:
+    """A ``name`` + ``sha256`` pair recorded in the release manifest."""
+
+    name: str
+    sha256: str
 
 
-def soldr_debug_info_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    soldr = manifest.get("soldr", {})
-    if not isinstance(soldr, dict):
-        return []
-    entries = soldr.get("debug_info", [])
+@dataclass(frozen=True)
+class DebugInfoEntry:
+    """One ``soldr.debug_info`` manifest entry."""
+
+    name: str
+    sha256: str
+    format: object
+
+
+@dataclass(frozen=True)
+class ReleaseManifest:
+    """The validated-by-shape view of a release ``manifest.json``.
+
+    A ``None`` field means the manifest block or key was absent or of the wrong
+    JSON type; validation reports that as a mismatch.
+    """
+
+    schema_version: int | None
+    archive_format: str | None
+    soldr_target: str | None
+    zccache_target: str | None
+    crgx_target: str | None
+    cargo_chef_target: str | None
+    binaries: tuple[BinaryRecord, ...]
+    debug_info: tuple[DebugInfoEntry, ...]
+
+
+def _str_field(block: object, key: str) -> str | None:
+    if isinstance(block, dict):
+        value = block.get(key)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _record(entry: object, name_key: str) -> BinaryRecord | None:
+    name = _str_field(entry, name_key)
+    sha = _str_field(entry, "sha256")
+    if name is None or sha is None:
+        return None
+    return BinaryRecord(name=name, sha256=sha)
+
+
+def _entry_records(entries: object) -> list[BinaryRecord]:
     if not isinstance(entries, list):
         return []
-    return [
-        entry
+    found = (_record(entry, "name") for entry in entries)
+    return [record for record in found if record is not None]
+
+
+def _manifest_binaries(manifest: object) -> tuple[BinaryRecord, ...]:
+    raw = manifest if isinstance(manifest, dict) else {}
+    records: list[BinaryRecord] = []
+    soldr = raw.get("soldr", {})
+    own = _record(soldr, "binary")
+    if own is not None:
+        records.append(own)
+    if isinstance(soldr, dict):
+        records.extend(_entry_records(soldr.get("sidecars", [])))
+    zccache = raw.get("zccache", {})
+    if isinstance(zccache, dict):
+        records.extend(_entry_records(zccache.get("binaries", [])))
+    for block in ("crgx", "cargo_chef"):
+        bundled = _record(raw.get(block, {}), "binary")
+        if bundled is not None:
+            records.append(bundled)
+    return tuple(records)
+
+
+def _debug_info_entries(manifest: object) -> tuple[DebugInfoEntry, ...]:
+    soldr = manifest.get("soldr", {}) if isinstance(manifest, dict) else {}
+    if not isinstance(soldr, dict):
+        return ()
+    entries = soldr.get("debug_info", [])
+    if not isinstance(entries, list):
+        return ()
+    return tuple(
+        DebugInfoEntry(
+            name=entry["name"], sha256=entry["sha256"], format=entry.get("format")
+        )
         for entry in entries
         if isinstance(entry, dict)
         and isinstance(entry.get("name"), str)
         and isinstance(entry.get("sha256"), str)
-    ]
+    )
+
+
+def parse_release_manifest(manifest: object) -> ReleaseManifest:
+    """Project the parsed ``manifest.json`` JSON onto a typed record."""
+
+    raw = manifest if isinstance(manifest, dict) else {}
+    schema_version = raw.get("schema_version")
+    return ReleaseManifest(
+        schema_version=schema_version if isinstance(schema_version, int) else None,
+        archive_format=_str_field(raw.get("archive"), "format"),
+        soldr_target=_str_field(raw.get("soldr"), "target"),
+        zccache_target=_str_field(raw.get("zccache"), "target"),
+        crgx_target=_str_field(raw.get("crgx"), "target"),
+        cargo_chef_target=_str_field(raw.get("cargo_chef"), "target"),
+        binaries=_manifest_binaries(raw),
+        debug_info=_debug_info_entries(raw),
+    )
+
+
+def soldr_debug_info_entries(manifest: object) -> tuple[DebugInfoEntry, ...]:
+    return parse_release_manifest(manifest).debug_info
 
 
 def validate_release_manifest(  # noqa: C901
-    manifest: dict[str, Any],
+    manifest: object,
     *,
     soldr_target: str,
     windows: bool,
     extract_dir: Path,
 ) -> None:
-    schema_version = manifest.get("schema_version")
-    if (
-        not isinstance(schema_version, int)
-        or schema_version < MANIFEST_MIN_SCHEMA_VERSION
-    ):
+    parsed = parse_release_manifest(manifest)
+    schema_version = parsed.schema_version
+    if schema_version is None or schema_version < MANIFEST_MIN_SCHEMA_VERSION:
         raise RuntimeError(
             f"release manifest schema_version must be >= {MANIFEST_MIN_SCHEMA_VERSION}"
         )
-    archive = manifest.get("archive")
-    if not isinstance(archive, dict) or archive.get("format") != ARCHIVE_EXT:
+    if parsed.archive_format != ARCHIVE_EXT:
         raise RuntimeError(f"release manifest archive.format must be {ARCHIVE_EXT}")
-    soldr = manifest.get("soldr")
-    if not isinstance(soldr, dict) or soldr.get("target") != soldr_target:
+    if parsed.soldr_target != soldr_target:
         raise RuntimeError(f"release manifest soldr.target must be {soldr_target}")
-    zccache = manifest.get("zccache")
     expected_zccache_target = zccache_target_for_soldr_target(soldr_target)
-    if (
-        not isinstance(zccache, dict)
-        or zccache.get("target") != expected_zccache_target
-    ):
+    if parsed.zccache_target != expected_zccache_target:
         raise RuntimeError(
             f"release manifest zccache.target must be {expected_zccache_target}"
         )
-    crgx = manifest.get("crgx")
-    if not isinstance(crgx, dict) or crgx.get("target") != soldr_target:
+    if parsed.crgx_target != soldr_target:
         raise RuntimeError(f"release manifest crgx.target must be {soldr_target}")
-    cargo_chef = manifest.get("cargo_chef")
-    if not isinstance(cargo_chef, dict) or cargo_chef.get("target") != soldr_target:
+    if parsed.cargo_chef_target != soldr_target:
         raise RuntimeError(f"release manifest cargo_chef.target must be {soldr_target}")
 
     expected_names = set(release_binary_names(windows=windows))
-    manifest_binaries = _manifest_binaries(manifest)
-    missing = sorted(expected_names.difference(manifest_binaries))
+    recorded_names = {record.name for record in parsed.binaries}
+    missing = sorted(expected_names.difference(recorded_names))
     if missing:
         raise RuntimeError(
             f"release manifest is missing bundled binary records: {', '.join(missing)}"
         )
 
     for name in sorted(expected_names):
-        expected_sha = manifest_binaries[name].lower()
+        # Later records win, matching the manifest's historical dict semantics.
+        recorded_sha = [r.sha256 for r in parsed.binaries if r.name == name][-1]
+        expected_sha = recorded_sha.lower()
         if len(expected_sha) != 64 or any(
             ch not in "0123456789abcdef" for ch in expected_sha
         ):
@@ -175,18 +262,18 @@ def validate_release_manifest(  # noqa: C901
                 f"release manifest sha256 mismatch for {name}: expected {expected_sha}, got {actual_sha}"
             )
 
-    debug_info = soldr_debug_info_entries(manifest)
+    debug_info = parsed.debug_info
     if windows and not debug_info:
         raise RuntimeError("release manifest is missing soldr debug_info PDB entry")
     for entry in debug_info:
-        name = str(entry["name"])
-        if entry.get("format") != "pdb":
+        name = entry.name
+        if entry.format != "pdb":
             raise RuntimeError(
-                f"unsupported soldr debug_info format for {name}: {entry.get('format')}"
+                f"unsupported soldr debug_info format for {name}: {entry.format}"
             )
         if not name.lower().endswith(".pdb"):
             raise RuntimeError(f"soldr debug_info entry must name a .pdb file: {name}")
-        expected_sha = str(entry["sha256"]).lower()
+        expected_sha = entry.sha256.lower()
         if len(expected_sha) != 64 or any(
             ch not in "0123456789abcdef" for ch in expected_sha
         ):

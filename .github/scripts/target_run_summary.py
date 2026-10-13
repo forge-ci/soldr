@@ -11,10 +11,44 @@ from __future__ import annotations
 import argparse
 import json
 import xml.etree.ElementTree as ET
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
 
 SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class ListCounts:
+    """Selected and ignored testcase counts from a nextest list document."""
+
+    discovered: int
+    ignored: int
+
+
+@dataclass(frozen=True)
+class JunitCounts:
+    """Totals reconciled from a JUnit report."""
+
+    executed: int
+    passed: int
+    failed: int
+    skipped: int
+
+
+@dataclass(frozen=True)
+class RunSummary:
+    """The stable per-target summary; `asdict` is the emitted JSON schema."""
+
+    schema_version: int
+    target: str
+    partition: str | None
+    phase: str
+    discovered: int | None
+    ignored: int | None
+    executed: int | None
+    passed: int | None
+    failed: int | None
+    skipped: int | None
 
 
 def _int_attr(element: ET.Element, name: str) -> int:
@@ -28,9 +62,9 @@ def _int_attr(element: ET.Element, name: str) -> int:
     return count
 
 
-def read_test_list(path: Path | None) -> tuple[int | None, int | None]:  # noqa: C901
+def read_test_list(path: Path | None) -> ListCounts | None:  # noqa: C901
     if path is None:
-        return None, None
+        return None
     if not path.is_file():
         raise ValueError(f"required nextest list JSON is missing: {path}")
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -42,14 +76,14 @@ def read_test_list(path: Path | None) -> tuple[int | None, int | None]:  # noqa:
     rust_suites = payload.get("rust-suites")
     if not isinstance(rust_suites, dict):
         raise ValueError("nextest list JSON is missing rust-suites object")
-    selected: list[dict[str, Any]] = []
+    selected_ignored: list[bool] = []
     for suite in rust_suites.values():
         for testcase in suite.get("testcases", {}).values():
             filter_match = testcase.get("filter-match")
             if filter_match is None:
                 # Unfiltered `nextest list` documents no match decision; every
                 # testcase is selected in that representation.
-                selected.append(testcase)
+                selected_ignored.append(testcase.get("ignored") is True)
                 continue
             if not isinstance(filter_match, dict) or filter_match.get("status") not in {
                 "matches",
@@ -57,20 +91,20 @@ def read_test_list(path: Path | None) -> tuple[int | None, int | None]:  # noqa:
             }:
                 raise ValueError("nextest testcase has invalid filter-match status")
             if filter_match["status"] == "matches":
-                selected.append(testcase)
-    discovered = len(selected)
+                selected_ignored.append(testcase.get("ignored") is True)
+    discovered = len(selected_ignored)
     if discovered > reported:
         raise ValueError(
             "nextest selected testcase count exceeds reported test-count: "
             f"selected={discovered}, reported={reported}"
         )
-    ignored = sum(1 for testcase in selected if testcase.get("ignored") is True)
+    ignored = sum(selected_ignored)
     if ignored > discovered:
         raise ValueError("nextest ignored count exceeds discovered count")
-    return discovered, ignored
+    return ListCounts(discovered, ignored)
 
 
-def read_junit(path: Path | None) -> dict[str, int] | None:
+def read_junit(path: Path | None) -> JunitCounts | None:
     if path is None or not path.is_file():
         return None
     root = ET.parse(path).getroot()
@@ -97,12 +131,7 @@ def read_junit(path: Path | None) -> dict[str, int] | None:
     passed = executed - failed - skipped
     if failed + skipped > executed:
         raise ValueError("JUnit totals are internally inconsistent")
-    return {
-        "executed": executed,
-        "passed": passed,
-        "failed": failed,
-        "skipped": skipped,
-    }
+    return JunitCounts(executed, passed, failed, skipped)
 
 
 def build_summary(
@@ -112,22 +141,24 @@ def build_summary(
     *,
     require_junit: bool = False,
     partition: str | None = None,
-) -> dict[str, Any]:
-    discovered, ignored = read_test_list(list_json)
+) -> RunSummary:
+    listed = read_test_list(list_json)
+    discovered = listed.discovered if listed else None
+    ignored = listed.ignored if listed else None
     run = read_junit(junit)
     if require_junit and run is None:
         raise ValueError(f"required JUnit report is missing: {junit}")
     if discovered == 0:
         raise ValueError("nextest selected zero tests")
-    if run is not None and run["executed"] == 0:
+    if run is not None and run.executed == 0:
         raise ValueError("nextest executed zero tests")
     if run is not None and discovered is not None and ignored is not None:
-        accounted = run["executed"] + ignored
+        accounted = run.executed + ignored
         is_complete_partition = partition in (None, "hash:1/1")
         counts_disagree = (
             accounted != discovered
             if is_complete_partition
-            else run["executed"] > discovered
+            else run.executed > discovered
         )
         # soldr#2724: the lane runs `--max-fail 3:immediate`, so a run that
         # hits its third failure stops with tests still unexecuted -- by
@@ -140,11 +171,11 @@ def build_summary(
         #
         # Over-execution is never explained by an early stop, so it still
         # raises regardless: more tests ran than were discovered.
-        stopped_early = run["failed"] > 0 and accounted < discovered
+        stopped_early = run.failed > 0 and accounted < discovered
         if counts_disagree and not stopped_early:
             raise ValueError(
                 "nextest coverage counts disagree: "
-                f"discovered={discovered}, executed={run['executed']}, "
+                f"discovered={discovered}, executed={run.executed}, "
                 f"ignored={ignored}"
             )
     if run is not None:
@@ -153,30 +184,30 @@ def build_summary(
         phase = "listed"
     else:
         phase = "setup"
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "target": target,
-        "partition": partition,
-        "phase": phase,
-        "discovered": discovered,
-        "ignored": ignored,
-        "executed": run["executed"] if run else None,
-        "passed": run["passed"] if run else None,
-        "failed": run["failed"] if run else None,
-        "skipped": run["skipped"] if run else None,
-    }
+    return RunSummary(
+        schema_version=SCHEMA_VERSION,
+        target=target,
+        partition=partition,
+        phase=phase,
+        discovered=discovered,
+        ignored=ignored,
+        executed=run.executed if run else None,
+        passed=run.passed if run else None,
+        failed=run.failed if run else None,
+        skipped=run.skipped if run else None,
+    )
 
 
-def append_markdown(path: Path, summary: dict[str, Any]) -> None:
+def append_markdown(path: Path, summary: RunSummary) -> None:
     values = [
-        summary["target"],
-        summary["phase"],
-        summary["discovered"],
-        summary["executed"],
-        summary["passed"],
-        summary["failed"],
-        summary["ignored"],
-        summary["skipped"],
+        summary.target,
+        summary.phase,
+        summary.discovered,
+        summary.executed,
+        summary.passed,
+        summary.failed,
+        summary.ignored,
+        summary.skipped,
     ]
     rendered = ["n/a" if value is None else str(value) for value in values]
     with path.open("a", encoding="utf-8") as stream:
@@ -207,7 +238,9 @@ def main() -> int:
         partition=args.partition,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    args.output.write_text(
+        json.dumps(asdict(summary), indent=2) + "\n", encoding="utf-8"
+    )
     if args.github_summary is not None:
         append_markdown(args.github_summary, summary)
     return 0

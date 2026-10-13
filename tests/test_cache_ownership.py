@@ -24,6 +24,7 @@ manifest still describes them.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -546,17 +547,13 @@ jobs:
 {save if save_before else ""}{prune}{"" if save_before else save}"""
 
 
-def _r8(tmp_path: Path, body: str, pruned: dict | None = None) -> list[str]:
+def _r8(tmp_path: Path, body: str, pruned: Sequence[object] = ()) -> list[str]:
     workflow_dir = tmp_path / "workflows"
     workflow_dir.mkdir(parents=True, exist_ok=True)
     (workflow_dir / "seeded.yml").write_text(body, encoding="utf-8")
-    original = dict(guard.PRUNED_PREFIX_CACHES)
-    try:
-        guard.PRUNED_PREFIX_CACHES.update(pruned or {})
-        return guard.prefix_cache_problems(workflow_dir)
-    finally:
-        guard.PRUNED_PREFIX_CACHES.clear()
-        guard.PRUNED_PREFIX_CACHES.update(original)
+    return guard.prefix_cache_problems(
+        workflow_dir, pruned=guard.PRUNED_PREFIX_CACHES + tuple(pruned)
+    )
 
 
 def test_unregistered_appending_prefix_cache_fails_r8(tmp_path: Path) -> None:
@@ -567,24 +564,31 @@ def test_unregistered_appending_prefix_cache_fails_r8(tmp_path: Path) -> None:
 
 
 def test_registered_prune_before_save_passes_r8(tmp_path: Path) -> None:
-    key = ("seeded.yml", "Restore appending store")
+    key = guard.PrefixCacheKey("seeded.yml", "Restore appending store")
     assert (
-        _r8(tmp_path, _prefix_cache_workflow("Prune store"), {key: "Prune store"}) == []
+        _r8(
+            tmp_path,
+            _prefix_cache_workflow("Prune store"),
+            (guard.PrefixCache(key, "Prune store"),),
+        )
+        == []
     )
 
 
 def test_registered_prune_missing_from_job_fails_r8(tmp_path: Path) -> None:
-    key = ("seeded.yml", "Restore appending store")
-    problems = _r8(tmp_path, _prefix_cache_workflow(None), {key: "Prune store"})
+    key = guard.PrefixCacheKey("seeded.yml", "Restore appending store")
+    problems = _r8(
+        tmp_path, _prefix_cache_workflow(None), (guard.PrefixCache(key, "Prune store"),)
+    )
     assert len(problems) == 1 and "no step of that name" in problems[0]
 
 
 def test_save_before_the_prune_fails_r8(tmp_path: Path) -> None:
-    key = ("seeded.yml", "Restore appending store")
+    key = guard.PrefixCacheKey("seeded.yml", "Restore appending store")
     problems = _r8(
         tmp_path,
         _prefix_cache_workflow("Prune store", save_before=True),
-        {key: "Prune store"},
+        (guard.PrefixCache(key, "Prune store"),),
     )
     assert len(problems) == 1 and "before the prune step" in problems[0]
 

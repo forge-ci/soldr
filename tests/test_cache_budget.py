@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -570,7 +571,7 @@ PRIOR_LOCK = "9506e5de4a14312c"
 
 
 def lineage_entries() -> list:
-    raw, _ = guard.load_from_json(LINEAGE_FIXTURE)
+    raw = guard.load_from_json(LINEAGE_FIXTURE).entries
     return guard.normalize_entries(raw)
 
 
@@ -720,7 +721,7 @@ DOGFOOD_LOCK = "55449f335975c067e53a168bab22ae9b63036849458d34b93c50638df7addd13
 
 
 def dogfood_entries() -> list:
-    raw, _ = guard.load_from_json(DOGFOOD_FIXTURE)
+    raw = guard.load_from_json(DOGFOOD_FIXTURE).entries
     return guard.normalize_entries(raw)
 
 
@@ -903,12 +904,18 @@ def budget_with(**families: dict) -> dict:
     }
 
 
+@dataclass(frozen=True)
+class OverBudgetFiles:
+    manifest: Path
+    listing: Path
+
+
 def over_budget_listing(
     tmp_path: Path, ref: str = "refs/heads/main"
-) -> tuple[Path, Path]:
+) -> OverBudgetFiles:
     manifest = write_manifest(tmp_path, budget_with(fam=family("exp-", 100)))
     listing = write_listing(tmp_path, [entry("exp-a", 80), entry("exp-b", 80, ref=ref)])
-    return manifest, listing
+    return OverBudgetFiles(manifest, listing)
 
 
 def run_mode(manifest: Path, listing: Path, *extra: str) -> int:
@@ -918,7 +925,8 @@ def run_mode(manifest: Path, listing: Path, *extra: str) -> int:
 
 
 def test_pr_run_with_preexisting_overage_warns_and_passes(tmp_path, capsys) -> None:
-    manifest, listing = over_budget_listing(tmp_path)
+    files = over_budget_listing(tmp_path)
+    manifest, listing = files.manifest, files.listing
     code = run_mode(
         manifest, listing, "--event-name", "pull_request", "--ref", "refs/pull/7/merge"
     )
@@ -930,7 +938,8 @@ def test_pr_run_with_preexisting_overage_warns_and_passes(tmp_path, capsys) -> N
 def test_pr_run_writes_the_warning_to_the_job_summary(tmp_path, monkeypatch) -> None:
     summary = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
-    manifest, listing = over_budget_listing(tmp_path)
+    files = over_budget_listing(tmp_path)
+    manifest, listing = files.manifest, files.listing
     assert (
         run_mode(
             manifest,
@@ -946,7 +955,8 @@ def test_pr_run_writes_the_warning_to_the_job_summary(tmp_path, monkeypatch) -> 
 
 
 def test_pr_that_saved_over_budget_from_its_own_ref_fails(tmp_path, capsys) -> None:
-    manifest, listing = over_budget_listing(tmp_path, ref="refs/pull/7/merge")
+    files = over_budget_listing(tmp_path, ref="refs/pull/7/merge")
+    manifest, listing = files.manifest, files.listing
     code = run_mode(
         manifest, listing, "--event-name", "pull_request", "--ref", "refs/pull/7/merge"
     )
@@ -983,7 +993,8 @@ def test_pr_saving_an_unregistered_key_from_its_own_ref_fails(tmp_path) -> None:
 def test_main_schedule_dispatch_and_local_runs_fail_when_over_budget(
     tmp_path, event, ref
 ) -> None:
-    manifest, listing = over_budget_listing(tmp_path)
+    files = over_budget_listing(tmp_path)
+    manifest, listing = files.manifest, files.listing
     assert run_mode(manifest, listing, "--event-name", event, "--ref", ref) == 1
 
 
@@ -991,7 +1002,8 @@ def test_main_schedule_dispatch_and_local_runs_fail_when_over_budget(
 def test_a_push_or_dispatch_on_another_branch_warns(tmp_path, capsys, event) -> None:
     # workflow_dispatch: a PR's exact-SHA "CI full" run on its feature branch
     # (zackees/ci.yml#166, soldr#3510) must not fail on main's overage.
-    manifest, listing = over_budget_listing(tmp_path)
+    files = over_budget_listing(tmp_path)
+    manifest, listing = files.manifest, files.listing
     assert (
         run_mode(manifest, listing, "--event-name", event, "--ref", "refs/heads/topic")
         == 0
@@ -1039,7 +1051,7 @@ def test_the_real_manifest_has_no_forecast_problems() -> None:
     assert guard.forecast_problems(MANIFEST, manifest) == []
 
 
-def _plan(rows: list[dict], families: dict, pr_state=None) -> tuple[list, list]:
+def _plan(rows: list[dict], families: dict, pr_state=None):
     manifest = {"budget": budget_with(**families)}
     return guard.plan_sweep(
         guard.normalize_entries(rows), manifest, None, NOW, pr_state
@@ -1053,7 +1065,7 @@ def test_lru_janitor_plan_reaches_the_family_budget() -> None:
         aged("exp-b", 60, accessed="2026-09-28T00:00:00Z"),
         aged("exp-c", 60, accessed="2026-09-25T00:00:00Z"),
     ]
-    delete, _ = _plan(rows, {"fam": lru})
+    delete = _plan(rows, {"fam": lru}).delete
     # Least recently used first, and only as much as the overage needs.
     assert [e.key for e in delete] == ["exp-a", "exp-c"]
     remaining = sum(r["sizeInBytes"] for r in rows) - sum(e.size_bytes for e in delete)
@@ -1062,7 +1074,7 @@ def test_lru_janitor_plan_reaches_the_family_budget() -> None:
 
 def test_a_non_evictable_family_is_never_touched_for_budget() -> None:
     rows = [aged("keep-a", 90), aged("keep-b", 90)]
-    delete, _ = _plan(rows, {"fam": family("keep-", 100)})
+    delete = _plan(rows, {"fam": family("keep-", 100)}).delete
     assert delete == []
 
 
@@ -1073,14 +1085,14 @@ def test_newest_per_lineage_never_evicts_the_newest_download() -> None:
         aged("dl-tool-v1.1", 60, created="2026-09-10T00:00:00Z"),
         aged("dl-tool-v1.2", 60, created="2026-09-20T00:00:00Z"),
     ]
-    delete, _ = _plan(rows, {"fam": pinned})
+    delete = _plan(rows, {"fam": pinned}).delete
     assert "dl-tool-v1.2" not in [e.key for e in delete]
     assert [e.key for e in delete] == ["dl-tool-v1.0", "dl-tool-v1.1"]
 
 
 def test_newest_per_lineage_leaves_a_lone_lineage_even_over_budget() -> None:
     pinned = {**family("dl-", 100), "evict": "newest-per-lineage"}
-    delete, _ = _plan([aged("dl-only-v1", 150)], {"fam": pinned})
+    delete = _plan([aged("dl-only-v1", 150)], {"fam": pinned}).delete
     assert delete == []
 
 
@@ -1094,14 +1106,14 @@ def test_newest_keeps_only_the_familys_newest_hash_keyed_generation() -> None:
         aged("zu-1dec4d", 60, created="2026-09-10T00:00:00Z"),
         aged("zu-ff1637", 60, created="2026-09-01T00:00:00Z"),
     ]
-    delete, _ = _plan(rows, {"fam": store})
+    delete = _plan(rows, {"fam": store}).delete
     assert "zu-13acf6" not in [e.key for e in delete]
     assert sorted(e.key for e in delete) == ["zu-1dec4d", "zu-ff1637"]
 
 
 def test_newest_leaves_a_lone_generation_even_over_budget() -> None:
     store = {**family("zu-", 100), "evict": "newest"}
-    delete, _ = _plan([aged("zu-only", 150)], {"fam": store})
+    delete = _plan([aged("zu-only", 150)], {"fam": store}).delete
     assert delete == []
 
 
@@ -1110,7 +1122,7 @@ STATES = {1: "open", 2: "closed", 3: "closed"}  # 2 merged, 3 closed unmerged
 
 def test_an_open_prs_entries_are_kept() -> None:
     rows = [aged("keep-a", 1, ref="refs/pull/1/merge", created=FRESH)]
-    delete, _ = _plan(rows, {"fam": family("keep-", 1000)}, STATES.get)
+    delete = _plan(rows, {"fam": family("keep-", 1000)}, STATES.get).delete
     assert delete == []
 
 
@@ -1128,14 +1140,14 @@ def test_merged_and_closed_unmerged_prs_entries_are_deleted() -> None:
         looked_up.append(number)
         return STATES.get(number)
 
-    delete, _ = _plan(rows, {"fam": family("keep-", 1000)}, state)
+    delete = _plan(rows, {"fam": family("keep-", 1000)}, state).delete
     assert sorted(e.key for e in delete) == ["keep-closed", "keep-merged"]
     assert looked_up == [1, 2, 3], "one lookup per PR number"
 
 
 def test_a_failed_pr_state_lookup_keeps_the_entries(capsys) -> None:
     rows = [aged("keep-a", 1, ref="refs/pull/9/merge")]
-    delete, _ = _plan(rows, {"fam": family("keep-", 1000)}, lambda _n: None)
+    delete = _plan(rows, {"fam": family("keep-", 1000)}, lambda _n: None).delete
     assert delete == []
     assert "PR #9: state unknown; kept 1" in capsys.readouterr().out
 
@@ -1155,7 +1167,7 @@ def test_the_janitor_matches_pr_caches_by_key_tag_and_by_ref() -> None:
         aged("keep-y", 1, ref="refs/pull/2/merge"),
         aged("keep-z-pr-1", 1, ref="refs/heads/main"),
     ]
-    delete, _ = _plan(rows, {"fam": family("keep-", 1000)}, STATES.get)
+    delete = _plan(rows, {"fam": family("keep-", 1000)}, STATES.get).delete
     assert sorted(e.key for e in delete) == ["keep-x-pr-2-linux", "keep-y"]
 
 
@@ -1179,14 +1191,15 @@ def test_pr_12_does_not_match_pr_123() -> None:
 def test_the_plan_skips_entries_younger_than_the_window() -> None:
     lru = {**family("exp-", 10), "evict": "lru"}
     rows = [aged("exp-new", 60, created=FRESH), aged("exp-old", 60)]
-    delete, _ = _plan(rows, {"fam": lru})
+    delete = _plan(rows, {"fam": lru}).delete
     assert [e.key for e in delete] == ["exp-old"]
     assert guard.SWEEP_GRACE_SECONDS == 600
 
 
 def test_an_entry_with_no_creation_time_is_never_swept() -> None:
     rows = [entry("keep-a", 1, ref="refs/heads/topic")]
-    delete, deferred = _plan(rows, {"fam": family("keep-", 1000)})
+    plan = _plan(rows, {"fam": family("keep-", 1000)})
+    delete, deferred = plan.delete, plan.deferred
     assert delete == [] and len(deferred) == 1
 
 
@@ -1308,9 +1321,10 @@ def test_3545_sweep_reclaims_the_older_toolchain_under_one_lock(kind):
         "entries": [],
         "rationale": "fixture",
     }
-    delete, deferred = guard.plan_sweep(
+    plan = guard.plan_sweep(
         guard.normalize_entries(rows), {"budget": budget_with(fam=spec)}, lock, NOW
     )
+    delete, deferred = plan.delete, plan.deferred
     assert [e.key for e in delete] == [key(stale_toolchain)]
     assert deferred == []
     # The current-toolchain generation is genuinely in use and stays live.

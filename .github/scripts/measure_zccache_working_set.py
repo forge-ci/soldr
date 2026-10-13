@@ -75,38 +75,75 @@ TRIAL_TIMEOUT_SECONDS = 900
 
 
 @dataclasses.dataclass
+class VersionStats:
+    """Per zccache version directory totals gathered by one store walk."""
+
+    name: str
+    total_bytes: int = 0
+    touched_bytes: int = 0
+    # files touched (a touched empty file still marks the version live)
+    touched_files: int = 0
+    # the directories carrying this version name
+    paths: set[pathlib.Path] = dataclasses.field(default_factory=set)
+
+
+@dataclasses.dataclass
 class Walk:
     total_files: int = 0
     total_bytes: int = 0
     touched_files: int = 0
     touched_bytes: int = 0
-    # version directory -> [bytes, touched bytes]
-    by_version: dict[str, list[int]] = dataclasses.field(default_factory=dict)
-    # version directory -> the directories carrying that name
-    version_paths: dict[str, set[pathlib.Path]] = dataclasses.field(
-        default_factory=dict
-    )
-    # version directory -> files touched (a touched empty file still marks it live)
-    touched_files_by_version: dict[str, int] = dataclasses.field(default_factory=dict)
+    versions: list[VersionStats] = dataclasses.field(default_factory=list)
+
+    def version(self, name: str) -> VersionStats:
+        """The totals for version directory `name`, created on first use."""
+        for stats in self.versions:
+            if stats.name == name:
+                return stats
+        stats = VersionStats(name)
+        self.versions.append(stats)
+        return stats
+
+
+@dataclasses.dataclass(frozen=True)
+class VersionDir:
+    """A store file's version directory name and path (None when unversioned)."""
+
+    name: str
+    directory: pathlib.Path | None
+
+
+@dataclasses.dataclass(frozen=True)
+class InodeKey:
+    """Identity of a file on disk, used to count hardlinks once."""
+
+    device: int
+    inode: int
+
+
+@dataclasses.dataclass(frozen=True)
+class PrunedTree:
+    """A removed version tree and the bytes it held."""
+
+    name: str
+    size: int
 
 
 UNVERSIONED = "(unversioned)"
 
 
-def version_dir(
-    store: pathlib.Path, path: pathlib.Path
-) -> tuple[str, pathlib.Path | None]:
+def version_dir(store: pathlib.Path, path: pathlib.Path) -> VersionDir:
     """The zccache version directory (`v1.13.22`) a store file lives under."""
     parts = path.relative_to(store).parts[:-1]
     for index, part in enumerate(parts):
         if part.startswith("v") and part[1:2].isdigit():
-            return part, store.joinpath(*parts[: index + 1])
-    return UNVERSIONED, None
+            return VersionDir(part, store.joinpath(*parts[: index + 1]))
+    return VersionDir(UNVERSIONED, None)
 
 
 def walk_store(store: pathlib.Path, since: float) -> Walk:
     walk = Walk()
-    seen: set[tuple[int, int]] = set()
+    seen: set[InodeKey] = set()
     for dirpath, _dirnames, filenames in os.walk(store):
         for name in filenames:
             path = pathlib.Path(dirpath) / name
@@ -116,25 +153,23 @@ def walk_store(store: pathlib.Path, since: float) -> Walk:
                 continue
             if not stat.S_ISREG(info.st_mode):
                 continue
-            inode = (info.st_dev, info.st_ino)
+            inode = InodeKey(info.st_dev, info.st_ino)
             if inode in seen:
                 continue
             seen.add(inode)
             touched = max(info.st_atime, info.st_ctime, info.st_mtime) >= since
-            version, directory = version_dir(store, path)
-            bucket = walk.by_version.setdefault(version, [0, 0])
-            if directory is not None:
-                walk.version_paths.setdefault(version, set()).add(directory)
+            located = version_dir(store, path)
+            bucket = walk.version(located.name)
+            if located.directory is not None:
+                bucket.paths.add(located.directory)
             walk.total_files += 1
             walk.total_bytes += info.st_size
-            bucket[0] += info.st_size
+            bucket.total_bytes += info.st_size
             if touched:
                 walk.touched_files += 1
                 walk.touched_bytes += info.st_size
-                bucket[1] += info.st_size
-                walk.touched_files_by_version[version] = (
-                    walk.touched_files_by_version.get(version, 0) + 1
-                )
+                bucket.touched_bytes += info.st_size
+                bucket.touched_files += 1
     return walk
 
 
@@ -143,7 +178,7 @@ def measurement_is_valid(walk: Walk) -> bool:
     return 0 < walk.touched_files < walk.total_files
 
 
-def prune_dead_version_dirs(walk: Walk) -> list[tuple[str, int]]:
+def prune_dead_version_dirs(walk: Walk) -> list[PrunedTree]:
     """Remove whole zccache version trees this run never touched (soldr#3120).
 
     A version tree nobody read, linked or wrote during a full gate run is dead
@@ -159,15 +194,15 @@ def prune_dead_version_dirs(walk: Walk) -> list[tuple[str, int]]:
     if not measurement_is_valid(walk):
         return []
     live = {
-        name
-        for name, count in walk.touched_files_by_version.items()
-        if count and name != UNVERSIONED
+        stats.name
+        for stats in walk.versions
+        if stats.touched_files and stats.name != UNVERSIONED
     }
     if not live:
         return []
-    pruned: list[tuple[str, int]] = []
-    for name, (total, _touched) in sorted(walk.by_version.items()):
-        paths = walk.version_paths.get(name, set())
+    pruned: list[PrunedTree] = []
+    for stats in sorted(walk.versions, key=lambda item: item.name):
+        name, paths = stats.name, stats.paths
         if name in live or name == UNVERSIONED or len(paths) != 1:
             continue
         (directory,) = paths
@@ -176,7 +211,7 @@ def prune_dead_version_dirs(walk: Walk) -> list[tuple[str, int]]:
         except OSError as error:
             print(f"could not prune {directory}: {error}", file=sys.stderr)
             continue
-        pruned.append((name, total))
+        pruned.append(PrunedTree(name, stats.total_bytes))
     return pruned
 
 
@@ -329,7 +364,7 @@ def render(  # noqa: C901
     verdict: str,
     cap_bytes: int,
     trial: dict | None,
-    pruned: list[tuple[str, int]] | None = None,
+    pruned: list[PrunedTree] | None = None,
     *,
     trim: dict | None = None,
 ) -> str:
@@ -349,14 +384,17 @@ def render(  # noqa: C901
             "| version dir | bytes | touched |",
             "| --- | ---: | ---: |",
         ]
-        for name, (total, touched) in sorted(walk.by_version.items()):
-            lines.append(f"| `{name}` | {gib(total)} | {gib(touched)} |")
+        for stats in sorted(walk.versions, key=lambda item: item.name):
+            name = stats.name
+            lines.append(
+                f"| `{name}` | {gib(stats.total_bytes)} | {gib(stats.touched_bytes)} |"
+            )
         lines.append("")
     else:
         lines += [f"Working set: {verdict}", ""]
     if pruned is not None:
         if pruned:
-            names = ", ".join(f"`{name}` ({gib(size)})" for name, size in pruned)
+            names = ", ".join(f"`{tree.name}` ({gib(tree.size)})" for tree in pruned)
             lines += [f"Pruned dead version trees before the save: {names}", ""]
         else:
             lines += ["Pruned dead version trees before the save: none", ""]
@@ -468,7 +506,7 @@ def main(argv: list[str] | None = None) -> int:
         and args.scratch_root is not None
     ):
         store_bytes = (
-            walk.total_bytes - sum(size for _name, size in pruned or [])
+            walk.total_bytes - sum(tree.size for tree in pruned or [])
             if walk is not None
             else walk_store(args.store, float("inf")).total_bytes
         )

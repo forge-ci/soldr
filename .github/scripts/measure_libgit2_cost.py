@@ -93,7 +93,9 @@ import pathlib
 import re
 import sys
 from collections import Counter
-from typing import Any
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
+from typing import Any, Protocol
 
 # Loaded with importlib.util.spec_from_file_location rather than a package
 # import: this script and analyze_compile_journal.py both live in
@@ -151,7 +153,140 @@ def is_libgit2_record(record: Any) -> bool:
     return LIBGIT2_PKG_RE.match(cwd.rsplit("/", 1)[-1]) is not None
 
 
-def union_seconds(intervals: list[tuple[int, int]]) -> float:
+class IntervalLike(Protocol):
+    """Read-only `[start, end]` nanosecond span (`analyze_compile_journal.Interval`)."""
+
+    @property
+    def start(self) -> int:
+        """Span start, nanoseconds."""
+
+    @property
+    def end(self) -> int:
+        """Span end, nanoseconds."""
+
+
+@dataclass(frozen=True)
+class Slot:
+    """One `(kind, outcome)` accumulator key."""
+
+    kind: str
+    outcome: str
+
+
+@dataclass(frozen=True)
+class KindOutcome:
+    """Cost of one kind/outcome bucket."""
+
+    count: int
+    wall_seconds: float
+    union_wall_seconds: float
+
+
+@dataclass(frozen=True)
+class KindBuckets:
+    """The hit and miss buckets of one compiler kind."""
+
+    hit: KindOutcome
+    miss: KindOutcome
+
+
+@dataclass(frozen=True)
+class ByKind:
+    """Per-kind cost rollup (`cc` native compiler vs `rustc`)."""
+
+    cc: KindBuckets
+    rustc: KindBuckets
+
+    def bucket(self, kind: str, outcome: str) -> KindOutcome:
+        """Return the bucket for `kind` (cc/rustc) and `outcome` (hit/miss)."""
+        buckets: KindBuckets = getattr(self, kind)
+        result: KindOutcome = getattr(buckets, outcome)
+        return result
+
+
+@dataclass(frozen=True)
+class HitMiss:
+    """A hit/miss record split for one named journal file or target tree."""
+
+    name: str
+    hit: int
+    miss: int
+
+
+@dataclass(frozen=True)
+class MissReason:
+    """How many attributed miss records carried one `miss_reason`."""
+
+    reason: str
+    count: int
+
+
+@dataclass(frozen=True)
+class UnitOverlap:
+    """Distinct-unit counts for missed vs hit crates."""
+
+    miss_units: int
+    hit_units: int
+    both: int
+
+
+@dataclass(frozen=True)
+class Totals:
+    """Cost totals across both kinds."""
+
+    miss_records: int
+    hit_records: int
+    miss_wall_seconds: float
+    miss_union_wall_seconds: float
+    hit_wall_seconds: float
+    hit_union_wall_seconds: float
+    all_wall_seconds: float
+    all_union_wall_seconds: float
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """The measured cost against the bar."""
+
+    bar_seconds: float
+    metric: str
+    measured_seconds: float
+    under_bar: bool
+    data_available: bool
+
+
+@dataclass(frozen=True)
+class Measurement:
+    """What `measure()` returns; `to_dict()` is the stable JSON schema."""
+
+    journal_files: int
+    journal_paths: list[str]
+    records_total: int
+    records_malformed: int
+    records_deduped: int
+    attributed_records: int
+    package_dirs: list[str]
+    by_kind: ByKind
+    by_source: list[HitMiss]
+    by_tree: list[HitMiss]
+    unit_overlap: UnitOverlap
+    miss_reasons: list[MissReason]
+    totals: Totals
+    verdict: Verdict
+
+    def to_dict(self) -> dict:
+        """JSON-ready dict: the stable schema, keyed by name where named."""
+        wire = asdict(self)
+        for field in ("by_source", "by_tree"):
+            wire[field] = {
+                row.name: {"hit": row.hit, "miss": row.miss}
+                for row in getattr(self, field)
+            }
+        wire["miss_reasons"] = {row.reason: row.count for row in self.miss_reasons}
+        return wire
+
+
+def union_seconds(intervals: Sequence[IntervalLike]) -> float:
     """Merge overlapping `[start_ns, end_ns]` intervals; return total seconds.
 
     Intervals are built from `analyze_compile_journal._interval(record)`,
@@ -159,17 +294,25 @@ def union_seconds(intervals: list[tuple[int, int]]) -> float:
     """
     if not intervals:
         return 0.0
-    ordered = sorted(intervals)
+    ordered = sorted(intervals, key=lambda span: (span.start, span.end))
     merged_ns = 0
-    current_start, current_end = ordered[0]
-    for start, end in ordered[1:]:
-        if start <= current_end:
-            current_end = max(current_end, end)
+    current_start, current_end = ordered[0].start, ordered[0].end
+    for span in ordered[1:]:
+        if span.start <= current_end:
+            current_end = max(current_end, span.end)
         else:
             merged_ns += current_end - current_start
-            current_start, current_end = start, end
+            current_start, current_end = span.start, span.end
     merged_ns += current_end - current_start
     return merged_ns / 1e9
+
+
+def _split(hit: Counter[str], miss: Counter[str]) -> list[HitMiss]:
+    """Name-sorted `HitMiss` rows over every name seen in either counter."""
+    return [
+        HitMiss(name=name, hit=hit[name], miss=miss[name])
+        for name in sorted(set(hit) | set(miss))
+    ]
 
 
 def measure(
@@ -178,11 +321,12 @@ def measure(
     dedupe: bool = True,
     bar_seconds: float = DEFAULT_BAR_SECONDS,
     bar_metric: str = "miss_wall_seconds",
-) -> dict[str, Any]:
+) -> Measurement:
     """Read `paths`, filter to libgit2-sys records, and roll up cost.
 
-    See the module docstring for the JSON schema this returns (kept stable
-    on purpose -- soldr#3046's t2-measure-script-test is written against it).
+    See the module docstring for the JSON schema `Measurement.to_dict()`
+    returns (kept stable on purpose -- soldr#3046's t2-measure-script-test
+    is written against it).
     """
     if bar_metric not in BAR_METRICS:
         # Validated before any I/O: a typo'd metric should not be discovered
@@ -197,9 +341,8 @@ def measure(
     # owner, and duplicating journal parsing here is exactly the drift
     # CLAUDE.md's soldr#2945 note warns about.
     # pylint: disable-next=protected-access
-    records, malformed, deduped = analyze_compile_journal._read_journals(
-        journal_files, dedupe
-    )
+    journal = analyze_compile_journal._read_journals(journal_files, dedupe)
+    records = journal.records
 
     attributed = [record for record in records if is_libgit2_record(record)]
     package_dirs = sorted(
@@ -209,18 +352,15 @@ def measure(
         }
     )
 
-    counts: dict[tuple[str, str], int] = {
-        (kind, outcome): 0 for kind in _KINDS for outcome in _OUTCOMES
-    }
-    wall_seconds: dict[tuple[str, str], float] = {
-        (kind, outcome): 0.0 for kind in _KINDS for outcome in _OUTCOMES
-    }
-    intervals: dict[tuple[str, str], list[tuple[int, int]]] = {
-        (kind, outcome): [] for kind in _KINDS for outcome in _OUTCOMES
-    }
+    slots = [Slot(kind, outcome) for kind in _KINDS for outcome in _OUTCOMES]
+    counts: dict[Slot, int] = dict.fromkeys(slots, 0)
+    wall_seconds: dict[Slot, float] = dict.fromkeys(slots, 0.0)
+    intervals: dict[Slot, list[IntervalLike]] = {slot: [] for slot in slots}
     miss_reasons: Counter[str] = Counter()
-    by_source: dict[str, dict[str, int]] = {}
-    by_tree: dict[str, dict[str, int]] = {}
+    source_hit: Counter[str] = Counter()
+    source_miss: Counter[str] = Counter()
+    tree_hit: Counter[str] = Counter()
+    tree_miss: Counter[str] = Counter()
     units: dict[str, set[str]] = {"hit": set(), "miss": set()}
 
     for record in attributed:
@@ -232,7 +372,7 @@ def measure(
             continue
         # pylint: disable-next=protected-access
         is_cc = analyze_compile_journal._is_native_compiler(record.compiler)
-        key = ("cc" if is_cc else "rustc", record.outcome)
+        key = Slot("cc" if is_cc else "rustc", record.outcome)
         counts[key] += 1
         wall_seconds[key] += (record.latency_ns or 0) / 1e9
         # pylint: disable-next=protected-access
@@ -243,94 +383,105 @@ def measure(
             miss_reasons[record.miss_reason] += 1
         # Provenance, so a total that spans two archived builds cannot be
         # mistaken for one build's cost -- see the module docstring.
-        by_source.setdefault(record.source, {"hit": 0, "miss": 0})[record.outcome] += 1
-        by_tree.setdefault(record.tree, {"hit": 0, "miss": 0})[record.outcome] += 1
+        if record.outcome == "hit":
+            source_hit[record.source] += 1
+            tree_hit[record.tree] += 1
+        else:
+            source_miss[record.source] += 1
+            tree_miss[record.tree] += 1
         units[record.outcome].add(record.crate_name)
 
-    by_kind: dict[str, dict[str, dict[str, float]]] = {}
-    for kind in _KINDS:
-        by_kind[kind] = {}
-        for outcome in _OUTCOMES:
-            key = (kind, outcome)
-            by_kind[kind][outcome] = {
-                "count": counts[key],
-                "wall_seconds": wall_seconds[key],
-                "union_wall_seconds": union_seconds(intervals[key]),
-            }
+    def bucket(kind: str, outcome: str) -> KindOutcome:
+        slot = Slot(kind, outcome)
+        return KindOutcome(
+            count=counts[slot],
+            wall_seconds=wall_seconds[slot],
+            union_wall_seconds=union_seconds(intervals[slot]),
+        )
 
-    miss_records = counts[("cc", "miss")] + counts[("rustc", "miss")]
-    hit_records = counts[("cc", "hit")] + counts[("rustc", "hit")]
-    miss_wall = wall_seconds[("cc", "miss")] + wall_seconds[("rustc", "miss")]
-    hit_wall = wall_seconds[("cc", "hit")] + wall_seconds[("rustc", "hit")]
-    miss_intervals = intervals[("cc", "miss")] + intervals[("rustc", "miss")]
-    hit_intervals = intervals[("cc", "hit")] + intervals[("rustc", "hit")]
+    by_kind = ByKind(
+        cc=KindBuckets(hit=bucket("cc", "hit"), miss=bucket("cc", "miss")),
+        rustc=KindBuckets(hit=bucket("rustc", "hit"), miss=bucket("rustc", "miss")),
+    )
 
-    totals = {
-        "miss_records": miss_records,
-        "hit_records": hit_records,
-        "miss_wall_seconds": miss_wall,
-        "miss_union_wall_seconds": union_seconds(miss_intervals),
-        "hit_wall_seconds": hit_wall,
-        "hit_union_wall_seconds": union_seconds(hit_intervals),
-        "all_wall_seconds": miss_wall + hit_wall,
-        "all_union_wall_seconds": union_seconds(miss_intervals + hit_intervals),
-    }
+    cc_miss, rustc_miss = Slot("cc", "miss"), Slot("rustc", "miss")
+    cc_hit, rustc_hit = Slot("cc", "hit"), Slot("rustc", "hit")
+    miss_records = counts[cc_miss] + counts[rustc_miss]
+    hit_records = counts[cc_hit] + counts[rustc_hit]
+    miss_wall = wall_seconds[cc_miss] + wall_seconds[rustc_miss]
+    hit_wall = wall_seconds[cc_hit] + wall_seconds[rustc_hit]
+    miss_intervals = intervals[cc_miss] + intervals[rustc_miss]
+    hit_intervals = intervals[cc_hit] + intervals[rustc_hit]
 
-    cc_records = counts[("cc", "hit")] + counts[("cc", "miss")]
+    totals = Totals(
+        miss_records=miss_records,
+        hit_records=hit_records,
+        miss_wall_seconds=miss_wall,
+        miss_union_wall_seconds=union_seconds(miss_intervals),
+        hit_wall_seconds=hit_wall,
+        hit_union_wall_seconds=union_seconds(hit_intervals),
+        all_wall_seconds=miss_wall + hit_wall,
+        all_union_wall_seconds=union_seconds(miss_intervals + hit_intervals),
+    )
+
+    cc_records = counts[cc_hit] + counts[cc_miss]
     data_available = bool(attributed) and cc_records > 0
-    measured_seconds = float(totals[bar_metric])
+    measured_seconds = float(getattr(totals, bar_metric))
     under_bar = data_available and measured_seconds <= bar_seconds
 
-    return {
-        "journal_files": len(journal_files),
-        "journal_paths": [str(path) for path in journal_files],
-        "records_total": len(records),
-        "records_malformed": malformed,
-        "records_deduped": deduped,
-        "attributed_records": len(attributed),
-        "package_dirs": package_dirs,
-        "by_kind": by_kind,
-        "by_source": {source: by_source[source] for source in sorted(by_source)},
-        "by_tree": {tree: by_tree[tree] for tree in sorted(by_tree)},
-        "unit_overlap": {
-            "miss_units": len(units["miss"]),
-            "hit_units": len(units["hit"]),
-            "both": len(units["miss"] & units["hit"]),
-        },
-        "miss_reasons": dict(sorted(miss_reasons.items())),
-        "totals": totals,
-        "verdict": {
-            "bar_seconds": bar_seconds,
-            "metric": bar_metric,
-            "measured_seconds": measured_seconds,
-            "under_bar": under_bar,
-            "data_available": data_available,
-        },
-    }
+    return Measurement(
+        journal_files=len(journal_files),
+        journal_paths=[str(path) for path in journal_files],
+        records_total=len(records),
+        records_malformed=journal.malformed,
+        records_deduped=journal.dropped,
+        attributed_records=len(attributed),
+        package_dirs=package_dirs,
+        by_kind=by_kind,
+        by_source=_split(source_hit, source_miss),
+        by_tree=_split(tree_hit, tree_miss),
+        unit_overlap=UnitOverlap(
+            miss_units=len(units["miss"]),
+            hit_units=len(units["hit"]),
+            both=len(units["miss"] & units["hit"]),
+        ),
+        miss_reasons=[
+            MissReason(reason=reason, count=count)
+            for reason, count in sorted(miss_reasons.items())
+        ],
+        totals=totals,
+        verdict=Verdict(
+            bar_seconds=bar_seconds,
+            metric=bar_metric,
+            measured_seconds=measured_seconds,
+            under_bar=under_bar,
+            data_available=data_available,
+        ),
+    )
 
 
-def render_text(summary: dict[str, Any]) -> str:  # noqa: C901
-    """Render `summary` (the dict `measure()` returns) as a console report."""
+def render_text(summary: Measurement) -> str:  # noqa: C901
+    """Render `summary` (the `Measurement` `measure()` returns) as a console report."""
     lines: list[str] = []
     lines.append("== libgit2-sys cost measurement (soldr#3046 step 1) ==")
     lines.append(
-        f"journals: {summary['journal_files']} files, "
-        f"{summary['records_total']} records read, "
-        f"{summary['records_malformed']} malformed, "
-        f"{summary['records_deduped']} deduped"
+        f"journals: {summary.journal_files} files, "
+        f"{summary.records_total} records read, "
+        f"{summary.records_malformed} malformed, "
+        f"{summary.records_deduped} deduped"
     )
     # Capped, because a `history/` tree carries one journal per archived
     # build and the full list can run to dozens. The JSON payload always
     # carries every path; this is the console courtesy copy.
-    shown = summary["journal_paths"][:PATHS_SHOWN]
+    shown = summary.journal_paths[:PATHS_SHOWN]
     for path in shown:
         lines.append(f"  journal: {path}")
-    remaining = len(summary["journal_paths"]) - len(shown)
+    remaining = len(summary.journal_paths) - len(shown)
     if remaining > 0:
         lines.append(f"  journal: (+{remaining} more, see --json)")
-    lines.append(f"attributed records: {summary['attributed_records']}")
-    if summary["package_dirs"]:
-        lines.append(f"package dirs: {', '.join(summary['package_dirs'])}")
+    lines.append(f"attributed records: {summary.attributed_records}")
+    if summary.package_dirs:
+        lines.append(f"package dirs: {', '.join(summary.package_dirs)}")
     else:
         lines.append("package dirs: (none found)")
 
@@ -338,35 +489,35 @@ def render_text(summary: dict[str, Any]) -> str:  # noqa: C901
     lines.append("kind/outcome  count  wall_s  union_wall_s")
     for kind in _KINDS:
         for outcome in _OUTCOMES:
-            bucket = summary["by_kind"][kind][outcome]
+            bucket = summary.by_kind.bucket(kind, outcome)
             lines.append(
-                f"{kind}/{outcome:<4}  {bucket['count']:>5}  "
-                f"{bucket['wall_seconds']:>7.2f}  {bucket['union_wall_seconds']:>7.2f}"
+                f"{kind}/{outcome:<4}  {bucket.count:>5}  "
+                f"{bucket.wall_seconds:>7.2f}  {bucket.union_wall_seconds:>7.2f}"
             )
 
     lines.append("")
     lines.append("attributed hit/miss by target tree:")
-    if summary["by_tree"]:
-        for tree, split in summary["by_tree"].items():
-            lines.append(f"  {tree}: {split['miss']} miss, {split['hit']} hit")
+    if summary.by_tree:
+        for split in summary.by_tree:
+            lines.append(f"  {split.name}: {split.miss} miss, {split.hit} hit")
     else:
         lines.append("  (none)")
 
     lines.append("")
     lines.append("attributed hit/miss by journal file:")
-    if summary["by_source"]:
-        for source, split in summary["by_source"].items():
-            lines.append(f"  {source}: {split['miss']} miss, {split['hit']} hit")
+    if summary.by_source:
+        for split in summary.by_source:
+            lines.append(f"  {split.name}: {split.miss} miss, {split.hit} hit")
     else:
         lines.append("  (none)")
 
-    overlap = summary["unit_overlap"]
+    overlap = summary.unit_overlap
     lines.append("")
     lines.append(
-        f"distinct units: {overlap['miss_units']} missed, "
-        f"{overlap['hit_units']} hit, {overlap['both']} both"
+        f"distinct units: {overlap.miss_units} missed, "
+        f"{overlap.hit_units} hit, {overlap.both} both"
     )
-    if overlap["both"]:
+    if overlap.both:
         # The reading that decides whether a catalogue asset is even the
         # right fix: a unit that is missed AND served inside one measurement
         # is cacheable already, so the gap is cross-run reuse, not vendoring.
@@ -379,33 +530,33 @@ def render_text(summary: dict[str, Any]) -> str:  # noqa: C901
 
     lines.append("")
     lines.append("miss reasons (attributed miss records):")
-    if summary["miss_reasons"]:
-        for reason, count in summary["miss_reasons"].items():
-            lines.append(f"  {reason}: {count}")
+    if summary.miss_reasons:
+        for row in summary.miss_reasons:
+            lines.append(f"  {row.reason}: {row.count}")
     else:
         lines.append("  (none)")
 
-    totals = summary["totals"]
+    totals = summary.totals
     lines.append("")
     lines.append("totals:")
     lines.append(
-        f"  miss: {totals['miss_records']} records, "
-        f"wall={totals['miss_wall_seconds']:.2f}s "
-        f"union={totals['miss_union_wall_seconds']:.2f}s"
+        f"  miss: {totals.miss_records} records, "
+        f"wall={totals.miss_wall_seconds:.2f}s "
+        f"union={totals.miss_union_wall_seconds:.2f}s"
     )
     lines.append(
-        f"  hit:  {totals['hit_records']} records, "
-        f"wall={totals['hit_wall_seconds']:.2f}s "
-        f"union={totals['hit_union_wall_seconds']:.2f}s"
+        f"  hit:  {totals.hit_records} records, "
+        f"wall={totals.hit_wall_seconds:.2f}s "
+        f"union={totals.hit_union_wall_seconds:.2f}s"
     )
     lines.append(
-        f"  all:  wall={totals['all_wall_seconds']:.2f}s "
-        f"union={totals['all_union_wall_seconds']:.2f}s"
+        f"  all:  wall={totals.all_wall_seconds:.2f}s "
+        f"union={totals.all_union_wall_seconds:.2f}s"
     )
 
-    verdict = summary["verdict"]
+    verdict = summary.verdict
     lines.append("")
-    if not verdict["data_available"]:
+    if not verdict.data_available:
         lines.append(
             "!! NO libgit2-sys native `cc` records found in this journal -- "
             "the measurement is UNAVAILABLE, not zero. A journal from a host "
@@ -414,12 +565,12 @@ def render_text(summary: dict[str, Any]) -> str:  # noqa: C901
         )
     verdict_word = (
         "UNAVAILABLE"
-        if not verdict["data_available"]
-        else ("UNDER BAR" if verdict["under_bar"] else "OVER BAR")
+        if not verdict.data_available
+        else ("UNDER BAR" if verdict.under_bar else "OVER BAR")
     )
     lines.append(
-        f"verdict: {verdict['metric']} = {verdict['measured_seconds']:.2f}s "
-        f"vs bar {verdict['bar_seconds']:.2f}s -> {verdict_word}"
+        f"verdict: {verdict.metric} = {verdict.measured_seconds:.2f}s "
+        f"vs bar {verdict.bar_seconds:.2f}s -> {verdict_word}"
     )
     return "\n".join(lines)
 
@@ -477,7 +628,9 @@ def main(argv: list[str] | None = None) -> int:
         out_path = pathlib.Path(args.json_out)
         try:
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+            out_path.write_text(
+                json.dumps(summary.to_dict(), indent=2) + "\n", encoding="utf-8"
+            )
         except OSError as error:
             print(
                 f"measure_libgit2_cost: could not write --json-out "
@@ -486,7 +639,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     if args.json:
-        print(json.dumps(summary, indent=2))
+        print(json.dumps(summary.to_dict(), indent=2))
     else:
         print(render_text(summary))
 

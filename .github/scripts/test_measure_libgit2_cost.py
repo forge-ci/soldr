@@ -30,6 +30,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from _script_loader import load_sibling_script
 
@@ -77,7 +78,7 @@ def _seed(root: Path, records: list[dict]) -> str:
     return str(root)
 
 
-def _summarize(records: list[dict], **kwargs: object) -> dict:
+def _summarize(records: list[dict], **kwargs: object) -> Any:
     """Measure `records` from a throwaway journal root."""
     with tempfile.TemporaryDirectory() as raw:
         return measure_libgit2_cost.measure([_seed(Path(raw), records)], **kwargs)
@@ -174,7 +175,13 @@ class UnionSecondsHelperTests(unittest.TestCase):
         # [0, 10) and [5, 20) overlap -> merge to [0, 20) width 20;
         # [30, 40) is disjoint -> +10. Total union width 30 (nanoseconds in,
         # seconds out per the documented ns->s contract).
-        result = measure_libgit2_cost.union_seconds([(0, 10), (5, 20), (30, 40)])
+        result = measure_libgit2_cost.union_seconds(
+            [
+                analyze_compile_journal.Interval(0, 10),
+                analyze_compile_journal.Interval(5, 20),
+                analyze_compile_journal.Interval(30, 40),
+            ]
+        )
         self.assertAlmostEqual(result, 30.0 / 1e9)
 
     def test_empty_input_is_zero(self) -> None:
@@ -214,8 +221,8 @@ class AttributionRegressionTests(unittest.TestCase):
                 ),
             ]
         )
-        self.assertEqual(summary["attributed_records"], 1)
-        self.assertEqual(summary["package_dirs"], [PKG_DIR_NAME])
+        self.assertEqual(summary.attributed_records, 1)
+        self.assertEqual(summary.package_dirs, [PKG_DIR_NAME])
 
 
 class BucketingTests(unittest.TestCase):
@@ -248,23 +255,21 @@ class BucketingTests(unittest.TestCase):
             ]
         )
 
-        by_kind = summary["by_kind"]
-        self.assertEqual(by_kind["cc"]["miss"]["count"], 1)
-        self.assertEqual(by_kind["cc"]["hit"]["count"], 1)
-        self.assertEqual(by_kind["rustc"]["miss"]["count"], 1)
-        self.assertEqual(by_kind["rustc"]["hit"]["count"], 1)
+        by_kind = summary.by_kind
+        self.assertEqual(by_kind.cc.miss.count, 1)
+        self.assertEqual(by_kind.cc.hit.count, 1)
+        self.assertEqual(by_kind.rustc.miss.count, 1)
+        self.assertEqual(by_kind.rustc.hit.count, 1)
 
         self.assertAlmostEqual(
-            by_kind["cc"]["miss"]["wall_seconds"], 250_000_000 / 1e9, places=3
+            by_kind.cc.miss.wall_seconds, 250_000_000 / 1e9, places=3
+        )
+        self.assertAlmostEqual(by_kind.cc.hit.wall_seconds, 100_000_000 / 1e9, places=3)
+        self.assertAlmostEqual(
+            by_kind.rustc.miss.wall_seconds, 500_000_000 / 1e9, places=3
         )
         self.assertAlmostEqual(
-            by_kind["cc"]["hit"]["wall_seconds"], 100_000_000 / 1e9, places=3
-        )
-        self.assertAlmostEqual(
-            by_kind["rustc"]["miss"]["wall_seconds"], 500_000_000 / 1e9, places=3
-        )
-        self.assertAlmostEqual(
-            by_kind["rustc"]["hit"]["wall_seconds"], 50_000_000 / 1e9, places=3
+            by_kind.rustc.hit.wall_seconds, 50_000_000 / 1e9, places=3
         )
 
 
@@ -296,11 +301,11 @@ class WallClockTests(unittest.TestCase):
             ]
         )
 
-        totals = summary["totals"]
-        self.assertAlmostEqual(totals["miss_wall_seconds"], 4.0)
-        self.assertAlmostEqual(totals["miss_union_wall_seconds"], 2.0)
+        totals = summary.totals
+        self.assertAlmostEqual(totals.miss_wall_seconds, 4.0)
+        self.assertAlmostEqual(totals.miss_union_wall_seconds, 2.0)
         self.assertAlmostEqual(
-            totals["miss_wall_seconds"], 2 * totals["miss_union_wall_seconds"]
+            totals.miss_wall_seconds, 2 * totals.miss_union_wall_seconds
         )
 
     def test_records_without_timestamps_still_count_in_wall_sum(self) -> None:
@@ -316,9 +321,9 @@ class WallClockTests(unittest.TestCase):
             ]
         )
 
-        totals = summary["totals"]
-        self.assertAlmostEqual(totals["miss_wall_seconds"], 300_000_000 / 1e9)
-        self.assertEqual(totals["miss_union_wall_seconds"], 0.0)
+        totals = summary.totals
+        self.assertAlmostEqual(totals.miss_wall_seconds, 300_000_000 / 1e9)
+        self.assertEqual(totals.miss_union_wall_seconds, 0.0)
 
 
 class DedupeTests(unittest.TestCase):
@@ -345,16 +350,16 @@ class DedupeTests(unittest.TestCase):
     def test_identical_lines_are_deduped_by_default(self) -> None:
         summary = _summarize(self._journal())
 
-        self.assertEqual(summary["records_deduped"], 1)
-        self.assertEqual(summary["attributed_records"], 1)
-        self.assertAlmostEqual(summary["totals"]["miss_wall_seconds"], 1.0)
+        self.assertEqual(summary.records_deduped, 1)
+        self.assertEqual(summary.attributed_records, 1)
+        self.assertAlmostEqual(summary.totals.miss_wall_seconds, 1.0)
 
     def test_no_dedupe_keeps_both_records(self) -> None:
         summary = _summarize(self._journal(), dedupe=False)
 
-        self.assertEqual(summary["records_deduped"], 0)
-        self.assertEqual(summary["attributed_records"], 2)
-        self.assertAlmostEqual(summary["totals"]["miss_wall_seconds"], 2.0)
+        self.assertEqual(summary.records_deduped, 0)
+        self.assertEqual(summary.attributed_records, 2)
+        self.assertAlmostEqual(summary.totals.miss_wall_seconds, 2.0)
 
 
 class ProvenanceTests(unittest.TestCase):
@@ -395,16 +400,16 @@ class ProvenanceTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            summary["by_tree"],
-            {
-                "dylint/tests": {"miss": 1, "hit": 1},
-                "other": {"miss": 1, "hit": 0},
-            },
+            summary.by_tree,
+            [
+                measure_libgit2_cost.HitMiss(name="dylint/tests", hit=1, miss=1),
+                measure_libgit2_cost.HitMiss(name="other", hit=0, miss=1),
+            ],
         )
         # `odb` was both missed and served; `hash` was only missed.
         self.assertEqual(
-            summary["unit_overlap"],
-            {"miss_units": 2, "hit_units": 1, "both": 1},
+            summary.unit_overlap,
+            measure_libgit2_cost.UnitOverlap(miss_units=2, hit_units=1, both=1),
         )
         self.assertIn("1 both", measure_libgit2_cost.render_text(summary))
 
@@ -443,20 +448,18 @@ class ProvenanceTests(unittest.TestCase):
 
         journal_a = str(build_a / "compile_journal.jsonl")
         journal_b = str(build_b / "compile_journal.jsonl")
-        self.assertEqual(summary["journal_files"], 2)
+        self.assertEqual(summary.journal_files, 2)
+        self.assertEqual(sorted(summary.journal_paths), sorted([journal_a, journal_b]))
         self.assertEqual(
-            sorted(summary["journal_paths"]), sorted([journal_a, journal_b])
-        )
-        self.assertEqual(
-            summary["by_source"],
-            {
-                journal_a: {"miss": 1, "hit": 0},
-                journal_b: {"miss": 0, "hit": 1},
-            },
+            summary.by_source,
+            [
+                measure_libgit2_cost.HitMiss(name=journal_a, hit=0, miss=1),
+                measure_libgit2_cost.HitMiss(name=journal_b, hit=1, miss=0),
+            ],
         )
         # Same unit name on both sides, but from two different journals --
         # which is precisely the case a bare hit/miss total cannot express.
-        self.assertEqual(summary["unit_overlap"]["both"], 1)
+        self.assertEqual(summary.unit_overlap.both, 1)
 
 
 class BarMetricContractTests(unittest.TestCase):
@@ -475,9 +478,9 @@ class BarMetricContractTests(unittest.TestCase):
         records = self._one_miss()
         summary = _summarize(records)
         for metric in measure_libgit2_cost.BAR_METRICS:
-            self.assertIn(metric, summary["totals"])
+            self.assertTrue(hasattr(summary.totals, metric))
             scoped = _summarize(records, bar_metric=metric)
-            self.assertEqual(scoped["verdict"]["metric"], metric)
+            self.assertEqual(scoped.verdict.metric, metric)
 
     def test_record_counts_are_not_accepted_as_a_seconds_bar(self) -> None:
         # `totals` also carries `miss_records`/`hit_records`; comparing a
@@ -516,7 +519,7 @@ class MissReasonsTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            summary["miss_reasons"],
+            {row.reason: row.count for row in summary.miss_reasons},
             {"context_not_found": 2, "uncacheable_input": 1},
         )
 
@@ -546,11 +549,11 @@ class VerdictTests(unittest.TestCase):
             ]
         )
 
-        self.assertTrue(under_summary["verdict"]["under_bar"])
-        self.assertFalse(over_summary["verdict"]["under_bar"])
+        self.assertTrue(under_summary.verdict.under_bar)
+        self.assertFalse(over_summary.verdict.under_bar)
         for summary in (under_summary, over_summary):
-            self.assertEqual(summary["verdict"]["bar_seconds"], 30.0)
-            self.assertEqual(summary["verdict"]["metric"], "miss_wall_seconds")
+            self.assertEqual(summary.verdict.bar_seconds, 30.0)
+            self.assertEqual(summary.verdict.metric, "miss_wall_seconds")
 
     def test_bar_metric_selects_the_measured_value(self) -> None:
         ts = f"{BASE_TS_PREFIX}11.000Z"
@@ -579,11 +582,11 @@ class VerdictTests(unittest.TestCase):
         wall_summary = _summarize(records)
         union_summary = _summarize(records, bar_metric="miss_union_wall_seconds")
 
-        self.assertAlmostEqual(wall_summary["verdict"]["measured_seconds"], 40.0)
-        self.assertFalse(wall_summary["verdict"]["under_bar"])
+        self.assertAlmostEqual(wall_summary.verdict.measured_seconds, 40.0)
+        self.assertFalse(wall_summary.verdict.under_bar)
 
-        self.assertAlmostEqual(union_summary["verdict"]["measured_seconds"], 20.0)
-        self.assertTrue(union_summary["verdict"]["under_bar"])
+        self.assertAlmostEqual(union_summary.verdict.measured_seconds, 20.0)
+        self.assertTrue(union_summary.verdict.under_bar)
 
         with self.assertRaises(ValueError):
             _summarize(records, bar_metric="not_a_real_metric")
@@ -605,8 +608,8 @@ class AvailabilityTests(unittest.TestCase):
         empty_summary = _summarize([])
 
         for summary in (no_attribution_summary, empty_summary):
-            self.assertFalse(summary["verdict"]["data_available"])
-            self.assertFalse(summary["verdict"]["under_bar"])
+            self.assertFalse(summary.verdict.data_available)
+            self.assertFalse(summary.verdict.under_bar)
             self.assertIn("UNAVAILABLE", measure_libgit2_cost.render_text(summary))
 
     def test_a_root_with_no_journals_at_all_is_unavailable(self) -> None:
@@ -616,8 +619,8 @@ class AvailabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             summary = measure_libgit2_cost.measure([raw])
 
-        self.assertEqual(summary["journal_paths"], [])
-        self.assertFalse(summary["verdict"]["data_available"])
+        self.assertEqual(summary.journal_paths, [])
+        self.assertFalse(summary.verdict.data_available)
         self.assertIn("UNAVAILABLE", measure_libgit2_cost.render_text(summary))
 
 

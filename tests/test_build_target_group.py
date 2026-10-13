@@ -8,7 +8,9 @@ the unknown-group failure mode.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 from conftest import load_script_module
@@ -24,21 +26,25 @@ build_target_group = load_module()
 REPO_ROOT = Path(__file__).parents[1]
 
 
-def canonical_aliases() -> dict[str, str]:
+def canonical_aliases() -> Sequence[Any]:
     data = json.loads(
         (REPO_ROOT / "ci" / "canonical-targets.json").read_text(encoding="utf-8")
     )
-    return {entry["alias"]: entry["triple"] for entry in data["targets"]}
+    return tuple(
+        build_target_group.CanonicalTarget(entry["alias"], entry["triple"])
+        for entry in data["targets"]
+    )
 
 
 def test_win_mac_musl_expands_to_exact_triples_in_order() -> None:
     plan = build_target_group.resolve_group("win-mac-musl", canonical_aliases())
-    assert list(plan) == [
+    expected = [
         ("win-x64", "x86_64-pc-windows-msvc"),
         ("mac-arm64", "aarch64-apple-darwin"),
         ("linux-x64-musl", "x86_64-unknown-linux-musl"),
         ("linux-arm64-musl", "aarch64-unknown-linux-musl"),
     ]
+    assert [(t.alias, t.triple) for t in plan] == expected
 
 
 def test_per_target_command_is_soldr_build_release_target() -> None:
@@ -74,7 +80,7 @@ def test_artifact_destinations_use_group_and_alias_with_exe_only_on_windows() ->
         triple="x86_64-pc-windows-msvc",
         out_dir=Path("dist"),
     )
-    dests = [dest for _, dest in moves]
+    dests = [move.destination for move in moves]
     assert Path("dist/win-mac-musl/win-x64/soldr.exe") in dests
     assert Path("dist/win-mac-musl/win-x64/soldr-daemon.exe") in dests
 
@@ -84,7 +90,8 @@ def test_artifact_destinations_use_group_and_alias_with_exe_only_on_windows() ->
         triple="x86_64-unknown-linux-musl",
         out_dir=Path("dist"),
     )
-    for src, dest in moves:
+    for move in moves:
+        src, dest = move.source, move.destination
         assert not src.name.endswith(".exe"), src
         assert not dest.name.endswith(".exe"), dest
         assert dest.parent == Path("dist/win-mac-musl/linux-x64-musl")
@@ -96,7 +103,7 @@ def test_artifact_destinations_use_group_and_alias_with_exe_only_on_windows() ->
 def test_group_table_aliases_are_canonical() -> None:
     # Parity guard (soldr#1695 spirit): every alias named by a group must
     # exist in ci/canonical-targets.json.
-    known = canonical_aliases()
+    known = {target.alias for target in canonical_aliases()}
     for group, aliases in build_target_group.GROUPS.items():
         for alias in aliases:
             assert alias in known, f"{group} names non-canonical alias {alias}"

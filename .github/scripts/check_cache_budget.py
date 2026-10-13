@@ -231,6 +231,63 @@ class CacheEntry:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class Listing:
+    """A `--from-json` fixture: its raw entries and the reported usage bytes."""
+
+    entries: list[object]
+    usage_bytes: int | None
+
+
+@dataclass(frozen=True)
+class Family:
+    """One manifest family; `spec` is None when the manifest value is no object."""
+
+    family_id: str
+    spec: dict | None
+
+
+@dataclass(frozen=True)
+class FamilyGroup:
+    """A family and the cache entries its key prefixes own."""
+
+    family: Family
+    entries: list[CacheEntry]
+
+
+@dataclass(frozen=True)
+class FamilyGrouping:
+    """Entries split across the manifest families, plus those matching none."""
+
+    groups: list[FamilyGroup]
+    unmatched: list[CacheEntry]
+
+    def entries_of(self, family_id: str) -> list[CacheEntry]:
+        """The entries owned by `family_id` (empty when it is not a family)."""
+        for group in self.groups:
+            if group.family.family_id == family_id:
+                return group.entries
+        return []
+
+
+@dataclass(frozen=True)
+class RecognizedEntry:
+    """An action-store cache entry split into its retention-relevant parts."""
+
+    entry: CacheEntry
+    platform: str
+    toolchain: str
+    lock: str
+
+
+@dataclass(frozen=True)
+class SweepPlan:
+    """One janitor sweep: what to delete now and what to defer."""
+
+    delete: list[CacheEntry]
+    deferred: list[CacheEntry]
+
+
 def normalize_entries(raw: list[object]) -> list[CacheEntry]:
     """Turn raw JSON rows (fixture or live) into `CacheEntry` objects.
 
@@ -275,7 +332,7 @@ def normalize_entries(raw: list[object]) -> list[CacheEntry]:
     return entries
 
 
-def load_from_json(path: pathlib.Path) -> tuple[list[object], int | None]:
+def load_from_json(path: pathlib.Path) -> Listing:
     """Read the `{"usage_bytes", "entries": [...]}` fixture shape."""
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -284,7 +341,7 @@ def load_from_json(path: pathlib.Path) -> tuple[list[object], int | None]:
     if not isinstance(entries, list):
         raise ValueError(f"{path} has no 'entries' array")
     usage = payload.get("usage_bytes")
-    return entries, usage if isinstance(usage, int) else None
+    return Listing(entries, usage if isinstance(usage, int) else None)
 
 
 def run_gh(args: list[str]) -> str:
@@ -346,12 +403,21 @@ def fetch_live_usage_bytes(repo: str) -> int | None:
 # ---------------------------------------------------------------------------
 
 
-def family_for(key: str, families: dict[str, object]) -> str | None:
+def parse_families(raw: dict) -> list[Family]:
+    """The manifest's `budget.families` object as `Family` records."""
+    return [
+        Family(family_id, spec if isinstance(spec, dict) else None)
+        for family_id, spec in raw.items()
+    ]
+
+
+def family_for(key: str, families: list[Family]) -> str | None:
     """The family owning `key`: the LONGEST matching `key_prefixes` entry."""
     best_id: str | None = None
     best_len = -1
-    for family_id, spec in families.items():
-        if not isinstance(spec, dict):
+    for family in families:
+        family_id, spec = family.family_id, family.spec
+        if spec is None:
             continue
         for prefix in spec.get("key_prefixes") or []:
             if (
@@ -365,18 +431,19 @@ def family_for(key: str, families: dict[str, object]) -> str | None:
 
 
 def group_by_family(
-    entries: list[CacheEntry], families: dict[str, object]
-) -> tuple[dict[str, list[CacheEntry]], list[CacheEntry]]:
-    """`(family_id -> its entries, entries matching no family)`."""
-    grouped: dict[str, list[CacheEntry]] = {family_id: [] for family_id in families}
+    entries: list[CacheEntry], families: list[Family]
+) -> FamilyGrouping:
+    """Each family's entries, plus the entries matching no family."""
+    groups = [FamilyGroup(family, []) for family in families]
+    by_id = {group.family.family_id: group for group in groups}
     unmatched: list[CacheEntry] = []
     for entry in entries:
         family_id = family_for(entry.key, families)
         if family_id is None:
             unmatched.append(entry)
         else:
-            grouped[family_id].append(entry)
-    return grouped, unmatched
+            by_id[family_id].entries.append(entry)
+    return FamilyGrouping(groups, unmatched)
 
 
 # ---------------------------------------------------------------------------
@@ -414,9 +481,10 @@ def budget_problems(  # noqa: C901
         problems.append(f"{manifest_path} budget.families must be a non-empty object")
         return problems
 
-    grouped, unmatched = group_by_family(entries, families)
+    parsed = parse_families(families)
+    grouping = group_by_family(entries, parsed)
 
-    for entry in sorted(unmatched, key=lambda e: (e.key, e.ref)):
+    for entry in sorted(grouping.unmatched, key=lambda e: (e.key, e.ref)):
         problems.append(
             f"unregistered cache entry key={entry.key!r} ref={entry.ref!r}: an "
             "unregistered producer may not appear; register its key prefix "
@@ -424,15 +492,16 @@ def budget_problems(  # noqa: C901
             "PR that adds the producer."
         )
 
-    for family_id, spec in sorted(families.items()):
-        if not isinstance(spec, dict):
+    for family in sorted(parsed, key=lambda f: f.family_id):
+        family_id, spec = family.family_id, family.spec
+        if spec is None:
             problems.append(f"family {family_id!r} is not an object")
             continue
         max_bytes = spec.get("max_bytes")
         if not isinstance(max_bytes, int):
             problems.append(f"family {family_id!r} has no integer 'max_bytes'")
             continue
-        used = sum(e.size_bytes for e in grouped.get(family_id, []))
+        used = sum(e.size_bytes for e in grouping.entries_of(family_id))
         if used > max_bytes:
             problems.append(
                 f"family {family_id!r} uses {used / GIB:.2f} GiB, over its "
@@ -471,16 +540,16 @@ def build_table(
     families = budget.get("families")
     if not isinstance(families, dict):
         families = {}
-    grouped, unmatched = group_by_family(entries, families)
+    grouping = group_by_family(entries, parse_families(families))
     total_bytes = sum(e.size_bytes for e in entries)
     total_max_bytes = budget.get("total_max_bytes")
 
     rows = []
-    for family_id, family_entries in grouped.items():
-        spec = families.get(family_id)
-        max_bytes = spec.get("max_bytes") if isinstance(spec, dict) else None
-        used = sum(e.size_bytes for e in family_entries)
-        rows.append((family_id, len(family_entries), used, max_bytes))
+    for group in grouping.groups:
+        spec = group.family.spec
+        max_bytes = spec.get("max_bytes") if spec is not None else None
+        used = sum(e.size_bytes for e in group.entries)
+        rows.append((group.family.family_id, len(group.entries), used, max_bytes))
     rows.sort(key=lambda row: row[2], reverse=True)
 
     lines = [f"{'family':<42} {'count':>6} {'used GiB':>10} {'alloc GiB':>10} {'%':>7}"]
@@ -500,6 +569,7 @@ def build_table(
     lines.append(
         f"{'TOTAL':<42} {len(entries):>6} {total_bytes / GIB:>10.2f} {total_alloc_gib:>10.2f}"
     )
+    unmatched = grouping.unmatched
     if unmatched:
         noun = "entry" if len(unmatched) == 1 else "entries"
         lines.append(f"  ({len(unmatched)} unregistered {noun} not shown above)")
@@ -674,18 +744,25 @@ def action_store_lineage_candidates(
     """
     if not current_main_lock:
         return []
-    # (entry, platform, toolchain, lock). Both key formats end their shape in
+    # Both key formats end their shape in
     # the toolchain hash, so the platform is everything before its last '-'.
-    recognized: list[tuple[CacheEntry, str, str, str]] = []
+    recognized: list[RecognizedEntry] = []
     for entry in on_main:
         build = ACTION_BUILD_KEY.fullmatch(entry.key)
         registry = ACTION_REGISTRY_KEY.fullmatch(entry.key)
         if build:
             platform, _, toolchain = build["shape"].rpartition("-")
-            recognized.append((entry, platform, toolchain, build["lock"]))
+            recognized.append(
+                RecognizedEntry(entry, platform, toolchain, build["lock"])
+            )
         elif registry:
             recognized.append(
-                (entry, registry["platform"], registry["toolchain"], registry["lock"])
+                RecognizedEntry(
+                    entry,
+                    registry["platform"],
+                    registry["toolchain"],
+                    registry["lock"],
+                )
             )
     # The current toolchain of every platform that still has a current-lock
     # store: the newest such entry, ties broken on the toolchain hash so two
@@ -693,10 +770,11 @@ def action_store_lineage_candidates(
     # Two parallel str dicts rather than a dict-of-tuple record (PY-002).
     best_created: dict[str, str] = {}
     best_toolchain: dict[str, str] = {}
-    for entry, platform, toolchain, lock in recognized:
-        if lock != current_main_lock:
+    for item in recognized:
+        platform, toolchain = item.platform, item.toolchain
+        if item.lock != current_main_lock:
             continue
-        created = entry.created_at or ""
+        created = item.entry.created_at or ""
         if platform not in best_created or (created, toolchain) > (
             best_created[platform],
             best_toolchain[platform],
@@ -704,10 +782,13 @@ def action_store_lineage_candidates(
             best_created[platform] = created
             best_toolchain[platform] = toolchain
     return [
-        entry
-        for entry, platform, toolchain, lock in recognized
-        if platform in best_toolchain
-        and (lock != current_main_lock or toolchain != best_toolchain[platform])
+        item.entry
+        for item in recognized
+        if item.platform in best_toolchain
+        and (
+            item.lock != current_main_lock
+            or item.toolchain != best_toolchain[item.platform]
+        )
     ]
 
 
@@ -893,7 +974,7 @@ def recency(entry: CacheEntry) -> str:
 
 def eviction_candidates(
     entries: list[CacheEntry],
-    families: dict[str, object],
+    families: list[Family],
     excluded: set[int],
     now: datetime.datetime,
 ) -> list[CacheEntry]:
@@ -903,11 +984,12 @@ def eviction_candidates(
     their bytes are not counted twice. Families without an `evict` policy are
     never touched here.
     """
-    grouped, _unmatched = group_by_family(entries, families)
+    grouping = group_by_family(entries, families)
     chosen: list[CacheEntry] = []
-    for family_id, family_entries in sorted(grouped.items()):
-        spec = families.get(family_id)
-        if not isinstance(spec, dict):
+    for group in sorted(grouping.groups, key=lambda g: g.family.family_id):
+        spec = group.family.spec
+        family_entries = group.entries
+        if spec is None:
             continue
         policy = spec.get("evict")
         max_bytes = spec.get("max_bytes")
@@ -991,8 +1073,8 @@ def plan_sweep(
     current_main_lock: str | None,
     now: datetime.datetime,
     pr_state: Callable[[int], str | None] | None = None,
-) -> tuple[list[CacheEntry], list[CacheEntry]]:
-    """`(delete, deferred)` for one janitor sweep.
+) -> SweepPlan:
+    """The `SweepPlan` (delete, deferred) for one janitor sweep.
 
     Order matters and is the whole convergence argument:
 
@@ -1020,8 +1102,10 @@ def plan_sweep(
     families = budget.get("families") if isinstance(budget, dict) else None
     if isinstance(families, dict):
         excluded = {id(e) for e in safe} | {id(e) for e in closed}
-        delete.extend(eviction_candidates(entries, families, excluded, now))
-    return delete, deferred
+        delete.extend(
+            eviction_candidates(entries, parse_families(families), excluded, now)
+        )
+    return SweepPlan(delete, deferred)
 
 
 # ---------------------------------------------------------------------------
@@ -1105,15 +1189,16 @@ def pr_owned_problems(
     families = budget.get("families") if isinstance(budget, dict) else None
     if not isinstance(families, dict):
         return []
-    grouped, unmatched = group_by_family(entries, families)
+    grouping = group_by_family(entries, parse_families(families))
     problems = [
         f"this PR ({pr_ref}) saved unregistered cache entry key={e.key!r}"
-        for e in unmatched
+        for e in grouping.unmatched
         if is_mine(e)
     ]
-    for family_id, family_entries in sorted(grouped.items()):
-        spec = families.get(family_id)
-        max_bytes = spec.get("max_bytes") if isinstance(spec, dict) else None
+    for group in sorted(grouping.groups, key=lambda g: g.family.family_id):
+        family_id, family_entries = group.family.family_id, group.entries
+        spec = group.family.spec
+        max_bytes = spec.get("max_bytes") if spec is not None else None
         if not isinstance(max_bytes, int):
             continue
         used = sum(e.size_bytes for e in family_entries)
@@ -1254,11 +1339,12 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
     usage_bytes: int | None
     if args.from_json is not None:
         try:
-            raw_entries, usage_bytes = load_from_json(args.from_json)
+            listing = load_from_json(args.from_json)
         except (OSError, json.JSONDecodeError, ValueError) as error:
             print(f"error: cannot read {args.from_json}: {error}")
             return 1
-        entries = normalize_entries(raw_entries)
+        usage_bytes = listing.usage_bytes
+        entries = normalize_entries(listing.entries)
     else:
         try:
             raw_entries = fetch_live_entries(args.repo)
@@ -1303,13 +1389,14 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
             )
             current_main_lock = None
         now = datetime.datetime.now(datetime.timezone.utc)
-        candidates, deferred = plan_sweep(
+        plan = plan_sweep(
             entries,
             manifest,
             current_main_lock,
             now,
             lambda number: fetch_pr_state(args.repo, number),
         )
+        candidates, deferred = plan.delete, plan.deferred
         reclaimed = sum(e.size_bytes for e in candidates)
         pr_bytes = sum(e.size_bytes for e in candidates if PR_REF.fullmatch(e.ref))
         print(

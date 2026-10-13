@@ -12,6 +12,7 @@ import sys
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -83,7 +84,16 @@ def git_output(source_dir: Path, arguments: Sequence[str]) -> str:
     return result.stdout.strip()
 
 
-def _versions(source_dir: Path) -> tuple[str, str, str]:
+@dataclass(frozen=True)
+class SourceVersions:
+    """The three version declarations a release must agree on."""
+
+    npm: str
+    cargo: str
+    lock: str
+
+
+def _versions(source_dir: Path) -> SourceVersions:
     package = json.loads((source_dir / "package.json").read_text(encoding="utf-8"))
     with (source_dir / "Cargo.toml").open("rb") as stream:
         cargo = _toml.load(stream)
@@ -97,7 +107,7 @@ def _versions(source_dir: Path) -> tuple[str, str, str]:
     ]
     if len(cli_versions) != 1:
         raise ValidationError("Cargo.lock must contain exactly one soldr-cli package")
-    return npm_version, cargo_version, cli_versions[0]
+    return SourceVersions(npm_version, cargo_version, cli_versions[0])
 
 
 def validate_recovery(  # noqa: C901
@@ -115,7 +125,9 @@ def validate_recovery(  # noqa: C901
     ):
         raise ValidationError("npm recovery requires an exact stable vX.Y.Z tag")
 
-    npm_version, cargo_version, lock_version = _versions(source_dir)
+    versions = _versions(source_dir)
+    npm_version, cargo_version = versions.npm, versions.cargo
+    lock_version = versions.lock
     version = release_ref.removeprefix("v")
     if {npm_version, cargo_version, lock_version} != {version}:
         raise ValidationError(
