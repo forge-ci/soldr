@@ -43,6 +43,7 @@ class FakeGit:
     ancestor: bool = True
     tag_sha: str | None = None
     ci_runs: list[GhRun] = field(default_factory=list)
+    open_attempt: int | None = None
     calls: list[list[str]] = field(default_factory=list)
 
     def __call__(self, argv: Sequence[str]) -> subprocess.CompletedProcess:
@@ -57,6 +58,12 @@ class FakeGit:
             out = f"{self.tag_sha}\trefs/tags/v1.2.3\n" if self.tag_sha else ""
         elif args[:3] == ["gh", "run", "list"]:
             out = json.dumps([row.to_json() for row in self.ci_runs])
+        elif args[:3] == ["gh", "issue", "list"]:
+            title = f"release attempt v1.2.3 @ {SHA[:12]}"
+            rows = [{"number": self.open_attempt, "title": title}]
+            out = json.dumps(rows if self.open_attempt else [])
+        elif args[:3] == ["gh", "issue", "create"]:
+            out = "https://github.com/zackees/soldr/issues/4242\n"
         return subprocess.CompletedProcess(args, code, out, "")
 
     def dispatched(self) -> list[list[str]]:
@@ -126,3 +133,28 @@ def test_status_reports_tag_and_runs(capsys) -> None:
     assert REL.main(["status", "--sha", SHA], run=git) == 0
     out = capsys.readouterr().out
     assert "v1.2.3" in out and "full CI run 8: completed success" in out
+
+
+def test_start_opens_one_attempt_issue_with_the_frozen_directive() -> None:
+    git = FakeGit()
+    assert REL.main(["start", "--sha", SHA], run=git) == 0
+    (create,) = [c for c in git.calls if c[:3] == ["gh", "issue", "create"]]
+    body = create[create.index("--body") + 1]
+    assert f"candidate_sha: {SHA}" in body and "tag: v1.2.3" in body
+    assert "x86_64-unknown-linux-gnu" in body
+    (comment,) = [c for c in git.calls if c[:3] == ["gh", "issue", "comment"]]
+    assert comment[3] == "4242" and "dispatched full CI" in comment[-1]
+
+
+def test_resume_appends_to_the_existing_attempt() -> None:
+    git = FakeGit(open_attempt=77, ci_runs=[ci_run(8, "completed", "success")])
+    assert REL.main(["start", "--sha", SHA], run=git) == 0
+    assert not [c for c in git.calls if c[:3] == ["gh", "issue", "create"]]
+    (comment,) = [c for c in git.calls if c[:3] == ["gh", "issue", "comment"]]
+    assert comment[3] == "77" and "release-auto.yml" in comment[-1]
+
+
+def test_a_refusal_opens_no_attempt() -> None:
+    git = FakeGit(tag_sha=OTHER)
+    assert REL.main(["start", "--sha", SHA], run=git) == 1
+    assert not [c for c in git.calls if c[:2] == ["gh", "issue"]]
