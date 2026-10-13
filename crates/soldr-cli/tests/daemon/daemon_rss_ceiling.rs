@@ -522,12 +522,64 @@ fn wait_for_breach_summary(
         }
         assert!(
             Instant::now() < deadline,
-            "no memory-breach dump appeared under {} or {} before the deadline (soldr#3057)",
+            "no memory-breach dump appeared under {} or {} before the deadline (soldr#3057)\n{}",
             cache_root.display(),
             home_root.display(),
+            breach_diagnostics(cache_root, home_root),
         );
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// soldr#3762: what a missing dump leaves behind -- the watchdog's last
+/// status (did the daemon sample? breach?), any `memory-breach-*` directory
+/// at ANY depth (a dump the finder's depth limit missed), and the tail of
+/// every log under both roots (the daemon's own account of its exit).
+fn breach_diagnostics(cache_root: &Path, home_root: &Path) -> String {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > 12 {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                walk(&path, depth + 1, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut report = String::from("--- soldr#3762 diagnostics ---\n");
+    let paths = SoldrPaths::with_root(cache_root.to_path_buf());
+    report.push_str(&format!(
+        "watchdog status: {:?}\n",
+        rss_ceiling::read_status(&paths)
+    ));
+    let mut files = Vec::new();
+    walk(cache_root, 0, &mut files);
+    walk(home_root, 0, &mut files);
+    for file in &files {
+        let text = file.to_string_lossy();
+        if text.contains("memory-breach") {
+            report.push_str(&format!("breach artifact: {}\n", file.display()));
+        }
+    }
+    for file in files
+        .iter()
+        .filter(|f| f.extension().is_some_and(|e| e == "log"))
+    {
+        let bytes = fs::read(file).unwrap_or_default();
+        let tail = &bytes[bytes.len().saturating_sub(4096)..];
+        report.push_str(&format!(
+            "--- tail of {} ---\n{}\n",
+            file.display(),
+            String::from_utf8_lossy(tail)
+        ));
+    }
+    report
 }
 
 #[test]
