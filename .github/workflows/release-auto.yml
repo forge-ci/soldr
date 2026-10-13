@@ -23,6 +23,10 @@ on:
         description: Recover npm for an immutable tag; candidate_sha and full_ci_run_id are required.
         type: string
         default: ""
+      dry_run:
+        description: Build, smoke and verify the full production matrix on candidate_sha, publishing nothing (soldr#2469 3.1).
+        type: boolean
+        default: false
 permissions:
   contents: write
   attestations: write
@@ -52,6 +56,7 @@ jobs:
       should_publish_github_release: ${{ steps.validate.outputs.should_publish_github_release }}
       should_publish_pypi: ${{ steps.validate.outputs.should_publish_pypi }}
       should_publish_npm: ${{ steps.validate.outputs.should_publish_npm }}
+      dry_run: ${{ steps.validate.outputs.dry_run }}
       tag_exists: ${{ steps.validate.outputs.tag_exists }}
       github_release_complete: ${{ steps.validate.outputs.github_release_complete }}
       github_release_immutable: ${{ steps.validate.outputs.github_release_immutable }}
@@ -98,6 +103,7 @@ jobs:
         id: validate
         env:
           FORCE_PYPI_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.force_pypi_publish || false }}
+          RELEASE_DRY_RUN: ${{ inputs.dry_run }}
           GH_TOKEN: ${{ github.token }}
         run: uv run --no-project --python 3.13 .github/scripts/release_detect.py --commit-sha "${{ inputs.candidate_sha }}"
 
@@ -864,6 +870,7 @@ jobs:
     needs: prepare
     if: >-
       always() && (
+        needs.prepare.outputs.dry_run == 'true' ||
         needs.prepare.outputs.should_publish_github_release == 'true' ||
         needs.prepare.outputs.should_publish_pypi == 'true' ||
         needs.prepare.outputs.should_publish_npm == 'true'
@@ -1015,7 +1022,7 @@ jobs:
       - prepare
       - build
       - publish
-    if: always() && needs.prepare.outputs.should_release == 'true' && needs.build.result == 'success' && needs.prepare.outputs.github_release_immutable != 'true'
+    if: always() && needs.prepare.outputs.should_release == 'true' && needs.build.result == 'success' && needs.prepare.outputs.github_release_immutable != 'true' && needs.prepare.outputs.dry_run != 'true'
     runs-on: ubuntu-24.04
     # Asset-set assertion against the GitHub API; observed max 0.1 min.
     timeout-minutes: 15
@@ -1115,7 +1122,7 @@ jobs:
     needs:
       - prepare
       - publish-pypi
-    if: always() && needs.prepare.outputs.should_release == 'true' && (needs.publish-pypi.result == 'success' || needs.publish-pypi.result == 'skipped')
+    if: always() && needs.prepare.outputs.should_release == 'true' && needs.prepare.outputs.dry_run != 'true' && (needs.publish-pypi.result == 'success' || needs.publish-pypi.result == 'skipped')
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
@@ -1221,7 +1228,7 @@ jobs:
       - publish-pypi
       - smoke-published-dylint
       - publish-npm
-    if: always() && needs.prepare.outputs.should_release == 'true'
+    if: always() && needs.prepare.outputs.should_release == 'true' && needs.prepare.outputs.dry_run != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

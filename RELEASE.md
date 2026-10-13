@@ -54,6 +54,16 @@ uv run --no-project python ci/release.py start  --sha <40-hex merged SHA>
 
 It never bumps a version or creates a tag.
 
+## Dry run (soldr#2469 3.1)
+
+Dispatch `release-auto.yml` with `candidate_sha`, `full_ci_run_id` and
+`dry_run=true` to build, smoke and verify the full production matrix on that
+exact SHA without writing anything. Every artifact is built, and the macOS,
+Windows and darwin smokes and `release_execution_contract` all run. No tag,
+GitHub Release, PyPI upload or npm publish is made, and the post-publish
+verifiers are skipped. Use it to canary a release-workflow change, or a
+lifted concurrency cap, before a real release.
+
 ## Current Release Model
 
 Since soldr#3346 (2026-09-24) a release is a deliberate two-dispatch act on
