@@ -382,31 +382,33 @@ class CargoLogParsingTests(unittest.TestCase):
         )
         parsed = analyze_compile_journal.parse_cargo_logs(text)
         self.assertEqual(
-            parsed["dirty"],
-            [{"crate": "foo", "version": "1.2.3", "reason": "FsStatusOutdated"}],
+            parsed.dirty,
+            [
+                analyze_compile_journal.DirtyEntry(
+                    crate="foo", version="1.2.3", reason="FsStatusOutdated"
+                )
+            ],
         )
-        self.assertIn(
-            {"verb": "Compiling", "crate": "bar", "version": "0.1.0"}, parsed["status"]
-        )
-        self.assertIn(
-            {"verb": "Fresh", "crate": "baz", "version": "2.0.0"}, parsed["status"]
-        )
+        status_entry = analyze_compile_journal.StatusEntry
+        self.assertIn(status_entry("Compiling", "bar", "0.1.0"), parsed.status)
+        self.assertIn(status_entry("Fresh", "baz", "2.0.0"), parsed.status)
 
     def test_checking_verb_is_captured(self) -> None:
         parsed = analyze_compile_journal.parse_cargo_logs("Checking qux v0.3.0\n")
         self.assertEqual(
-            parsed["status"], [{"verb": "Checking", "crate": "qux", "version": "0.3.0"}]
+            parsed.status,
+            [analyze_compile_journal.StatusEntry("Checking", "qux", "0.3.0")],
         )
 
     def test_dirty_reason_falls_back_to_camel_case(self) -> None:
         text = "fingerprint dirty for foo v1.2.3\n    TargetInnerChanged happened\n"
         parsed = analyze_compile_journal.parse_cargo_logs(text)
-        self.assertEqual(parsed["dirty"][0]["reason"], "TargetInnerChanged")
+        self.assertEqual(parsed.dirty[0].reason, "TargetInnerChanged")
 
     def test_no_reason_found_is_unknown(self) -> None:
         text = "fingerprint dirty for foo v1.2.3\nnothing useful here\nor here\n"
         parsed = analyze_compile_journal.parse_cargo_logs(text)
-        self.assertEqual(parsed["dirty"][0]["reason"], "unknown")
+        self.assertEqual(parsed.dirty[0].reason, "unknown")
 
 
 class AnalyzeFixtureTests(unittest.TestCase):
@@ -574,25 +576,28 @@ class DedupeAndDiscoveryTests(unittest.TestCase):
 
 class CompareBaselineTests(unittest.TestCase):
     def test_delta_and_tolerance(self) -> None:
-        summary = {
-            "totals": {"records": 9, "third_party": 2, "first_party": 7},
-            "outcomes": {"hit": 1},
-            "miss_reasons": {},
-            "duplicates": {"concurrent": 0, "sequential": 0},
-            "trees": {"stable": 0, "dylint/target": 0, "dylint/tests": 0},
-        }
-        baseline = {
-            "tolerance": 10,
-            "metrics": {"total_units": 10, "hits": 1, "first_party": 100},
-        }
+        summary = analyze_compile_journal.Summary(
+            totals=analyze_compile_journal.Totals(
+                records=9, third_party=2, first_party=7
+            ),
+            outcomes=[analyze_compile_journal.NamedCount("hit", 1)],
+        )
+        baseline = analyze_compile_journal.Baseline(
+            tolerance=10,
+            metrics=[
+                analyze_compile_journal.NamedCount("total_units", 10),
+                analyze_compile_journal.NamedCount("hits", 1),
+                analyze_compile_journal.NamedCount("first_party", 100),
+            ],
+        )
         rows = analyze_compile_journal.compare_baseline(summary, baseline)
-        by_metric = {row["metric"]: row for row in rows}
-        self.assertEqual(by_metric["total_units"]["delta"], -1)
-        self.assertTrue(by_metric["total_units"]["within_tolerance"])
-        self.assertEqual(by_metric["hits"]["delta"], 0)
-        self.assertTrue(by_metric["hits"]["within_tolerance"])
+        by_metric = {row.metric: row for row in rows}
+        self.assertEqual(by_metric["total_units"].delta, -1)
+        self.assertTrue(by_metric["total_units"].within_tolerance)
+        self.assertEqual(by_metric["hits"].delta, 0)
+        self.assertTrue(by_metric["hits"].within_tolerance)
         # actual first_party (7) vs baseline 100 with 10% tolerance -> far outside.
-        self.assertFalse(by_metric["first_party"]["within_tolerance"])
+        self.assertFalse(by_metric["first_party"].within_tolerance)
 
     def test_the_pinned_baseline_names_only_mapped_metrics(self) -> None:
         # `compare_baseline` skips a metric it has no path for, so a typo in
@@ -612,15 +617,20 @@ class CompareBaselineTests(unittest.TestCase):
         )
         self.assertEqual(unmapped, [])
         rows = analyze_compile_journal.compare_baseline(
-            analyze_compile_journal.analyze([]), baseline
+            analyze_compile_journal.analyze_summary([]),
+            analyze_compile_journal.Baseline.from_json(baseline),
         )
         self.assertEqual(len(rows), len(baseline["metrics"]))
 
     def test_zero_baseline_requires_exact_match(self) -> None:
-        summary = {"outcomes": {"hit": 1}}
-        baseline = {"tolerance": 50, "metrics": {"hits": 0}}
+        summary = analyze_compile_journal.Summary(
+            outcomes=[analyze_compile_journal.NamedCount("hit", 1)]
+        )
+        baseline = analyze_compile_journal.Baseline(
+            tolerance=50, metrics=[analyze_compile_journal.NamedCount("hits", 0)]
+        )
         rows = analyze_compile_journal.compare_baseline(summary, baseline)
-        self.assertFalse(rows[0]["within_tolerance"])
+        self.assertFalse(rows[0].within_tolerance)
 
 
 class MainTests(unittest.TestCase):
@@ -653,7 +663,7 @@ class MainTests(unittest.TestCase):
                 journal_dir / "compile_journal.jsonl",
                 [{"outcome": "hit", "args": [], "cwd": "/somewhere"}],
             )
-            summary = analyze_compile_journal.analyze([str(journal_dir)])
+            summary = analyze_compile_journal.analyze_summary([str(journal_dir)])
         rendered = analyze_compile_journal.render_text(summary)
         self.assertIn("totals", rendered)
         self.assertIn("uncacheable_input", rendered)

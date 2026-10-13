@@ -125,9 +125,9 @@ import json
 import re
 import sys
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Iterator
 
 SCHEMA_VERSION = 1
 
@@ -166,18 +166,27 @@ STATUS_RE = re.compile(
 
 LOCKFILE_NAME_RE = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.MULTILINE)
 
-BASELINE_METRIC_PATHS: dict[str, tuple[str, str]] = {
-    "total_units": ("totals", "records"),
-    "third_party": ("totals", "third_party"),
-    "first_party": ("totals", "first_party"),
-    "hits": ("outcomes", "hit"),
-    "context_not_found": ("miss_reasons", "context_not_found"),
-    "uncacheable_input": ("miss_reasons", "uncacheable_input"),
-    "duplicate_records_concurrent": ("duplicates", "concurrent"),
-    "duplicate_records_sequential": ("duplicates", "sequential"),
-    "tree_stable": ("trees", "stable"),
-    "tree_dylint_target": ("trees", "dylint/target"),
-    "tree_dylint_tests": ("trees", "dylint/tests"),
+
+@dataclass(frozen=True)
+class MetricPath:
+    """Where a baseline metric lives in the summary: `summary[section][key]`."""
+
+    section: str
+    key: str
+
+
+BASELINE_METRIC_PATHS: dict[str, MetricPath] = {
+    "total_units": MetricPath("totals", "records"),
+    "third_party": MetricPath("totals", "third_party"),
+    "first_party": MetricPath("totals", "first_party"),
+    "hits": MetricPath("outcomes", "hit"),
+    "context_not_found": MetricPath("miss_reasons", "context_not_found"),
+    "uncacheable_input": MetricPath("miss_reasons", "uncacheable_input"),
+    "duplicate_records_concurrent": MetricPath("duplicates", "concurrent"),
+    "duplicate_records_sequential": MetricPath("duplicates", "sequential"),
+    "tree_stable": MetricPath("trees", "stable"),
+    "tree_dylint_target": MetricPath("trees", "dylint/target"),
+    "tree_dylint_tests": MetricPath("trees", "dylint/tests"),
 }
 
 
@@ -210,6 +219,308 @@ class Record:
     out_dir: str
     tree: str
     party: str = "unclassified"
+
+
+@dataclass(frozen=True)
+class NamedCount:
+    """One `name -> count` entry; JSON renders a list of these as an object."""
+
+    name: str
+    count: int
+
+
+def _counts_to_json(entries: list[NamedCount]) -> dict:
+    return {entry.name: entry.count for entry in entries}
+
+
+def _named_counts(mapping: Counter[str]) -> list[NamedCount]:
+    return [NamedCount(name, count) for name, count in sorted(mapping.items())]
+
+
+@dataclass(frozen=True, order=True)
+class Interval:
+    """A derived `[start, end]` compile interval in nanoseconds.
+
+    Iterable so callers that unpack `start, end = interval` keep working.
+    """
+
+    start: int
+    end: int
+
+    def __iter__(self) -> Iterator[int]:
+        yield self.start
+        yield self.end
+
+
+@dataclass(frozen=True)
+class CrateIdentity:
+    """Crate name and crate type derived for one journal record."""
+
+    name: str
+    crate_type: str
+
+
+@dataclass(frozen=True)
+class DirtyEntry:
+    """One `fingerprint dirty for` cargo log line."""
+
+    crate: str
+    version: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class StatusEntry:
+    """One `Compiling` / `Checking` / `Fresh` cargo status line."""
+
+    verb: str
+    crate: str
+    version: str
+
+
+@dataclass(frozen=True)
+class ParsedCargoLog:
+    """Dirty and status lines parsed out of one cargo log."""
+
+    dirty: list[DirtyEntry] = field(default_factory=list)
+    status: list[StatusEntry] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class JournalRead:
+    """Result of reading journal files. Iterable as `(records, malformed, dropped)`."""
+
+    records: list["Record"]
+    malformed: int
+    dropped: int
+
+    def __iter__(self) -> Iterator[Any]:
+        yield self.records
+        yield self.malformed
+        yield self.dropped
+
+
+@dataclass(frozen=True)
+class DuplicateIdentity:
+    """One duplicated `context_key` group, for the top-identities list."""
+
+    context_key: str
+    crate: str
+    count: int
+
+
+@dataclass(frozen=True)
+class DuplicatesStats:
+    """Duplicate-record accounting (`summary.duplicates`)."""
+
+    groups: int = 0
+    records_in_groups: int = 0
+    excess_records: int = 0
+    concurrent: int = 0
+    sequential: int = 0
+    cross_generation: int = 0
+    records_without_context_key: int = 0
+    top_identities: list[DuplicateIdentity] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class CostKey:
+    """Grouping key for third-party miss cost."""
+
+    crate: str
+    context_key: str | None
+
+
+@dataclass(frozen=True)
+class CostItem:
+    """Third-party miss cost for one (crate, context_key) pair."""
+
+    crate: str
+    context_key: str | None
+    count: int
+    wall_seconds: float
+
+
+@dataclass(frozen=True)
+class CostStats:
+    """Third-party cost block (`summary.cost`)."""
+
+    third_party_miss_records: int = 0
+    third_party_miss_wall_seconds: float = 0.0
+    third_party_miss_cpu_seconds: float | None = None
+    top_third_party: list[CostItem] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class UncacheableKey:
+    """Grouping key for `uncacheable_input` misses."""
+
+    crate: str
+    crate_type: str
+    dylint_link: bool
+    test_harness: bool
+    first_party: bool
+
+
+@dataclass(frozen=True)
+class UncacheableBucket:
+    """One `uncacheable_input` bucket and its record count."""
+
+    crate: str
+    crate_type: str
+    dylint_link: bool
+    test_harness: bool
+    first_party: bool
+    count: int
+
+
+@dataclass(frozen=True)
+class UncacheableStats:
+    """`summary.uncacheable_input`."""
+
+    total: int = 0
+    buckets: list[UncacheableBucket] = field(default_factory=list)
+
+
+@dataclass
+class CrateCargoCounts:
+    """Per-crate cargo dirty/compiling/fresh tallies."""
+
+    name: str = ""
+    dirty: int = 0
+    compiling: int = 0
+    fresh: int = 0
+    reasons: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class CargoSummary:
+    """`summary.cargo`."""
+
+    available: bool = False
+    dirty_units: int = 0
+    third_party_dirty_units: int = 0
+    dirty_reasons: list[NamedCount] = field(default_factory=list)
+    per_crate: list[CrateCargoCounts] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class BucketStats:
+    """`summary.buckets` (the four-bucket join)."""
+
+    third_party_total: int = 0
+    fresh: int | None = None
+    compiling_hit: int = 0
+    compiling_miss: int = 0
+    compiling_other: int = 0
+    compiling_no_record: int | None = None
+
+
+@dataclass(frozen=True)
+class PartyStats:
+    """Per-party hit/miss accounting (`summary.first_party` / `third_party`)."""
+
+    records: int = 0
+    hits: int = 0
+    misses: int = 0
+    crates: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ThirdPartyStats(PartyStats):
+    """Third-party stats, which also carry the strict miss cost."""
+
+    miss_wall_seconds: float | None = None
+    miss_cpu_seconds: float | None = None
+
+
+@dataclass(frozen=True)
+class InputsInfo:
+    """`summary.inputs`."""
+
+    journal_files: list[str] = field(default_factory=list)
+    records_read: int = 0
+    malformed_lines: int = 0
+    duplicate_lines_dropped: int = 0
+    cargo_log_files: list[str] = field(default_factory=list)
+    lockfiles: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Totals:
+    """`summary.totals`."""
+
+    records: int = 0
+    first_party: int = 0
+    third_party: int = 0
+    unclassified: int = 0
+
+
+@dataclass(frozen=True)
+class Summary:
+    """The full analysis result; `to_dict()` is the JSON payload."""
+
+    schema_version: int = SCHEMA_VERSION
+    inputs: InputsInfo = field(default_factory=InputsInfo)
+    totals: Totals = field(default_factory=Totals)
+    outcomes: list[NamedCount] = field(default_factory=list)
+    miss_reasons: list[NamedCount] = field(default_factory=list)
+    first_party: PartyStats = field(default_factory=PartyStats)
+    third_party: ThirdPartyStats = field(default_factory=ThirdPartyStats)
+    uncacheable_input: UncacheableStats = field(default_factory=UncacheableStats)
+    duplicates: DuplicatesStats = field(default_factory=DuplicatesStats)
+    trees: list[NamedCount] = field(default_factory=list)
+    cost: CostStats = field(default_factory=CostStats)
+    cargo: CargoSummary = field(default_factory=CargoSummary)
+    buckets: BucketStats = field(default_factory=BucketStats)
+
+    def to_dict(self) -> dict:
+        """JSON-ready payload; key order matches the dataclass field order."""
+        payload = asdict(self)
+        payload["outcomes"] = _counts_to_json(self.outcomes)
+        payload["miss_reasons"] = _counts_to_json(self.miss_reasons)
+        payload["trees"] = _counts_to_json(self.trees)
+        payload["cargo"]["dirty_reasons"] = _counts_to_json(self.cargo.dirty_reasons)
+        payload["cargo"]["per_crate"] = {
+            crate.name: {
+                "dirty": crate.dirty,
+                "compiling": crate.compiling,
+                "fresh": crate.fresh,
+                "reasons": crate.reasons,
+            }
+            for crate in self.cargo.per_crate
+        }
+        return payload
+
+
+@dataclass(frozen=True)
+class Baseline:
+    """A pinned baseline file: a percentage tolerance plus metric values."""
+
+    tolerance: float = 0
+    metrics: list[NamedCount] = field(default_factory=list)
+
+    @staticmethod
+    def from_json(obj: dict) -> "Baseline":
+        """Build from a decoded baseline JSON object."""
+        return Baseline(
+            tolerance=obj.get("tolerance", 0),
+            metrics=[
+                NamedCount(name, value)
+                for name, value in obj.get("metrics", {}).items()
+            ],
+        )
+
+
+@dataclass(frozen=True)
+class BaselineRow:
+    """One metric comparison against the baseline."""
+
+    metric: str
+    baseline: int
+    actual: int
+    delta: int
+    within_tolerance: bool
 
 
 def _parse_ts_ns(ts: str) -> int | None:
@@ -251,12 +562,12 @@ def _parse_ts_ns(ts: str) -> int | None:
     return base_ns + frac_ns - offset_ns
 
 
-def _interval(record: Record) -> tuple[int, int] | None:
+def _interval(record: Record) -> Interval | None:
     if record.ts_ns is None or record.latency_ns is None:
         return None
     end = record.ts_ns
     start = end - record.latency_ns
-    return start, end
+    return Interval(start, end)
 
 
 def _get_flag(args: list[str], flag: str) -> str | None:
@@ -280,8 +591,8 @@ def _is_native_compiler(compiler: str | None) -> bool:
 
 
 def _derive_crate_name_and_type(  # noqa: C901
-    obj: dict[str, Any], compiler: str | None, args: list[str]
-) -> tuple[str, str]:
+    obj: dict, compiler: str | None, args: list[str]
+) -> CrateIdentity:
     raw_name = obj.get("crate_name")
     crate_name = raw_name if isinstance(raw_name, str) and raw_name else None
     if crate_name is None:
@@ -310,7 +621,7 @@ def _derive_crate_name_and_type(  # noqa: C901
                 crate_type = "native"
             else:
                 crate_type = ""
-    return crate_name, crate_type
+    return CrateIdentity(crate_name, crate_type)
 
 
 def _derive_out_dir(args: list[str]) -> str:
@@ -406,7 +717,8 @@ def record_from_json(obj: Any, source: str) -> Record | None:
     session_id_raw = obj.get("session_id")
     session_id = session_id_raw if isinstance(session_id_raw, str) else None
 
-    crate_name, crate_type = _derive_crate_name_and_type(obj, compiler, args)
+    identity = _derive_crate_name_and_type(obj, compiler, args)
+    crate_name, crate_type = identity.name, identity.crate_type
     test_harness = "--test" in args
     dylint_link = any("dylint-link" in arg for arg in args)
     out_dir = _derive_out_dir(args)
@@ -591,10 +903,10 @@ def _classify_party(record: Record, workspace_names: set[str]) -> str:
     return "unclassified"
 
 
-def parse_cargo_logs(text: str) -> dict[str, list[dict[str, str]]]:
+def parse_cargo_logs(text: str) -> ParsedCargoLog:
     """Parse cargo/nextest build output for dirty-fingerprint and status lines.
 
-    Returns `{"dirty": [...], "status": [...]}`. `dirty` entries carry
+    Returns a `ParsedCargoLog` with `dirty` and `status` lists. `dirty` entries carry
     crate, version, and a best-effort `reason` (see `_extract_dirty_
     reason`). `status` entries carry crate, version, and `verb` -- the
     caller folds `Checking` together with `Compiling` because soldr's
@@ -602,31 +914,29 @@ def parse_cargo_logs(text: str) -> dict[str, list[dict[str, str]]]:
     not `Compiling`.
     """
     lines = [ANSI.sub("", line) for line in text.splitlines()]
-    dirty: list[dict[str, str]] = []
-    status: list[dict[str, str]] = []
+    dirty: list[DirtyEntry] = []
+    status: list[StatusEntry] = []
     for index, line in enumerate(lines):
         dirty_match = DIRTY_RE.search(line)
         if dirty_match:
             dirty.append(
-                {
-                    "crate": dirty_match.group("name"),
-                    "version": dirty_match.group("version"),
-                    "reason": _extract_dirty_reason(
-                        line, lines, index, dirty_match.end()
-                    ),
-                }
+                DirtyEntry(
+                    crate=dirty_match.group("name"),
+                    version=dirty_match.group("version"),
+                    reason=_extract_dirty_reason(line, lines, index, dirty_match.end()),
+                )
             )
             continue
         status_match = STATUS_RE.match(line)
         if status_match:
             status.append(
-                {
-                    "verb": status_match.group("verb"),
-                    "crate": status_match.group("crate"),
-                    "version": status_match.group("version"),
-                }
+                StatusEntry(
+                    verb=status_match.group("verb"),
+                    crate=status_match.group("crate"),
+                    version=status_match.group("version"),
+                )
             )
-    return {"dirty": dirty, "status": status}
+    return ParsedCargoLog(dirty=dirty, status=status)
 
 
 def _extract_dirty_reason(
@@ -674,12 +984,15 @@ def _classify_duplicate(record: Record, others: list[Record]) -> str:
             other_interval = _interval(other)
             if other_interval is None:
                 continue
-            if interval[0] < other_interval[1] and other_interval[0] < interval[1]:
+            if (
+                interval.start < other_interval.end
+                and other_interval.start < interval.end
+            ):
                 return "concurrent"
     return "sequential"
 
 
-def _compute_duplicates(records: list[Record]) -> dict[str, Any]:
+def _compute_duplicates(records: list[Record]) -> DuplicatesStats:
     groups: dict[str, list[Record]] = {}
     without_key = 0
     for record in records:
@@ -694,7 +1007,7 @@ def _compute_duplicates(records: list[Record]) -> dict[str, Any]:
     concurrent = 0
     sequential = 0
     cross_generation = 0
-    identities: list[tuple[str, str, int]] = []
+    identities: list[DuplicateIdentity] = []
 
     for key, members in groups.items():
         if len(members) <= 1:
@@ -702,7 +1015,7 @@ def _compute_duplicates(records: list[Record]) -> dict[str, Any]:
         dup_groups += 1
         records_in_groups += len(members)
         excess += len(members) - 1
-        identities.append((key, members[0].crate_name, len(members)))
+        identities.append(DuplicateIdentity(key, members[0].crate_name, len(members)))
         for record in members:
             others = [member for member in members if member is not record]
             flavour = _classify_duplicate(record, others)
@@ -713,24 +1026,20 @@ def _compute_duplicates(records: list[Record]) -> dict[str, Any]:
             else:
                 sequential += 1
 
-    identities.sort(key=lambda item: (-item[2], item[0]))
-    top_identities = [
-        {"context_key": key, "crate": crate, "count": count}
-        for key, crate, count in identities[:10]
-    ]
-    return {
-        "groups": dup_groups,
-        "records_in_groups": records_in_groups,
-        "excess_records": excess,
-        "concurrent": concurrent,
-        "sequential": sequential,
-        "cross_generation": cross_generation,
-        "records_without_context_key": without_key,
-        "top_identities": top_identities,
-    }
+    identities.sort(key=lambda item: (-item.count, item.context_key))
+    return DuplicatesStats(
+        groups=dup_groups,
+        records_in_groups=records_in_groups,
+        excess_records=excess,
+        concurrent=concurrent,
+        sequential=sequential,
+        cross_generation=cross_generation,
+        records_without_context_key=without_key,
+        top_identities=identities[:10],
+    )
 
 
-def _compute_cost(records: list[Record]) -> dict[str, Any]:
+def _compute_cost(records: list[Record]) -> CostStats:
     """Cost of third-party work, on the STRICT `outcome == "miss"` definition.
 
     `third_party_miss_records` is the count that matches the metric
@@ -743,43 +1052,40 @@ def _compute_cost(records: list[Record]) -> dict[str, Any]:
     misses = [r for r in records if r.party == "third" and r.outcome == "miss"]
     total_wall = sum((r.latency_ns or 0) for r in misses) / 1e9
 
-    grouped: dict[tuple[str, str | None], list[Record]] = {}
+    grouped: dict[CostKey, list[Record]] = {}
     for record in misses:
-        grouped.setdefault((record.crate_name, record.context_key), []).append(record)
+        key = CostKey(record.crate_name, record.context_key)
+        grouped.setdefault(key, []).append(record)
 
-    items: list[dict[str, Any]] = []
-    for (crate, context_key), members in grouped.items():
+    items: list[CostItem] = []
+    for group_key, members in grouped.items():
         wall_seconds = sum((member.latency_ns or 0) for member in members) / 1e9
         items.append(
-            {
-                "crate": crate,
-                "context_key": context_key,
-                "count": len(members),
-                "wall_seconds": wall_seconds,
-            }
+            CostItem(
+                crate=group_key.crate,
+                context_key=group_key.context_key,
+                count=len(members),
+                wall_seconds=wall_seconds,
+            )
         )
     items.sort(
-        key=lambda item: (
-            -item["wall_seconds"],
-            item["crate"],
-            item["context_key"] or "",
-        )
+        key=lambda item: (-item.wall_seconds, item.crate, item.context_key or "")
     )
 
-    return {
-        "third_party_miss_records": len(misses),
-        "third_party_miss_wall_seconds": total_wall,
-        "third_party_miss_cpu_seconds": None,
-        "top_third_party": items[:10],
-    }
+    return CostStats(
+        third_party_miss_records=len(misses),
+        third_party_miss_wall_seconds=total_wall,
+        third_party_miss_cpu_seconds=None,
+        top_third_party=items[:10],
+    )
 
 
-def _compute_uncacheable(records: list[Record]) -> dict[str, Any]:
+def _compute_uncacheable(records: list[Record]) -> UncacheableStats:
     matches = [r for r in records if r.miss_reason == "uncacheable_input"]
-    counts: dict[tuple[str, str, bool, bool, bool], int] = {}
-    order: list[tuple[str, str, bool, bool, bool]] = []
+    counts: dict[UncacheableKey, int] = {}
+    order: list[UncacheableKey] = []
     for record in matches:
-        key = (
+        key = UncacheableKey(
             record.crate_name,
             record.crate_type,
             record.dylint_link,
@@ -790,71 +1096,67 @@ def _compute_uncacheable(records: list[Record]) -> dict[str, Any]:
             counts[key] = 0
             order.append(key)
         counts[key] += 1
-    order.sort(key=lambda key: (-counts[key], key[0]))
+    order.sort(key=lambda key: (-counts[key], key.crate))
     buckets = [
-        {
-            "crate": key[0],
-            "crate_type": key[1],
-            "dylint_link": key[2],
-            "test_harness": key[3],
-            "first_party": key[4],
-            "count": counts[key],
-        }
+        UncacheableBucket(
+            crate=key.crate,
+            crate_type=key.crate_type,
+            dylint_link=key.dylint_link,
+            test_harness=key.test_harness,
+            first_party=key.first_party,
+            count=counts[key],
+        )
         for key in order
     ]
-    return {"total": len(matches), "buckets": buckets}
+    return UncacheableStats(total=len(matches), buckets=buckets)
 
 
 def _compute_cargo_summary(
-    parsed_logs: list[dict[str, list[dict[str, str]]]],
+    parsed_logs: list[ParsedCargoLog],
     workspace_names: set[str],
     available: bool,
-) -> dict[str, Any]:
+) -> CargoSummary:
     ws_norm = {_normalize_crate(name) for name in workspace_names}
     dirty_reasons: Counter[str] = Counter()
-    per_crate: dict[str, dict[str, Any]] = {}
+    per_crate: dict[str, CrateCargoCounts] = {}
     dirty_units = 0
     third_party_dirty_units = 0
     for parsed in parsed_logs:
-        for entry in parsed["dirty"]:
+        for dirty_entry in parsed.dirty:
             dirty_units += 1
-            crate = entry["crate"]
-            reason = entry["reason"]
+            crate = dirty_entry.crate
+            reason = dirty_entry.reason
             dirty_reasons[reason] += 1
-            bucket = per_crate.setdefault(
-                crate, {"dirty": 0, "compiling": 0, "fresh": 0, "reasons": []}
-            )
-            bucket["dirty"] += 1
-            bucket["reasons"].append(reason)
+            bucket = per_crate.setdefault(crate, CrateCargoCounts(crate))
+            bucket.dirty += 1
+            bucket.reasons.append(reason)
             if _normalize_crate(crate) not in ws_norm:
                 third_party_dirty_units += 1
-        for entry in parsed["status"]:
-            crate = entry["crate"]
-            verb = entry["verb"]
-            bucket = per_crate.setdefault(
-                crate, {"dirty": 0, "compiling": 0, "fresh": 0, "reasons": []}
-            )
+        for status_entry in parsed.status:
+            crate = status_entry.crate
+            verb = status_entry.verb
+            bucket = per_crate.setdefault(crate, CrateCargoCounts(crate))
             if verb in ("Compiling", "Checking"):
-                bucket["compiling"] += 1
+                bucket.compiling += 1
             elif verb == "Fresh":
-                bucket["fresh"] += 1
+                bucket.fresh += 1
     for bucket in per_crate.values():
-        bucket["reasons"] = sorted(bucket["reasons"])
-    return {
-        "available": available,
-        "dirty_units": dirty_units,
-        "third_party_dirty_units": third_party_dirty_units,
-        "dirty_reasons": dict(sorted(dirty_reasons.items())),
-        "per_crate": dict(sorted(per_crate.items())),
-    }
+        bucket.reasons = sorted(bucket.reasons)
+    return CargoSummary(
+        available=available,
+        dirty_units=dirty_units,
+        third_party_dirty_units=third_party_dirty_units,
+        dirty_reasons=_named_counts(dirty_reasons),
+        per_crate=[per_crate[name] for name in sorted(per_crate)],
+    )
 
 
 def _compute_buckets(
     records: list[Record],
-    parsed_logs: list[dict[str, list[dict[str, str]]]],
+    parsed_logs: list[ParsedCargoLog],
     lockfile_names: set[str],
     workspace_names: set[str],
-) -> dict[str, Any]:
+) -> BucketStats:
     third_party = [r for r in records if r.party == "third"]
     third_party_total = len(third_party)
     compiling_hit = sum(1 for r in third_party if r.outcome in ("hit", "link_hit"))
@@ -870,11 +1172,11 @@ def _compute_buckets(
         cargo_names: set[str] = set()
         for parsed in parsed_logs:
             cargo_names.update(
-                _normalize_crate(e["crate"])
-                for e in parsed["status"]
-                if e["verb"] in ("Compiling", "Checking")
+                _normalize_crate(e.crate)
+                for e in parsed.status
+                if e.verb in ("Compiling", "Checking")
             )
-            cargo_names.update(_normalize_crate(e["crate"]) for e in parsed["dirty"])
+            cargo_names.update(_normalize_crate(e.crate) for e in parsed.dirty)
         fresh = sum(
             1
             for name in lock_norm
@@ -884,22 +1186,22 @@ def _compute_buckets(
             1 for name in lock_norm if name in cargo_names and name not in journal_names
         )
 
-    return {
-        "third_party_total": third_party_total,
-        "fresh": fresh,
-        "compiling_hit": compiling_hit,
-        "compiling_miss": compiling_miss,
-        "compiling_other": compiling_other,
-        "compiling_no_record": compiling_no_record,
-    }
+    return BucketStats(
+        third_party_total=third_party_total,
+        fresh=fresh,
+        compiling_hit=compiling_hit,
+        compiling_miss=compiling_miss,
+        compiling_other=compiling_other,
+        compiling_no_record=compiling_no_record,
+    )
 
 
-def _party_stats(records: list[Record], party: str) -> dict[str, Any]:
+def _party_stats(records: list[Record], party: str) -> PartyStats:
     subset = [r for r in records if r.party == party]
     hits = sum(1 for r in subset if r.outcome in ("hit", "link_hit"))
     misses = sum(1 for r in subset if r.outcome in ("miss", "link_miss"))
     crates = sorted({r.crate_name for r in subset})
-    return {"records": len(subset), "hits": hits, "misses": misses, "crates": crates}
+    return PartyStats(records=len(subset), hits=hits, misses=misses, crates=crates)
 
 
 def _default_repo_root() -> Path:
@@ -939,9 +1241,7 @@ def repo_lockfiles(repo_root: Path | None = None) -> list[Path]:
     return found
 
 
-def _read_journals(
-    journal_files: list[Path], dedupe: bool
-) -> tuple[list[Record], int, int]:
+def _read_journals(journal_files: list[Path], dedupe: bool) -> JournalRead:
     records: list[Record] = []
     malformed = 0
     dropped = 0
@@ -970,11 +1270,11 @@ def _read_journals(
                 malformed += 1
                 continue
             records.append(record)
-    return records, malformed, dropped
+    return JournalRead(records, malformed, dropped)
 
 
-def _read_cargo_logs(paths: list[Path]) -> list[dict[str, list[dict[str, str]]]]:
-    parsed: list[dict[str, list[dict[str, str]]]] = []
+def _read_cargo_logs(paths: list[Path]) -> list[ParsedCargoLog]:
+    parsed: list[ParsedCargoLog] = []
     for path in paths:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -1002,11 +1302,11 @@ def _build_summary(
     malformed_lines: int,
     duplicate_lines_dropped: int,
     cargo_log_files: list[Path],
-    parsed_logs: list[dict[str, list[dict[str, str]]]],
+    parsed_logs: list[ParsedCargoLog],
     lockfile_paths: list[Path],
     lockfile_names: set[str],
     workspace_names: set[str],
-) -> dict[str, Any]:
+) -> Summary:
     outcomes: Counter[str] = Counter(r.outcome for r in records if r.outcome)
     miss_reasons: Counter[str] = Counter(
         r.miss_reason for r in records if r.miss_reason
@@ -1014,12 +1314,15 @@ def _build_summary(
     trees: Counter[str] = Counter(r.tree for r in records)
 
     first_party_stats = _party_stats(records, "first")
-    third_party_stats = _party_stats(records, "third")
+    third_base = _party_stats(records, "third")
     unclassified_count = sum(1 for r in records if r.party == "unclassified")
 
     cost = _compute_cost(records)
-    third_party_stats["miss_wall_seconds"] = cost["third_party_miss_wall_seconds"]
-    third_party_stats["miss_cpu_seconds"] = None
+    third_party_stats = ThirdPartyStats(
+        **asdict(third_base),
+        miss_wall_seconds=cost.third_party_miss_wall_seconds,
+        miss_cpu_seconds=None,
+    )
 
     uncacheable = _compute_uncacheable(records)
     duplicates = _compute_duplicates(records)
@@ -1028,39 +1331,42 @@ def _build_summary(
     )
     buckets = _compute_buckets(records, parsed_logs, lockfile_names, workspace_names)
 
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "inputs": {
-            "journal_files": sorted(str(p) for p in journal_files),
-            "records_read": len(records),
-            "malformed_lines": malformed_lines,
-            "duplicate_lines_dropped": duplicate_lines_dropped,
-            "cargo_log_files": sorted(str(p) for p in cargo_log_files),
-            "lockfiles": sorted(str(p) for p in lockfile_paths),
-        },
-        "totals": {
-            "records": len(records),
-            "first_party": first_party_stats["records"],
-            "third_party": third_party_stats["records"],
-            "unclassified": unclassified_count,
-        },
-        "outcomes": dict(sorted(outcomes.items())),
-        "miss_reasons": dict(sorted(miss_reasons.items())),
-        "first_party": first_party_stats,
-        "third_party": third_party_stats,
-        "uncacheable_input": uncacheable,
-        "duplicates": duplicates,
-        "trees": {
-            "stable": trees.get("stable", 0),
-            "dylint/target": trees.get("dylint/target", 0),
-            "dylint/tests": trees.get("dylint/tests", 0),
-            "dylint/libraries": trees.get("dylint/libraries", 0),
-            "other": trees.get("other", 0),
-        },
-        "cost": cost,
-        "cargo": cargo_summary,
-        "buckets": buckets,
-    }
+    return Summary(
+        schema_version=SCHEMA_VERSION,
+        inputs=InputsInfo(
+            journal_files=sorted(str(p) for p in journal_files),
+            records_read=len(records),
+            malformed_lines=malformed_lines,
+            duplicate_lines_dropped=duplicate_lines_dropped,
+            cargo_log_files=sorted(str(p) for p in cargo_log_files),
+            lockfiles=sorted(str(p) for p in lockfile_paths),
+        ),
+        totals=Totals(
+            records=len(records),
+            first_party=first_party_stats.records,
+            third_party=third_party_stats.records,
+            unclassified=unclassified_count,
+        ),
+        outcomes=_named_counts(outcomes),
+        miss_reasons=_named_counts(miss_reasons),
+        first_party=first_party_stats,
+        third_party=third_party_stats,
+        uncacheable_input=uncacheable,
+        duplicates=duplicates,
+        trees=[
+            NamedCount(name, trees.get(name, 0))
+            for name in (
+                "stable",
+                "dylint/target",
+                "dylint/tests",
+                "dylint/libraries",
+                "other",
+            )
+        ],
+        cost=cost,
+        cargo=cargo_summary,
+        buckets=buckets,
+    )
 
 
 def analyze(
@@ -1069,7 +1375,24 @@ def analyze(
     repo_root: Path | None = None,
     lockfiles: list[str | Path] | None = None,
     dedupe: bool = True,
-) -> dict[str, Any]:
+) -> dict:
+    """`analyze_summary(...)` as the JSON-ready payload (`Summary.to_dict()`).
+
+    The dict is the on-disk / cross-script JSON boundary; in-process callers
+    should prefer the typed `analyze_summary()`.
+    """
+    return analyze_summary(
+        journal_paths, cargo_log_paths, repo_root, lockfiles, dedupe
+    ).to_dict()
+
+
+def analyze_summary(
+    journal_paths: list[str | Path],
+    cargo_log_paths: list[str | Path] | None = None,
+    repo_root: Path | None = None,
+    lockfiles: list[str | Path] | None = None,
+    dedupe: bool = True,
+) -> Summary:
     """Read journals (+ optional cargo logs / lockfiles) and summarize them.
 
     See the module docstring for the schema this returns and the
@@ -1112,38 +1435,38 @@ def _section(lines: list[str], title: str) -> None:
     lines.append(f"-- {title} --")
 
 
-def render_text(summary: dict[str, Any], top: int = 10, verbose: bool = False) -> str:  # noqa: C901
-    """Render `summary` (the dict `analyze()` returns) as a console table."""
+def render_text(summary: Summary, top: int = 10, verbose: bool = False) -> str:  # noqa: C901
+    """Render `summary` (the `Summary` `analyze_summary()` returns) as a console table."""
     lines: list[str] = []
-    inputs = summary["inputs"]
+    inputs = summary.inputs
     lines.append("== Compile journal analysis ==")
     lines.append(
-        f"journals: {len(inputs['journal_files'])} files, "
-        f"{inputs['records_read']} records read, "
-        f"{inputs['malformed_lines']} malformed, "
-        f"{inputs['duplicate_lines_dropped']} duplicate lines dropped"
+        f"journals: {len(inputs.journal_files)} files, "
+        f"{inputs.records_read} records read, "
+        f"{inputs.malformed_lines} malformed, "
+        f"{inputs.duplicate_lines_dropped} duplicate lines dropped"
     )
-    if inputs["cargo_log_files"]:
-        lines.append(f"cargo logs: {len(inputs['cargo_log_files'])} files")
-    if inputs["lockfiles"]:
-        lines.append(f"lockfiles: {len(inputs['lockfiles'])} files")
+    if inputs.cargo_log_files:
+        lines.append(f"cargo logs: {len(inputs.cargo_log_files)} files")
+    if inputs.lockfiles:
+        lines.append(f"lockfiles: {len(inputs.lockfiles)} files")
 
-    totals = summary["totals"]
+    totals = summary.totals
     _section(lines, "totals")
-    lines.append(f"records: {totals['records']}")
-    lines.append(f"first-party: {totals['first_party']}")
-    lines.append(f"third-party: {totals['third_party']}")
-    lines.append(f"unclassified: {totals['unclassified']}")
+    lines.append(f"records: {totals.records}")
+    lines.append(f"first-party: {totals.first_party}")
+    lines.append(f"third-party: {totals.third_party}")
+    lines.append(f"unclassified: {totals.unclassified}")
 
     _section(lines, "outcomes")
-    for key, value in summary["outcomes"].items():
-        lines.append(f"  {key}: {value}")
+    for entry in summary.outcomes:
+        lines.append(f"  {entry.name}: {entry.count}")
 
     _section(lines, "miss reasons")
-    for key, value in summary["miss_reasons"].items():
-        lines.append(f"  {key}: {value}")
+    for entry in summary.miss_reasons:
+        lines.append(f"  {entry.name}: {entry.count}")
 
-    uncacheable = summary["uncacheable_input"]
+    uncacheable = summary.uncacheable_input
     _section(lines, "uncacheable_input")
     lines.append(
         "  baseline (run 33536940076): 120 uncacheable_input records; the "
@@ -1151,152 +1474,147 @@ def render_text(summary: dict[str, Any], top: int = 10, verbose: bool = False) -
         "hand-written sum of buckets here -- the buckets below ARE the "
         "breakdown, and a second copy in prose can only drift from them."
     )
-    lines.append(f"  total: {uncacheable['total']}")
-    for bucket in uncacheable["buckets"][:top]:
+    lines.append(f"  total: {uncacheable.total}")
+    for bucket in uncacheable.buckets[:top]:
         lines.append(
-            f"  {bucket['count']:>5}  {bucket['crate']} "
-            f"(type={bucket['crate_type']!r} dylint_link={bucket['dylint_link']} "
-            f"test_harness={bucket['test_harness']} first_party={bucket['first_party']})"
+            f"  {bucket.count:>5}  {bucket.crate} "
+            f"(type={bucket.crate_type!r} dylint_link={bucket.dylint_link} "
+            f"test_harness={bucket.test_harness} first_party={bucket.first_party})"
         )
 
-    duplicates = summary["duplicates"]
+    duplicates = summary.duplicates
     _section(lines, "duplicates")
     lines.append(
-        f"  groups: {duplicates['groups']}  records_in_groups: "
-        f"{duplicates['records_in_groups']}  excess: {duplicates['excess_records']}"
+        f"  groups: {duplicates.groups}  records_in_groups: "
+        f"{duplicates.records_in_groups}  excess: {duplicates.excess_records}"
     )
     lines.append(
-        f"  concurrent: {duplicates['concurrent']}  sequential: "
-        f"{duplicates['sequential']}  cross_generation: {duplicates['cross_generation']}"
+        f"  concurrent: {duplicates.concurrent}  sequential: "
+        f"{duplicates.sequential}  cross_generation: {duplicates.cross_generation}"
     )
     lines.append(
-        f"  records_without_context_key: {duplicates['records_without_context_key']}"
+        f"  records_without_context_key: {duplicates.records_without_context_key}"
     )
-    for entry in duplicates["top_identities"][:top]:
+    for identity in duplicates.top_identities[:top]:
         lines.append(
-            f"    {entry['count']:>5}  {entry['crate']}  {entry['context_key']}"
+            f"    {identity.count:>5}  {identity.crate}  {identity.context_key}"
         )
 
-    trees = summary["trees"]
+    trees = summary.trees
     _section(lines, "trees")
-    for key, value in trees.items():
-        lines.append(f"  {key}: {value}")
+    for entry in trees:
+        lines.append(f"  {entry.name}: {entry.count}")
 
-    cost = summary["cost"]
+    cost = summary.cost
     _section(lines, "cost")
     lines.append(
         f"  third-party miss records (strict outcome==miss): "
-        f"{cost.get('third_party_miss_records', 'n/a')}"
+        f"{cost.third_party_miss_records}"
     )
     lines.append(
-        f"  third-party miss wall seconds: {cost['third_party_miss_wall_seconds']:.3f}"
+        f"  third-party miss wall seconds: {cost.third_party_miss_wall_seconds:.3f}"
     )
     lines.append(
         "  third-party miss cpu seconds: unavailable (the zccache journal "
         "carries no CPU-time field)"
     )
-    for entry in cost["top_third_party"][:top]:
+    for item in cost.top_third_party[:top]:
         lines.append(
-            f"    {entry['wall_seconds']:>10.3f}s  {entry['crate']}  "
-            f"{entry['context_key']}  (x{entry['count']})"
+            f"    {item.wall_seconds:>10.3f}s  {item.crate}  "
+            f"{item.context_key}  (x{item.count})"
         )
 
-    cargo = summary["cargo"]
-    if not cargo["available"]:
+    cargo = summary.cargo
+    if not cargo.available:
         lines.append("")
         lines.append("cargo logs: none supplied")
     else:
         _section(lines, "cargo")
         lines.append(
-            f"  dirty units: {cargo['dirty_units']}  third-party dirty: "
-            f"{cargo['third_party_dirty_units']}"
+            f"  dirty units: {cargo.dirty_units}  third-party dirty: "
+            f"{cargo.third_party_dirty_units}"
         )
-        for key, value in cargo["dirty_reasons"].items():
-            lines.append(f"    {key}: {value}")
+        for entry in cargo.dirty_reasons:
+            lines.append(f"    {entry.name}: {entry.count}")
         if verbose:
-            for crate, info in cargo["per_crate"].items():
+            for info in cargo.per_crate:
                 lines.append(
-                    f"    {crate}: dirty={info['dirty']} compiling={info['compiling']} "
-                    f"fresh={info['fresh']}"
+                    f"    {info.name}: dirty={info.dirty} compiling={info.compiling} "
+                    f"fresh={info.fresh}"
                 )
 
-    buckets = summary["buckets"]
+    buckets = summary.buckets
     _section(lines, "four-bucket join (#3039)")
-    fresh_display = "n/a" if buckets["fresh"] is None else buckets["fresh"]
+    fresh_display = "n/a" if buckets.fresh is None else buckets.fresh
     no_record_display = (
-        "n/a"
-        if buckets["compiling_no_record"] is None
-        else buckets["compiling_no_record"]
+        "n/a" if buckets.compiling_no_record is None else buckets.compiling_no_record
     )
-    lines.append(f"  third_party_total: {buckets['third_party_total']}")
+    lines.append(f"  third_party_total: {buckets.third_party_total}")
     lines.append(f"  fresh: {fresh_display}")
-    lines.append(f"  compiling_hit: {buckets['compiling_hit']}")
-    lines.append(f"  compiling_miss: {buckets['compiling_miss']}")
-    lines.append(f"  compiling_other: {buckets['compiling_other']}")
+    lines.append(f"  compiling_hit: {buckets.compiling_hit}")
+    lines.append(f"  compiling_miss: {buckets.compiling_miss}")
+    lines.append(f"  compiling_other: {buckets.compiling_other}")
     lines.append(f"  compiling_no_record: {no_record_display}")
     bucket_sum = (
-        buckets["compiling_hit"]
-        + buckets["compiling_miss"]
-        + buckets["compiling_other"]
+        buckets.compiling_hit + buckets.compiling_miss + buckets.compiling_other
     )
     lines.append(
         f"  sum(compiling_hit+compiling_miss+compiling_other) = {bucket_sum} "
-        f"(third_party_total = {buckets['third_party_total']})"
+        f"(third_party_total = {buckets.third_party_total})"
     )
 
     if verbose:
         _section(lines, "first-party crates")
-        for crate in summary["first_party"]["crates"]:
+        for crate in summary.first_party.crates:
             lines.append(f"  {crate}")
         _section(lines, "third-party crates")
-        for crate in summary["third_party"]["crates"]:
+        for crate in summary.third_party.crates:
             lines.append(f"  {crate}")
 
     return "\n".join(lines)
 
 
-def compare_baseline(
-    summary: dict[str, Any], baseline: dict[str, Any]
-) -> list[dict[str, Any]]:
+def compare_baseline(summary: Summary, baseline: Baseline) -> list[BaselineRow]:
     """Compare `summary` against a pinned baseline's `metrics` block.
 
     `tolerance` is a PERCENTAGE (see the module docstring): within-
     tolerance means `abs(delta) <= abs(baseline) * tolerance / 100`, except
     a zero baseline requires an exact match.
     """
-    tolerance = baseline.get("tolerance", 0)
-    metrics = baseline.get("metrics", {})
-    rows: list[dict[str, Any]] = []
-    for name, (section, key) in BASELINE_METRIC_PATHS.items():
+    tolerance = baseline.tolerance
+    payload = summary.to_dict()
+    metrics = _counts_to_json(baseline.metrics)
+    rows: list[BaselineRow] = []
+    for name, path in BASELINE_METRIC_PATHS.items():
         if name not in metrics:
             continue
         expected = metrics[name]
-        actual = summary.get(section, {}).get(key, 0)
+        actual = payload.get(path.section, {}).get(path.key, 0)
         delta = actual - expected
         if expected == 0:
             within = delta == 0
         else:
             within = abs(delta) <= abs(expected) * (tolerance / 100.0)
         rows.append(
-            {
-                "metric": name,
-                "baseline": expected,
-                "actual": actual,
-                "delta": delta,
-                "within_tolerance": within,
-            }
+            BaselineRow(
+                metric=name,
+                baseline=expected,
+                actual=actual,
+                delta=delta,
+                within_tolerance=within,
+            )
         )
     return rows
 
 
-def _print_baseline_table(rows: list[dict[str, Any]], tolerance: float) -> None:
+def _print_baseline_table(rows: list[BaselineRow], tolerance: float) -> None:
     print("")
     print(f"-- baseline comparison (+/-{tolerance}%) --")
     print(f"{'metric':<32}{'baseline':>12}{'actual':>12}{'delta':>12}  within")
     for row in rows:
         print(
-            f"{row['metric']:<32}{row['baseline']:>12}{row['actual']:>12}"
-            f"{row['delta']:>12}  {row['within_tolerance']}"
+            f"{row.metric:<32}{row.baseline:>12}{row.actual:>12}"
+            f"{row.delta:>12}  {row.within_tolerance}"
         )
 
 
@@ -1377,7 +1695,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         else:
             print(notice)
 
-    summary = analyze(
+    summary = analyze_summary(
         args.paths,
         cargo_log_paths=args.cargo_logs,
         repo_root=repo_root,
@@ -1392,7 +1710,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         out_path = Path(args.json_out)
         try:
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+            out_path.write_text(
+                json.dumps(summary.to_dict(), indent=2) + "\n", encoding="utf-8"
+            )
         except OSError as error:
             print(
                 f"analyze_compile_journal: could not write --json-out {args.json_out}: "
@@ -1401,7 +1721,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
             )
 
     if args.json:
-        print(json.dumps(summary, indent=2))
+        print(json.dumps(summary.to_dict(), indent=2))
     else:
         print(render_text(summary, top=args.top, verbose=args.verbose))
 
@@ -1426,10 +1746,11 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
             )
             baseline = None
         if baseline is not None:
-            rows = compare_baseline(summary, baseline)
-            _print_baseline_table(rows, baseline.get("tolerance", 0))
+            parsed_baseline = Baseline.from_json(baseline)
+            rows = compare_baseline(summary, parsed_baseline)
+            _print_baseline_table(rows, parsed_baseline.tolerance)
             if args.fail_on_baseline_delta and not all(
-                row["within_tolerance"] for row in rows
+                row.within_tolerance for row in rows
             ):
                 exit_code = 1
     return exit_code

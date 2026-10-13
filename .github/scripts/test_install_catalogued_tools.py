@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 import unittest
 import urllib.error
+from dataclasses import dataclass
 from pathlib import Path
 from unittest import mock
 
@@ -36,16 +37,22 @@ def encoded(value: object) -> bytes:
     return json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
 
 
-def publication_documents(
-    entries: list[dict[str, object]] | None = None,
-) -> tuple[bytes, bytes]:
-    catalogue: dict[str, object] = {
+@dataclass(frozen=True)
+class PublicationDocuments:
+    """Encoded catalogue and publication-state documents."""
+
+    catalogue: bytes
+    state: bytes
+
+
+def publication_documents(entries: list[object] | None = None) -> PublicationDocuments:
+    catalogue = {
         "schema_version": 2,
         "generation": GENERATION,
         "publication_state": {"generation": GENERATION, "url": STATE_URL},
         "entries": entries or [],
     }
-    state: dict[str, object] = {
+    state = {
         "schema_version": 1,
         "generation": GENERATION,
         "source": {"branch": "assets", "commit": "1" * 40, "tree": "2" * 40},
@@ -63,12 +70,13 @@ def publication_documents(
         "retained_generations": [{"generation": GENERATION, "published_at": 1}],
         "parts_by_sha256": {},
     }
-    return encoded(catalogue), encoded(state)
+    return PublicationDocuments(encoded(catalogue), encoded(state))
 
 
 class InstallCataloguedToolsTests(unittest.TestCase):
     def test_catalogue_fetch_retries_a_transient_failure(self) -> None:
-        catalogue, state = publication_documents()
+        documents = publication_documents()
+        catalogue, state = documents.catalogue, documents.state
         with (
             mock.patch.object(
                 script,
@@ -93,7 +101,8 @@ class InstallCataloguedToolsTests(unittest.TestCase):
                 b'{"schema_version":2,"schema_version":2}', label="catalogue"
             )
 
-        catalogue, state = publication_documents()
+        documents = publication_documents()
+        catalogue, state = documents.catalogue, documents.state
         forged_state = json.loads(state)
         forged_state["catalogue_sha256"] = "0" * 64
         with (
@@ -130,7 +139,7 @@ class InstallCataloguedToolsTests(unittest.TestCase):
                 ) as urlopen,
                 mock.patch.object(script.time, "sleep"),
             ):
-                script.download_verified(entry, output)
+                script.download_verified(script.JsonObject(entry), output)
 
             self.assertEqual(urlopen.call_count, 2)
             self.assertEqual(output.read_bytes(), payload)
@@ -164,7 +173,7 @@ class InstallCataloguedToolsTests(unittest.TestCase):
                 "open_url",
                 side_effect=[io.BytesIO(part) for part in payloads],
             ) as urlopen:
-                script.download_verified(entry, output)
+                script.download_verified(script.JsonObject(entry), output)
 
             self.assertEqual(urlopen.call_count, 2)
             self.assertEqual(output.read_bytes(), payload)
@@ -192,23 +201,25 @@ class InstallCataloguedToolsTests(unittest.TestCase):
         }
         self.assertEqual(
             script.select_entry(
-                {"schema_version": 2, "entries": [row]},
+                script.JsonObject({"schema_version": 2, "entries": [row]}),
                 tool="dylint-link",
                 version="6.0.3",
                 target="x86_64-unknown-linux-gnu",
-            ),
+            ).fields,
             row,
         )
         with self.assertRaisesRegex(SystemExit, "exactly one"):
             script.select_entry(
-                {"schema_version": 2, "entries": []},
+                script.JsonObject({"schema_version": 2, "entries": []}),
                 tool="dylint-link",
                 version="6.0.3",
                 target="x86_64-unknown-linux-gnu",
             )
         with self.assertRaisesRegex(SystemExit, "valid sha256"):
             script.select_entry(
-                {"schema_version": 2, "entries": [{**row, "sha256": "bad"}]},
+                script.JsonObject(
+                    {"schema_version": 2, "entries": [{**row, "sha256": "bad"}]}
+                ),
                 tool="dylint-link",
                 version="6.0.3",
                 target="x86_64-unknown-linux-gnu",
@@ -236,20 +247,26 @@ class InstallCataloguedToolsTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(SystemExit, "exactly one transport"):
             script.select_entry(
-                {
-                    "schema_version": 2,
-                    "entries": [{**row, "urls": ["https://example.test/full"]}],
-                },
+                script.JsonObject(
+                    {
+                        "schema_version": 2,
+                        "entries": [{**row, "urls": ["https://example.test/full"]}],
+                    }
+                ),
                 tool="dylint-link",
                 version="6.0.3",
                 target="x86_64-unknown-linux-gnu",
             )
         with self.assertRaisesRegex(SystemExit, "non-contiguous"):
             script.select_entry(
-                {
-                    "schema_version": 2,
-                    "entries": [{**row, "parts": [{**row["parts"][0], "number": 2}]}],
-                },
+                script.JsonObject(
+                    {
+                        "schema_version": 2,
+                        "entries": [
+                            {**row, "parts": [{**row["parts"][0], "number": 2}]}
+                        ],
+                    }
+                ),
                 tool="dylint-link",
                 version="6.0.3",
                 target="x86_64-unknown-linux-gnu",
@@ -268,7 +285,7 @@ class InstallCataloguedToolsTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(SystemExit, "credential-free absolute HTTPS"):
             script.select_entry(
-                {"schema_version": 2, "entries": [row]},
+                script.JsonObject({"schema_version": 2, "entries": [row]}),
                 tool="dylint-link",
                 version="6.0.3",
                 target="x86_64-unknown-linux-gnu",
