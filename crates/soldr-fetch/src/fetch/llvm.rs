@@ -185,9 +185,16 @@ async fn fetch_managed_llvm(paths: &SoldrPaths) -> Result<PathBuf, SoldrError> {
         // An install stamped before exec bits were restored (linux-arm64
         // archive, soldr#3505) is repaired in place instead of re-fetched.
         let stamped = std::fs::read_to_string(&stamp).unwrap_or_default();
-        if !stamped.contains(STAMP_EXEC_MARKER) {
+        let has_exec = stamped.contains(STAMP_EXEC_MARKER);
+        let has_libs = stamped.contains(STAMP_HOST_LIBS_MARKER);
+        if !has_exec {
             restore_bin_exec_bits(&bin_dir)?;
-            std::fs::write(&stamp, stamp_contents())?;
+        }
+        // soldr#3774: an install from before the host-libs overlay is
+        // completed in place, too.
+        let libs_done = has_libs || complete_host_libs(paths, &bin_dir).await?;
+        if !has_exec || libs_done != has_libs {
+            std::fs::write(&stamp, stamp_contents(libs_done))?;
         }
         return Ok(bin_dir);
     }
@@ -233,7 +240,8 @@ async fn fetch_managed_llvm(paths: &SoldrPaths) -> Result<PathBuf, SoldrError> {
     }
 
     restore_bin_exec_bits(&bin_dir)?;
-    std::fs::write(&stamp, stamp_contents())?;
+    let libs_done = complete_host_libs(paths, &bin_dir).await?;
+    std::fs::write(&stamp, stamp_contents(libs_done))?;
     eprintln!("soldr: extracted LLVM to {}", install_dir.display());
     Ok(bin_dir)
 }
@@ -296,8 +304,44 @@ fn catalogue_entry_from_index(
 /// applied.
 const STAMP_EXEC_MARKER: &str = "exec-bits";
 
-fn stamp_contents() -> String {
-    format!("{MANAGED_LLVM_VERSION}\n{STAMP_EXEC_MARKER}\n")
+/// Marks a `.complete` stamp whose `lib/` carries the soldr#3774 host
+/// libraries (or whose host needs none).
+const STAMP_HOST_LIBS_MARKER: &str = "host-libs";
+
+fn stamp_contents(host_libs: bool) -> String {
+    let libs = if host_libs {
+        STAMP_HOST_LIBS_MARKER
+    } else {
+        ""
+    };
+    format!("{MANAGED_LLVM_VERSION}\n{STAMP_EXEC_MARKER}\n{libs}\n")
+}
+
+/// soldr#3774: put `libxml2.so.2` / `libz.so.1` beside the bundle's `lld`
+/// (`RUNPATH $ORIGIN/../lib`) and prove it no longer needs them from the
+/// host. Returns whether the overlay is complete. Hosts without a
+/// `llvm-host-libs` row (Windows) need none. A catalogue miss is logged and
+/// retried on the next run; hosts that have the libraries keep working
+/// meanwhile. A bundle that is still incomplete *after* the overlay is a
+/// hard error.
+async fn complete_host_libs(paths: &SoldrPaths, bin_dir: &Path) -> Result<bool, SoldrError> {
+    let Some(host) = host_triple_for_llvm() else {
+        return Ok(true);
+    };
+    if super::llvm_host_libs::catalogue_slug_for(host).is_none() {
+        return Ok(true);
+    }
+    let root = match super::llvm_host_libs::ensure_llvm_host_libs(paths, host).await {
+        Ok(root) => root,
+        Err(err) => {
+            eprintln!("soldr: managed LLVM host libraries unavailable for {host}: {err}");
+            return Ok(false);
+        }
+    };
+    let lib_dir = bin_dir.parent().unwrap_or(bin_dir).join("lib");
+    super::llvm_host_libs::install_into(&root, &lib_dir)?;
+    super::llvm_host_libs::verify_lld_self_contained(bin_dir)?;
+    Ok(true)
 }
 
 /// The `linux-arm64` LLVM archive stores its binaries as `rw-rw-rw-` (no
@@ -397,7 +441,14 @@ mod tests {
                 assert_eq!(mode & 0o111, 0o111, "{tool} must be executable: {mode:o}");
             }
         }
-        assert!(stamp_contents().contains(STAMP_EXEC_MARKER));
+        assert!(stamp_contents(false).contains(STAMP_EXEC_MARKER));
+    }
+
+    #[test]
+    fn host_libs_marker_is_recorded_only_when_the_overlay_completed() {
+        assert!(stamp_contents(true).contains(STAMP_HOST_LIBS_MARKER));
+        assert!(!stamp_contents(false).contains(STAMP_HOST_LIBS_MARKER));
+        assert!(stamp_contents(false).contains(STAMP_EXEC_MARKER));
     }
 
     #[test]

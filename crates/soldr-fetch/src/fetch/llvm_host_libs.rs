@@ -55,18 +55,117 @@ pub async fn ensure_llvm_host_libs(
 }
 
 /// Copy every shared object under `<host_libs>/lib` into `llvm_lib`.
-pub fn install_into(_host_libs: &Path, _llvm_lib: &Path) -> Result<Vec<String>, SoldrError> {
-    Ok(Vec::new())
+/// Returns the copied file names.
+pub fn install_into(host_libs: &Path, llvm_lib: &Path) -> Result<Vec<String>, SoldrError> {
+    std::fs::create_dir_all(llvm_lib)?;
+    let mut copied = Vec::new();
+    for entry in std::fs::read_dir(host_libs.join("lib"))? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !entry.file_type()?.is_file() || !name.contains(".so") {
+            continue;
+        }
+        let dest = llvm_lib.join(&name);
+        let staged = llvm_lib.join(format!(".{name}.soldr-tmp"));
+        std::fs::copy(entry.path(), &staged)?;
+        std::fs::rename(&staged, &dest)?;
+        copied.push(name);
+    }
+    Ok(copied)
 }
 
 /// The `DT_NEEDED` entries of an ELF64 little-endian file.
-pub fn elf_needed(_path: &Path) -> Result<Vec<String>, SoldrError> {
-    Ok(Vec::new())
+///
+/// Reads `PT_DYNAMIC`, then resolves `DT_STRTAB` (a virtual address)
+/// through the `PT_LOAD` segments. Enough for the verification below; not a
+/// general ELF reader.
+pub fn elf_needed(path: &Path) -> Result<Vec<String>, SoldrError> {
+    let bytes = std::fs::read(path)?;
+    parse_needed(&bytes).ok_or_else(|| {
+        SoldrError::Archive(format!(
+            "{} is not a readable ELF64 little-endian dynamic object",
+            path.display()
+        ))
+    })
+}
+
+fn parse_needed(b: &[u8]) -> Option<Vec<String>> {
+    if b.get(..4)? != b"\x7fELF" || *b.get(4)? != 2 || *b.get(5)? != 1 {
+        return None;
+    }
+    let u16_at = |o: usize| Some(u16::from_le_bytes(b.get(o..o + 2)?.try_into().ok()?));
+    let u32_at = |o: usize| Some(u32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?));
+    let u64_at = |o: usize| Some(u64::from_le_bytes(b.get(o..o + 8)?.try_into().ok()?));
+    let phoff = usize::try_from(u64_at(0x20)?).ok()?;
+    let phentsize = usize::from(u16_at(0x36)?);
+    let phnum = usize::from(u16_at(0x38)?);
+    let mut loads = Vec::new();
+    let mut dynamic = None;
+    for i in 0..phnum {
+        let ph = phoff.checked_add(i.checked_mul(phentsize)?)?;
+        let kind = u32_at(ph)?;
+        let offset = u64_at(ph + 8)?;
+        let vaddr = u64_at(ph + 16)?;
+        let filesz = u64_at(ph + 32)?;
+        match kind {
+            1 => loads.push((vaddr, offset, filesz)),
+            2 => dynamic = Some((offset, filesz)),
+            _ => {}
+        }
+    }
+    let (dyn_off, dyn_size) = dynamic?;
+    let (mut strtab, mut needed) = (None, Vec::new());
+    let mut at = usize::try_from(dyn_off).ok()?;
+    let end = at.checked_add(usize::try_from(dyn_size).ok()?)?;
+    while at + 16 <= end {
+        let (tag, val) = (u64_at(at)?, u64_at(at + 8)?);
+        match tag {
+            0 => break,
+            1 => needed.push(val),
+            5 => strtab = Some(val),
+            _ => {}
+        }
+        at += 16;
+    }
+    let strtab = strtab?;
+    let (vaddr, offset, _) = loads
+        .iter()
+        .find(|(v, _, size)| strtab >= *v && strtab < v + size)?;
+    let str_base = usize::try_from(strtab - vaddr + offset).ok()?;
+    needed
+        .into_iter()
+        .map(|rel| {
+            let start = str_base.checked_add(usize::try_from(rel).ok()?)?;
+            let len = b.get(start..)?.iter().position(|c| *c == 0)?;
+            String::from_utf8(b[start..start + len].to_vec()).ok()
+        })
+        .collect()
 }
 
 /// NEEDED entries that are neither glibc core nor present in `lib_dir`.
-pub fn unresolved_needed(_needed: &[String], _lib_dir: &Path) -> Vec<String> {
-    Vec::new()
+pub fn unresolved_needed(needed: &[String], lib_dir: &Path) -> Vec<String> {
+    needed
+        .iter()
+        .filter(|name| !GLIBC_CORE.contains(&name.as_str()) && !lib_dir.join(name).is_file())
+        .cloned()
+        .collect()
+}
+
+/// Fail when the bundle's `lld` still needs a library the bundle lacks.
+pub fn verify_lld_self_contained(bin_dir: &Path) -> Result<(), SoldrError> {
+    let lld = bin_dir.join("lld");
+    let lib_dir = bin_dir.parent().unwrap_or(bin_dir).join("lib");
+    let missing = unresolved_needed(&elf_needed(&lld)?, &lib_dir);
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(SoldrError::Archive(format!(
+            "managed LLVM {} still needs host libraries {missing:?}; \
+             expected them in {}",
+            lld.display(),
+            lib_dir.display()
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -123,6 +222,30 @@ mod tests {
             needed.iter().any(|n| n == "libc.so.6"),
             "expected libc.so.6 in {needed:?}"
         );
+    }
+
+    /// End to end on a real ELF standing in for `lld`: a NEEDED the bundle
+    /// lacks fails verification by name, and providing it in `lib/` passes.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn verify_requires_every_non_glibc_needed_in_the_bundle_lib() {
+        let exe = std::env::current_exe().unwrap();
+        let extra: Vec<String> =
+            unresolved_needed(&elf_needed(&exe).unwrap(), Path::new("/nonexistent"));
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("hardlinked/bin");
+        let lib = root.path().join("hardlinked/lib");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::copy(&exe, bin.join("lld")).unwrap();
+        if !extra.is_empty() {
+            let err = verify_lld_self_contained(&bin).expect_err("missing libs must fail");
+            assert!(err.to_string().contains(&extra[0]), "{err}");
+        }
+        for name in &extra {
+            std::fs::write(lib.join(name), b"").unwrap();
+        }
+        verify_lld_self_contained(&bin).expect("bundle now provides every non-glibc NEEDED");
     }
 
     #[test]
