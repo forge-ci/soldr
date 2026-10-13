@@ -61,7 +61,42 @@ pub async fn ensure_libuuid_sysroot(
 
 /// Layer a materialized libuuid bundle at `root` onto the prepared GNU
 /// target environment `env`.
-pub fn overlay_env(_env: &mut Vec<(String, String)>, _target_triple: &str, _root: &Path) {}
+///
+/// * `CFLAGS_<t>` / `CXXFLAGS_<t>` gain `-isystem <root>/include`, which
+///   cc-rs and cmake-rs both read, so `<uuid/uuid.h>` resolves beside the
+///   sysroot headers.
+/// * `CARGO_TARGET_<T>_RUSTFLAGS` gains `-C link-arg=-L<root>/lib`, so a
+///   build script's `cargo:rustc-link-lib=uuid` finds the static
+///   `libuuid.a` at the final link. It is spelled as a `-C` pair because
+///   prepared target rustflags are split only on ` -C ` (so paths may hold
+///   spaces); a bare `-L native=` would be glued onto the preceding value.
+///
+/// Values are appended to existing entries (the GNU toolchain has already
+/// pushed `--sysroot` into all three) and created when absent.
+pub fn overlay_env(env: &mut Vec<(String, String)>, target_triple: &str, root: &Path) {
+    let target_u = target_triple.replace('-', "_");
+    let target_upper = target_u.to_ascii_uppercase();
+    let include = format!("-isystem {}", root.join("include").display());
+    let link = format!("-C link-arg=-L{}", root.join("lib").display());
+    append_flag(env, &format!("CFLAGS_{target_u}"), &include);
+    append_flag(env, &format!("CXXFLAGS_{target_u}"), &include);
+    append_flag(
+        env,
+        &format!("CARGO_TARGET_{target_upper}_RUSTFLAGS"),
+        &link,
+    );
+}
+
+fn append_flag(env: &mut Vec<(String, String)>, key: &str, flag: &str) {
+    match env.iter_mut().find(|(k, _)| k == key) {
+        Some((_, value)) if !value.is_empty() => {
+            value.push(' ');
+            value.push_str(flag);
+        }
+        Some((_, value)) => flag.clone_into(value),
+        None => env.push((key.to_string(), flag.to_string())),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -133,7 +168,7 @@ mod tests {
         );
         assert_eq!(
             value(&env, "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS"),
-            Some("-C link-arg=--sysroot=/s -L native=/opt/uuid/package/lib")
+            Some("-C link-arg=--sysroot=/s -C link-arg=-L/opt/uuid/package/lib")
         );
         assert_eq!(env.len(), 3, "overlay must not add new keys: {env:?}");
     }
@@ -152,7 +187,7 @@ mod tests {
         );
         assert_eq!(
             value(&env, "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS"),
-            Some("-L native=/u/package/lib")
+            Some("-C link-arg=-L/u/package/lib")
         );
     }
 }

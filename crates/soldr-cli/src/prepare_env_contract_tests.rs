@@ -630,6 +630,14 @@ fn managed_gnu_target_layers_libuuid_onto_the_sysroot() {
     let _legacy_sys = EnvVarGuard::set(crate::blessed_build::USE_LEGACY_VENDORED_SYS_ENV_VAR, "1");
     let _system_cmake = EnvVarGuard::set(crate::blessed_build::USE_SYSTEM_CMAKE_ENV_VAR, "1");
     let _manifest = EnvVarGuard::set("SOLDR_MANIFEST_DISABLE", "1");
+    let _ambient_flags: Vec<_> = [
+        "RUSTFLAGS".to_string(),
+        "CARGO_ENCODED_RUSTFLAGS".to_string(),
+        rustflags_key.clone(),
+    ]
+    .into_iter()
+    .map(DynamicEnvVarGuard::remove)
+    .collect();
 
     let paths = crate::core::SoldrPaths::with_root(dir.path().join("soldr"));
     let syslib = paths.bin.join("syslib");
@@ -673,7 +681,7 @@ fn managed_gnu_target_layers_libuuid_onto_the_sysroot() {
             .unwrap_or_else(|| panic!("{key} missing from {:?}", prep.env))
     };
     let include = format!("-isystem {}", uuid_root.join("include").display());
-    let link = format!("-L native={}", uuid_root.join("lib").display());
+    let link_arg = format!("link-arg=-L{}", uuid_root.join("lib").display());
     for key in [format!("CFLAGS_{target_u}"), format!("CXXFLAGS_{target_u}")] {
         let flags = value(&key);
         assert!(
@@ -687,8 +695,15 @@ fn managed_gnu_target_layers_libuuid_onto_the_sysroot() {
     }
     let rustflags = value(&rustflags_key);
     assert!(rustflags.contains("link-arg=--sysroot="), "{rustflags}");
+    // What rustc actually receives: the search path must survive encoding
+    // as its own `-C link-arg=` pair, not glued onto `--sysroot`.
+    let encoded = crate::target_lifecycle::encoded_rustflags_for_prep(&prep)
+        .expect("prepared target rustflags are encoded");
+    let tokens: Vec<_> = encoded.split('\u{1f}').collect();
     assert!(
-        rustflags.contains(&link),
-        "rustflags lack libuuid search path: {rustflags}"
+        tokens
+            .windows(2)
+            .any(|pair| pair == ["-C", link_arg.as_str()]),
+        "encoded rustflags lack a standalone libuuid search path: {tokens:?}"
     );
 }
