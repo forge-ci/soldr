@@ -589,6 +589,45 @@ fn exported_encoded_rustflags_keep_caller_target_flags() {
     );
 }
 
+/// A stamped, stub `gnu-linux-toolchain` bundle that passes `validate()`.
+fn seed_fake_gnu_bundle(paths: &crate::core::SoldrPaths, slug: &str, target_prefix: &str) {
+    let gnu = paths
+        .bin
+        .join("syslib")
+        .join("gnu-linux-toolchain")
+        .join(crate::fetch::gnu_linux_toolchain::GNU_LINUX_TOOLCHAIN_VERSION)
+        .join(slug);
+    let managed_bin = gnu.join("package").join("bin");
+    let sysroot = gnu.join("package").join(target_prefix).join("sysroot");
+    std::fs::create_dir_all(&managed_bin).expect("create managed bin");
+    std::fs::create_dir_all(sysroot.join("usr/include")).expect("create sysroot includes");
+    std::fs::create_dir_all(sysroot.join("usr/lib")).expect("create sysroot libraries");
+    for tool in ["gcc", "g++", "ar", "ranlib", "ld", "readelf"] {
+        write_executable(
+            &managed_bin.join(format!("{target_prefix}-{tool}")),
+            "#!/bin/sh\nexit 0\n",
+        );
+    }
+    std::fs::write(gnu.join(".complete"), "test bundle").expect("stamp gnu bundle");
+}
+
+/// A stamped libuuid bundle; returns its `package` root.
+fn seed_fake_libuuid_bundle(paths: &crate::core::SoldrPaths, slug: &str) -> std::path::PathBuf {
+    let uuid = paths
+        .bin
+        .join("syslib")
+        .join("libuuid")
+        .join(crate::fetch::libuuid_sysroot::MANAGED_LIBUUID_VERSION)
+        .join(slug);
+    let root = uuid.join("package");
+    std::fs::create_dir_all(root.join("include/uuid")).expect("create uuid include");
+    std::fs::create_dir_all(root.join("lib")).expect("create uuid lib");
+    std::fs::write(root.join("include/uuid/uuid.h"), "").expect("write uuid.h");
+    std::fs::write(root.join("lib/libuuid.a"), "!<arch>\n").expect("write libuuid.a");
+    std::fs::write(uuid.join(".complete"), "test bundle").expect("stamp uuid bundle");
+    root
+}
+
 /// soldr#3771: the catalogue glibc 2.17 sysroot ships no libuuid, so a
 /// `cc` build that includes `<uuid/uuid.h>` and emits
 /// `cargo:rustc-link-lib=uuid` (obs-rust/obs-studio#516) failed for
@@ -640,34 +679,8 @@ fn managed_gnu_target_layers_libuuid_onto_the_sysroot() {
     .collect();
 
     let paths = crate::core::SoldrPaths::with_root(dir.path().join("soldr"));
-    let syslib = paths.bin.join("syslib");
-    let gnu = syslib
-        .join("gnu-linux-toolchain")
-        .join(crate::fetch::gnu_linux_toolchain::GNU_LINUX_TOOLCHAIN_VERSION)
-        .join(slug);
-    let managed_bin = gnu.join("package").join("bin");
-    let sysroot = gnu.join("package").join(target_prefix).join("sysroot");
-    std::fs::create_dir_all(&managed_bin).expect("create managed bin");
-    std::fs::create_dir_all(sysroot.join("usr/include")).expect("create sysroot includes");
-    std::fs::create_dir_all(sysroot.join("usr/lib")).expect("create sysroot libraries");
-    for tool in ["gcc", "g++", "ar", "ranlib", "ld", "readelf"] {
-        write_executable(
-            &managed_bin.join(format!("{target_prefix}-{tool}")),
-            "#!/bin/sh\nexit 0\n",
-        );
-    }
-    std::fs::write(gnu.join(".complete"), "test bundle").expect("stamp gnu bundle");
-
-    let uuid = syslib
-        .join("libuuid")
-        .join(crate::fetch::libuuid_sysroot::MANAGED_LIBUUID_VERSION)
-        .join(slug);
-    let uuid_root = uuid.join("package");
-    std::fs::create_dir_all(uuid_root.join("include/uuid")).expect("create uuid include");
-    std::fs::create_dir_all(uuid_root.join("lib")).expect("create uuid lib");
-    std::fs::write(uuid_root.join("include/uuid/uuid.h"), "").expect("write uuid.h");
-    std::fs::write(uuid_root.join("lib/libuuid.a"), "!<arch>\n").expect("write libuuid.a");
-    std::fs::write(uuid.join(".complete"), "test bundle").expect("stamp uuid bundle");
+    seed_fake_gnu_bundle(&paths, slug, target_prefix);
+    let uuid_root = seed_fake_libuuid_bundle(&paths, slug);
 
     let prep = tokio::runtime::Runtime::new()
         .expect("runtime")
