@@ -133,11 +133,13 @@ def test_run_passes_the_argv_to_subprocess(monkeypatch: pytest.MonkeyPatch) -> N
 def test_copy_into_share_dir_stages_every_guest_binary(tmp_path: Path) -> None:
     extract = tmp_path / "extracted"
     extract.mkdir()
-    for name, _check in MODULE.GUEST_BINARY_CHECKS:
+    for binary in MODULE.GUEST_BINARY_CHECKS:
+        name = binary.name
         (extract / name).write_bytes(b"fake binary")
     share = tmp_path / "share"
     MODULE.copy_into_share_dir(extract, share, "")
-    for name, _check in MODULE.GUEST_BINARY_CHECKS:
+    for binary in MODULE.GUEST_BINARY_CHECKS:
+        name = binary.name
         assert (share / name).read_bytes() == b"fake binary"
 
 
@@ -209,7 +211,8 @@ def test_build_release_guest_script_fetches_every_binary_by_basename() -> None:
         "0.9.11", "soldr-0.9.11-cp310-abi3-macosx_11_0_x86_64.whl"
     )
     assert script.startswith("#!/bin/sh")
-    for name, _check in MODULE.GUEST_BINARY_CHECKS:
+    for binary in MODULE.GUEST_BINARY_CHECKS:
+        name = binary.name
         assert f"curl -fsS -o /tmp/{name} {MODULE.GUEST_HTTP_BASE}/{name}" in script
     assert MODULE.MACOS_X64_PYTHON_ARCHIVE in script
     assert "-m pip install --no-index" in script
@@ -235,14 +238,21 @@ def test_build_release_guest_script_help_check_for_daemon() -> None:
 def test_parse_summary_splits_status_and_detail() -> None:
     text = "arch=pass:x86_64\nversion=fail:not soldr\nempty=\n\n"
     results = MODULE.parse_summary(text)
-    assert results["arch"] == (True, "x86_64")
-    assert results["version"] == (False, "not soldr")
-    assert results["empty"] == (False, "")
+    assert MODULE.find_result(results, "arch") == MODULE.CheckResult(
+        "arch", True, "x86_64"
+    )
+    assert MODULE.find_result(results, "version") == MODULE.CheckResult(
+        "version", False, "not soldr"
+    )
+    assert MODULE.find_result(results, "empty") == MODULE.CheckResult(
+        "empty", False, ""
+    )
 
 
 def test_parse_summary_flags_malformed_lines() -> None:
     results = MODULE.parse_summary("not a key value line\n")
-    assert results["summary_line_1"] == (
+    assert MODULE.find_result(results, "summary_line_1") == MODULE.CheckResult(
+        "summary_line_1",
         False,
         "malformed line: 'not a key value line'",
     )
@@ -250,7 +260,8 @@ def test_parse_summary_flags_malformed_lines() -> None:
 
 def _passing_summary_lines() -> list[str]:
     lines = ["arch=pass:x86_64"]
-    for name, check in MODULE.GUEST_BINARY_CHECKS:
+    for binary in MODULE.GUEST_BINARY_CHECKS:
+        name, check = binary.name, binary.check
         lines.append(f"fetch_{name}=pass")
         lines.append(f"{name}_{check}=pass:ok")
     lines.append('soldr_version_json=pass:{"soldr_version": "0.9.11"}')

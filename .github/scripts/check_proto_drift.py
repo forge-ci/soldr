@@ -45,7 +45,18 @@ PAIRS = [
 # not a way to silence a finding. soldr#2996 emptied this map when the target
 # cache was removed: its only entries mirrored zccache's bundle-manifest types
 # for `rust_plan_manifest.proto`, which no longer exists.
-CROSS_REPO_MESSAGES: dict[str, dict[str, str]] = {}
+
+
+@dataclass(frozen=True)
+class CrossRepoMessage:
+    """One allowlisted message: the proto it lives in and where it is implemented."""
+
+    proto_rel: str
+    message: str
+    location: str
+
+
+CROSS_REPO_MESSAGES: tuple[CrossRepoMessage, ...] = ()
 
 # soldr copies of schemas owned by a vendored repo. Keeping the copy identical
 # to its origin is the whole point -- soldr#2753's second drift was this
@@ -266,9 +277,9 @@ def check_pair(proto_rel, rust_rel, root):
         )
     ]
     # Types implemented in another repo have no local prost struct by design.
-    elsewhere = CROSS_REPO_MESSAGES.get(proto_rel, {})
-    for name in elsewhere:
-        proto.pop(name, None)
+    for entry in CROSS_REPO_MESSAGES:
+        if entry.proto_rel == proto_rel:
+            proto.pop(entry.message, None)
     problems.extend(compare(proto, rust))
     return problems
 

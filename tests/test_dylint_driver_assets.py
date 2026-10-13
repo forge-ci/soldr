@@ -206,11 +206,11 @@ def test_happy_path_every_triple_present():
 def test_one_missing_triple_is_reported_by_name():
     payload = catalogue([t for t in EXPECTED_TRIPLES if t != "aarch64-apple-darwin"])
     failures = GUARD.missing_drivers(payload, VERSION, CHANNEL, EXPECTED_TRIPLES)
-    assert [triple for triple, _, _ in failures] == ["aarch64-apple-darwin"]
-    assert failures[0][1] == GUARD.driver_asset_name(
+    assert [f.triple for f in failures] == ["aarch64-apple-darwin"]
+    assert failures[0].asset_name == GUARD.driver_asset_name(
         VERSION, CHANNEL, "aarch64-apple-darwin"
     )
-    assert failures[0][2] == "no catalogue row"
+    assert failures[0].reason == "no catalogue row"
 
 
 def test_several_missing_triples_are_all_reported():
@@ -222,7 +222,7 @@ def test_several_missing_triples_are_all_reported():
     }
     payload = catalogue([t for t in EXPECTED_TRIPLES if t not in absent])
     failures = GUARD.missing_drivers(payload, VERSION, CHANNEL, EXPECTED_TRIPLES)
-    assert {triple for triple, _, _ in failures} == absent
+    assert {f.triple for f in failures} == absent
 
 
 def test_a_driver_for_a_different_nightly_does_not_satisfy_the_check():
@@ -260,14 +260,14 @@ def test_row_declaring_both_transports_fails():
     )
     failures = GUARD.missing_drivers(payload, VERSION, CHANNEL, EXPECTED_TRIPLES)
     assert len(failures) == len(EXPECTED_TRIPLES)
-    assert "exactly one transport shape" in failures[0][2]
+    assert "exactly one transport shape" in failures[0].reason
 
 
 def test_row_declaring_no_transport_at_all_fails():
     payload = catalogue(EXPECTED_TRIPLES, urls=[])
     failures = GUARD.missing_drivers(payload, VERSION, CHANNEL, EXPECTED_TRIPLES)
     assert len(failures) == len(EXPECTED_TRIPLES)
-    assert "invalid transport" in failures[0][2]
+    assert "invalid transport" in failures[0].reason
 
 
 def test_row_with_an_unknown_transport_key_fails():
@@ -291,7 +291,7 @@ def test_row_demanding_a_newer_client_capability_fails():
     payload = catalogue(EXPECTED_TRIPLES, min_client_version=99)
     failures = GUARD.missing_drivers(payload, VERSION, CHANNEL, EXPECTED_TRIPLES)
     assert len(failures) == len(EXPECTED_TRIPLES)
-    assert "capability" in failures[0][2]
+    assert "capability" in failures[0].reason
 
 
 def test_duplicate_rows_for_one_asset_fail():
@@ -300,7 +300,7 @@ def test_duplicate_rows_for_one_asset_fail():
     payload["entries"].append(copy.deepcopy(payload["entries"][0]))
     failures = GUARD.missing_drivers(payload, VERSION, CHANNEL, EXPECTED_TRIPLES)
     assert len(failures) == 1
-    assert "2 catalogue rows" in failures[0][2]
+    assert "2 catalogue rows" in failures[0].reason
 
 
 def test_legacy_v1_single_url_rows_are_accepted():
@@ -431,7 +431,9 @@ def test_main_skips_when_the_catalogue_cannot_be_resolved(monkeypatch, capsys):
 
 def test_main_skips_when_the_catalogue_is_malformed(monkeypatch, capsys):
     monkeypatch.setattr(
-        GUARD, "load_catalogue", lambda _origin: ("https://example.test/c", {})
+        GUARD,
+        "load_catalogue",
+        lambda _origin: GUARD.LoadedCatalogue("https://example.test/c", {}),
     )
     assert GUARD.main([]) == 0
     assert "skipped" in capsys.readouterr().out
@@ -450,7 +452,9 @@ def test_main_passes_when_every_triple_has_a_driver(monkeypatch, capsys):
         ],
     }
     monkeypatch.setattr(
-        GUARD, "load_catalogue", lambda _origin: ("https://example.test/c", payload)
+        GUARD,
+        "load_catalogue",
+        lambda _origin: GUARD.LoadedCatalogue("https://example.test/c", payload),
     )
     assert GUARD.main([]) == 0
     assert "all 8 release-included triples" in capsys.readouterr().out
@@ -472,7 +476,9 @@ def test_main_failure_names_every_gap_and_where_each_pin_came_from(monkeypatch, 
         ],
     }
     monkeypatch.setattr(
-        GUARD, "load_catalogue", lambda _origin: ("https://example.test/c", payload)
+        GUARD,
+        "load_catalogue",
+        lambda _origin: GUARD.LoadedCatalogue("https://example.test/c", payload),
     )
 
     assert GUARD.main([]) == 1

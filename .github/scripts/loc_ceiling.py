@@ -16,6 +16,7 @@ generated sources (none live under src/), non-production test targets
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 
 CEILING = 1000
@@ -41,16 +42,24 @@ def production_sources() -> list[Path]:
     return files
 
 
-def violations() -> list[tuple[Path, int]]:
-    over: list[tuple[Path, int]] = []
+@dataclass(frozen=True)
+class OverCeiling:
+    """A production source file and its physical line count."""
+
+    path: Path
+    lines: int
+
+
+def violations() -> list[OverCeiling]:
+    over: list[OverCeiling] = []
     for path in production_sources():
         try:
             count = sum(1 for _ in path.read_text(encoding="utf-8").splitlines())
         except OSError:
             continue
         if count > CEILING:
-            over.append((path, count))
-    over.sort(key=lambda pair: (-pair[1], pair[0].as_posix()))
+            over.append(OverCeiling(path, count))
+    over.sort(key=lambda item: (-item.lines, item.path.as_posix()))
     return over
 
 
@@ -59,11 +68,11 @@ def main() -> int:
     parser.add_argument("--ceiling", type=int, default=CEILING)
     args = parser.parse_args()
 
-    over = [(path, count) for path, count in violations() if count > args.ceiling]
+    over = [item for item in violations() if item.lines > args.ceiling]
     if over:
         print(f"loc ceiling ({args.ceiling}) exceeded by {len(over)} file(s):")
-        for path, count in sorted(over, key=lambda pair: -pair[1]):
-            print(f"  {count:5d} {path}")
+        for item in sorted(over, key=lambda item: -item.lines):
+            print(f"  {item.lines:5d} {item.path}")
         return 1
     print(f"loc ceiling ({args.ceiling}): all production files are within budget")
     return 0

@@ -8,21 +8,28 @@ import os
 import shutil
 import struct
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 
-def is_elf_amd64(path: Path) -> tuple[bool, str]:
+@dataclass(frozen=True)
+class ElfVerdict:
+    ok: bool
+    reason: str
+
+
+def is_elf_amd64(path: Path) -> ElfVerdict:
     try:
         data = path.read_bytes()[:32]
     except OSError as exc:
-        return False, f"cannot read {path}: {exc}"
+        return ElfVerdict(False, f"cannot read {path}: {exc}")
     if len(data) < 20 or data[:4] != b"\x7fELF":
-        return False, "missing ELF signature"
+        return ElfVerdict(False, "missing ELF signature")
     if data[4:6] != b"\x02\x01":
-        return False, "not a 64-bit little-endian ELF"
+        return ElfVerdict(False, "not a 64-bit little-endian ELF")
     if struct.unpack_from("<H", data, 18)[0] != 62:
-        return False, "ELF machine is not x86-64"
-    return True, "ELF64 x86-64"
+        return ElfVerdict(False, "ELF machine is not x86-64")
+    return ElfVerdict(True, "ELF64 x86-64")
 
 
 def main() -> int:
@@ -49,18 +56,18 @@ def main() -> int:
 
     target_dir = Path(os.environ.get("CARGO_TARGET_DIR", fixture / "target"))
     binary = target_dir / args.target / "debug" / "docker-cross-c"
-    ok, reason = is_elf_amd64(binary)
+    verdict = is_elf_amd64(binary)
     report = (
         "## Windows-host Docker Linux cross smoke\n\n"
         f"- target: `{args.target}`\n"
         f"- fixture: `{fixture.name}` (C + C++)\n"
         f"- output: `{binary}`\n"
-        f"- verdict: {'OK' if ok else 'FAIL'} — {reason}\n"
+        f"- verdict: {'OK' if verdict.ok else 'FAIL'} — {verdict.reason}\n"
     )
     print(report)
     if args.summary:
         args.summary.open("a", encoding="utf-8").write(report)
-    return 0 if ok else 1
+    return 0 if verdict.ok else 1
 
 
 if __name__ == "__main__":

@@ -955,7 +955,9 @@ def test_mac_x64_distribution_uses_pinned_setup_soldr_and_the_blessed_build() ->
     # ubuntu-24.04 build-runner fact is pinned in
     # test_canonical_target_contract.py against release.build.
     assert "include: ${{ fromJSON(needs.prepare.outputs.build_matrix) }}" in release
-    assert '"x86_64-apple-darwin": {"os": "darwin", "arch": "x86_64"}' in support_fetch
+    assert (
+        '"x86_64-apple-darwin": ToolchainPlatform("darwin", "x86_64")' in support_fetch
+    )
     # soldr#2469 step 2.2: the GNU-Linux `soldr prepare` hook moved into
     # `native_release_build.py matrix-binary`. The invariant is unchanged --
     # a GNU release build must still export its prepared target env -- so the

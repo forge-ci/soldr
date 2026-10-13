@@ -52,12 +52,14 @@ time.sleep(float(sys.argv[2]))
 """
 
 
-def _env(tmp_path: Path, **extra: str) -> dict[str, str]:
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.startswith("SOLDR_NEXTEST_") and not key.startswith("NEXTEST_")
-    }
+def _fill_env(env: dict[str, str], tmp_path: Path, **extra: str) -> None:
+    env.update(
+        {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("SOLDR_NEXTEST_") and not key.startswith("NEXTEST_")
+        }
+    )
     env.update(
         {
             "TMPDIR": str(tmp_path),
@@ -66,7 +68,6 @@ def _env(tmp_path: Path, **extra: str) -> dict[str, str]:
         }
     )
     env.update(extra)
-    return env
 
 
 def _run(
@@ -99,7 +100,9 @@ def test_over_ceiling_test_tree_is_killed_with_a_named_memory_diagnostic(
     tmp_path: Path,
 ) -> None:
     admission = _admission_dir(tmp_path)
-    env = _env(
+    env: dict[str, str] = {}
+    _fill_env(
+        env,
         tmp_path,
         SOLDR_NEXTEST_ADMISSION_DIR=str(admission),
         SOLDR_NEXTEST_TEST_MEMORY_CEILING_BYTES=str(96 * MIB),
@@ -132,7 +135,9 @@ def test_ordinary_assertion_failure_is_not_labelled_a_memory_failure(
     tmp_path: Path,
 ) -> None:
     admission = _admission_dir(tmp_path)
-    env = _env(
+    env: dict[str, str] = {}
+    _fill_env(
+        env,
         tmp_path,
         SOLDR_NEXTEST_ADMISSION_DIR=str(admission),
         SOLDR_NEXTEST_TEST_MEMORY_CEILING_BYTES=str(512 * MIB),
@@ -151,7 +156,9 @@ def test_well_behaved_neighbour_is_untouched_while_a_hog_is_killed(
 ) -> None:
     nextest_wrapper_argv()  # skip here, not inside a worker thread
     admission = _admission_dir(tmp_path)
-    env = _env(
+    env: dict[str, str] = {}
+    _fill_env(
+        env,
         tmp_path,
         SOLDR_NEXTEST_ADMISSION_DIR=str(admission),
         SOLDR_NEXTEST_TEST_MEMORY_CEILING_BYTES=str(96 * MIB),
@@ -188,7 +195,8 @@ def test_enomem_inside_the_test_is_classified_as_infrastructure(
     """The soldr#2885 shape: an allocation fails with ENOMEM mid-test."""
 
     admission = _admission_dir(tmp_path)
-    env = _env(tmp_path, SOLDR_NEXTEST_ADMISSION_DIR=str(admission))
+    env: dict[str, str] = {}
+    _fill_env(env, tmp_path, SOLDR_NEXTEST_ADMISSION_DIR=str(admission))
     child = (
         "import resource\n"
         "resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024,) * 2)\n"
@@ -213,7 +221,9 @@ def test_process_start_failure_is_named_as_pid_or_memory_pressure(
         pytest.skip("RLIMIT_NPROC does not bind root")
     import resource  # pylint: disable=import-outside-toplevel  # Unix-only module
 
-    env = _env(tmp_path)
+    env: dict[str, str] = {}
+
+    _fill_env(env, tmp_path)
 
     def no_more_processes() -> None:
         resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
@@ -252,7 +262,9 @@ def test_paused_admission_holds_a_new_test_until_pressure_clears(
     try:
         (admission / "active" / str(sleeper.pid)).touch()
         (admission / PAUSED_FLAG).touch()
-        env = _env(
+        env: dict[str, str] = {}
+        _fill_env(
+            env,
             tmp_path,
             SOLDR_NEXTEST_ADMISSION_DIR=str(admission),
             SOLDR_NEXTEST_ADMISSION_MAX_WAIT_SECS="30",
@@ -285,7 +297,9 @@ def test_paused_admission_is_bounded_and_says_so(tmp_path: Path) -> None:
     try:
         (admission / "active" / str(sleeper.pid)).touch()
         (admission / PAUSED_FLAG).touch()
-        env = _env(
+        env: dict[str, str] = {}
+        _fill_env(
+            env,
             tmp_path,
             SOLDR_NEXTEST_ADMISSION_DIR=str(admission),
             SOLDR_NEXTEST_ADMISSION_MAX_WAIT_SECS="1",
@@ -310,7 +324,9 @@ def test_a_paused_gate_never_holds_the_only_test(tmp_path: Path) -> None:
     # A stale slot from a SIGKILLed wrapper names a dead pid and must not count.
     (admission / "active" / "999999999").touch()
     (admission / PAUSED_FLAG).touch()
-    env = _env(
+    env: dict[str, str] = {}
+    _fill_env(
+        env,
         tmp_path,
         SOLDR_NEXTEST_ADMISSION_DIR=str(admission),
         SOLDR_NEXTEST_ADMISSION_MAX_WAIT_SECS="30",
@@ -328,7 +344,8 @@ def test_active_slot_is_held_for_the_test_lifetime_and_released(
     tmp_path: Path,
 ) -> None:
     admission = _admission_dir(tmp_path)
-    env = _env(tmp_path, SOLDR_NEXTEST_ADMISSION_DIR=str(admission))
+    env: dict[str, str] = {}
+    _fill_env(env, tmp_path, SOLDR_NEXTEST_ADMISSION_DIR=str(admission))
     child = "import os, sys; print(sorted(os.listdir(sys.argv[1])))"
     result = _run(["-c", child, str(admission / "active")], env)
 
@@ -342,7 +359,9 @@ def test_admission_controls_are_not_inherited_by_the_test_process(
     tmp_path: Path,
 ) -> None:
     admission = _admission_dir(tmp_path)
-    env = _env(
+    env: dict[str, str] = {}
+    _fill_env(
+        env,
         tmp_path,
         SOLDR_NEXTEST_ADMISSION_DIR=str(admission),
         SOLDR_NEXTEST_TEST_MEMORY_CEILING_BYTES=str(512 * MIB),
@@ -360,7 +379,9 @@ def test_admission_controls_are_not_inherited_by_the_test_process(
 
 @POSIX
 def test_without_ci_test_controls_the_wrapper_behaves_as_before(tmp_path: Path) -> None:
-    result = _run(["-c", _HOG, "64", "0"], _env(tmp_path))
+    env: dict[str, str] = {}
+    _fill_env(env, tmp_path)
+    result = _run(["-c", _HOG, "64", "0"], env)
     assert result.returncode == 0, result.stderr
     assert "nextest memory:" not in result.stderr
 
@@ -412,7 +433,9 @@ def test_delegated_cgroup_v2_ceiling_is_enforced_by_the_kernel(tmp_path: Path) -
     if probe is None or probe.returncode != 0:
         pytest.skip("no delegatable systemd user scope on this host")
     admission = _admission_dir(tmp_path)
-    env = _env(
+    env: dict[str, str] = {}
+    _fill_env(
+        env,
         tmp_path,
         SOLDR_NEXTEST_ADMISSION_DIR=str(admission),
         SOLDR_NEXTEST_TEST_MEMORY_CEILING_BYTES=str(96 * MIB),

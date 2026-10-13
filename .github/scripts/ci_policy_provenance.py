@@ -11,6 +11,7 @@ Policy updates deliberately require a separate reviewed bootstrap.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
 
 SHA = re.compile(r"[0-9a-f]{40}\Z")
@@ -36,7 +37,17 @@ def _path(value: Any) -> str:
     return value
 
 
-def _entries(evidence: dict, expected_sha: str) -> dict[str, tuple[str, str, str]]:
+@dataclass(frozen=True)
+class TreeEntry:
+    """One Git tree row: path, object kind, file mode and object SHA."""
+
+    path: str
+    kind: str
+    mode: str
+    sha: str
+
+
+def _entries(evidence: dict, expected_sha: str) -> list[TreeEntry]:
     commit, tree = evidence["commit"], evidence["tree"]
     if _sha(commit["sha"]) != _sha(expected_sha):
         raise ValueError("commit response does not identify the requested revision")
@@ -47,11 +58,13 @@ def _entries(evidence: dict, expected_sha: str) -> dict[str, tuple[str, str, str
     rows = tree["tree"]
     if not isinstance(rows, list) or len(rows) > 100_000:
         raise ValueError("invalid or oversized tree inventory")
-    result = {}
+    seen: set[str] = set()
+    result: list[TreeEntry] = []
     for row in rows:
         path = _path(row["path"])
-        if path in result:
+        if path in seen:
             raise ValueError("duplicate path in tree inventory")
+        seen.add(path)
         kind, mode = row["type"], row["mode"]
         if (kind, mode) not in (
             ("tree", "040000"),
@@ -61,7 +74,7 @@ def _entries(evidence: dict, expected_sha: str) -> dict[str, tuple[str, str, str
             ("commit", "160000"),
         ):
             raise ValueError("unrecognized Git tree entry")
-        result[path] = kind, mode, _sha(row["sha"])
+        result.append(TreeEntry(path, kind, mode, _sha(row["sha"])))
     return result
 
 
@@ -95,8 +108,8 @@ def verify_policy_trees(  # noqa: C901
         if not isinstance(protected_files, list):
             raise ValueError("policy file inventory must be a list")
         files = {_path(path) for path in protected_files}
-        base = _entries(reviewed, reviewed_sha)
-        proposed = _entries(candidate, candidate_sha)
+        base = {entry.path: entry for entry in _entries(reviewed, reviewed_sha)}
+        proposed = {entry.path: entry for entry in _entries(candidate, candidate_sha)}
         paths = {
             path
             for path in base.keys() | proposed.keys()
@@ -111,10 +124,12 @@ def verify_policy_trees(  # noqa: C901
         }
         for path in sorted(paths):
             old, new = base.get(path), proposed.get(path)
-            if old == new and old and old[0] == "tree":
+            if old == new and old and old.kind == "tree":
                 continue
             checked.append(path)
-            if any(entry and entry[1] in ("120000", "160000") for entry in (old, new)):
+            if any(
+                entry and entry.mode in ("120000", "160000") for entry in (old, new)
+            ):
                 failures.append(f"{path}: policy symlink or submodule is unsupported")
             if old != new:
                 changes.append(path)

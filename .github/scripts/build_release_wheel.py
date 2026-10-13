@@ -19,6 +19,7 @@ import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 
 # Use regular-file capture without an installed Python dependency.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -58,7 +59,9 @@ def validate_target(target: str) -> None:
         raise ValueError(f"unsupported release wheel target: {target}")
 
 
-def build_environment(target: str, base: Mapping[str, str]) -> dict[str, str]:
+def build_environment(
+    target: str, base: Mapping[str, str]
+) -> MappingProxyType[str, str]:
     """Copy *base* and enforce the release PEP 517 environment."""
 
     validate_target(target)
@@ -84,7 +87,7 @@ def build_environment(target: str, base: Mapping[str, str]) -> dict[str, str]:
         # managed LLVM bin dir `soldr prepare` put on PATH.
         triple_env = target.upper().replace("-", "_")
         env[f"CARGO_TARGET_{triple_env}_LINKER"] = "lld-link"
-    return env
+    return MappingProxyType(env)
 
 
 def soldr_maturin_install_command(python: Path) -> list[str]:
@@ -169,7 +172,9 @@ def resolve_soldr_driver(env: Mapping[str, str]) -> Path:
     return Path(candidate)
 
 
-def source_build_environment(base: Mapping[str, str]) -> dict[str, str]:
+def source_build_environment(
+    base: Mapping[str, str],
+) -> MappingProxyType[str, str]:
     """Strip cross-target state before compiling the host Maturin executable."""
 
     env = dict(base)
@@ -201,7 +206,7 @@ def source_build_environment(base: Mapping[str, str]) -> dict[str, str]:
     env.setdefault("CARGO_BUILD_JOBS", "2")
     env.setdefault("SOLDR_JOBS", "2")
     env["RUSTUP_TOOLCHAIN"] = SOLDR_TOOLCHAIN
-    return env
+    return MappingProxyType(env)
 
 
 def resolve_toolchain_rustc(driver: Path, env: Mapping[str, str]) -> Path:
@@ -222,7 +227,7 @@ def resolve_toolchain_rustc(driver: Path, env: Mapping[str, str]) -> Path:
 
 def with_toolchain_shims(
     base: Mapping[str, str], shim_dir: Path, rustc: Path
-) -> dict[str, str]:
+) -> MappingProxyType[str, str]:
     """Route Cargo through Soldr while exposing its pinned real rustc to probes."""
 
     env = dict(base)
@@ -234,7 +239,7 @@ def with_toolchain_shims(
     suffix = ".exe" if os.name == "nt" else ""
     env["CARGO"] = str(shim_dir / f"cargo{suffix}")
     env["RUSTC"] = str(rustc)
-    return env
+    return MappingProxyType(env)
 
 
 def run(command: Sequence[str], *, env: Mapping[str, str]) -> None:
@@ -244,7 +249,7 @@ def run(command: Sequence[str], *, env: Mapping[str, str]) -> None:
     subprocess.run(command, check=True, env=dict(env))
 
 
-def read_github_env(path: Path) -> dict[str, str]:
+def read_github_env(path: Path) -> MappingProxyType[str, str]:
     """Read the simple ``NAME=value`` records emitted by ``soldr prepare``."""
 
     result: dict[str, str] = {}
@@ -255,7 +260,7 @@ def read_github_env(path: Path) -> dict[str, str]:
         if not separator or not key:
             raise ValueError(f"invalid GitHub environment record at {path}:{number}")
         result[key] = value
-    return result
+    return MappingProxyType(result)
 
 
 def run_hook(*, target: str, hook: str, base_env: Mapping[str, str]) -> None:

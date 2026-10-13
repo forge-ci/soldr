@@ -11,13 +11,58 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 SELECTOR_SCHEMA = "fleet-ci-mode/v1"
 
 
-def label_aliases_from_adapter(adapter: dict[str, object]) -> dict[str, str]:
+_ALIAS_TARGETS = frozenset({"ci-test", "ci-full"})
+
+
+@dataclass(frozen=True)
+class LabelAlias:
+    """One reviewed legacy label and the literal fleet label it maps onto."""
+
+    legacy: str
+    target: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.legacy, str)
+            or not self.legacy.strip()
+            or self.legacy in _ALIAS_TARGETS
+            or not isinstance(self.target, str)
+            or self.target not in _ALIAS_TARGETS
+        ):
+            raise ValueError(
+                "label aliases must map legacy names to ci-test or ci-full"
+            )
+
+
+@dataclass(frozen=True)
+class LabelAliases:
+    """Validated legacy-label aliases; resolving never downgrades a label."""
+
+    entries: tuple[LabelAlias, ...] = ()
+
+    def resolve(self, name: str) -> str:
+        for entry in self.entries:
+            if entry.legacy == name:
+                return entry.target
+        return name
+
+
+@dataclass(frozen=True)
+class ModeSelection:
+    """The selected CI tier and the lowercase commit it is pinned to."""
+
+    mode: str
+    checkout_sha: str
+
+
+def label_aliases_from_adapter(adapter: dict) -> LabelAliases:
     """Map reviewed legacy controls onto literal fleet labels, never downgrade."""
     schema = adapter.get("schema_version")
     aliases = adapter.get("label_aliases")
@@ -30,43 +75,32 @@ def label_aliases_from_adapter(adapter: dict[str, object]) -> dict[str, str]:
         raise ValueError(
             "selector adapter requires integer schema_version 1 and label_aliases"
         )
-    for alias, target in aliases.items():
-        if (
-            not isinstance(alias, str)
-            or not alias.strip()
-            or alias in {"ci-test", "ci-full"}
-            or not isinstance(target, str)
-            or target not in {"ci-test", "ci-full"}
-        ):
-            raise ValueError(
-                "label aliases must map legacy names to ci-test or ci-full"
-            )
-    return aliases
+    return LabelAliases(
+        tuple(LabelAlias(alias, target) for alias, target in aliases.items())
+    )
 
 
 def select_mode(
     event_name: str,
-    event: dict[str, object],
+    event: dict,
     candidate_sha: str,
     *,
     author_permission: str | None = None,
-    label_aliases: dict[str, str] | None = None,
-) -> tuple[str, str]:
-    aliases = label_aliases_from_adapter(
-        {"schema_version": 1, "label_aliases": label_aliases or {}}
-    )
+    label_aliases: LabelAliases | None = None,
+) -> ModeSelection:
+    aliases = label_aliases or LabelAliases()
     if event_name == "workflow_dispatch":
         if not re.fullmatch(r"[0-9a-fA-F]{40}", candidate_sha):
             raise ValueError(
                 "workflow_dispatch requires a full 40-character candidate SHA"
             )
-        return "full", candidate_sha.lower()
+        return ModeSelection("full", candidate_sha.lower())
     if event_name == "merge_group":
         group = event.get("merge_group")
         sha = group.get("head_sha") if isinstance(group, dict) else None
         if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
             raise ValueError("merge_group head SHA is missing or invalid")
-        return "full", sha.lower()
+        return ModeSelection("full", sha.lower())
     if event_name == "pull_request":
         pr = event.get("pull_request")
         if not isinstance(pr, dict):
@@ -78,7 +112,7 @@ def select_mode(
         labels = pr.get("labels")
         names = (
             {
-                aliases.get(label["name"], label["name"])
+                aliases.resolve(label["name"])
                 for label in labels
                 if isinstance(label, dict) and isinstance(label.get("name"), str)
             }
@@ -93,12 +127,12 @@ def select_mode(
             if "ci-test" in names
             else "minimal"
         )
-        return mode, sha.lower()
+        return ModeSelection(mode, sha.lower())
     if event_name == "push":
         sha = event.get("after")
         if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
             raise ValueError("push commit SHA is missing or invalid")
-        return "minimal", sha.lower()
+        return ModeSelection("minimal", sha.lower())
     raise ValueError(f"unsupported CI event: {event_name}")
 
 
@@ -259,7 +293,7 @@ def main() -> int:
     )
     if args.adapter and not isinstance(adapter, dict):
         raise ValueError("selector adapter must be an object")
-    mode, sha = select_mode(
+    selection = select_mode(
         args.event_name,
         event,
         args.candidate_sha,
@@ -268,6 +302,7 @@ def main() -> int:
             label_aliases_from_adapter(adapter) if adapter is not None else None
         ),
     )
+    mode, sha = selection.mode, selection.checkout_sha
     verify_checkout(sha, args.checked_out_sha)
     if not args.github_output:
         raise ValueError("GITHUB_OUTPUT is required")

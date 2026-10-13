@@ -31,7 +31,7 @@ class ReportFreeSpaceTests(unittest.TestCase):
     def test_both_volumes_are_measured(self) -> None:
         """Workspace and temp are frequently different volumes on Windows
         runners, and soldr#2734's isolated-home tests fill the temp one."""
-        names = [name for name, _ in report_free_space.volumes(Path.cwd())]
+        names = [volume.name for volume in report_free_space.volumes(Path.cwd())]
         self.assertEqual(names, ["workspace", "temp"])
 
     def test_main_always_succeeds_even_for_a_bad_workspace(self) -> None:

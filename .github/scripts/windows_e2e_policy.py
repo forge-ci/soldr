@@ -99,7 +99,7 @@ def decide_windows_e2e(
     return Decision(True, f"platform-sensitive path changed: {sensitive[0]}")
 
 
-def _pull_request_paths(event: dict[str, object]) -> list[str]:
+def _pull_request_paths(event: dict) -> list[str]:
     pull_request = event.get("pull_request")
     if not isinstance(pull_request, dict):
         return []
@@ -127,7 +127,7 @@ def _pull_request_paths(event: dict[str, object]) -> list[str]:
     return [line for line in result.stdout.splitlines() if line]
 
 
-def _labels(event: dict[str, object]) -> list[str]:
+def _labels(event: dict) -> list[str]:
     pull_request = event.get("pull_request")
     if not isinstance(pull_request, dict):
         return []
@@ -149,7 +149,7 @@ def main() -> int:
     parser.add_argument("--full", action="store_true")
     args = parser.parse_args()
 
-    event: dict[str, object] = {}
+    event: dict = {}
     if args.event_path:
         event = json.loads(Path(args.event_path).read_text(encoding="utf-8"))
     paths = (

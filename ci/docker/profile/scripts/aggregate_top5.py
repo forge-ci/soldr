@@ -26,6 +26,7 @@ import argparse
 import re
 import sys
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 # Folded-stack lines end with a whitespace-separated integer sample count.
@@ -33,11 +34,19 @@ from pathlib import Path
 _LINE_RE = re.compile(r"^(?P<stack>.+)\s+(?P<count>\d+)\s*$")
 
 
-def parse_folded(path: Path) -> list[tuple[str, int]]:
-    """Return [(leaf, count), ...] for a folded-stack file. Empty if missing."""
+@dataclass(frozen=True)
+class FoldedLeaf:
+    """The leaf frame of one folded-stack line and its sample count."""
+
+    leaf: str
+    count: int
+
+
+def parse_folded(path: Path) -> list[FoldedLeaf]:
+    """Return the leaf and count of each folded-stack line. Empty if missing."""
     if not path.is_file() or path.stat().st_size == 0:
         return []
-    out: list[tuple[str, int]] = []
+    out: list[FoldedLeaf] = []
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             match = _LINE_RE.match(line)
@@ -50,7 +59,7 @@ def parse_folded(path: Path) -> list[tuple[str, int]]:
             leaf = stack.rsplit(";", 1)[-1].strip()
             if not leaf:
                 continue
-            out.append((leaf, count))
+            out.append(FoldedLeaf(leaf, count))
     return out
 
 
@@ -95,10 +104,10 @@ def main() -> int:  # noqa: C901
             entries = parse_folded(path)
             if entries:
                 seen_any = True
-            for leaf_raw, count in entries:
-                leaf = _normalize_leaf(leaf_raw)
-                totals[leaf][kind] += count
-                totals[leaf][f"scenario_{kind}"][scen] += count
+            for entry in entries:
+                leaf = _normalize_leaf(entry.leaf)
+                totals[leaf][kind] += entry.count
+                totals[leaf][f"scenario_{kind}"][scen] += entry.count
 
     top5_path = out_dir / "top5.md"
 

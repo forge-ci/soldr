@@ -14,7 +14,17 @@ from __future__ import annotations
 
 import tomllib
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class LockedPackage:
+    """One resolved `[[package]]` entry of a lint crate's lockfile."""
+
+    name: str
+    version: str
+    checksum: str | None
 
 
 def lint_roots(repo_root: Path, lints_dir: str = "dylints") -> list[Path]:
@@ -34,7 +44,7 @@ def lint_roots(repo_root: Path, lints_dir: str = "dylints") -> list[Path]:
     )
 
 
-def dependency_closure(lint_root: Path) -> frozenset[tuple[str, str, str | None]]:
+def dependency_closure(lint_root: Path) -> frozenset[LockedPackage]:
     """The `(name, version, checksum)` set a lint crate's lockfile resolves to.
 
     The crate's own entry is excluded: it is the one package guaranteed to
@@ -43,7 +53,7 @@ def dependency_closure(lint_root: Path) -> frozenset[tuple[str, str, str | None]
     """
     lock = tomllib.loads((lint_root / "Cargo.lock").read_text(encoding="utf-8"))
     return frozenset(
-        (package["name"], package["version"], package.get("checksum"))
+        LockedPackage(package["name"], package["version"], package.get("checksum"))
         for package in lock.get("package", ())
         if package["name"] != lint_root.name
     )

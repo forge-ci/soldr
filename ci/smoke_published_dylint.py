@@ -22,8 +22,9 @@ import os
 import subprocess
 import sys
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Protocol, cast
 
 # Use regular-file capture without an installed Python dependency.
@@ -127,7 +128,7 @@ def published_console_script(venv: Path) -> Path:
     return found
 
 
-def isolated_environment(root: Path) -> dict[str, str]:
+def isolated_environment(root: Path) -> MappingProxyType[str, str]:
     """Fresh, inspectable state for this one published-binary proof."""
 
     home = root / "home"
@@ -169,11 +170,15 @@ def isolated_environment(root: Path) -> dict[str, str]:
         for entry in environment.get("PATH", "").split(os.pathsep)
         if str(Path(entry).resolve()).casefold() != inherited_cargo_bin
     )
-    return environment
+    return MappingProxyType(environment)
 
 
 def run(
-    command: list[str], *, env: dict[str, str], cwd: Path, timeout: float | None = None
+    command: list[str],
+    *,
+    env: Mapping[str, str],
+    cwd: Path,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a probe with output retained in the failure explaining it.
 
@@ -222,7 +227,7 @@ def run(
     return completed
 
 
-def installed_version(soldr: Path, *, env: dict[str, str], cwd: Path) -> str:
+def installed_version(soldr: Path, *, env: Mapping[str, str], cwd: Path) -> str:
     output = run(
         [str(soldr), "version", "--json"], env=env, cwd=cwd, timeout=120
     ).stdout

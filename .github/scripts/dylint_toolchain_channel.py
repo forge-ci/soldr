@@ -43,6 +43,7 @@ from __future__ import annotations
 import os
 import pathlib
 import sys
+from dataclasses import dataclass
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
@@ -62,8 +63,16 @@ from check_dylint_driver_assets import (  # noqa: E402  # pylint: disable=wrong-
 )
 
 
-def resolve(repo_root: pathlib.Path) -> tuple[str, str]:
-    """(channel, dylint_version), e.g. `("nightly-2026-05-28", "6.0.3")`."""
+@dataclass(frozen=True)
+class DylintToolchain:
+    """The nightly channel and Dylint version the lint libraries pin."""
+
+    channel: str
+    dylint_version: str
+
+
+def resolve(repo_root: pathlib.Path) -> DylintToolchain:
+    """The channel and Dylint version, e.g. `nightly-2026-05-28` / `6.0.3`."""
     manifests = {
         path.relative_to(repo_root).as_posix(): path.read_text(encoding="utf-8")
         for path in dylint_library_manifests(repo_root)
@@ -71,7 +80,7 @@ def resolve(repo_root: pathlib.Path) -> tuple[str, str]:
     channel = library_nightly(manifests)
     known_tools_text = (repo_root / KNOWN_TOOLS_RELATIVE).read_text(encoding="utf-8")
     dylint_version = pinned_dylint_version(known_tools_text)
-    return channel, dylint_version
+    return DylintToolchain(channel, dylint_version)
 
 
 def emit(name: str, value: str) -> None:
@@ -90,7 +99,7 @@ def emit(name: str, value: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     del argv
     try:
-        channel, dylint_version = resolve(REPO_ROOT)
+        toolchain = resolve(REPO_ROOT)
     except GuardError as error:
         print(f"dylint_toolchain_channel: {error}", file=sys.stderr)
         return 1
@@ -101,8 +110,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    emit("channel", channel)
-    emit("dylint_version", dylint_version)
+    emit("channel", toolchain.channel)
+    emit("dylint_version", toolchain.dylint_version)
     return 0
 
 

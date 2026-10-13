@@ -250,14 +250,14 @@ def test_build_guest_script_is_valid_posix_sh_syntax() -> None:
 
 def test_parse_summary_splits_status_and_detail() -> None:
     text = "arch=pass:x86_64\nversion=fail:not soldr\n"
-    results = MODULE.parse_summary(text)
-    assert results["arch"] == (True, "x86_64")
-    assert results["version"] == (False, "not soldr")
+    results = {r.name: r for r in MODULE.parse_summary(text)}
+    assert results["arch"] == MODULE.CheckResult("arch", True, "x86_64")
+    assert results["version"] == MODULE.CheckResult("version", False, "not soldr")
 
 
 def test_parse_summary_flags_malformed_lines() -> None:
-    results = MODULE.parse_summary("garbage line with no equals\n")
-    assert results["summary_line_1"][0] is False
+    results = {r.name: r for r in MODULE.parse_summary("garbage line with no equals\n")}
+    assert results["summary_line_1"].passed is False
 
 
 def _passing_summary_lines() -> list[str]:
@@ -277,9 +277,14 @@ def test_main_emit_guest_script_writes_the_output_file(tmp_path: Path) -> None:
     assert output.read_text(encoding="utf-8").startswith("#!/bin/sh")
 
 
+def _contract_document() -> dict:
+    """The executor contract exactly as the emitted JSON document carries it."""
+    return json.loads(json.dumps(MODULE.executor_contract().to_dict()))
+
+
 def test_executor_contract_owns_every_3084_handoff_edge() -> None:
     """soldr#3084 may close only when soldr#3294 owns every sharp edge."""
-    contract = MODULE.executor_contract()
+    contract = _contract_document()
 
     assert contract["schema_version"] == 1
     assert contract["superseded_issue"] == "soldr#3084"
@@ -369,7 +374,7 @@ def test_executor_contract_owns_every_3084_handoff_edge() -> None:
 
 
 def test_executor_contract_matches_the_emitted_guest_program() -> None:
-    contract = MODULE.executor_contract()
+    contract = _contract_document()
     script = MODULE.build_guest_script()
 
     for name, value in contract["required_guest_env"].items():
@@ -425,7 +430,7 @@ def test_main_describe_executor_writes_stable_json(tmp_path: Path) -> None:
     output = tmp_path / "executor-contract.json"
     rc = MODULE.main(["describe-executor", "--output", str(output)])
     assert rc == 0
-    assert json.loads(output.read_text(encoding="utf-8")) == MODULE.executor_contract()
+    assert json.loads(output.read_text(encoding="utf-8")) == _contract_document()
 
 
 def test_main_verify_collected_delegates_to_verify_collected(tmp_path: Path) -> None:

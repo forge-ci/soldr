@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,9 +27,19 @@ EXTRA_REQUIRED = {
 }
 
 
-def required_jobs(contract: dict[str, Any]) -> set[str]:  # noqa: C901
+@dataclass(frozen=True)
+class JsonDocument:
+    """A parsed JSON object whose schema the consumers validate field by field."""
+
+    fields: dict  # raw JSON object at the parse boundary
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.fields.get(key, default)
+
+
+def required_jobs(contract: JsonDocument) -> set[str]:  # noqa: C901
     declared = contract.get("required_jobs", list(EXTRA_REQUIRED))
-    if "required_jobs" in contract and (
+    if "required_jobs" in contract.fields and (
         not isinstance(contract.get("schema_version"), int)
         or isinstance(contract.get("schema_version"), bool)
         or contract.get("schema_version") != 1
@@ -53,7 +64,7 @@ def required_jobs(contract: dict[str, Any]) -> set[str]:  # noqa: C901
     for target in targets:
         if not isinstance(target, dict) or not isinstance(target.get("ci"), dict):
             raise ValueError("target must declare a ci object")
-        if "required_jobs" in contract:
+        if "required_jobs" in contract.fields:
             identity = target.get("triple")
             if (
                 not isinstance(identity, str)
@@ -80,8 +91,8 @@ def required_jobs(contract: dict[str, Any]) -> set[str]:  # noqa: C901
 
 
 def coverage_failures(
-    contract: dict[str, Any],
-    needs: dict[str, object],
+    contract: JsonDocument,
+    needs: JsonDocument,
     *,
     expected_sha: str | None = None,
     selected_sha: str | None = None,
@@ -102,7 +113,7 @@ def coverage_failures(
         state = result.get("result") if isinstance(result, dict) else "missing"
         if state != "success":
             failures.append(f"{job}: {state or 'missing'}")
-    for target in contract["targets"]:
+    for target in contract.fields["targets"]:
         ci = target["ci"]
         if ci.get("run_job"):
             continue
@@ -121,9 +132,9 @@ def main() -> int:
     args = parser.parse_args()
     contract_path = args.contract or ROOT / "ci" / "canonical-targets.json"
     raw = contract_path.read_bytes()
-    contract = json.loads(raw)
-    needs = json.loads(os.environ["CI_NEEDS_JSON"])
-    if args.contract and "required_jobs" not in contract:
+    contract = JsonDocument(json.loads(raw))
+    needs = JsonDocument(json.loads(os.environ["CI_NEEDS_JSON"]))
+    if args.contract and "required_jobs" not in contract.fields:
         raise ValueError("portable contract requires explicit required_jobs")
     if (args.contract or args.report) and (
         not args.expected_sha or not args.selected_sha

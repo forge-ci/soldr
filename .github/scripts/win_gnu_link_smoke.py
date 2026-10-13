@@ -37,14 +37,23 @@ import struct
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 
 TARGET = "x86_64-pc-windows-gnu"
 TOOLCHAIN = "1.98.1"
 IMAGE_FILE_MACHINE_AMD64 = 0x8664
 
 
-def is_pe_amd64(path: str) -> tuple[bool, str]:
-    """Return (ok, reason). `ok` is True only for a PE whose COFF machine is
+@dataclass(frozen=True)
+class PeCheck:
+    """Whether a file is an x86-64 PE, and the reason for the verdict."""
+
+    ok: bool
+    reason: str
+
+
+def is_pe_amd64(path: str) -> PeCheck:
+    """Return a PeCheck. `ok` is True only for a PE whose COFF machine is
     AMD64 (x86-64). Parses the DOS stub `e_lfanew` -> `PE\\0\\0` -> machine word,
     the minimal structure that distinguishes a real PE from an ELF/Mach-O or a
     truncated file — no external `file`/objdump dependency."""
@@ -52,21 +61,21 @@ def is_pe_amd64(path: str) -> tuple[bool, str]:
         with open(path, "rb") as fh:
             data = fh.read(0x400)
     except OSError as exc:
-        return False, f"cannot read {path}: {exc}"
+        return PeCheck(False, f"cannot read {path}: {exc}")
     if len(data) < 0x40 or data[:2] != b"MZ":
-        return False, "missing 'MZ' DOS signature (not a PE)"
+        return PeCheck(False, "missing 'MZ' DOS signature (not a PE)")
     e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
     if e_lfanew + 6 > len(data):
-        return False, f"PE header offset {e_lfanew:#x} outside the read window"
+        return PeCheck(False, f"PE header offset {e_lfanew:#x} outside the read window")
     if data[e_lfanew : e_lfanew + 4] != b"PE\x00\x00":
-        return False, "missing 'PE\\0\\0' signature at e_lfanew"
+        return PeCheck(False, "missing 'PE\\0\\0' signature at e_lfanew")
     machine = struct.unpack_from("<H", data, e_lfanew + 4)[0]
     if machine != IMAGE_FILE_MACHINE_AMD64:
-        return (
+        return PeCheck(
             False,
             f"COFF machine {machine:#06x} is not AMD64 ({IMAGE_FILE_MACHINE_AMD64:#06x})",
         )
-    return True, "PE32+ x86-64"
+    return PeCheck(True, "PE32+ x86-64")
 
 
 def _write_fixture(root: str) -> str:
@@ -180,7 +189,8 @@ def cmd_smoke(args: argparse.Namespace) -> int:
             print(f"FAIL: soldr build exited {proc.returncode}", file=sys.stderr)
             return proc.returncode or 1
         exe = _output_exe(crate, args.target)
-        ok, reason = is_pe_amd64(exe)
+        check = is_pe_amd64(exe)
+        ok, reason = check.ok, check.reason
         if args.summary:
             with open(args.summary, "a", encoding="utf-8") as fh:
                 fh.write(render_summary(args.target, exe, ok, reason, marks=True))
@@ -271,7 +281,8 @@ def cmd_locate(args: argparse.Namespace) -> int:
 
 
 def cmd_assert_pe(args: argparse.Namespace) -> int:
-    ok, reason = is_pe_amd64(args.path)
+    check = is_pe_amd64(args.path)
+    ok, reason = check.ok, check.reason
     print(reason)
     return 0 if ok else 1
 

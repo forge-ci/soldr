@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 BINARIES_METADATA = "binaries-metadata.json"
@@ -139,30 +140,38 @@ def fallback_args(archive: Path, extract_dir: Path) -> list[str]:
     ]
 
 
+@dataclass(frozen=True)
+class Resolution:
+    """The extraction flags to use plus a one-line explanation for the log."""
+
+    flags: list[str]
+    reason: str
+
+
 def resolve(
     extract_dir: Path,
     archive: Path,
     *,
     allow_reuse: bool = True,
-) -> tuple[list[str], str]:
+) -> Resolution:
     """The flags to use plus a one-line explanation for the log."""
 
     if not allow_reuse:
-        return (
+        return Resolution(
             fallback_args(archive, extract_dir),
             f"reuse disabled by {REUSE_ENV}; re-extracting into "
             f"{extract_dir.as_posix()}",
         )
     args = reuse_args(extract_dir)
     if args is None:
-        return (
+        return Resolution(
             fallback_args(archive, extract_dir),
             "no reuse metadata found under "
             f"{extract_dir.as_posix()} ({BINARIES_METADATA} / "
             f"{CARGO_METADATA} / target/); re-extracting into the same "
             "directory instead",
         )
-    return args, f"reusing the extraction at {extract_dir.as_posix()}"
+    return Resolution(args, f"reusing the extraction at {extract_dir.as_posix()}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -171,7 +180,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--archive", type=Path, required=True)
     args = parser.parse_args(argv)
 
-    flags, reason = resolve(args.extract_dir, args.archive, allow_reuse=reuse_enabled())
+    resolution = resolve(args.extract_dir, args.archive, allow_reuse=reuse_enabled())
+    flags, reason = resolution.flags, resolution.reason
     print(f"nextest extraction: {reason}", file=sys.stderr)
     # LF, never CRLF -- and `reconfigure` rather than writing "\n", because a
     # text-mode stream on Windows translates the \n on the way out no matter

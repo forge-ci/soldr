@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import re
 import sys
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 JOB_HEADER = re.compile(r"^  ([A-Za-z0-9_-]+):\s*(?:#.*)?$")
@@ -45,13 +47,19 @@ def _timeout_value_is_valid(value: str) -> bool:
     return bool(branches) and all(1 <= int(branch) <= 360 for branch in branches)
 
 
-def _job_blocks(workflow: str) -> list[tuple[str, list[str]]]:
+@dataclass(frozen=True)
+class JobBlock:
+    job_id: str
+    lines: tuple[str, ...]
+
+
+def _job_blocks(workflow: str) -> list[JobBlock]:
     """Return top-level job blocks from the workflow's ``jobs`` section."""
 
     in_jobs = False
     current_id: str | None = None
     current_lines: list[str] = []
-    blocks: list[tuple[str, list[str]]] = []
+    blocks: list[JobBlock] = []
 
     for line in workflow.splitlines():
         if not in_jobs:
@@ -66,18 +74,18 @@ def _job_blocks(workflow: str) -> list[tuple[str, list[str]]]:
         match = JOB_HEADER.match(line)
         if match:
             if current_id is not None:
-                blocks.append((current_id, current_lines))
+                blocks.append(JobBlock(current_id, tuple(current_lines)))
             current_id = match.group(1)
             current_lines = []
         elif current_id is not None:
             current_lines.append(line)
 
     if current_id is not None:
-        blocks.append((current_id, current_lines))
+        blocks.append(JobBlock(current_id, tuple(current_lines)))
     return blocks
 
 
-def _timeout_values(lines: list[str]) -> list[str]:
+def _timeout_values(lines: Sequence[str]) -> list[str]:
     """Read only four-space job keys, excluding nested step keys."""
 
     values: list[str] = []
@@ -92,7 +100,8 @@ def find_timeout_violations(workflow: str) -> list[str]:
     """Return actionable errors for direct jobs without valid job timeouts."""
 
     violations: list[str] = []
-    for job_id, lines in _job_blocks(workflow):
+    for block in _job_blocks(workflow):
+        job_id, lines = block.job_id, block.lines
         keys = {
             match.group(1) for line in lines if (match := TOP_LEVEL_KEY.match(line))
         }

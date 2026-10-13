@@ -77,11 +77,24 @@ import argparse
 import os
 import pathlib
 import sys
+from dataclasses import dataclass
 
 TREES = ("libraries", "target", "tests")
 
 
-def tree_bytes(path: pathlib.Path) -> tuple[int, int]:
+@dataclass(frozen=True)
+class TreeSize:
+    total_bytes: int
+    file_count: int
+
+
+@dataclass(frozen=True)
+class CacheHit:
+    label: str
+    value: str
+
+
+def tree_bytes(path: pathlib.Path) -> TreeSize:
     """Return (total bytes, file count) below *path*, following no symlinks."""
     total = 0
     files = 0
@@ -96,7 +109,7 @@ def tree_bytes(path: pathlib.Path) -> tuple[int, int]:
             except OSError:
                 # A file that vanished mid-walk is not worth failing over.
                 continue
-    return total, files
+    return TreeSize(total_bytes=total, file_count=files)
 
 
 def human(size: int) -> str:
@@ -124,10 +137,10 @@ def report(target_root: pathlib.Path) -> list[str]:
         if not path.is_dir():
             lines.append(f"| `{name}` | absent | — |")
             continue
-        size, files = tree_bytes(path)
-        grand_total += size
-        grand_files += files
-        lines.append(f"| `{name}` | {human(size)} | {files} |")
+        tree = tree_bytes(path)
+        grand_total += tree.total_bytes
+        grand_files += tree.file_count
+        lines.append(f"| `{name}` | {human(tree.total_bytes)} | {tree.file_count} |")
     lines.append(f"| **total** | **{human(grand_total)}** | **{grand_files}** |")
     lines.append("")
     lines.append(
@@ -137,21 +150,21 @@ def report(target_root: pathlib.Path) -> list[str]:
     return lines
 
 
-def parse_cache_hit_pairs(raw: list[str] | None) -> list[tuple[str, str]]:
-    """`["label=value", ...]` -> `[(label, value), ...]`, skipping malformed entries.
+def parse_cache_hit_pairs(raw: list[str] | None) -> list[CacheHit]:
+    """`["label=value", ...]` -> `[CacheHit(label, value), ...]`, skipping malformed entries.
 
     A malformed entry (no `=`, or an empty label) is dropped rather than
     raised: this script's one hard rule is that it never fails the lane, and a
     workflow typo in one `--cache-hit` argument must not take down the whole
     report.
     """
-    pairs: list[tuple[str, str]] = []
+    pairs: list[CacheHit] = []
     for entry in raw or []:
         label, sep, value = entry.partition("=")
         label = label.strip()
         if not sep or not label:
             continue
-        pairs.append((label, value.strip()))
+        pairs.append(CacheHit(label, value.strip()))
     return pairs
 
 
@@ -210,7 +223,7 @@ def describe_library_stage(before: str | None, path: pathlib.Path) -> str:
 
 
 def cache_layer_lines(
-    pairs: list[tuple[str, str]],
+    pairs: list[CacheHit],
     stage_skip_marker: pathlib.Path | None,
     stage_skip_marker_before: str | None,
 ) -> list[str]:
@@ -228,8 +241,8 @@ def cache_layer_lines(
     lines = ["### Dylint cache layer status (soldr#2349)", ""]
     lines.append("| layer | status |")
     lines.append("|---|---|")
-    for label, value in pairs:
-        lines.append(f"| {label} | {describe_cache_hit(value)} |")
+    for hit in pairs:
+        lines.append(f"| {hit.label} | {describe_cache_hit(hit.value)} |")
 
     if stage_skip_marker is not None:
         status = describe_library_stage(stage_skip_marker_before, stage_skip_marker)

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -42,17 +43,27 @@ def collect_wheels(dist: Path) -> list[Path]:
     return wheels
 
 
-def version_failures(wheels: list[Path], expected: str) -> list[tuple[str, str]]:
-    bad: list[tuple[str, str]] = []
+@dataclass(frozen=True)
+class VersionFailure:
+    """A wheel whose filename does not carry the expected version."""
+
+    name: str
+    why: str
+
+
+def version_failures(wheels: list[Path], expected: str) -> list[VersionFailure]:
+    bad: list[VersionFailure] = []
     for wheel in wheels:
         parts = wheel.stem.split("-")
         if len(parts) < 2:
-            bad.append((wheel.name, "filename has no version field"))
+            bad.append(VersionFailure(wheel.name, "filename has no version field"))
             continue
         wheel_version = parts[1]
         if wheel_version != expected:
             bad.append(
-                (wheel.name, f"version {wheel_version!r} != expected {expected!r}")
+                VersionFailure(
+                    wheel.name, f"version {wheel_version!r} != expected {expected!r}"
+                )
             )
     return bad
 
@@ -64,7 +75,7 @@ def lint_version(dist: Path, expected_version: str) -> None:
     bad = version_failures(wheels, expected)
     if bad:
         msg = ["wheel version lint FAILED:"]
-        msg.extend(f"  - {name}: {why}" for name, why in bad)
+        msg.extend(f"  - {failure.name}: {failure.why}" for failure in bad)
         msg.append("")
         msg.append(
             f"Every wheel in dist/ must be tagged {expected!r} to match "

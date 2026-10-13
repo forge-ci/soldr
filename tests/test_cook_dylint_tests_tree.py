@@ -96,7 +96,9 @@ def test_dependency_closure_excludes_the_crates_own_entry(tmp_path, cook):
         encoding="utf-8",
     )
 
-    assert cook.dependency_closure(crate) == frozenset({("libc", "0.2.1", "abc")})
+    assert cook.dependency_closure(crate) == frozenset(
+        {cook.LockedPackage("libc", "0.2.1", "abc")}
+    )
 
 
 def test_diverging_closures_names_only_the_crates_that_differ(tmp_path, cook):

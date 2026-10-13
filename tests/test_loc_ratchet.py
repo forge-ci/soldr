@@ -63,8 +63,10 @@ def test_a_file_under_the_ceiling_passes(mod, repo):
     _write(repo, "crates/a.rs", 20)
     _commit(repo, "grow a little")
 
-    violations, checked = _evaluate(mod, repo)
-    assert violations == []
+    evaluation = _evaluate(mod, repo)
+    violations = evaluation.violations
+    checked = evaluation.checked
+    assert not violations
     assert checked == 1
 
 
@@ -75,7 +77,7 @@ def test_crossing_the_ceiling_fails(mod, repo):
     _write(repo, "crates/a.rs", 150)
     _commit(repo, "cross the ceiling")
 
-    violations, _ = _evaluate(mod, repo)
+    violations = _evaluate(mod, repo).violations
     assert len(violations) == 1
     assert violations[0].path == "crates/a.rs"
     assert violations[0].baseline == 50
@@ -94,8 +96,10 @@ def test_an_existing_offender_may_be_edited_without_growing(mod, repo):
     )
     _commit(repo, "edit without growing")
 
-    violations, checked = _evaluate(mod, repo)
-    assert violations == [], "editing an over-ceiling file must stay allowed"
+    evaluation = _evaluate(mod, repo)
+    violations = evaluation.violations
+    checked = evaluation.checked
+    assert not violations, "editing an over-ceiling file must stay allowed"
     assert checked == 1
 
 
@@ -106,8 +110,8 @@ def test_an_existing_offender_may_shrink(mod, repo):
     _write(repo, "crates/big.rs", 250)
     _commit(repo, "shrink")
 
-    violations, _ = _evaluate(mod, repo)
-    assert violations == [], "shrinking must always be allowed"
+    violations = _evaluate(mod, repo).violations
+    assert not violations, "shrinking must always be allowed"
 
 
 def test_an_existing_offender_may_not_grow(mod, repo):
@@ -117,7 +121,7 @@ def test_an_existing_offender_may_not_grow(mod, repo):
     _write(repo, "crates/big.rs", 301)
     _commit(repo, "one more line")
 
-    violations, _ = _evaluate(mod, repo)
+    violations = _evaluate(mod, repo).violations
     assert len(violations) == 1
     assert violations[0].baseline == 300
     assert violations[0].lines == 301
@@ -130,7 +134,7 @@ def test_a_new_oversized_file_fails_with_a_new_file_message(mod, repo):
     _write(repo, "crates/fresh.rs", 400)
     _commit(repo, "add an oversized file")
 
-    violations, _ = _evaluate(mod, repo)
+    violations = _evaluate(mod, repo).violations
     assert len(violations) == 1
     assert violations[0].baseline is None
     assert "new file" in violations[0].describe(100)
@@ -147,8 +151,8 @@ def test_deleting_an_oversized_file_is_not_a_violation(mod, repo):
     _write(repo, "crates/part_b.rs", 80)
     _commit(repo, "split it up")
 
-    violations, _ = _evaluate(mod, repo)
-    assert violations == [], "a split must not be blocked by the ratchet"
+    violations = _evaluate(mod, repo).violations
+    assert not violations, "a split must not be blocked by the ratchet"
 
 
 def test_non_rust_and_out_of_scope_paths_are_ignored(mod, repo):
@@ -159,8 +163,10 @@ def test_non_rust_and_out_of_scope_paths_are_ignored(mod, repo):
     _write(repo, "vendor/huge.rs", 900)
     _commit(repo, "unrelated bulk")
 
-    violations, checked = _evaluate(mod, repo)
-    assert violations == []
+    evaluation = _evaluate(mod, repo)
+    violations = evaluation.violations
+    checked = evaluation.checked
+    assert not violations
     assert checked == 0, "only .rs under the configured roots is checked"
 
 
@@ -173,7 +179,9 @@ def test_mod_rs_files_are_exempt(mod, repo):
     _write(repo, "crates/component/implementation.rs", 301)
     _commit(repo, "grow module surface and implementation")
 
-    violations, checked = _evaluate(mod, repo)
+    evaluation = _evaluate(mod, repo)
+    violations = evaluation.violations
+    checked = evaluation.checked
     assert [violation.path for violation in violations] == [
         "crates/component/implementation.rs"
     ]
@@ -187,8 +195,10 @@ def test_new_oversized_mod_rs_is_exempt(mod, repo):
     _write(repo, "crates/new_component/mod.rs", 400)
     _commit(repo, "add module surface")
 
-    violations, checked = _evaluate(mod, repo)
-    assert violations == []
+    evaluation = _evaluate(mod, repo)
+    violations = evaluation.violations
+    checked = evaluation.checked
+    assert not violations
     assert checked == 0
 
 
@@ -201,8 +211,10 @@ def test_untouched_offenders_are_not_reported(mod, repo):
     _write(repo, "crates/small.rs", 20)
     _commit(repo, "touch only the small file")
 
-    violations, checked = _evaluate(mod, repo)
-    assert violations == []
+    evaluation = _evaluate(mod, repo)
+    violations = evaluation.violations
+    checked = evaluation.checked
+    assert not violations
     assert checked == 1, "the untouched oversized file must not be examined"
 
 
@@ -259,7 +271,7 @@ def test_base_sha_needs_no_shared_ancestry(mod, repo):
     try:
         with pytest.raises(mod.NoMergeBase):
             mod._merge_base(base_sha)  # the mode that silently skipped in CI
-        violations, _ = mod.evaluate("unused", ("crates",), 100, base_sha)
+        violations = mod.evaluate("unused", ("crates",), 100, base_sha).violations
     finally:
         os.chdir(cwd)
 
@@ -295,11 +307,12 @@ def test_a_stale_branch_is_not_blamed_for_changes_on_main(mod, repo):
     os.chdir(repo)
     try:
         # merge-base mode: correct -- only the branch's own change is in scope.
-        violations, checked = mod.evaluate("main", ("crates",), 100)
+        evaluation = mod.evaluate("main", ("crates",), 100)
     finally:
         os.chdir(cwd)
+    violations, checked = evaluation.violations, evaluation.checked
 
-    assert violations == [], (
+    assert not violations, (
         "the branch must not be blamed for main's change to a file it never "
         f"touched, got: {[v.path for v in violations]}"
     )
@@ -317,7 +330,9 @@ def test_a_renamed_offender_that_grows_fails(mod, repo):
         fh.write("".join(f"// extra {i}\n" for i in range(10)))
     _commit(repo, "move and grow")
 
-    violations, checked = _evaluate(mod, repo)
+    evaluation = _evaluate(mod, repo)
+    violations = evaluation.violations
+    checked = evaluation.checked
     assert len(violations) == 1
     assert violations[0].path == "crates/b.rs"
     assert violations[0].baseline == 150
@@ -332,8 +347,10 @@ def test_a_pure_rename_of_an_offender_passes(mod, repo):
     _git(repo, "mv", "crates/a.rs", "crates/b.rs")
     _commit(repo, "move")
 
-    violations, checked = _evaluate(mod, repo)
-    assert violations == []
+    evaluation = _evaluate(mod, repo)
+    violations = evaluation.violations
+    checked = evaluation.checked
+    assert not violations
     assert checked == 1
 
 
@@ -345,5 +362,5 @@ def test_a_renamed_offender_that_shrinks_passes(mod, repo):
     _write(repo, "crates/b.rs", 140)
     _commit(repo, "move and shrink")
 
-    violations, _ = _evaluate(mod, repo)
-    assert violations == []
+    violations = _evaluate(mod, repo).violations
+    assert not violations

@@ -451,7 +451,9 @@ def test_host_native_target_keeps_the_host_gnu_binutils(
     monkeypatch.setattr(stage.sys, "platform", "linux")
     monkeypatch.setattr(stage.platform, "machine", lambda: "x86_64")
 
-    assert stage.select_binutils("x86_64-unknown-linux-gnu") == ("objcopy", "strip")
+    assert stage.select_binutils("x86_64-unknown-linux-gnu") == stage.Binutils(
+        "objcopy", "strip"
+    )
 
 
 def test_foreign_target_prefers_llvm_binutils_from_path(
@@ -463,7 +465,8 @@ def test_foreign_target_prefers_llvm_binutils_from_path(
     bin_dir = fake_tool_dir(tmp_path / "llvm" / "bin", "llvm-objcopy", "llvm-strip")
     monkeypatch.setenv("PATH", str(bin_dir))
 
-    objcopy, strip_tool = stage.select_binutils("aarch64-apple-darwin")
+    tools = stage.select_binutils("aarch64-apple-darwin")
+    objcopy, strip_tool = tools.objcopy, tools.strip
 
     assert Path(objcopy).name == "llvm-objcopy"
     assert Path(strip_tool).name == "llvm-strip"
@@ -490,7 +493,8 @@ def test_foreign_target_finds_llvm_in_the_managed_soldr_cache(
     )
     monkeypatch.setenv("SOLDR_CACHE_DIR", str(cache))
 
-    objcopy, strip_tool = stage.select_binutils("x86_64-apple-darwin")
+    tools = stage.select_binutils("x86_64-apple-darwin")
+    objcopy, strip_tool = tools.objcopy, tools.strip
 
     assert Path(objcopy).name == "llvm-objcopy"
     assert Path(strip_tool).name == "llvm-strip"
@@ -517,7 +521,8 @@ def test_foreign_target_finds_llvm_in_the_rustup_llvm_tools_component(
     )
     monkeypatch.setenv("RUSTUP_HOME", str(rustup))
 
-    objcopy, strip_tool = stage.select_binutils("aarch64-unknown-linux-gnu")
+    tools = stage.select_binutils("aarch64-unknown-linux-gnu")
+    objcopy, strip_tool = tools.objcopy, tools.strip
 
     assert Path(objcopy).name == "llvm-objcopy"
     assert Path(strip_tool).name == "llvm-strip"
@@ -543,7 +548,8 @@ def test_elf_target_falls_back_to_the_managed_cross_toolchain_binutils(
     )
     monkeypatch.setenv("AR_aarch64_unknown_linux_gnu", str(bundle / f"{prefix}-ar"))
 
-    objcopy, strip_tool = stage.select_binutils("aarch64-unknown-linux-gnu")
+    tools = stage.select_binutils("aarch64-unknown-linux-gnu")
+    objcopy, strip_tool = tools.objcopy, tools.strip
 
     assert Path(objcopy).name == f"{prefix}-objcopy"
     assert Path(strip_tool).name == f"{prefix}-strip"
@@ -601,7 +607,9 @@ def test_stage_debug_symbols_auto_selects_when_no_tools_are_passed(
     stage.stage_release_binaries("aarch64-apple-darwin", release, package)
 
     monkeypatch.setattr(
-        stage, "select_binutils", lambda target: ("llvm-objcopy", "llvm-strip")
+        stage,
+        "select_binutils",
+        lambda target: stage.Binutils("llvm-objcopy", "llvm-strip"),
     )
     calls: list[list[str]] = []
     monkeypatch.setattr(stage, "run_tool", fake_objcopy_strip(calls))
@@ -723,7 +731,8 @@ def test_selected_tool_reads_a_real_foreign_binary_the_host_one_rejects(
     monkeypatch.setattr(stage.sys, "platform", "linux")
     monkeypatch.setattr(stage.platform, "machine", lambda: "x86_64")
     try:
-        objcopy, strip_tool = stage.select_binutils(target)
+        tools = stage.select_binutils(target)
+        objcopy, strip_tool = tools.objcopy, tools.strip
     except stage.StagingError:
         pytest.skip("no cross-capable binutils installed here")
 

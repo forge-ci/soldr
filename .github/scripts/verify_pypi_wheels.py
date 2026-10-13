@@ -47,6 +47,9 @@ def load_release_completeness() -> Any:
     if spec is None or spec.loader is None:
         raise RuntimeError(f"could not load release completeness helper: {path}")
     module = importlib.util.module_from_spec(spec)
+    # Registered before exec so the helper's @dataclass classes can resolve
+    # their own module namespace.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return cast(Any, module)
 
@@ -72,8 +75,10 @@ def missing_wheels(version: str, published: list[str]) -> list[str]:
     return [name for name in expected_wheels(version) if name not in present]
 
 
-def published_filenames(payload: dict[str, Any]) -> list[str]:
-    """Filenames from a PyPI project-version JSON payload."""
+def published_filenames(payload: object) -> list[str]:
+    """Filenames from a decoded PyPI project-version JSON payload."""
+    if not isinstance(payload, dict):
+        return []
     urls = payload.get("urls")
     if not isinstance(urls, list):
         return []

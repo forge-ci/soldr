@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_ROOTS = ("crates",)
@@ -37,8 +38,17 @@ PATTERN = re.compile(r"\b(protocol_v3|client_v3)\b")
 SELF = Path(__file__).resolve()
 
 
-def scan(roots: tuple[str, ...], repo_root: Path) -> list[tuple[Path, int, str]]:
-    findings: list[tuple[Path, int, str]] = []
+@dataclass(frozen=True)
+class Finding:
+    """One banned-name occurrence: repo-relative file, 1-based line, its text."""
+
+    path: Path
+    lineno: int
+    line: str
+
+
+def scan(roots: tuple[str, ...], repo_root: Path) -> list[Finding]:
+    findings: list[Finding] = []
     for root_str in roots:
         root = repo_root / root_str
         if not root.is_dir():
@@ -50,7 +60,9 @@ def scan(roots: tuple[str, ...], repo_root: Path) -> list[tuple[Path, int, str]]
                 continue
             for lineno, line in enumerate(text.splitlines(), start=1):
                 if PATTERN.search(line):
-                    findings.append((path.relative_to(repo_root), lineno, line.strip()))
+                    findings.append(
+                        Finding(path.relative_to(repo_root), lineno, line.strip())
+                    )
     return findings
 
 
@@ -68,8 +80,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     print("no_protocol_v3: FAIL", file=sys.stderr)
-    for path, lineno, line in findings:
-        print(f"  - {path}:{lineno}: {line}", file=sys.stderr)
+    for finding in findings:
+        print(f"  - {finding.path}:{finding.lineno}: {finding.line}", file=sys.stderr)
     print(
         "\nThe broker wire stays protocol_v2 / client_v2, broken in place -- "
         "see soldr#2360 and soldr#2363. A protocol_v3/client_v3 module means "

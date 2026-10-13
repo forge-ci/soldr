@@ -53,7 +53,10 @@ class TestPinnedVersions:
         target.write_text("nothing here\n", encoding="utf-8")
         with pytest.raises(manifest_mod.ManifestError, match="WIDGET"):
             manifest_mod.read_pinned_version(
-                tmp_path, ("some.rs", r'WIDGET: &str = "(.*)";', "WIDGET")
+                tmp_path,
+                manifest_mod.PinnedVersionSpec(
+                    "some.rs", r'WIDGET: &str = "(.*)";', "WIDGET"
+                ),
             )
 
 
@@ -91,8 +94,8 @@ class TestDebugSidecars:
     def test_windows_pdb_is_recorded_under_either_name(self, tmp_path: Path) -> None:
         package = stage(tmp_path / "pkg", suffix=".exe", extra={"soldr_cli.pdb": b"p"})
         entries = manifest_mod.collect_debug_info(package, ".exe")
-        assert [e["format"] for e in entries] == ["pdb"]
-        assert entries[0]["name"] == "soldr_cli.pdb"
+        assert [e.format for e in entries] == ["pdb"]
+        assert entries[0].name == "soldr_cli.pdb"
 
     def test_unix_sidecars_are_optional(self, tmp_path: Path) -> None:
         package = stage(tmp_path / "pkg")

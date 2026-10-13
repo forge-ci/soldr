@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,11 +25,24 @@ REQUIRED_ENV = "SOLDR_REQUIRE_WASM32_WASIP1_THREADS_MATERIALIZATION"
 helper = load_script_module(SCRIPT, "target_run_add_target")
 
 
+@dataclass(frozen=True)
+class RecordedProvision:
+    command: object
+    check: object
+
+
+@dataclass(frozen=True)
+class WorkflowStep:
+    name: object
+    condition: object
+    run: object
+
+
 def test_provisioning_uses_the_packaged_soldr_rustup_front_door() -> None:
-    calls: list[tuple[object, object]] = []
+    calls: list[RecordedProvision] = []
 
     def record(command: object, *, check: object) -> None:
-        calls.append((command, check))
+        calls.append(RecordedProvision(command, check))
 
     helper.provision_target(
         Path("packaged-soldr"),
@@ -38,7 +52,7 @@ def test_provisioning_uses_the_packaged_soldr_rustup_front_door() -> None:
     )
 
     assert calls == [
-        (
+        RecordedProvision(
             [
                 "packaged-soldr",
                 "rustup",
@@ -73,9 +87,14 @@ def test_subprocess_failure_is_reported_as_a_failed_helper(
     assert f"failed to provision {TARGET} through Soldr" in capsys.readouterr().err
 
 
-def workflow_steps() -> list[dict[str, object]]:
+def workflow_steps() -> list[WorkflowStep]:
     document = yaml.safe_load(TARGET_RUN.read_text(encoding="utf-8"))
-    return next(iter(document["jobs"].values()))["steps"]
+    return [
+        WorkflowStep(
+            name=step.get("name"), condition=step.get("if"), run=step.get("run")
+        )
+        for step in next(iter(document["jobs"].values()))["steps"]
+    ]
 
 
 def test_authoritative_target_run_provisions_and_enforces_the_wasm_target() -> None:
@@ -85,11 +104,13 @@ def test_authoritative_target_run_provisions_and_enforces_the_wasm_target() -> N
     step = next(
         step
         for step in workflow_steps()
-        if step.get("name")
+        if step.name
         == "Provision Wasm target for materialization regression (soldr#2919)"
     )
-    assert step["if"] == "${{ inputs.require_wasm32_wasip1_threads_materialization }}"
-    run = step["run"]
+    assert (
+        step.condition == "${{ inputs.require_wasm32_wasip1_threads_materialization }}"
+    )
+    run = step.run
     assert isinstance(run, str)
     assert "target_run_add_target.py" in run
     assert '"$SOLDR_BIN"' in run

@@ -55,6 +55,7 @@ import json
 import pathlib
 import re
 import sys
+from dataclasses import dataclass
 
 # Reuse the catalogue client and the transport validator rather than writing a
 # second one (the soldr#2740/#2741 "N implementations of one idea" rule): a
@@ -371,26 +372,43 @@ def driver_row_problem(rows: list[dict], asset_name: str) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class DriverFailure:
+    """One triple whose Dylint driver the catalogue cannot serve."""
+
+    triple: str
+    asset_name: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class LoadedCatalogue:
+    """A fetched catalogue document and the URL it came from."""
+
+    url: str
+    payload: dict  # raw JSON object, as decoded from the wire
+
+
 def missing_drivers(
     payload: dict, version: str, channel: str, triples: list[str]
-) -> list[tuple[str, str, str]]:
-    """`(triple, asset name, reason)` for every triple the catalogue fails."""
+) -> list[DriverFailure]:
+    """A `DriverFailure` for every triple the catalogue fails."""
     rows_by_asset: dict[str, list[dict]] = {}
     for row in catalogue_entries(payload):
         asset = row.get("asset")
         if isinstance(asset, str):
             rows_by_asset.setdefault(asset, []).append(row)
 
-    failures = []
+    failures: list[DriverFailure] = []
     for triple in triples:
         asset_name = driver_asset_name(version, channel, triple)
         problem = driver_row_problem(rows_by_asset.get(asset_name, []), asset_name)
         if problem is not None:
-            failures.append((triple, asset_name, problem))
+            failures.append(DriverFailure(triple, asset_name, problem))
     return failures
 
 
-def load_catalogue(origin: str) -> tuple[str, dict]:
+def load_catalogue(origin: str) -> LoadedCatalogue:
     """Fetch the published catalogue, preferring v2 exactly as the runtime does.
 
     Raises `CatalogueUnavailable` when neither document can be resolved; the
@@ -411,7 +429,7 @@ def load_catalogue(origin: str) -> tuple[str, dict]:
         if not isinstance(payload, dict):
             reasons.append(f"{name}: not a JSON object")
             continue
-        return url, payload
+        return LoadedCatalogue(url, payload)
     raise CatalogueUnavailable("; ".join(reasons))
 
 
@@ -421,7 +439,7 @@ def load_catalogue(origin: str) -> tuple[str, dict]:
 
 
 def failure_report(
-    failures: list[tuple[str, str, str]],
+    failures: list[DriverFailure],
     *,
     version: str,
     channel: str,
@@ -431,8 +449,9 @@ def failure_report(
 ) -> str:
     """The whole diagnosis, so the reader never has to open this script."""
     rows = "\n".join(
-        f"  {triple}\n    expected asset: {asset}\n    catalogue says: {reason}"
-        for triple, asset, reason in failures
+        f"  {failure.triple}\n    expected asset: {failure.asset_name}\n"
+        f"    catalogue says: {failure.reason}"
+        for failure in failures
     )
     libraries = ", ".join(library_paths)
     return (
@@ -485,18 +504,18 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        catalogue_url, payload = load_catalogue(args.origin)
+        catalogue = load_catalogue(args.origin)
     except CatalogueUnavailable as exc:
         # Not a failure: see the network policy in this module's docstring.
         print(f"check_dylint_driver_assets: skipped, cannot resolve catalogue ({exc})")
         return 0
 
     try:
-        failures = missing_drivers(payload, version, channel, triples)
+        failures = missing_drivers(catalogue.payload, version, channel, triples)
     except MalformedCatalogue as exc:
         # Same reasoning as an unreachable catalogue: a remote document this
         # guard cannot read is not evidence that a driver is missing.
-        print(f"check_dylint_driver_assets: skipped, {catalogue_url} {exc}")
+        print(f"check_dylint_driver_assets: skipped, {catalogue.url} {exc}")
         return 0
 
     if failures:
@@ -505,7 +524,7 @@ def main(argv: list[str] | None = None) -> int:
                 failures,
                 version=version,
                 channel=channel,
-                catalogue_url=catalogue_url,
+                catalogue_url=catalogue.url,
                 library_paths=[
                     path.relative_to(repo_root).as_posix() for path in manifests
                 ],

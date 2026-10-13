@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,7 +20,15 @@ SHA = "a" * 40
 REPO = "zackees/soldr"
 
 
-def proof() -> tuple[dict, list[dict]]:
+@dataclass(frozen=True)
+class Proof:
+    """A CI run payload and its jobs payload, as the GitHub API returns them."""
+
+    run: dict
+    jobs: list[dict]
+
+
+def proof() -> Proof:
     run = {
         "event": "workflow_dispatch",
         "path": ".github/workflows/ci.yml",
@@ -33,11 +42,12 @@ def proof() -> tuple[dict, list[dict]]:
         {"name": name, "status": "completed", "conclusion": "success"}
         for name in ("CI mode", "Full coverage")
     ]
-    return run, jobs
+    return Proof(run, jobs)
 
 
 def test_exact_sha_full_run_succeeds() -> None:
-    run, jobs = proof()
+    fixture = proof()
+    run, jobs = fixture.run, fixture.jobs
     gate.validate(run, jobs, sha=SHA, repository=REPO)
 
 
@@ -46,7 +56,8 @@ def test_exact_sha_full_run_succeeds() -> None:
     ["wrong_sha", "pr", "feature_branch", "failed_run", "missing", "skipped", "failed"],
 )
 def test_nonmatching_or_incomplete_proof_is_rejected(mutation: str) -> None:
-    run, jobs = proof()
+    fixture = proof()
+    run, jobs = fixture.run, fixture.jobs
     if mutation == "wrong_sha":
         run["display_title"] = "CI full " + "b" * 40
     elif mutation == "pr":

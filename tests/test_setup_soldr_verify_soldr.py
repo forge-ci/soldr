@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,13 @@ from soldr._process import run_captured
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / ".github" / "actions" / "setup-soldr" / "verify_soldr.py"
+
+
+@dataclass(frozen=True)
+class RecordedCall:
+    command: list[str]
+    capture_output: bool = False
+    text: bool = False
 
 
 def _load_module():
@@ -27,7 +35,7 @@ def test_main_tolerates_missing_zccache_daemon_during_status_probe(
     monkeypatch.setenv("SETUP_SOLDR_PATH", "C:/temp/soldr.exe")
     monkeypatch.setenv("GITHUB_OUTPUT", str(github_output))
 
-    calls: list[tuple[list[str], dict[str, object]]] = []
+    calls: list[RecordedCall] = []
 
     def fake_check_output(
         cmd: list[str], *, text: bool = True, timeout: int = 30
@@ -37,8 +45,8 @@ def test_main_tolerates_missing_zccache_daemon_during_status_probe(
         assert cmd == ["C:/temp/soldr.exe", "version", "--json"]
         return json.dumps({"soldr_version": "0.7.4"})
 
-    def fake_run(cmd: list[str], **kwargs: Any):
-        calls.append((cmd, kwargs))
+    def fake_run(cmd: list[str], *, capture_output: bool = False, text: bool = False):
+        calls.append(RecordedCall(cmd, capture_output, text))
         if cmd == ["soldr", "status", "--json"]:
             raise subprocess.CalledProcessError(
                 1,
@@ -57,12 +65,9 @@ def test_main_tolerates_missing_zccache_daemon_during_status_probe(
     module.main()
 
     assert calls == [
-        (["cargo", "--version"], {}),
-        (["rustc", "--version"], {}),
-        (
-            ["soldr", "status", "--json"],
-            {"capture_output": True, "text": True},
-        ),
+        RecordedCall(["cargo", "--version"]),
+        RecordedCall(["rustc", "--version"]),
+        RecordedCall(["soldr", "status", "--json"], capture_output=True, text=True),
     ]
     assert github_output.read_text(encoding="utf-8") == "soldr_version=0.7.4\n"
 

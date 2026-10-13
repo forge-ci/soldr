@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -59,6 +60,14 @@ def test_missing_file_utility_does_not_block_the_release_smoke(
     assert "could not run file(1)" in capsys.readouterr().err
 
 
+@dataclass(frozen=True)
+class CliCall:
+    """One recorded `run_cli` invocation."""
+
+    command: list[str]
+    capture: bool
+
+
 def test_smoke_runs_file_and_both_cli_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -67,13 +76,13 @@ def test_smoke_runs_file_and_both_cli_paths(
     binary.write_bytes(b"")
     binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
     file_calls: list[Path] = []
-    cli_calls: list[tuple[list[str], bool]] = []
+    cli_calls: list[CliCall] = []
 
     def fake_file_metadata(path: Path) -> None:
         file_calls.append(path)
 
     def fake_cli(command: list[str], *, capture: bool) -> str:
-        cli_calls.append((command, capture))
+        cli_calls.append(CliCall(command, capture))
         if command[-1] == "--version":
             return "soldr 0.9.2\n"
         if command[-2:] == ["version", "--json"]:
@@ -92,8 +101,8 @@ def test_smoke_runs_file_and_both_cli_paths(
 
     assert file_calls == [binary]
     assert cli_calls == [
-        ([str(binary), "--version"], True),
-        ([str(binary), "version", "--json"], True),
+        CliCall([str(binary), "--version"], True),
+        CliCall([str(binary), "version", "--json"], True),
     ]
 
 

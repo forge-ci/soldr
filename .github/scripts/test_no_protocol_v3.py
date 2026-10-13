@@ -38,7 +38,7 @@ def test_detects_protocol_v3_module_path(tmp_path: Path) -> None:
     )
     findings = no_protocol_v3.scan(("crates",), tmp_path)
     assert len(findings) == 1
-    assert findings[0][1] == 1
+    assert findings[0].lineno == 1
 
 
 def test_does_not_false_positive_on_near_miss_identifiers(tmp_path: Path) -> None:

@@ -48,8 +48,18 @@ import argparse
 import pathlib
 import re
 import sys
+from dataclasses import dataclass
 
 import yaml
+
+
+@dataclass(frozen=True, order=True)
+class JobRef:
+    """One workflow job, named by its file and job id."""
+
+    workflow: str
+    job: str
+
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
@@ -80,19 +90,19 @@ STDLIB_SCRIPTS: frozenset[str] = frozenset({".github/scripts/check_cache_budget.
 VERSIONED_UBUNTU = re.compile(r"^ubuntu-[0-9]{2}\.[0-9]{2}(?:-arm)?$")
 
 # Jobs running repo Python under an unpinned interpreter as of soldr#2763.
-# Entries are `(workflow file, job id)`. Shrink this list; never grow it.
-BASELINE: frozenset[tuple[str, str]] = frozenset(
+# Entries are `JobRef(workflow file, job id)`. Shrink this list; never grow it.
+BASELINE: frozenset[JobRef] = frozenset(
     {
-        ("_bootstrap-e2e.yml", "bootstrap-e2e"),
-        ("_build-and-test.yml", "build-and-test"),
-        ("_ci-cross-build-linux.yml", "cross-build"),
-        ("baseline-zero-deps.yml", "build-soldr"),
-        ("baseline-zero-deps.yml", "docker-baseline"),
-        ("benchmark-stats.yml", "gate"),
-        ("cross-compile-all-targets.yml", "bootstrap-and-linux-x86"),
-        ("cross-compile-all-targets.yml", "cross-compile"),
-        ("docker-linux-cross-smoke.yml", "smoke"),
-        ("perf-matrix.yml", "gate"),
+        JobRef("_bootstrap-e2e.yml", "bootstrap-e2e"),
+        JobRef("_build-and-test.yml", "build-and-test"),
+        JobRef("_ci-cross-build-linux.yml", "cross-build"),
+        JobRef("baseline-zero-deps.yml", "build-soldr"),
+        JobRef("baseline-zero-deps.yml", "docker-baseline"),
+        JobRef("benchmark-stats.yml", "gate"),
+        JobRef("cross-compile-all-targets.yml", "bootstrap-and-linux-x86"),
+        JobRef("cross-compile-all-targets.yml", "cross-compile"),
+        JobRef("docker-linux-cross-smoke.yml", "smoke"),
+        JobRef("perf-matrix.yml", "gate"),
     }
 )
 
@@ -307,9 +317,9 @@ def uv_is_installed_before_use(job: dict) -> bool:
     return setup_at is not None and setup_at < first_use
 
 
-def unpinned_jobs(workflow_dir: pathlib.Path) -> set[tuple[str, str]]:
+def unpinned_jobs(workflow_dir: pathlib.Path) -> set[JobRef]:
     """Every `(file, job)` that runs repo Python without pinning an interpreter."""
-    found: set[tuple[str, str]] = set()
+    found: set[JobRef] = set()
     paths = sorted(workflow_dir.glob("*.yml")) + sorted(workflow_dir.glob("*.yaml"))
     for path in paths:
         document = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -321,7 +331,7 @@ def unpinned_jobs(workflow_dir: pathlib.Path) -> set[tuple[str, str]]:
             if job_runs_repo_python(job) and not job_pins_interpreter(
                 job, release_job=path.name == RELEASE_WORKFLOW
             ):
-                found.add((path.name, str(job_id)))
+                found.add(JobRef(path.name, str(job_id)))
     return found
 
 
@@ -341,8 +351,8 @@ def main() -> int:
 
     if added:
         print("error: workflow job runs repo Python under an unpinned interpreter:")
-        for workflow, job in added:
-            print(f"  {workflow}: job '{job}'")
+        for ref in added:
+            print(f"  {ref.workflow}: job '{ref.job}'")
         print()
         print(
             "Pin it: add `actions/setup-python`, or add `astral-sh/setup-uv` and\n"
@@ -355,8 +365,8 @@ def main() -> int:
         if added:
             print()
         print("error: these jobs now pin an interpreter and must leave the baseline:")
-        for workflow, job in fixed:
-            print(f"  {workflow}: job '{job}'")
+        for ref in fixed:
+            print(f"  {ref.workflow}: job '{ref.job}'")
         print()
         print(
             "Remove them from BASELINE in this script. The list is a record of\n"

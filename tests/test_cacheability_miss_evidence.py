@@ -33,9 +33,13 @@ explain_report = cacheability.explain_report
 emit_report_explanation = cacheability.emit_report_explanation
 
 
-def report(**overrides: Any) -> dict[str, Any]:
-    """A report shaped like the real thing, with the parts under test filled."""
-    base: dict[str, Any] = {
+def report(**overrides: Any) -> object:
+    """A report shaped like the real thing, with the parts under test filled.
+
+    The harness parses `cache report --json` into an untyped JSON document, so
+    the fixture is one too -- a raw-JSON boundary, not a record.
+    """
+    base = {
         "command": "cache report",
         "journal_path": "/root/.soldr/cache/zccache/history/42/last-session.jsonl",
         "journal_present": True,

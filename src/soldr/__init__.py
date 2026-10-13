@@ -68,7 +68,6 @@ _PEP517_ENV_KEYS = {
     "SOLDR_PEP517_PROFILE",
     "SOLDR_LINKER",
 }
-_MISSING = object()
 _PEP517_TARGET_SCHEMA = b"pep517-target-v3"
 _WHEEL_CACHE_SCHEMA = b"pep517-wheel-cache-v1"
 _WHEEL_CACHE_IGNORED_DIRECTORIES = {
@@ -240,8 +239,8 @@ def _managed_pep517_environment(
 ) -> Iterator[None]:
     """Apply soldr's child-build environment around a delegated backend."""
     prepared = _prep_env(config_settings, editable=editable)
-    previous: dict[str, object] = {
-        key: os.environ.get(key, _MISSING) for key in _PEP517_ENV_KEYS
+    previous: dict[str, str | None] = {
+        key: os.environ.get(key) for key in _PEP517_ENV_KEYS
     }
     try:
         for key in _PEP517_ENV_KEYS:
@@ -253,10 +252,10 @@ def _managed_pep517_environment(
         yield
     finally:
         for key, previous_value in previous.items():
-            if previous_value is _MISSING:
+            if previous_value is None:
                 os.environ.pop(key, None)
             else:
-                os.environ[key] = str(previous_value)
+                os.environ[key] = previous_value
 
 
 @contextmanager

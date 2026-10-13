@@ -63,6 +63,7 @@ import sys
 import tempfile
 import urllib.request
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 # Use regular-file capture without an installed Python dependency.
@@ -85,6 +86,7 @@ _MACHO_CPUTYPE = {
     "arm64": b"\x0c\x00\x00\x01",
 }
 
+
 # soldr#3076: the binaries copied into --share-dir and executed inside the
 # Recovery guest for x86_64-apple-darwin, plus the flag run on each one.
 # `soldr` itself (the only binary whose output format soldr controls) gets
@@ -94,11 +96,19 @@ _MACHO_CPUTYPE = {
 # `--version` text -- only needs to exit 0, matching what the native `run()`
 # calls below check for them; "help"/"version" here select which flag to
 # pass, not a stricter check.
-GUEST_BINARY_CHECKS: tuple[tuple[str, str], ...] = (
-    ("soldr", "version"),
-    ("soldr-daemon", "help"),
-    ("crgx", "version"),
-    ("cargo-chef", "version"),
+@dataclass(frozen=True)
+class GuestBinaryCheck:
+    """A guest binary and which flag (`version` / `help`) is probed."""
+
+    name: str
+    check: str
+
+
+GUEST_BINARY_CHECKS: tuple[GuestBinaryCheck, ...] = (
+    GuestBinaryCheck("soldr", "version"),
+    GuestBinaryCheck("soldr-daemon", "help"),
+    GuestBinaryCheck("crgx", "version"),
+    GuestBinaryCheck("cargo-chef", "version"),
 )
 
 RESULTS_FILE = "summary.txt"
@@ -269,7 +279,8 @@ def copy_into_share_dir(extract: Path, share_dir: Path, suffix: str) -> None:
     not get.
     """
     share_dir.mkdir(parents=True, exist_ok=True)
-    for name, _check in GUEST_BINARY_CHECKS:
+    for binary in GUEST_BINARY_CHECKS:
+        name = binary.name
         src = extract / f"{name}{suffix}"
         if not src.is_file():
             sys.exit(f"ERROR: cannot stage {src} into the guest share-dir: missing")
@@ -339,7 +350,8 @@ def build_release_guest_script(expected_version: str, wheel_name: str) -> str:
         "fi",
         "",
     ]
-    for name, check in GUEST_BINARY_CHECKS:
+    for binary in GUEST_BINARY_CHECKS:
+        name, check = binary.name, binary.check
         dest = f"/tmp/{name}"
         lines += [
             f"curl -fsS -o {dest} {GUEST_HTTP_BASE}/{name}",
@@ -512,30 +524,56 @@ def append_github_output_multiline(path: Path, name: str, value: str) -> None:
         handle.write(f"{name}<<{delimiter}\n{value}{delimiter}\n")
 
 
-def parse_summary(text: str) -> dict[str, tuple[bool, str]]:
+@dataclass(frozen=True)
+class CheckResult:
+    """One guest check: its name, whether it passed, and its detail text."""
+
+    name: str
+    ok: bool
+    detail: str
+
+
+def find_result(results: list[CheckResult], name: str) -> CheckResult | None:
+    """The recorded result for `name`, if the guest wrote one."""
+    return next((result for result in results if result.name == name), None)
+
+
+def parse_summary(text: str) -> list[CheckResult]:
     """Parse the guest's flat `key=value` results file.
 
     Each line is `name=pass[:detail]` or `name=fail[:detail]`; a malformed
     or truncated line (a wedged guest can be killed mid-write) is not
-    silently dropped -- it fails as its own diagnostic.
+    silently dropped -- it fails as its own diagnostic. A repeated name keeps
+    its first position and its last value.
     """
-    results: dict[str, tuple[bool, str]] = {}
+    results: list[CheckResult] = []
+
+    def record(result: CheckResult) -> None:
+        for index, existing in enumerate(results):
+            if existing.name == result.name:
+                results[index] = result
+                return
+        results.append(result)
+
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.strip()
         if not line:
             continue
         name, sep, rest = line.partition("=")
         if not sep:
-            results[f"summary_line_{lineno}"] = (False, f"malformed line: {raw!r}")
+            record(
+                CheckResult(f"summary_line_{lineno}", False, f"malformed line: {raw!r}")
+            )
             continue
         status, _, detail = rest.partition(":")
-        results[name] = (status == "pass", detail)
+        record(CheckResult(name, status == "pass", detail))
     return results
 
 
 def expected_check_names() -> list[str]:
     names = ["arch"]
-    for name, check in GUEST_BINARY_CHECKS:
+    for binary in GUEST_BINARY_CHECKS:
+        name, check = binary.name, binary.check
         names.append(f"fetch_{name}")
         names.append(f"{name}_{check}")
     names.append("soldr_version_json")
@@ -573,12 +611,12 @@ def verify_collected(collected_dir: Path, *, guest_exit_code: str) -> int:
 
     failures: list[str] = []
     for name in expected_check_names():
-        if name not in results:
+        result = find_result(results, name)
+        if result is None:
             failures.append(f"{name}: no result recorded (guest script exited early?)")
             continue
-        ok, detail = results[name]
-        if not ok:
-            failures.append(f"{name}: {detail}")
+        if not result.ok:
+            failures.append(f"{name}: {result.detail}")
 
     if guest_exit_code.strip() != "0":
         failures.append(

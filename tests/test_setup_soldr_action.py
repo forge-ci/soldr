@@ -48,12 +48,12 @@ def test_load_toolchain_spec_reads_rust_toolchain_toml() -> None:
 
     spec = module.load_toolchain_spec(REPO_ROOT, "rust-toolchain.toml", "")
 
-    assert spec["channel"] == "1.98.1"
-    assert spec["profile"] == "minimal"
-    assert "rustfmt" in spec["components"]
-    assert "clippy" in spec["components"]
-    assert spec["source"] == "rust-toolchain.toml"
-    assert spec["file_hash"] != "none"
+    assert spec.channel == "1.98.1"
+    assert spec.profile == "minimal"
+    assert "rustfmt" in spec.components
+    assert "clippy" in spec.components
+    assert spec.source == "rust-toolchain.toml"
+    assert spec.file_hash != "none"
 
 
 def test_load_toolchain_spec_defaults_when_file_missing(tmp_path: Path) -> None:
@@ -61,14 +61,14 @@ def test_load_toolchain_spec_defaults_when_file_missing(tmp_path: Path) -> None:
 
     spec = module.load_toolchain_spec(tmp_path, "missing.toml", "")
 
-    assert spec == {
-        "channel": "stable",
-        "profile": "minimal",
-        "components": [],
-        "targets": [],
-        "source": "default",
-        "file_hash": "none",
-    }
+    assert spec == module.ToolchainSpec(
+        channel="stable",
+        profile="minimal",
+        components=(),
+        targets=(),
+        source="default",
+        file_hash="none",
+    )
 
 
 def test_load_toolchain_spec_prefers_explicit_override() -> None:
@@ -76,9 +76,9 @@ def test_load_toolchain_spec_prefers_explicit_override() -> None:
 
     spec = module.load_toolchain_spec(REPO_ROOT, "rust-toolchain.toml", "stable")
 
-    assert spec["channel"] == "stable"
-    assert spec["profile"] == "minimal"
-    assert spec["source"] == "input"
+    assert spec.channel == "stable"
+    assert spec.profile == "minimal"
+    assert spec.source == "input"
 
 
 def test_normalize_list_accepts_csv_strings() -> None:
@@ -95,12 +95,12 @@ def test_toolchain_signature_payload_is_json_serializable() -> None:
     spec = module.load_toolchain_spec(REPO_ROOT, "rust-toolchain.toml", "")
 
     payload = {
-        "channel": spec["channel"],
-        "profile": spec["profile"],
-        "components": spec["components"],
-        "targets": spec["targets"],
-        "source": spec["source"],
-        "file_hash": spec["file_hash"],
+        "channel": spec.channel,
+        "profile": spec.profile,
+        "components": list(spec.components),
+        "targets": list(spec.targets),
+        "source": spec.source,
+        "file_hash": spec.file_hash,
         "soldr_repo": "zackees/soldr",
         "soldr_version": "0.7.4",
     }
@@ -509,12 +509,42 @@ def test_target_cache_inputs_are_deprecated_noops(
     assert "soldr#2996" in text
 
 
+@dataclass(frozen=True)
+class SetupPaths:
+    """The GitHub env/output/path files `_setup_main_env` points the action at."""
+
+    github_env: Path
+    github_output: Path
+    github_path: Path
+
+
+@dataclass(frozen=True)
+class OutputLine:
+    """One `name=value` line of a GITHUB_OUTPUT file."""
+
+    name: str
+    value: str
+
+
+@dataclass(frozen=True)
+class ActionOutputs:
+    """The parsed `name=value` lines of a GITHUB_OUTPUT file (last one wins)."""
+
+    lines: tuple[OutputLine, ...]
+
+    def value(self, name: str) -> str:
+        for line in reversed(self.lines):
+            if line.name == name:
+                return line.value
+        raise KeyError(name)
+
+
 def _setup_main_env(
     tmp_path: Path,
     monkeypatch,
     *,
     version: str = "",
-) -> tuple[Path, Path, Path]:
+) -> SetupPaths:
     workspace = tmp_path / "workspace"
     runner_temp = tmp_path / "runner-temp"
     workspace.mkdir()
@@ -540,14 +570,16 @@ def _setup_main_env(
     monkeypatch.setenv("GITHUB_ENV", str(github_env))
     monkeypatch.setenv("GITHUB_OUTPUT", str(github_output))
     monkeypatch.setenv("GITHUB_PATH", str(github_path))
-    return github_env, github_output, github_path
+    return SetupPaths(github_env, github_output, github_path)
 
 
-def _collect_outputs(output_path: Path) -> dict[str, str]:
-    return dict(
-        line.split("=", 1)
-        for line in output_path.read_text(encoding="utf-8").splitlines()
-        if "=" in line
+def _collect_outputs(output_path: Path) -> ActionOutputs:
+    return ActionOutputs(
+        tuple(
+            OutputLine(*line.split("=", 1))
+            for line in output_path.read_text(encoding="utf-8").splitlines()
+            if "=" in line
+        )
     )
 
 
@@ -567,22 +599,22 @@ def test_latest_version_cache_key_changes_when_release_changes(
 
     run_dir_a = tmp_path / "run-a"
     run_dir_a.mkdir()
-    _, output_a, _ = _setup_main_env(run_dir_a, monkeypatch)
+    output_a = _setup_main_env(run_dir_a, monkeypatch).github_output
     monkeypatch.setattr(module, "resolve_latest_soldr_release", fake_resolver_0)
     module.main()
     outputs_a = _collect_outputs(output_a)
 
     run_dir_b = tmp_path / "run-b"
     run_dir_b.mkdir()
-    _, output_b, _ = _setup_main_env(run_dir_b, monkeypatch)
+    output_b = _setup_main_env(run_dir_b, monkeypatch).github_output
     monkeypatch.setattr(module, "resolve_latest_soldr_release", lambda _repo: "0.7.12")
     module.main()
     outputs_b = _collect_outputs(output_b)
 
-    assert outputs_a["cache_key"] != outputs_b["cache_key"]
-    assert outputs_a["soldr_version_resolved"] == "0.7.11"
-    assert outputs_b["soldr_version_resolved"] == "0.7.12"
-    assert outputs_a["soldr_version_requested"] == ""
+    assert outputs_a.value("cache_key") != outputs_b.value("cache_key")
+    assert outputs_a.value("soldr_version_resolved") == "0.7.11"
+    assert outputs_b.value("soldr_version_resolved") == "0.7.12"
+    assert outputs_a.value("soldr_version_requested") == ""
     assert calls["count"] == 1
 
 
@@ -596,20 +628,20 @@ def test_latest_version_cache_key_falls_back_to_literal_when_resolution_fails(
 
     run_dir_a = tmp_path / "run-a"
     run_dir_a.mkdir()
-    _, output_a, _ = _setup_main_env(run_dir_a, monkeypatch)
+    output_a = _setup_main_env(run_dir_a, monkeypatch).github_output
     monkeypatch.setattr(module, "resolve_latest_soldr_release", lambda _repo: "")
     module.main()
     outputs_a = _collect_outputs(output_a)
 
     run_dir_b = tmp_path / "run-b"
     run_dir_b.mkdir()
-    _, output_b, _ = _setup_main_env(run_dir_b, monkeypatch)
+    output_b = _setup_main_env(run_dir_b, monkeypatch).github_output
     monkeypatch.setattr(module, "resolve_latest_soldr_release", lambda _repo: "")
     module.main()
     outputs_b = _collect_outputs(output_b)
 
-    assert outputs_a["cache_key"] == outputs_b["cache_key"]
-    assert outputs_a["soldr_version_resolved"] == ""
+    assert outputs_a.value("cache_key") == outputs_b.value("cache_key")
+    assert outputs_a.value("soldr_version_resolved") == ""
 
 
 def test_pinned_version_input_skips_latest_resolution(
@@ -624,14 +656,16 @@ def test_pinned_version_input_skips_latest_resolution(
         calls["count"] += 1
         return "should-not-be-used"
 
-    _, github_output, _ = _setup_main_env(tmp_path, monkeypatch, version="0.7.10")
+    github_output = _setup_main_env(
+        tmp_path, monkeypatch, version="0.7.10"
+    ).github_output
     monkeypatch.setattr(module, "resolve_latest_soldr_release", _should_not_call)
     module.main()
 
     outputs = _collect_outputs(github_output)
     assert calls["count"] == 0
-    assert outputs["soldr_version_resolved"] == "0.7.10"
-    assert outputs["soldr_version_requested"] == "0.7.10"
+    assert outputs.value("soldr_version_resolved") == "0.7.10"
+    assert outputs.value("soldr_version_requested") == "0.7.10"
 
 
 def test_native_cache_default_on_writes_no_env(tmp_path: Path, monkeypatch) -> None:
@@ -641,7 +675,8 @@ def test_native_cache_default_on_writes_no_env(tmp_path: Path, monkeypatch) -> N
     overrides that pre-populate it (e.g. `env: SOLDR_NATIVE_CACHE=0` on a
     later step)."""
     module = _load_module()
-    github_env, github_output, _ = _setup_main_env(tmp_path, monkeypatch)
+    paths = _setup_main_env(tmp_path, monkeypatch)
+    github_env, github_output = paths.github_env, paths.github_output
     monkeypatch.setattr(module, "resolve_latest_soldr_release", lambda _repo: "")
     module.main()
 
@@ -649,7 +684,7 @@ def test_native_cache_default_on_writes_no_env(tmp_path: Path, monkeypatch) -> N
     assert "SOLDR_NATIVE_CACHE" not in env_text
 
     outputs = _collect_outputs(github_output)
-    assert outputs["native_cache_enabled"] == "true"
+    assert outputs.value("native_cache_enabled") == "true"
 
 
 def test_native_cache_explicit_false_writes_opt_out(
@@ -660,7 +695,8 @@ def test_native_cache_explicit_false_writes_opt_out(
     skips native compiler wrapping. The corresponding output flips to
     `false` so workflows can echo the effective policy."""
     module = _load_module()
-    github_env, github_output, _ = _setup_main_env(tmp_path, monkeypatch)
+    paths = _setup_main_env(tmp_path, monkeypatch)
+    github_env, github_output = paths.github_env, paths.github_output
     monkeypatch.setenv("INPUT_NATIVE_CACHE", "false")
     monkeypatch.setattr(module, "resolve_latest_soldr_release", lambda _repo: "")
     module.main()
@@ -669,14 +705,15 @@ def test_native_cache_explicit_false_writes_opt_out(
     assert "SOLDR_NATIVE_CACHE=0\n" in env_text
 
     outputs = _collect_outputs(github_output)
-    assert outputs["native_cache_enabled"] == "false"
+    assert outputs.value("native_cache_enabled") == "false"
 
 
 def test_native_cache_explicit_true_does_not_write_env(
     tmp_path: Path, monkeypatch
 ) -> None:
     module = _load_module()
-    github_env, github_output, _ = _setup_main_env(tmp_path, monkeypatch)
+    paths = _setup_main_env(tmp_path, monkeypatch)
+    github_env, github_output = paths.github_env, paths.github_output
     monkeypatch.setenv("INPUT_NATIVE_CACHE", "true")
     monkeypatch.setattr(module, "resolve_latest_soldr_release", lambda _repo: "")
     module.main()
@@ -684,7 +721,7 @@ def test_native_cache_explicit_true_does_not_write_env(
     env_text = github_env.read_text(encoding="utf-8")
     assert "SOLDR_NATIVE_CACHE" not in env_text
     outputs = _collect_outputs(github_output)
-    assert outputs["native_cache_enabled"] == "true"
+    assert outputs.value("native_cache_enabled") == "true"
 
 
 def test_native_cache_invalid_value_rejected(tmp_path: Path, monkeypatch) -> None:

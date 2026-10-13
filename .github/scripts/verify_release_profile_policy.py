@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 # Workflows permitted to use `--release`, each with the reason it survives.
@@ -144,9 +145,18 @@ def is_exempt(lines: list[str], index: int) -> bool:
     return False
 
 
-def scan(workflows_dir: Path) -> list[tuple[str, int, str]]:
-    """Every disallowed `--release`, as `(file, line number, line)`."""
-    findings: list[tuple[str, int, str]] = []
+@dataclass(frozen=True)
+class ReleaseFinding:
+    """One disallowed `--release` line in a workflow file."""
+
+    file: str
+    line_number: int
+    line: str
+
+
+def scan(workflows_dir: Path) -> list[ReleaseFinding]:
+    """Every disallowed `--release` in the workflows."""
+    findings: list[ReleaseFinding] = []
     for path in sorted(workflows_dir.glob("*.yml")):
         if path.name in ALLOWLIST:
             continue
@@ -159,7 +169,7 @@ def scan(workflows_dir: Path) -> list[tuple[str, int, str]]:
             if is_comment(line):
                 continue
             if uses_release_profile(line) and not is_exempt(lines, index):
-                findings.append((path.name, index + 1, line.strip()))
+                findings.append(ReleaseFinding(path.name, index + 1, line.strip()))
     return findings
 
 
@@ -224,8 +234,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if findings:
         print("release-profile policy: FAIL", file=sys.stderr)
-        for name, number, line in findings:
-            print(f"  - {name}:{number}: {line}", file=sys.stderr)
+        for finding in findings:
+            print(
+                f"  - {finding.file}:{finding.line_number}: {finding.line}",
+                file=sys.stderr,
+            )
         print(
             "\n`--release` costs thin-LTO + single-CU codegen. Use the cheapest profile "
             "that still exercises the path -- `ci-release`, `ci-nextest`, or "

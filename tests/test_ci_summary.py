@@ -236,14 +236,22 @@ def test_rerun_summary_rechecks_permission_instead_of_cached_write(
 def test_rerun_cannot_reuse_minimal_after_current_labels_require_more(label):
     event = {"pull_request": {"head": {"sha": SHA}, "labels": [{"name": label}]}}
     assert SUMMARY.current_selection_failures(
-        event, mode="minimal", selected_sha=SHA, permission="admin", aliases={}
+        event,
+        mode="minimal",
+        selected_sha=SHA,
+        permission="admin",
+        aliases=SUMMARY.SELECTOR["LabelAliases"](),
     )
 
 
 def test_current_head_and_legacy_labels_are_authoritative():
     event = {"pull_request": {"head": {"sha": "b" * 40}, "labels": []}}
     assert SUMMARY.current_selection_failures(
-        event, mode="full", selected_sha=SHA, permission="admin", aliases={}
+        event,
+        mode="full",
+        selected_sha=SHA,
+        permission="admin",
+        aliases=SUMMARY.SELECTOR["LabelAliases"](),
     )
     event["pull_request"]["head"]["sha"] = SHA
     event["pull_request"]["labels"] = [{"name": "ci:full"}]
@@ -252,13 +260,19 @@ def test_current_head_and_legacy_labels_are_authoritative():
         mode="test",
         selected_sha=SHA,
         permission="admin",
-        aliases={"ci:full": "ci-full"},
+        aliases=SUMMARY.SELECTOR["LabelAliases"](
+            (SUMMARY.SELECTOR["LabelAlias"]("ci:full", "ci-full"),)
+        ),
     )
 
 
 def test_missing_current_metadata_fails_even_when_cached_full_is_green():
     assert SUMMARY.current_selection_failures(
-        None, mode="full", selected_sha=SHA, permission="admin", aliases={}
+        None,
+        mode="full",
+        selected_sha=SHA,
+        permission="admin",
+        aliases=SUMMARY.SELECTOR["LabelAliases"](),
     )
 
 

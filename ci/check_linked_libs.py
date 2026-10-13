@@ -36,6 +36,7 @@ import argparse
 import fnmatch
 import struct
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
@@ -49,6 +50,15 @@ _PT_DYNAMIC = 2
 _DT_NULL = 0
 _DT_NEEDED = 1
 _DT_STRTAB = 5
+
+
+@dataclass(frozen=True)
+class LoadSegment:
+    """A `PT_LOAD` program header: virtual address, size and file offset."""
+
+    vaddr: int
+    memsz: int
+    file_offset: int
 
 
 def _elf_program_headers(f: BinaryIO, e_phoff: int, e_phentsize: int, e_phnum: int):
@@ -100,14 +110,16 @@ def read_elf_needed(f: BinaryIO) -> list[str] | None:  # noqa: C901
 
     dynamic_off: int | None = None
     dynamic_size = 0
-    loads: list[tuple[int, int, int]] = []  # (vaddr, memsz, file_offset)
+    loads: list[LoadSegment] = []
     for p_type, p_offset, p_vaddr, p_filesz, p_memsz in _elf_program_headers(
         f, e_phoff, e_phentsize, e_phnum
     ):
         if p_type == _PT_DYNAMIC:
             dynamic_off, dynamic_size = p_offset, p_filesz
         elif p_type == _PT_LOAD:
-            loads.append((p_vaddr, p_memsz, p_offset))
+            loads.append(
+                LoadSegment(vaddr=p_vaddr, memsz=p_memsz, file_offset=p_offset)
+            )
 
     if dynamic_off is None:
         # No PT_DYNAMIC segment at all: a fully static binary. Trivially
@@ -131,9 +143,9 @@ def read_elf_needed(f: BinaryIO) -> list[str] | None:  # noqa: C901
         return []
 
     strtab_file_off = None
-    for seg_vaddr, seg_memsz, seg_offset in loads:
-        if seg_vaddr <= strtab_vaddr < seg_vaddr + seg_memsz:
-            strtab_file_off = seg_offset + (strtab_vaddr - seg_vaddr)
+    for segment in loads:
+        if segment.vaddr <= strtab_vaddr < segment.vaddr + segment.memsz:
+            strtab_file_off = segment.file_offset + (strtab_vaddr - segment.vaddr)
             break
     if strtab_file_off is None:
         return []
@@ -281,19 +293,36 @@ def disallowed_libs(kind: str, names: list[str]) -> list[str]:
     ]
 
 
-def check_binary(path: Path) -> tuple[str, list[str], list[str]] | None:
+@dataclass(frozen=True)
+class BinaryCheck:
+    """`kind` is `elf` or `macho`; `offenders` is the disallowed subset of `linked`."""
+
+    kind: str
+    linked: tuple[str, ...]
+    offenders: tuple[str, ...]
+
+
+def check_binary(path: Path) -> BinaryCheck | None:
     """Classify *path* and report its disallowed dynamic dependencies.
 
-    Returns `(kind, all_linked_names, offenders)`, or `None` if the file is
+    Returns a `BinaryCheck` (kind, all linked names, offenders), or `None` if the file is
     not a format this script understands (skip, not a failure).
     """
     with path.open("rb") as f:
         elf_needed = read_elf_needed(f)
         if elf_needed is not None:
-            return "elf", elf_needed, disallowed_libs("elf", elf_needed)
+            return BinaryCheck(
+                "elf",
+                tuple(elf_needed),
+                tuple(disallowed_libs("elf", elf_needed)),
+            )
         macho_dylibs = read_macho_dylibs(f)
         if macho_dylibs is not None:
-            return "macho", macho_dylibs, disallowed_libs("macho", macho_dylibs)
+            return BinaryCheck(
+                "macho",
+                tuple(macho_dylibs),
+                tuple(disallowed_libs("macho", macho_dylibs)),
+            )
     return None
 
 
@@ -324,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{binary}: skipped: unsupported format")
             continue
 
-        kind, needed, offenders = result
+        kind, needed, offenders = result.kind, result.linked, result.offenders
         if offenders:
             exit_code = 1
             print(

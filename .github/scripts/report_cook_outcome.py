@@ -35,19 +35,30 @@ import argparse
 import os
 import pathlib
 import sys
+from dataclasses import dataclass
 
 
 def truthy(value: str | None) -> bool:
     return (value or "").strip().lower() == "true"
 
 
-def classify(ran: bool, hit: bool, layer: str) -> tuple[str, str]:
-    """Return (level, message). `level` is 'notice' or 'warning'."""
+@dataclass(frozen=True)
+class Outcome:
+    """An annotation `level` ('notice' or 'warning') and its message."""
+
+    level: str
+    message: str
+
+
+def classify(ran: bool, hit: bool, layer: str) -> Outcome:
+    """Return the annotation level and message for this cook outcome."""
     if hit:
-        return "notice", "cook cache hit; soldr cook did not need to run"
+        return Outcome("notice", "cook cache hit; soldr cook did not need to run")
     if ran:
-        return "notice", f"soldr cook ran and will save (layer={layer or 'unknown'})"
-    return (
+        return Outcome(
+            "notice", f"soldr cook ran and will save (layer={layer or 'unknown'})"
+        )
+    return Outcome(
         "warning",
         "soldr cook neither hit the cache nor ran successfully -- no cook "
         "cache will be written for this lane. This does not fail the build "
@@ -65,7 +76,8 @@ def main(argv: list[str] | None = None) -> int:
     hit = truthy(os.environ.get("COOK_HIT"))
     layer = (os.environ.get("COOK_LAYER") or "").strip()
 
-    level, message = classify(ran, hit, layer)
+    outcome = classify(ran, hit, layer)
+    level, message = outcome.level, outcome.message
     line = f"cook[{args.target}]: {message}"
 
     # A GitHub annotation makes it visible on the run summary page, not just

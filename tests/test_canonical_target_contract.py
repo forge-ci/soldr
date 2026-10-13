@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from conftest import RELEASE_INCLUDED_TRIPLES, load_script_module
@@ -32,11 +33,41 @@ def rust_string_list(path: Path, constant: str) -> list[str]:
     return re.findall(r'"([^"]+)"', match.group(1))
 
 
-def rust_tuple_table(path: Path, constant: str) -> dict[str, str]:
+@dataclass(frozen=True, order=True)
+class TableRow:
+    """One `("key", "value")` row of a Rust tuple table."""
+
+    key: str
+    value: str
+
+
+@dataclass(frozen=True)
+class RustTable:
+    """A Rust `&[(&str, &str)]` table; a repeated key keeps its last value."""
+
+    rows: tuple[TableRow, ...]
+
+    def get(self, key: str) -> str | None:
+        found = None
+        for row in self.rows:
+            if row.key == key:
+                found = row.value
+        return found
+
+    def deduplicated(self) -> list[TableRow]:
+        return sorted({row.key: row for row in self.rows}.values())
+
+
+def rust_tuple_table(path: Path, constant: str) -> RustTable:
     text = path.read_text(encoding="utf-8")
     match = re.search(rf"pub const {constant}[^=]*= &\[(.*?)\];", text, re.DOTALL)
     assert match, f"missing Rust table {constant} in {path.relative_to(ROOT)}"
-    return dict(re.findall(r'\("([^"]+)",\s*"([^"]+)"\)', match.group(1)))
+    return RustTable(
+        tuple(
+            TableRow(key, value)
+            for key, value in re.findall(r'\("([^"]+)",\s*"([^"]+)"\)', match.group(1))
+        )
+    )
 
 
 def workflow_job(text: str, job: str) -> str:
@@ -52,7 +83,9 @@ def workflow_job(text: str, job: str) -> str:
 def test_runtime_and_manifest_mirrors_match_contract() -> None:
     rows = contract_targets()
     expected_triples = [row["triple"] for row in rows]
-    expected_aliases = {row["alias"]: row["triple"] for row in rows}
+    expected_aliases = sorted(
+        {row["alias"]: TableRow(row["alias"], row["triple"]) for row in rows}.values()
+    )
 
     core = rust_string_list(
         ROOT / "crates" / "soldr-core" / "src" / "core" / "canonical_targets.rs",
@@ -73,7 +106,7 @@ def test_runtime_and_manifest_mirrors_match_contract() -> None:
     assert core == expected_triples, (
         "CANONICAL_TARGETS drifted from canonical-targets.json"
     )
-    assert aliases == expected_aliases, (
+    assert aliases.deduplicated() == expected_aliases, (
         "CANONICAL_ALIASES drifted from canonical-targets.json"
     )
     assert manifest_targets == expected_triples, (
@@ -282,7 +315,7 @@ def test_catalogue_mappings_cover_every_target() -> None:
     module = load_script_module(script, "fetch_catalogued_nextest")
 
     for row in rows:
-        expected = tuple(row["catalogue"]["nextest"])
+        expected = module.CatalogueQuery(*row["catalogue"]["nextest"])
         assert module.query_for_target(row["triple"]) == expected, (
             f"cargo-nextest mapping drifted for {row['triple']}"
         )
@@ -303,7 +336,7 @@ def test_catalogue_mappings_cover_every_target() -> None:
         for row in rows:
             exclusions = set(row["catalogue"].get("syslib_exclusions", []))
             if filename in exclusions:
-                assert row["triple"] not in mapping, (
+                assert mapping.get(row["triple"]) is None, (
                     f"{constant} unexpectedly covers explicitly excluded "
                     f"target {row['triple']}"
                 )
@@ -389,21 +422,27 @@ def test_release_build_matrix_is_generated_from_the_contract() -> None:
         if entry["release"]["status"] == "included"
     ]
 
-    assert [row["target"] for row in matrix] == [e["triple"] for e in included]
-    assert len({row["name"] for row in matrix}) == len(matrix)
+    assert [row.target for row in matrix] == [e["triple"] for e in included]
+    assert len({row.name for row in matrix}) == len(matrix)
     for row in matrix:
-        assert set(row) == {"name", "runner", "target", "setup_target", "binary"}
+        assert set(vars(row)) == {
+            "name",
+            "runner",
+            "target",
+            "setup_target",
+            "binary",
+        }
 
-    by_target = {row["target"]: row for row in matrix}
+    by_target = {row.target: row for row in matrix}
     # The two structural exceptions the old inline matrix encoded in
     # comments: ARM64 musl builds natively (its catalogue compiler is
     # i386-hosted) and Windows targets build as Linux cross lanes.
     arm_musl = by_target["aarch64-unknown-linux-musl"]
-    assert arm_musl["runner"] == "ubuntu-24.04-arm"
-    assert arm_musl["setup_target"] == ""
+    assert arm_musl.runner == "ubuntu-24.04-arm"
+    assert arm_musl.setup_target == ""
     for triple in ("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"):
-        assert by_target[triple]["runner"] == "ubuntu-24.04"
-        assert by_target[triple]["binary"] == "soldr.exe"
+        assert by_target[triple].runner == "ubuntu-24.04"
+        assert by_target[triple].binary == "soldr.exe"
 
 
 def test_release_workflow_consumes_the_generated_matrix() -> None:

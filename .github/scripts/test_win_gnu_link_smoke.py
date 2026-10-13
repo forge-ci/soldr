@@ -36,39 +36,44 @@ class PeDetectionTests(unittest.TestCase):
     def test_amd64_pe_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = _write(tmp, "ok.exe", _make_pe(0x8664))
-            ok, reason = script.is_pe_amd64(path)
+            check = script.is_pe_amd64(path)
+            ok, reason = check.ok, check.reason
             self.assertTrue(ok, reason)
 
     def test_non_amd64_machine_rejected(self) -> None:
         # 0x01C0 == ARM; a valid PE but not the target architecture.
         with tempfile.TemporaryDirectory() as tmp:
             path = _write(tmp, "arm.exe", _make_pe(0x01C0))
-            ok, reason = script.is_pe_amd64(path)
+            check = script.is_pe_amd64(path)
+            ok, reason = check.ok, check.reason
             self.assertFalse(ok)
             self.assertIn("AMD64", reason)
 
     def test_missing_mz_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = _write(tmp, "elf", b"\x7fELF" + b"\x00" * 0x80)
-            ok, reason = script.is_pe_amd64(path)
+            check = script.is_pe_amd64(path)
+            ok, reason = check.ok, check.reason
             self.assertFalse(ok)
             self.assertIn("MZ", reason)
 
     def test_missing_pe_sig_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = _write(tmp, "bad.exe", _make_pe(0x8664, pe_sig=b"XX\x00\x00"))
-            ok, reason = script.is_pe_amd64(path)
+            check = script.is_pe_amd64(path)
+            ok, reason = check.ok, check.reason
             self.assertFalse(ok)
             self.assertIn("PE", reason)
 
     def test_truncated_file_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = _write(tmp, "tiny", b"MZ")
-            ok, _ = script.is_pe_amd64(path)
+            ok = script.is_pe_amd64(path).ok
             self.assertFalse(ok)
 
     def test_missing_file_rejected(self) -> None:
-        ok, reason = script.is_pe_amd64("/nonexistent/never.exe")
+        check = script.is_pe_amd64("/nonexistent/never.exe")
+        ok, reason = check.ok, check.reason
         self.assertFalse(ok)
         self.assertIn("cannot read", reason)
 

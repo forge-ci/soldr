@@ -132,13 +132,19 @@ def derive_workspace_version(cargo_toml: str) -> str:
     raise DetectionError("failed to derive workspace version from Cargo.toml")
 
 
-def npm_metadata(package_json: str) -> tuple[str, str]:
+@dataclass(frozen=True)
+class NpmMetadata:
+    name: str
+    version: str
+
+
+def npm_metadata(package_json: str) -> NpmMetadata:
     data = json.loads(package_json)
     name = data.get("name") or ""
     version = data.get("version") or ""
     if not name or not version:
         raise DetectionError("failed to derive npm package metadata from package.json")
-    return name, version
+    return NpmMetadata(name=name, version=version)
 
 
 def validate_candidate(cargo_version: str, npm_package_version: str) -> str:
@@ -260,13 +266,19 @@ def fetch_release_json(version: str) -> dict | None:
         raise
 
 
-def fetch_pypi_state(cargo_version: str) -> tuple[str, int]:
+@dataclass(frozen=True)
+class PypiState:
+    latest: str
+    file_count: int
+
+
+def fetch_pypi_state(cargo_version: str) -> PypiState:
     data = fetch_json(f"https://pypi.org/pypi/{PYPI_PROJECT}/json")
     latest = (data.get("info") or {}).get("version") or ""
     if not latest:
         raise DetectionError("failed to fetch latest PyPI version for soldr")
     files = (data.get("releases") or {}).get(cargo_version) or []
-    return latest, len(files)
+    return PypiState(latest=latest, file_count=len(files))
 
 
 def fetch_npm_has_version(package_name: str, cargo_version: str) -> bool:
@@ -283,22 +295,20 @@ def collect_state(force_pypi_publish: bool) -> ReleaseState:
     cargo_version = derive_workspace_version(
         (REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8")
     )
-    npm_name, npm_version = npm_metadata(
-        (REPO_ROOT / "package.json").read_text(encoding="utf-8")
-    )
-    version = validate_candidate(cargo_version, npm_version)
+    npm = npm_metadata((REPO_ROOT / "package.json").read_text(encoding="utf-8"))
+    version = validate_candidate(cargo_version, npm.version)
     expected = expected_github_assets(version, included_triples())
-    pypi_latest, pypi_file_count = fetch_pypi_state(cargo_version)
+    pypi = fetch_pypi_state(cargo_version)
     return ReleaseState(
         version=version,
         cargo_version=cargo_version,
-        npm_package_name=npm_name,
-        npm_package_version=npm_version,
+        npm_package_name=npm.name,
+        npm_package_version=npm.version,
         tag_exists=tag_exists(version),
         github=github_release_state(fetch_release_json(version), expected),
-        pypi_latest=pypi_latest,
-        pypi_file_count=pypi_file_count,
-        npm_has_version=fetch_npm_has_version(npm_name, cargo_version),
+        pypi_latest=pypi.latest,
+        pypi_file_count=pypi.file_count,
+        npm_has_version=fetch_npm_has_version(npm.name, cargo_version),
         force_pypi_publish=force_pypi_publish,
     )
 

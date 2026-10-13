@@ -39,9 +39,7 @@ def load_release_completeness() -> Any:
 RELEASE_COMPLETENESS = load_release_completeness()
 
 
-def verify_release_assets(
-    tag: str, release: dict[str, Any], *, draft: bool = False
-) -> list[str]:
+def verify_release_assets(tag: str, release: dict, *, draft: bool = False) -> list[str]:
     """Return named failures for an incomplete GitHub Release.
 
     By default the release must be published. With `draft`, it must still be
@@ -71,7 +69,7 @@ def verify_release_assets(
     return failures
 
 
-def fetch_release(tag: str, repo: str) -> dict[str, Any]:
+def fetch_release(tag: str, repo: str) -> dict:
     """Read release metadata through the runner's authenticated gh CLI."""
     result = run_captured(
         ["gh", "release", "view", tag, "--repo", repo, "--json", "assets,isDraft"],

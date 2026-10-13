@@ -30,6 +30,7 @@ import argparse
 import pathlib
 import re
 import sys
+from dataclasses import dataclass
 
 # `run: >` or `run: >-` (optionally with an indentation indicator), then the
 # indented block that follows it. Both spellings occur in this repo: `run:` on
@@ -37,9 +38,17 @@ import sys
 FOLDED_RUN = re.compile(r"^(\s*(?:-\s+)?)run:\s*>-?\d*\s*$")
 
 
-def offending_blocks(text: str) -> list[tuple[int, str]]:
-    """Return (line number, first offending line) for each folded run block."""
-    found: list[tuple[int, str]] = []
+@dataclass(frozen=True)
+class OffendingBlock:
+    """The first `#` line hidden inside one folded `run: >` block."""
+
+    line_number: int
+    line: str
+
+
+def offending_blocks(text: str) -> list[OffendingBlock]:
+    """Return the first offending line of each folded run block."""
+    found: list[OffendingBlock] = []
     lines = text.splitlines()
     i = 0
     while i < len(lines):
@@ -55,7 +64,7 @@ def offending_blocks(text: str) -> list[tuple[int, str]]:
             if line.strip() and (len(line) - len(line.lstrip())) <= indent:
                 break
             if line.lstrip().startswith("#"):
-                found.append((j + 1, line.strip()))
+                found.append(OffendingBlock(j + 1, line.strip()))
                 break
             j += 1
         i = j if j > i else i + 1
@@ -69,10 +78,10 @@ def main(argv: list[str] | None = None) -> int:
 
     problems: list[str] = []
     for path in sorted(pathlib.Path(args.workflows).glob("*.yml")):
-        for line_no, line in offending_blocks(path.read_text(encoding="utf-8")):
+        for block in offending_blocks(path.read_text(encoding="utf-8")):
             problems.append(
-                f"{path}:{line_no}: `#` inside a folded `run: >` block.\n"
-                f"     {line}\n"
+                f"{path}:{block.line_number}: `#` inside a folded `run: >` block.\n"
+                f"     {block.line}\n"
                 "     A folded scalar joins these lines into one, so the shell "
                 "treats this `#` as a comment and DROPS every argument after "
                 "it. Move the prose to a YAML comment above the step, or use a "

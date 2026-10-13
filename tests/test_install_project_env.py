@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -53,9 +54,15 @@ def _fake_uv(bin_dir: Path, log: Path) -> None:
     uv.chmod(0o755)
 
 
+@dataclass(frozen=True)
+class InstallRun:
+    result: subprocess.CompletedProcess[str]
+    calls: tuple[str, ...]
+
+
 def _run_install(
     workdir: Path, tmp_path: Path, extra_env: dict[str, str]
-) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+) -> InstallRun:
     log = tmp_path / "uv.log"
     bin_dir = tmp_path / "bin"
     _fake_uv(bin_dir, log)
@@ -80,7 +87,7 @@ def _run_install(
         check=False,
     )
     calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
-    return result, calls
+    return InstallRun(result, tuple(calls))
 
 
 def test_container_project_environment_is_where_the_env_is_written(
@@ -90,11 +97,12 @@ def test_container_project_environment_is_where_the_env_is_written(
     checkout.mkdir()
     venv = tmp_path / "container-venv"
 
-    result, calls = _run_install(
+    install = _run_install(
         checkout,
         tmp_path,
         {"UV_PROJECT_ENVIRONMENT": str(venv), "container": "docker"},
     )
+    result, calls = install.result, install.calls
 
     assert result.returncode == 0, result.stderr
     assert calls[0].startswith(f"venv {venv} "), calls
@@ -108,9 +116,8 @@ def test_host_default_stays_in_the_checkout(tmp_path: Path) -> None:
 
     # soldr#3565: host-contract case -- ask the script to probe as if on a
     # host so this passes inside CI's container too.
-    result, calls = _run_install(
-        checkout, tmp_path, {"SOLDR_INSTALL_CONTAINER_CHECK": "off"}
-    )
+    install = _run_install(checkout, tmp_path, {"SOLDR_INSTALL_CONTAINER_CHECK": "off"})
+    result, calls = install.result, install.calls
 
     assert result.returncode == 0, result.stderr
     assert calls[0].startswith("venv .venv --python 3.13 "), calls
@@ -123,10 +130,11 @@ def test_container_without_project_environment_refuses_before_uv(
     checkout = tmp_path / "repo"
     checkout.mkdir()
 
-    result, calls = _run_install(checkout, tmp_path, {"container": "podman"})
+    install = _run_install(checkout, tmp_path, {"container": "podman"})
+    result, calls = install.result, install.calls
 
     assert result.returncode != 0
-    assert calls == [], "uv must not run, or it writes .venv into the mount"
+    assert not calls, "uv must not run, or it writes .venv into the mount"
     assert "UV_PROJECT_ENVIRONMENT" in result.stderr
     assert "soldr#3519" in result.stderr
     assert not (checkout / ".venv").exists()
@@ -143,12 +151,11 @@ def test_unusable_checkout_venv_fails_with_the_remedy(tmp_path: Path) -> None:
 
     # soldr#3565: host-contract case -- bypass the container refusal so the
     # broken-.venv remedy is what this asserts, on any runner.
-    result, calls = _run_install(
-        checkout, tmp_path, {"SOLDR_INSTALL_CONTAINER_CHECK": "off"}
-    )
+    install = _run_install(checkout, tmp_path, {"SOLDR_INSTALL_CONTAINER_CHECK": "off"})
+    result, calls = install.result, install.calls
 
     assert result.returncode != 0
-    assert calls == []
+    assert not calls
     assert "rm -rf .venv" in result.stderr
     assert "soldr#3519" in result.stderr
 
@@ -169,10 +176,11 @@ def test_container_check_refusal_fires_without_the_override(tmp_path: Path) -> N
         if override is not None:
             extra_env["SOLDR_INSTALL_CONTAINER_CHECK"] = override
 
-        result, calls = _run_install(checkout, tmp_path, extra_env)
+        install = _run_install(checkout, tmp_path, extra_env)
+        result, calls = install.result, install.calls
 
         assert result.returncode != 0, override
-        assert calls == [], (override, calls)
+        assert not calls, (override, calls)
         assert "UV_PROJECT_ENVIRONMENT" in result.stderr, override
         assert "soldr#3519" in result.stderr, override
         assert not (checkout / ".venv").exists(), override
@@ -190,11 +198,12 @@ def test_container_check_off_suppresses_every_marker(tmp_path: Path) -> None:
     checkout.mkdir()
 
     for override in ("off", "OFF", " off ", "0", "false", "no"):
-        result, calls = _run_install(
+        install = _run_install(
             checkout,
             tmp_path,
             {"container": "podman", "SOLDR_INSTALL_CONTAINER_CHECK": override},
         )
+        result, calls = install.result, install.calls
 
         assert result.returncode == 0, (override, result.stderr)
         assert calls[0].startswith("venv .venv --python 3.13 "), (override, calls)

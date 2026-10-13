@@ -46,6 +46,7 @@ import hashlib
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from release_artifacts import binary_suffix
@@ -56,20 +57,30 @@ SCHEMA_VERSION = 4
 ARCHIVE_FORMAT = "tar.zst"
 ARCHIVE_COMPRESSION_LEVEL = 19
 
-# (source file, regex, human name) for each pinned version the manifest
-# reports. Read from the tree rather than passed in, so the manifest cannot
-# disagree with the source it was built from.
-ZCCACHE_VERSION = (
+
+@dataclass(frozen=True)
+class PinnedVersionSpec:
+    """Where one pinned version lives: source file, regex, and human name."""
+
+    relative: str
+    pattern: str
+    label: str
+
+
+# One spec for each pinned version the manifest reports. Read from the tree
+# rather than passed in, so the manifest cannot disagree with the source it
+# was built from.
+ZCCACHE_VERSION = PinnedVersionSpec(
     "Cargo.lock",
     r'(?ms)^\[\[package\]\]\nname = "zccache"\nversion = "([^"]+)"',
     "zccache",
 )
-CRGX_VERSION = (
+CRGX_VERSION = PinnedVersionSpec(
     "crates/soldr-fetch/src/fetch/mod.rs",
     r'MANAGED_CRGX_VERSION: &str = "(.*)";',
     "MANAGED_CRGX_VERSION",
 )
-CARGO_CHEF_VERSION = (
+CARGO_CHEF_VERSION = PinnedVersionSpec(
     "crates/soldr-fetch/src/fetch/known_tools.rs",
     r'CARGO_CHEF_PINNED_VERSION: &str = "(.*)";',
     "CARGO_CHEF_PINNED_VERSION",
@@ -108,14 +119,14 @@ def load_artifact_provenance(root: Path, target: str) -> dict:
     raise ManifestError(f"{target}: target is missing from {contract_path}")
 
 
-def read_pinned_version(root: Path, spec: tuple[str, str, str]) -> str:
+def read_pinned_version(root: Path, spec: PinnedVersionSpec) -> str:
     """First capture of `spec`'s regex in its file.
 
     Empty is an error rather than a default: a manifest that reports `""` for
     a pinned version looks answered, which the v0.8.29 provenance incident
     showed is worse than absent.
     """
-    relative, pattern, label = spec
+    relative, pattern, label = spec.relative, spec.pattern, spec.label
     text = (root / relative).read_text(encoding="utf-8")
     match = re.search(pattern, text, re.MULTILINE)
     if not match or not match.group(1):
@@ -141,7 +152,19 @@ def find_sidecar(
     return None
 
 
-def collect_debug_info(package_dir: Path, suffix: str) -> list[dict[str, str]]:
+@dataclass(frozen=True)
+class DebugSidecar:
+    """One debug-symbol sidecar recorded in the manifest's `debug_info`."""
+
+    name: str
+    sha256: str
+    format: str
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "sha256": self.sha256, "format": self.format}
+
+
+def collect_debug_info(package_dir: Path, suffix: str) -> list[DebugSidecar]:
     """The Windows PDB sidecar, if this is a Windows release -- and nothing else.
 
     soldr#3038: this used to also look for `soldr.dwp` / `soldr.dSYM` in
@@ -157,7 +180,7 @@ def collect_debug_info(package_dir: Path, suffix: str) -> list[dict[str, str]]:
     because the failure mode is silent and a future edit could easily wire a
     sidecar back into `package_dir` without knowing why that is dangerous.
     """
-    entries: list[dict[str, str]] = []
+    entries: list[DebugSidecar] = []
     if suffix:
         pdb = find_sidecar(package_dir, ["soldr.pdb", "soldr_cli.pdb"])
         if pdb is None:
@@ -166,7 +189,7 @@ def collect_debug_info(package_dir: Path, suffix: str) -> list[dict[str, str]]:
                 "missing soldr PDB sidecar in "
                 f"{package_dir} for Windows release; contents:\n{listing}"
             )
-        entries.append({"name": pdb.name, "sha256": sha256_file(pdb), "format": "pdb"})
+        entries.append(DebugSidecar(pdb.name, sha256_file(pdb), "pdb"))
     return entries
 
 
@@ -253,7 +276,9 @@ def main(argv: list[str] | None = None) -> int:
             target=args.target,
             suffix=suffix,
             digests=digests,
-            debug_info=collect_debug_info(package_dir, suffix),
+            debug_info=[
+                sidecar.to_dict() for sidecar in collect_debug_info(package_dir, suffix)
+            ],
             versions={
                 "zccache": read_pinned_version(args.repo_root, ZCCACHE_VERSION),
                 "crgx": read_pinned_version(args.repo_root, CRGX_VERSION),

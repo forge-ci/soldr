@@ -23,6 +23,7 @@ The fat format is a big-endian header followed by the untouched thin files:
 import argparse
 import struct
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 MH_MAGIC_64 = 0xFEEDFACF
@@ -35,8 +36,28 @@ DEFAULT_ALIGN = {CPU_TYPE_X86_64: 12, CPU_TYPE_ARM64: 14}
 NAMES = {CPU_TYPE_X86_64: "x86_64", CPU_TYPE_ARM64: "arm64"}
 
 
-def thin_info(path: Path) -> tuple[int, int, bytes]:
-    """(cputype, cpusubtype, contents) for one thin 64-bit Mach-O."""
+@dataclass(frozen=True)
+class ThinSlice:
+    """One thin 64-bit Mach-O: its CPU identity and raw contents."""
+
+    cputype: int
+    cpusubtype: int
+    data: bytes
+
+
+@dataclass(frozen=True)
+class FatArch:
+    """One `fat_arch` header entry laid out for a slice."""
+
+    cputype: int
+    cpusubtype: int
+    offset: int
+    size: int
+    align: int
+
+
+def thin_info(path: Path) -> ThinSlice:
+    """The cputype, cpusubtype and contents of one thin 64-bit Mach-O."""
     data = path.read_bytes()
     if len(data) < 16:
         raise SystemExit(f"{path}: too small to be a Mach-O")
@@ -47,44 +68,53 @@ def thin_info(path: Path) -> tuple[int, int, bytes]:
         raise SystemExit(f"{path}: not a 64-bit Mach-O (magic {magic:#x})")
     endian = "<" if magic == MH_MAGIC_64 else ">"
     cputype, cpusubtype = struct.unpack_from(endian + "ii", data, 4)
-    return cputype, cpusubtype, data
+    return ThinSlice(cputype, cpusubtype, data)
 
 
 def build(out: Path, inputs: list[Path]) -> None:
     slices = [thin_info(p) for p in inputs]
 
     seen: set[int] = set()
-    for (cputype, _, _), p in zip(slices, inputs, strict=True):
-        if cputype in seen:
+    for thin, p in zip(slices, inputs, strict=True):
+        if thin.cputype in seen:
             raise SystemExit(
-                f"{p}: duplicate architecture {NAMES.get(cputype, cputype)}"
+                f"{p}: duplicate architecture {NAMES.get(thin.cputype, thin.cputype)}"
             )
-        seen.add(cputype)
+        seen.add(thin.cputype)
 
     header = 8 + 20 * len(slices)
     offset = header
-    entries: list[tuple[int, int, int, int, int]] = []
-    for cputype, cpusubtype, data in slices:
-        align = DEFAULT_ALIGN.get(cputype, 14)
+    entries: list[FatArch] = []
+    for thin in slices:
+        align = DEFAULT_ALIGN.get(thin.cputype, 14)
         step = 1 << align
         offset = (offset + step - 1) // step * step
-        entries.append((cputype, cpusubtype, offset, len(data), align))
-        offset += len(data)
+        entries.append(
+            FatArch(thin.cputype, thin.cpusubtype, offset, len(thin.data), align)
+        )
+        offset += len(thin.data)
 
     blob = bytearray(struct.pack(">II", FAT_MAGIC, len(slices)))
-    for cputype, cpusubtype, off, size, align in entries:
-        blob += struct.pack(">iiIII", cputype, cpusubtype, off, size, align)
-    for (_, _, data), (_, _, off, _, _) in zip(slices, entries, strict=True):
-        blob += b"\x00" * (off - len(blob))
-        blob += data
+    for arch in entries:
+        blob += struct.pack(
+            ">iiIII",
+            arch.cputype,
+            arch.cpusubtype,
+            arch.offset,
+            arch.size,
+            arch.align,
+        )
+    for thin, arch in zip(slices, entries, strict=True):
+        blob += b"\x00" * (arch.offset - len(blob))
+        blob += thin.data
 
     out.write_bytes(bytes(blob))
     out.chmod(0o755)
-    for cputype, cpusubtype, off, size, align in entries:
+    for arch in entries:
         print(
-            f"  {NAMES.get(cputype, hex(cputype)):8} "
-            f"cputype={cputype:#x} subtype={cpusubtype} "
-            f"offset={off} size={size} align=2^{align}"
+            f"  {NAMES.get(arch.cputype, hex(arch.cputype)):8} "
+            f"cputype={arch.cputype:#x} subtype={arch.cpusubtype} "
+            f"offset={arch.offset} size={arch.size} align=2^{arch.align}"
         )
     print(f"wrote {out} ({out.stat().st_size} bytes, {len(slices)} slices)")
 

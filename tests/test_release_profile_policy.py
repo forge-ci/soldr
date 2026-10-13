@@ -41,10 +41,10 @@ def test_release_in_a_non_allowlisted_workflow_fails(mod, tmp_path):
     )
     findings = mod.scan(tmp_path)
     assert len(findings) == 1
-    name, number, line = findings[0]
-    assert name == "greedy.yml"
-    assert number == 3
-    assert "--release" in line
+    finding = findings[0]
+    assert finding.file == "greedy.yml"
+    assert finding.line_number == 3
+    assert "--release" in finding.line
 
 
 def test_an_allowlisted_workflow_is_skipped(mod, tmp_path):
@@ -166,7 +166,7 @@ def test_profile_release_is_flagged(mod, tmp_path):
     )
     findings = mod.scan(tmp_path)
     assert len(findings) == 1, f"--profile release must be caught: {findings}"
-    assert findings[0][1] == 3
+    assert findings[0].line_number == 3
 
 
 def test_profile_equals_release_is_flagged(mod, tmp_path):

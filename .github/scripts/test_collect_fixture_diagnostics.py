@@ -78,9 +78,7 @@ class CollectFixtureDiagnosticsTests(unittest.TestCase):
                 prefixes=collector.DEFAULT_PREFIXES,
             )
 
-            copied = sorted(
-                entry["path"].replace("\\", "/") for entry in index["copied"]
-            )
+            copied = sorted(entry.path.replace("\\", "/") for entry in index.copied)
             self.assertEqual(
                 copied,
                 [
@@ -126,9 +124,9 @@ class CollectFixtureDiagnosticsTests(unittest.TestCase):
                 prefixes=("soldr-rss-",),
                 max_file_bytes=32,
             )
-            entry = index["copied"][0]
-            self.assertTrue(entry["truncated"])
-            self.assertEqual(entry["bytes"], 32)
+            entry = index.copied[0]
+            self.assertTrue(entry.truncated)
+            self.assertEqual(entry.bytes, 32)
             body = (out / "soldr-rss-breach-cache-a-1" / "daemon-spawn.log").read_text(
                 encoding="utf-8"
             )
@@ -147,9 +145,9 @@ class CollectFixtureDiagnosticsTests(unittest.TestCase):
                 prefixes=("soldr-rss-",),
                 max_total_bytes=64,
             )
-            self.assertEqual(len(index["copied"]), 1)
-            self.assertEqual(len(index["skipped"]), 1)
-            self.assertEqual(index["skipped"][0]["reason"], "total-cap")
+            self.assertEqual(len(index.copied), 1)
+            self.assertEqual(len(index.skipped), 1)
+            self.assertEqual(index.skipped[0].reason, "total-cap")
 
     def test_main_returns_zero_and_writes_the_output_directory(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
