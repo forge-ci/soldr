@@ -30,6 +30,7 @@ belongs in `ci/*.py` / `.github/scripts/*.py`, not inline workflow YAML.
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import re
 import sys
@@ -43,10 +44,41 @@ from soldr._process import (  # noqa: E402 -- source-relative bootstrap precedes
     run_captured,
 )
 
-# A `-C linker=<path>` value soldr injects must always be an absolute path:
-# either the content-addressed clang driver shim (Linux) or the direct
-# resolved `reld` executable (Windows/macOS). It must never be a bare name.
+# A `-C linker=` value soldr injects is either the direct resolved `reld`
+# executable (Windows/macOS, absolute) or a generated content-addressed clang
+# driver shim (Linux). The shim is passed by its file name -- `clang-<digest>`
+# / `cc-<digest>` -- with its directory on the cargo child's search path, so
+# no cache-root path enters the compile's cache key (soldr#3766). It must
+# never be the bare `reld` name clang rejects.
 BARE_RELD_NAMES = {"reld", "reld.exe"}
+SHIM_NAME = re.compile(r"^(clang|cc)-[0-9a-f]{20}$")
+
+
+def soldr_root(soldr_bin: pathlib.Path, repo_root: pathlib.Path) -> pathlib.Path | None:
+    """The state root the build's own soldr selected (`soldr logs paths`)."""
+    result = run_captured(
+        [str(soldr_bin), "logs", "paths", "--json"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    try:
+        root = json.loads(result.stdout).get("root")
+    except json.JSONDecodeError:
+        return None
+    return pathlib.Path(root) if root else None
+
+
+def locate_shim(name: str, root: pathlib.Path | None) -> pathlib.Path | None:
+    """Find a generated shim by name under the soldr root (soldr#3766)."""
+    if root is None:
+        return None
+    for candidate in root.glob(f"**/linker-shims/v1/{name}"):
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -163,6 +195,7 @@ def main() -> int:  # noqa: C901
     force_rebuild(repo_root)
     build_log = run_verbose_build(soldr_bin, args.package, repo_root)
 
+    root = soldr_root(soldr_bin, repo_root)
     invocations = final_link_invocations(build_log, "soldr")
     if not invocations:
         print(build_log, file=sys.stderr)
@@ -191,18 +224,28 @@ def main() -> int:  # noqa: C901
                 f"(clang would reject --ld-path={linker}): {invocation[:200]}..."
             )
             continue
-        if not pathlib.Path(linker).is_absolute():
-            failures.append(f"linker value is not an absolute path: {linker}")
+        shim = None
+        if SHIM_NAME.match(linker):
+            shim = locate_shim(linker, root)
+            if shim is None:
+                failures.append(
+                    f"generated linker shim {linker} not found under soldr's roots"
+                )
+                continue
+        elif not pathlib.Path(linker).is_absolute():
+            failures.append(
+                f"linker value is not an absolute path or a shim name: {linker}"
+            )
             continue
-        if not pathlib.Path(linker).is_file():
+        elif not pathlib.Path(linker).is_file():
             failures.append(f"injected linker path does not exist on disk: {linker}")
             continue
 
         # On Linux this is a generated clang driver shim; read it back and
         # confirm the embedded --ld-path= is itself an absolute, existing
         # reld executable -- not a second layer of indirection to a bare name.
-        if "linker-shims" in linker:
-            shim_body = pathlib.Path(linker).read_text(encoding="utf-8")
+        if shim is not None:
+            shim_body = shim.read_text(encoding="utf-8")
             shim_match = re.search(r"--ld-path=(\S+)", shim_body)
             if shim_match is None:
                 failures.append(f"linker shim has no --ld-path=: {shim_body}")

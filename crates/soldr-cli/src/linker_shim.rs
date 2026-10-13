@@ -81,6 +81,55 @@ pub fn materialize_linker_driver_shim(
     Ok(())
 }
 
+/// The `CARGO_TARGET_*_LINKER` value to hand Cargo for `linker`.
+///
+/// soldr#3743 (Perf Matrix `cold-tar-untar-warm` at 0% hits): a generated
+/// shim lives under the cache root, and Cargo passes this value to every
+/// rustc as `-C linker=...`, which is part of the compile's cache key. An
+/// absolute shim path therefore made every unit miss after `soldr load`
+/// restored the cache under a different root (and across worktrees and CI
+/// runners). A shim is passed by file name instead, with its directory put on
+/// the cargo child's `PATH`: the name still carries the shim's content digest,
+/// so the key changes exactly when the generated command does, and nothing
+/// root-specific enters it. Any other linker value is returned unchanged.
+pub(crate) fn linker_value_for_command(
+    command: &mut std::process::Command,
+    linker: &str,
+) -> Result<String, SoldrError> {
+    let path = Path::new(linker);
+    let in_shim_dir = path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "linker-shims");
+    let (Some(dir), Some(name), true) = (path.parent(), path.file_name(), in_shim_dir) else {
+        return Ok(linker.to_string());
+    };
+    prepend_command_path(command, dir)?;
+    Ok(name.to_string_lossy().into_owned())
+}
+
+/// Put `dir` first on `command`'s `PATH` (its own value when set, else this
+/// process's).
+pub(crate) fn prepend_command_path(
+    command: &mut std::process::Command,
+    dir: &Path,
+) -> Result<(), SoldrError> {
+    let existing = command
+        .get_envs()
+        .find(|(key, _)| *key == std::ffi::OsStr::new("PATH"))
+        .map(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+        .unwrap_or_else(|| std::env::var_os("PATH"));
+    let mut entries = vec![dir.to_path_buf()];
+    if let Some(existing) = existing {
+        entries.extend(std::env::split_paths(&existing));
+    }
+    let joined = std::env::join_paths(entries)
+        .map_err(|error| SoldrError::Other(format!("invalid PATH: {error}")))?;
+    command.env("PATH", joined);
+    Ok(())
+}
+
 /// Write `body` to `<bin>/linker-shims/v1/<stem>-<digest>`, the content
 /// digest in the name so the `CARGO_TARGET_*_LINKER` cache-key input changes
 /// whenever the generated command does.

@@ -30,6 +30,17 @@ fn command_env_override(
         .map(|(_, value)| value.map(OsString::from))
 }
 
+/// Where the cargo child would find the shim `name` through its `PATH`.
+fn resolve_shim_on_command_path(
+    command: &std::process::Command,
+    name: &str,
+) -> Option<std::path::PathBuf> {
+    let path = command_env_override(command, "PATH").flatten()?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
 fn argvec(s: &str) -> Vec<String> {
     s.split_whitespace().map(String::from).collect()
 }
@@ -38,10 +49,19 @@ fn assert_generated_linux_linker(command: &std::process::Command, context: &str)
     let linker = command_env_override(command, LINKER_KEY)
         .and_then(|value| value)
         .expect("Linux linker injection");
+    let name = linker.to_string_lossy();
     assert!(
-        linker.to_string_lossy().contains("linker-shims"),
-        "{context}: expected generated linker shim, got {}",
-        linker.to_string_lossy(),
+        !name.contains('/') && name.starts_with("clang-"),
+        "{context}: expected a generated linker shim passed by file name, got {name}",
+    );
+    // The helper's temporary root is gone by now, so check the search-path
+    // entry rather than the file; the reld end-to-end test reads a live shim.
+    let search = command_env_override(command, "PATH")
+        .flatten()
+        .unwrap_or_default();
+    assert!(
+        std::env::split_paths(&search).any(|dir| dir.ends_with("linker-shims/v1")),
+        "{context}: the shim's directory must be on the cargo child's search path: {search:?}",
     );
     assert_eq!(
         command_env_override(command, RUSTFLAGS_KEY),
@@ -243,11 +263,10 @@ fn cargo_toml_metadata_linker_reld_resolves_absolute_path_end_to_end() {
     // (materialize_linker_driver_shim); everywhere else it is the direct
     // absolute reld path. Either way it must never be the literal `reld`.
     if crate::platform::host::facts::os() == crate::platform::host::facts::HostOs::Linux {
-        assert!(
-            linker.contains("linker-shims"),
-            "linux reld uses a generated clang driver shim: {linker}"
-        );
-        let shim_body = std::fs::read_to_string(linker.as_ref()).expect("read shim");
+        let shim = resolve_shim_on_command_path(&command, &linker).unwrap_or_else(|| {
+            panic!("linux reld uses a generated clang driver shim on PATH: {linker}")
+        });
+        let shim_body = std::fs::read_to_string(shim).expect("read shim");
         assert!(
             shim_body.contains(&format!("--ld-path={}", reld_bin.display())),
             "shim must embed the resolved absolute reld path, not a bare name: {shim_body}"

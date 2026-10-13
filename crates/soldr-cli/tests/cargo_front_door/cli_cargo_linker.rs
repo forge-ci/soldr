@@ -84,6 +84,16 @@ fn prepend_to_path(command: &mut Command, dir: &Path) {
 /// `--ld-path=reld` on Linux (so the driver injects CRT) and macOS (rustc's
 /// `darwin-cc` flavor passes clang-driver argv, soldr#3359), direct on Windows
 /// (reld bridges to lld-link).
+/// A generated linker shim is handed to Cargo by its content-addressed file
+/// name, never an absolute path under the cache root: `-C linker=` is part of
+/// every rustc's cache key, so a root-specific path made a cache restored
+/// under another root miss everything (Perf Matrix cold-tar-untar-warm).
+fn is_generated_shim_name(value: &str) -> bool {
+    !value.contains('/')
+        && !value.contains('\\')
+        && (value.starts_with("clang-") || value.starts_with("cc-"))
+}
+
 fn assert_reld_injected(log: &str) {
     let linker = extract_linker_env_value(log).unwrap_or_else(|| {
         panic!("expected CARGO_TARGET_<triple>_LINKER in fake cargo log: {log}")
@@ -94,7 +104,7 @@ fn assert_reld_injected(log: &str) {
         soldr_platform::host::facts::HostOs::Linux | soldr_platform::host::facts::HostOs::MacOs
     ) {
         assert!(
-            linker.contains("linker-shims"),
+            is_generated_shim_name(&linker),
             "linux/macos reld uses a generated clang driver shim: {log}"
         );
         assert!(
@@ -191,7 +201,7 @@ fn cargo_front_door_default_falls_back_to_rust_lld_without_reld() {
             panic!("expected CARGO_TARGET_<triple>_LINKER in fake cargo log: {log}")
         });
         assert!(
-            linker_value.contains("linker-shims"),
+            is_generated_shim_name(&linker_value),
             "linux fallback uses a generated clang driver shim: {log}"
         );
         assert!(
@@ -284,7 +294,7 @@ fn cargo_front_door_rust_lld_injects_target_linker_env() {
         });
         let rustflags_value = extract_rustflags_env_value(&log);
         assert!(
-            linker_value.contains("linker-shims"),
+            is_generated_shim_name(&linker_value),
             "non-windows non-macos rust-lld should use a clang driver shim: {log}"
         );
         assert!(
