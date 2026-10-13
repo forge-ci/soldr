@@ -13,16 +13,25 @@ use std::path::{Path, PathBuf};
 use crate::core::{SoldrError, SoldrPaths};
 
 pub(crate) const LLD_CONFIG_BODY: &str = "-fuse-ld=lld\n";
-const LLD_CONFIG_NAME: &str = "soldr-fuse-ld-lld-v1.cfg";
+const LLD_CONFIG_NAME: &str = "soldr-darwin-link-lld-v1.cfg";
 
 /// Materialize the managed clang configuration file and return its path.
-pub(crate) fn ensure_lld_config(_paths: &SoldrPaths) -> Result<PathBuf, SoldrError> {
-    Err(SoldrError::Other("not implemented".into()))
+pub(crate) fn ensure_lld_config(paths: &SoldrPaths) -> Result<PathBuf, SoldrError> {
+    let dir = paths.bin.join("clang-config");
+    let file = dir.join(LLD_CONFIG_NAME);
+    if std::fs::read_to_string(&file).is_ok_and(|body| body == LLD_CONFIG_BODY) {
+        return Ok(file);
+    }
+    std::fs::create_dir_all(&dir)?;
+    let staged = dir.join(format!(".{LLD_CONFIG_NAME}.{}.tmp", std::process::id()));
+    std::fs::write(&staged, LLD_CONFIG_BODY)?;
+    std::fs::rename(&staged, &file)?;
+    Ok(file)
 }
 
 /// The C/C++ flag fragment (leading space) that selects lld link-only.
-pub(crate) fn link_only_lld_flag(_config: &Path) -> String {
-    " -fuse-ld=lld".to_string()
+pub(crate) fn link_only_lld_flag(config: &Path) -> String {
+    format!(" --config={}", config.display())
 }
 
 #[cfg(test)]
@@ -41,13 +50,13 @@ mod tests {
 
     #[test]
     fn compile_flags_carry_the_config_not_the_raw_linker_flag() {
-        let flag = link_only_lld_flag(Path::new("/s/soldr-fuse-ld-lld-v1.cfg"));
-        assert_eq!(flag, " --config=/s/soldr-fuse-ld-lld-v1.cfg");
+        let flag = link_only_lld_flag(Path::new("/s/soldr-darwin-link-lld-v1.cfg"));
+        assert_eq!(flag, " --config=/s/soldr-darwin-link-lld-v1.cfg");
         assert!(!flag.contains("-fuse-ld"));
     }
 
     /// With a real clang: a compile-only `-Werror` run is clean, and a link
-    /// still selects lld. Skipped where no clang is on PATH.
+    /// still selects lld. Runs against `SOLDR_LLVM_DIR`'s clang; skipped without it.
     #[test]
     fn real_clang_is_warning_free_on_compile_and_uses_lld_on_link() {
         let tmp = tempfile::tempdir().unwrap();
@@ -56,7 +65,13 @@ mod tests {
         let src = tmp.path().join("f.c");
         std::fs::write(&src, "int f(void) { return 0; }\n").unwrap();
         let config = format!("--config={}", cfg.display());
-        let Ok(compile) = std::process::Command::new("clang")
+        // Only the managed (unwrapped) clang is meaningful here: distro and
+        // nix wrappers inject flags of their own.
+        let Some(dir) = std::env::var_os("SOLDR_LLVM_DIR") else {
+            return;
+        };
+        let clang = std::path::Path::new(&dir).join("clang");
+        let Ok(compile) = std::process::Command::new(&clang)
             .args([
                 config.as_str(),
                 "--target=arm64-apple-darwin",
@@ -73,7 +88,7 @@ mod tests {
         let stderr = String::from_utf8_lossy(&compile.stderr);
         assert!(compile.status.success(), "compile failed: {stderr}");
         assert!(!stderr.contains("unused"), "{stderr}");
-        let link = std::process::Command::new("clang")
+        let link = std::process::Command::new(&clang)
             .args([config.as_str(), "--target=x86_64-unknown-linux-gnu", "-###"])
             .arg(tmp.path().join("f.o"))
             .output()
