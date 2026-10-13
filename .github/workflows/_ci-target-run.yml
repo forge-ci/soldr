@@ -177,7 +177,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for bin in artifact/package/soldr artifact/package/soldr-daemon artifact/package/tools/cargo-nextest; do
+          for bin in artifact/package/soldr artifact/package/tools/cargo-nextest; do
             if [ -f "$bin" ]; then
               chmod +x "$bin"
               echo "chmod +x $bin"
@@ -218,7 +218,9 @@ jobs:
           nextest_bin="$GITHUB_WORKSPACE/artifact/package/tools/cargo-nextest$suffix"
           fixtures="$GITHUB_WORKSPACE/artifact/package/fixtures"
           test -f "$soldr_bin"
-          test -f "$daemon_bin"
+          # soldr#3539: the artifact ships soldr once; soldr-daemon is the
+          # same bytes under the multicall name, derived here.
+          cp "$soldr_bin" "$daemon_bin"
           test -f "$nextest_bin"
           test -d "$fixtures"
           {

@@ -902,9 +902,9 @@ jobs:
           case "$target" in *-pc-windows-*) suffix=".exe" ;; esac
           mkdir -p dist/package
           cp "target/$target/$ci_profile/soldr$suffix" "dist/package/soldr$suffix"
-          cp "dist/package/soldr$suffix" "dist/package/soldr-daemon$suffix"
+          # soldr#3539: soldr-daemon is byte-identical to soldr; the target
+          # run derives it locally instead of uploading 130-160 MB again.
           chmod +x "dist/package/soldr$suffix" 2>/dev/null || true
-          chmod +x "dist/package/soldr-daemon$suffix" 2>/dev/null || true
           # Fixtures go alongside the binary so the target-run job can
           # set SOLDR_TEST_FIXTURES_DIR via the helper from #1040.
           if [ -d crates/soldr-cli/tests/fixtures ]; then
