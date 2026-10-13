@@ -974,12 +974,19 @@ fn daemon_rss_retention_rate_per_compile_stays_within_budget() {
     drop(cleanup);
 }
 
-/// Deliberately below the daemon's own real compile-driven peak while
-/// serving [`write_workload_workspace`]'s 12-crate chained build (~78-93
-/// MiB, measured directly while building this reproduction on a real host)
-/// but comfortably above a cold daemon's startup baseline, so the breach
-/// happens once real compiles are underway, not before.
-const GUARANTEED_BREACH_CEILING_BYTES: u64 = 32 * 1024 * 1024;
+/// Below any soldr-daemon's own resident footprint, so the breach is
+/// guaranteed no matter how lean the daemon gets.
+///
+/// soldr#3762: this used to be 32 MiB, chosen to sit between a cold daemon's
+/// startup baseline and its compile-driven peak (~78-93 MiB when measured).
+/// Daemon memory work since then (#3713's bounded event batcher, among
+/// others) brought a whole 12-crate build on macOS Intel down to a 31.4 MiB
+/// peak, so the daemon sampled 12 times, never breached, and the test failed
+/// with "no memory-breach dump appeared". A ceiling tuned between two
+/// moving measurements is a test that fails when the product gets better.
+/// The breach no longer has to land mid-compile: the dump assertions below
+/// already allow an empty in-flight compile list.
+const GUARANTEED_BREACH_CEILING_BYTES: u64 = 8 * 1024 * 1024;
 
 /// soldr#3057: reproduces the reversed decision -- on breach, the daemon
 /// dumps its memory state and exits immediately, and a caller driving a
