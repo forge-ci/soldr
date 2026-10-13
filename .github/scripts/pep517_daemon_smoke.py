@@ -71,12 +71,13 @@ def venv_bin(venv: Path) -> Path:
     return venv / ("Scripts" if os.name == "nt" else "bin")
 
 
-def isolated_smoke_env(source: dict[str, str] | None = None) -> dict[str, str]:
-    """Keep the installed wheel under test independent of setup-soldr."""
-    env = os.environ.copy() if source is None else source.copy()
+def scrub_outer_soldr_env(env: dict[str, str]) -> None:
+    """Drop, in place, the outer setup-soldr variables from a smoke environment.
+
+    Keeps the installed wheel under test independent of setup-soldr.
+    """
     for name in OUTER_SOLDR_ENV:
         env.pop(name, None)
-    return env
 
 
 def run(
@@ -328,7 +329,8 @@ def main() -> int:
 
         write_project(project)
         wheelhouse.mkdir()
-        env = isolated_smoke_env()
+        env = os.environ.copy()
+        scrub_outer_soldr_env(env)
         env["PATH"] = str(venv_bin(venv)) + os.pathsep + env.get("PATH", "")
         env["SOLDR_DAEMON_REQUIRED"] = "1"
         env.setdefault("SOLDR_DAEMON_SPAWN_RETRY_BUDGET_MS", "5000")

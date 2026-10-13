@@ -12,7 +12,7 @@ MODULE = load_script_module(SCRIPT, "install_soldr_maturin")
 
 
 def test_distribution_comes_from_runtime_contract() -> None:
-    assert MODULE.distribution() == ("soldr-maturin", "1.14.1.post1")
+    assert MODULE.distribution() == MODULE.Distribution("soldr-maturin", "1.14.1.post1")
 
 
 def test_install_command_forces_an_uncached_sdist_build() -> None:

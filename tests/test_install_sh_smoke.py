@@ -29,6 +29,7 @@ import stat
 import sys
 import tarfile
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -98,7 +99,15 @@ def _write_executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _make_archives(tmp: Path) -> dict[str, Path]:
+@dataclass(frozen=True)
+class Archives:
+    """The stand-in release archives, one per supported extension."""
+
+    targz: Path
+    zip: Path
+
+
+def _make_archives(tmp: Path) -> Archives:
     """A tar.gz and a zip, each holding a stand-in `soldr` binary.
 
     Both, because `detect_target()` picks `zip` on Windows and `tar.gz`
@@ -119,7 +128,7 @@ def _make_archives(tmp: Path) -> dict[str, Path]:
         for name in ("soldr", "soldr.exe"):
             archive.write(payload / name, arcname=name)
 
-    return {"tar.gz": targz, "zip": zipped}
+    return Archives(targz, zipped)
 
 
 def _release_json(with_assets: bool) -> str:
@@ -136,7 +145,7 @@ def _release_json(with_assets: bool) -> str:
     return json.dumps({"tag_name": TAG, "assets": assets})
 
 
-def _stub_curl(bin_dir: Path, release_json: str, archives: dict[str, Path]) -> None:
+def _stub_curl(bin_dir: Path, release_json: str, archives: Archives) -> None:
     """Serve the API call and the asset download from disk.
 
     The script calls curl exactly twice: once for release metadata, once for
@@ -164,8 +173,8 @@ RELEASE_JSON_EOF
 fi
 
 case "$out" in
-  *.zip) src={archives["zip"].as_posix()!r} ;;
-  *)     src={archives["tar.gz"].as_posix()!r} ;;
+  *.zip) src={archives.zip.as_posix()!r} ;;
+  *)     src={archives.targz.as_posix()!r} ;;
 esac
 cp "$src" "$out"
 """

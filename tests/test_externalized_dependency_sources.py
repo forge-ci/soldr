@@ -28,6 +28,7 @@ family, so a blanket "no path deps" rule would be wrong.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -53,16 +54,26 @@ def workspace_manifests() -> list[Path]:
     return [path for path in manifests if path.is_file()]
 
 
-def locked_packages() -> list[tuple[str, str | None]]:
-    """`(name, source)` for every package in Cargo.lock; `None` = local path."""
+@dataclass(frozen=True)
+class LockedPackage:
+    """A Cargo.lock package; `source` is `None` for a local path."""
+
+    name: str
+    source: str | None
+
+
+def locked_packages() -> list[LockedPackage]:
+    """Every package in Cargo.lock."""
     text = (REPO_ROOT / "Cargo.lock").read_text(encoding="utf-8")
-    packages: list[tuple[str, str | None]] = []
+    packages: list[LockedPackage] = []
     for block in text.split("[[package]]"):
         name = re.search(r'^name = "([^"]+)"', block, flags=re.MULTILINE)
         if not name:
             continue
         source = re.search(r'^source = "([^"]+)"', block, flags=re.MULTILINE)
-        packages.append((name.group(1), source.group(1) if source else None))
+        packages.append(
+            LockedPackage(name.group(1), source.group(1) if source else None)
+        )
     return packages
 
 
@@ -81,7 +92,7 @@ def test_the_scan_reaches_the_manifests_and_the_lockfile() -> None:
     packages = locked_packages()
     assert len(packages) > 100, f"Cargo.lock looks unparsed: {len(packages)} packages"
 
-    externalized = [name for name, _ in packages if is_externalized(name)]
+    externalized = [pkg.name for pkg in packages if is_externalized(pkg.name)]
     assert externalized, (
         "no zccache/running-process package in Cargo.lock at all -- either the "
         "dependency was dropped or the name match has stopped working, and "
@@ -94,9 +105,9 @@ def test_the_scan_reaches_the_manifests_and_the_lockfile() -> None:
 
 def test_every_externalized_package_comes_from_a_registry() -> None:
     local = [
-        name
-        for name, source in locked_packages()
-        if is_externalized(name) and not source
+        pkg.name
+        for pkg in locked_packages()
+        if is_externalized(pkg.name) and not pkg.source
     ]
     assert not local, (
         "these resolve to a local path, so every checkout compiles its own copy "
@@ -112,9 +123,9 @@ def test_no_externalized_package_comes_from_git() -> None:
     source cargo cannot share as a published artifact.
     """
     git_sourced = [
-        name
-        for name, source in locked_packages()
-        if is_externalized(name) and source and source.startswith("git+")
+        pkg.name
+        for pkg in locked_packages()
+        if is_externalized(pkg.name) and pkg.source and pkg.source.startswith("git+")
     ]
     assert not git_sourced, (
         f"expected registry sources, found git: {sorted(git_sourced)}"
@@ -124,15 +135,23 @@ def test_no_externalized_package_comes_from_git() -> None:
 # --------------------------------- manifests ---------------------------------
 
 
-def dependency_specs(manifest_text: str) -> list[tuple[str, str]]:
-    """`(dependency name, spec)` for every dependency-ish table entry.
+@dataclass(frozen=True)
+class DependencySpec:
+    """One dependency-ish table entry: its name and spec text."""
+
+    name: str
+    spec: str
+
+
+def dependency_specs(manifest_text: str) -> list[DependencySpec]:
+    """Every dependency-ish table entry.
 
     Text-scanned rather than TOML-parsed on purpose: this needs to catch the
     inline form (`zccache = { path = "..." }`), the section form
     (`[dependencies.zccache]`), and `[patch.crates-io]` entries alike, and the
     thing being detected is a substring in all three.
     """
-    specs: list[tuple[str, str]] = []
+    specs: list[DependencySpec] = []
     section = ""
     for line in manifest_text.splitlines():
         stripped = line.strip()
@@ -151,10 +170,10 @@ def dependency_specs(manifest_text: str) -> list[tuple[str, str]]:
                 "workspace",
             )
         ):
-            specs.append((key, stripped))
+            specs.append(DependencySpec(key, stripped))
         # `[dependencies.zccache]` style: the name is in the section header.
         if "." in section and section.rsplit(".", 1)[0].endswith("dependencies"):
-            specs.append((section.rsplit(".", 1)[1], stripped))
+            specs.append(DependencySpec(section.rsplit(".", 1)[1], stripped))
     return specs
 
 
@@ -162,9 +181,13 @@ def test_no_manifest_declares_a_path_dependency_on_them() -> None:
     offenders: list[str] = []
     for manifest in workspace_manifests():
         text = manifest.read_text(encoding="utf-8")
-        for name, spec in dependency_specs(text):
-            if is_externalized(name) and "path" in spec and "_vender" in spec:
-                offenders.append(f"{manifest.relative_to(REPO_ROOT)}: {spec}")
+        for dep in dependency_specs(text):
+            if (
+                is_externalized(dep.name)
+                and "path" in dep.spec
+                and "_vender" in dep.spec
+            ):
+                offenders.append(f"{manifest.relative_to(REPO_ROOT)}: {dep.spec}")
     assert not offenders, "path dependencies reintroduced (soldr#2835):\n" + "\n".join(
         offenders
     )

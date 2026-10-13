@@ -23,6 +23,7 @@ import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 
 # Use regular-file capture without an installed Python dependency.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -69,7 +70,7 @@ def soldr_cli_version(metadata: str) -> str:
 
 def release_build_environment(
     base: Mapping[str, str], *, target: str
-) -> dict[str, str]:
+) -> MappingProxyType[str, str]:
     env = dict(base)
     env.pop("RUSTC_WRAPPER", None)
     env.update(
@@ -101,7 +102,7 @@ def release_build_environment(
         # so "packed" (which runs dsymutil) stays the native answer here.
         # See docs/DEBUG_SIDECARS.md.
         env["CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO"] = "packed"
-    return env
+    return MappingProxyType(env)
 
 
 def build_binary(driver: Path, target: str) -> None:
@@ -248,13 +249,13 @@ def build_matrix_binary(driver: Path, target: str) -> None:
 
 def wheel_environment(
     base: Mapping[str, str], *, driver: Path, cargo_bridge: Path
-) -> dict[str, str]:
+) -> MappingProxyType[str, str]:
     env = dict(base)
     env.pop("RUSTC_WRAPPER", None)
     env["SOLDR_RELEASE_DRIVER"] = str(driver)
     env["SOLDR_RELEASE_TOOLCHAIN"] = TOOLCHAIN
     env["CARGO"] = str(cargo_bridge)
-    return env
+    return MappingProxyType(env)
 
 
 def resolve_toolchain_rustc(driver: Path, base: Mapping[str, str]) -> Path:
@@ -275,10 +276,10 @@ def resolve_toolchain_rustc(driver: Path, base: Mapping[str, str]) -> Path:
 
 def host_tool_environment(
     base: Mapping[str, str], *, driver: Path, cargo_bridge: Path, rustc: Path
-) -> dict[str, str]:
+) -> MappingProxyType[str, str]:
     """Remove wheel-target state while source-building the host Maturin tool."""
 
-    env = wheel_environment(base, driver=driver, cargo_bridge=cargo_bridge)
+    env = dict(wheel_environment(base, driver=driver, cargo_bridge=cargo_bridge))
     exact = {
         "AR",
         "CARGO_BUILD_TARGET",
@@ -305,7 +306,7 @@ def host_tool_environment(
     # defaults retain normal local/CI throughput when no caller limit exists.
     env.setdefault("CARGO_BUILD_JOBS", "2")
     env.setdefault("SOLDR_JOBS", "2")
-    return env
+    return MappingProxyType(env)
 
 
 def build_musl_wheel(driver: Path, target: str, expected_version: str) -> None:

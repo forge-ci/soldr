@@ -46,8 +46,8 @@ class TestTargetPlatformMapping:
             if target["release"]["status"] != "included":
                 continue
             mapping = support.platform_for_target(target["triple"])
-            assert mapping["os"]
-            assert mapping["arch"]
+            assert mapping.os
+            assert mapping.arch
 
     def test_unknown_target_fails_with_the_target_name(self) -> None:
         with pytest.raises(support.SupportBinaryError, match="made-up-target"):
@@ -128,7 +128,7 @@ class TestCatalogueIntegrity:
         monkeypatch.setattr(
             support,
             "load_tool_catalog",
-            lambda *_args: (
+            lambda *_args: support.ToolCatalog(
                 "https://example.invalid/crgx.json",
                 {
                     "releases": [
@@ -138,7 +138,7 @@ class TestCatalogueIntegrity:
                                 {
                                     "platform": support.platform_for_target(
                                         "x86_64-unknown-linux-gnu"
-                                    ),
+                                    ).to_dict(),
                                     "asset": {
                                         "filename": "crgx.zip",
                                         "urls": ["https://example.invalid/crgx.zip"],
@@ -202,7 +202,7 @@ class TestStaging:
                         {
                             "platform": support.platform_for_target(
                                 "x86_64-unknown-linux-gnu"
-                            ),
+                            ).to_dict(),
                             "asset": asset,
                         }
                     ],
@@ -212,7 +212,9 @@ class TestStaging:
         monkeypatch.setattr(
             support,
             "load_tool_catalog",
-            lambda *_args: ("https://example.invalid/crgx.json", catalog),
+            lambda *_args: support.ToolCatalog(
+                "https://example.invalid/crgx.json", catalog
+            ),
         )
         monkeypatch.setattr(
             support,
@@ -283,7 +285,7 @@ class TestStaging:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        parts: list[dict[str, object]] = [
+        parts = [
             {
                 "number": 1,
                 "sha256": "1" * 64,
@@ -291,7 +293,7 @@ class TestStaging:
                 "urls": ["https://parts.invalid/1"],
             }
         ]
-        asset: dict[str, object] = {
+        asset = {
             "filename": "crgx.zip",
             "sha256": "0" * 64,
             "size_bytes": 1,
@@ -317,7 +319,7 @@ class TestStaging:
     ) -> None:
         archive = zip_with("release/bin/crgx", b"preferred")
         digest = hashlib.sha256(archive).hexdigest()
-        platform = support.platform_for_target("x86_64-unknown-linux-gnu")
+        platform = support.platform_for_target("x86_64-unknown-linux-gnu").to_dict()
         catalog = {
             "releases": [
                 {
@@ -342,7 +344,9 @@ class TestStaging:
         monkeypatch.setattr(
             support,
             "load_tool_catalog",
-            lambda *_args: ("https://example.invalid/crgx.json", catalog),
+            lambda *_args: support.ToolCatalog(
+                "https://example.invalid/crgx.json", catalog
+            ),
         )
         attempts: list[str] = []
 

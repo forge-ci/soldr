@@ -19,13 +19,14 @@ def test_current_tree_passes_the_guard() -> None:
 def test_every_allowlist_entry_is_still_live() -> None:
     """A file that no longer spawns must lose its entry (anti-mask rule)."""
     counts = GUARD.spawn_counts()
-    stale = [rel for rel in GUARD.ALLOWLIST if counts.get(rel, 0) == 0]
+    live = {entry.path for entry in counts}
+    stale = [entry.path for entry in GUARD.ALLOWLIST if entry.path not in live]
     assert stale == [], f"allowlist entries for files with no spawns: {stale}"
 
 
 def test_a_new_spawn_file_is_a_named_violation() -> None:
     counts = GUARD.spawn_counts()
-    counts["crates/soldr-cli/src/imaginary_new_module.rs"] = 1
+    counts.append(GUARD.SpawnCount("crates/soldr-cli/src/imaginary_new_module.rs", 1))
     problems = GUARD.violations(counts)
     assert any(
         "imaginary_new_module.rs" in p and "no allowlist entry" in p for p in problems
@@ -34,8 +35,10 @@ def test_a_new_spawn_file_is_a_named_violation() -> None:
 
 def test_a_grown_count_is_a_named_violation() -> None:
     counts = GUARD.spawn_counts()
-    some_file = next(iter(GUARD.ALLOWLIST))
-    counts[some_file] = GUARD.ALLOWLIST[some_file][0] + 1
+    first = GUARD.ALLOWLIST[0]
+    some_file = first.path
+    counts = [entry for entry in counts if entry.path != some_file]
+    counts.append(GUARD.SpawnCount(some_file, first.count + 1))
     problems = GUARD.violations(counts)
     assert any(some_file in p and "grew" in p for p in problems)
 
@@ -44,12 +47,13 @@ def test_sanctioned_broker_and_daemon_paths_are_not_allowlisted() -> None:
     """The front-door broker spawn and all daemon children go through
     running_process::spawn*; the guard exists so raw spawns cannot appear
     beside them. Their files must never need entries."""
-    assert "crates/soldr-cli/src/broker_spawn.rs" not in GUARD.ALLOWLIST
+    paths = [entry.path for entry in GUARD.ALLOWLIST]
+    assert "crates/soldr-cli/src/broker_spawn.rs" not in paths
     daemon_entries = [
-        rel
-        for rel in GUARD.ALLOWLIST
-        if rel.startswith("crates/soldr-daemon/")
-        and "false positive" not in GUARD.ALLOWLIST[rel][1]
+        entry.path
+        for entry in GUARD.ALLOWLIST
+        if entry.path.startswith("crates/soldr-daemon/")
+        and "false positive" not in entry.justification
     ]
     assert daemon_entries == []
 

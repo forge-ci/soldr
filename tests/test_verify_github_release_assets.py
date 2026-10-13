@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from conftest import load_script_module
 
@@ -14,14 +13,20 @@ verify = load_script_module(
 )
 
 
-def complete_release(tag: str = "v0.9.2") -> dict[str, Any]:
+def complete_release(
+    tag: str = "v0.9.2", *, draft: bool = False, first_asset_size: int = 1
+) -> object:
+    """A `gh release view --json` document: raw JSON, so not a record type."""
+    names = list(
+        verify.RELEASE_COMPLETENESS.expected_github_assets(
+            tag, verify.RELEASE_COMPLETENESS.included_triples()
+        )
+    )
     return {
-        "isDraft": False,
+        "isDraft": draft,
         "assets": [
-            {"name": name, "size": 1}
-            for name in verify.RELEASE_COMPLETENESS.expected_github_assets(
-                tag, verify.RELEASE_COMPLETENESS.included_triples()
-            )
+            {"name": name, "size": first_asset_size if index == 0 else 1}
+            for index, name in enumerate(names)
         ],
     }
 
@@ -38,8 +43,7 @@ def test_draft_and_missing_assets_are_named() -> None:
 
 
 def test_zero_sized_asset_is_rejected() -> None:
-    release = complete_release()
-    release["assets"][0]["size"] = 0
+    release = complete_release(first_asset_size=0)
     failures = verify.verify_release_assets("v0.9.2", release)
     assert failures == [
         "GitHub release asset soldr-v0.9.2-x86_64-pc-windows-msvc.tar.zst "
@@ -55,8 +59,7 @@ def test_main_reports_fixture_result(monkeypatch, capsys) -> None:
 
 def test_draft_mode_requires_a_complete_draft() -> None:
     """soldr#2469 4.2: verify the draft before it becomes immutable."""
-    draft = complete_release()
-    draft["isDraft"] = True
+    draft = complete_release(draft=True)
     assert verify.verify_release_assets("v0.9.2", draft, draft=True) == []
     published = complete_release()
     assert verify.verify_release_assets("v0.9.2", published, draft=True) == [

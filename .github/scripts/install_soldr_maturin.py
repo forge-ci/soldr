@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 # Use regular-file capture without an installed Python dependency.
@@ -25,17 +26,26 @@ SOLDR_TOOLCHAIN = "1.98.1"
 SOLDR_TOOLCHAIN_SHIMS = Path("target/soldr-maturin-ci-shims")
 
 
-def distribution() -> tuple[str, str]:
+@dataclass(frozen=True)
+class Distribution:
+    """The canonical PyPI distribution and its managed version."""
+
+    package: str
+    version: str
+
+
+def distribution() -> Distribution:
     """Return the canonical PyPI distribution and managed version."""
 
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))["maturin"]
-    return str(contract["pypi_package"]), str(contract["managed_version"])
+    return Distribution(str(contract["pypi_package"]), str(contract["managed_version"]))
 
 
 def install_command(python: Path) -> list[str]:
     """Return the uncached sdist-only install command."""
 
-    package, version = distribution()
+    dist = distribution()
+    package, version = dist.package, dist.version
     return [
         str(python),
         "-m",
@@ -50,7 +60,7 @@ def install_command(python: Path) -> list[str]:
 
 def source_build_environment(
     base: Mapping[str, str], *, rustc: Path, cargo: Path
-) -> dict[str, str]:
+) -> dict:
     """Expose real rustc to probes while routing Cargo through Soldr.
 
     soldr#3123: the CI smoke installer runs the sdist compile at the
@@ -119,7 +129,8 @@ def main() -> int:
     env = source_build_environment(base_env, rustc=rustc, cargo=cargo)
     python = Path(sys.executable)
     run(install_command(python), env=env)
-    package, version = distribution()
+    dist = distribution()
+    package, version = dist.package, dist.version
     run(
         [
             str(python),

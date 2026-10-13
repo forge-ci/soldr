@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -30,20 +31,19 @@ detect = load_script_module(
 
 
 def make_state(**overrides: object) -> object:
-    defaults: dict[str, object] = {
-        "version": "v0.9.2",
-        "cargo_version": "0.9.2",
-        "npm_package_name": "@zackees/soldr",
-        "npm_package_version": "0.9.2",
-        "tag_exists": False,
-        "github": detect.GithubReleaseState(),
-        "pypi_latest": "0.9.1",
-        "pypi_file_count": 0,
-        "npm_has_version": False,
-        "force_pypi_publish": False,
-    }
-    defaults.update(overrides)
-    return detect.ReleaseState(**defaults)  # type: ignore[arg-type]
+    defaults = detect.ReleaseState(
+        version="v0.9.2",
+        cargo_version="0.9.2",
+        npm_package_name="@zackees/soldr",
+        npm_package_version="0.9.2",
+        tag_exists=False,
+        github=detect.GithubReleaseState(),
+        pypi_latest="0.9.1",
+        pypi_file_count=0,
+        npm_has_version=False,
+        force_pypi_publish=False,
+    )
+    return replace(defaults, **overrides)  # type: ignore[arg-type]
 
 
 class TestVersionDerivation:

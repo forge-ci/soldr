@@ -49,6 +49,7 @@ import argparse
 import json
 import re
 import sys
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 # Use regular-file capture without an installed Python dependency.
@@ -117,7 +118,112 @@ REPLAY_SHARE_FILES = (
 NEXTEST_LOG_TAIL_BYTES = 2_000_000
 
 
-def executor_contract() -> dict[str, object]:
+@dataclass(frozen=True)
+class Readiness:
+    """Whether the executor may run by default, and what still blocks it."""
+
+    default_enabled: bool
+    blocked_by: tuple[str, ...]
+    unavailable_action: str
+
+
+@dataclass(frozen=True)
+class ReuseArguments:
+    """The preferred and fallback nextest archive-reuse argument lists."""
+
+    preferred: tuple[str, ...]
+    fallback: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SelectionFilter:
+    """Where the nextest filter expression comes from and how it is passed."""
+
+    source_file: str
+    expression_variable: str
+    argument: str
+
+
+@dataclass(frozen=True)
+class NextestContract:
+    """The nextest invocations the guest replays."""
+
+    argv_prefix: tuple[str, ...]
+    archive: str
+    inventory_arguments: tuple[str, ...]
+    reuse_arguments: ReuseArguments
+    selection_filter: SelectionFilter
+    selected_list_arguments: tuple[str, ...]
+    run_arguments: tuple[str, ...]
+    zero_tests_is_failure: bool
+
+
+@dataclass(frozen=True)
+class GuestEnvVar:
+    """One environment variable the guest script must export."""
+
+    name: str
+    value: str
+
+
+@dataclass(frozen=True)
+class GuestCapabilities:
+    """What the Recovery guest can and cannot do."""
+
+    shell: str
+    execution_model: str
+    python3: bool
+    git: bool
+    dyld_shared_cache: bool
+    system_c_compiler: bool
+    xcrun: bool
+    sdk: bool
+    preinstalled_rust_toolchain: bool
+    toolchain_provisioning: str
+    isolated_toolchain_homes: bool
+    tmp_storage: str
+    scratch_storage: str
+    workspace_source_staged: bool
+    fixtures_staged: bool
+
+
+@dataclass(frozen=True)
+class ResultGate:
+    """What a Recovery run must prove before it counts as passing."""
+
+    guest_exit_code_must_be_zero: bool
+    all_checks_must_pass: tuple[str, ...]
+    requires_inventory: bool
+    requires_junit: bool
+    diagnostics_are_always_collected: bool
+
+
+@dataclass(frozen=True)
+class ExecutorContract:
+    """The versioned handoff from soldr#3084 to soldr#3294 Phase 2."""
+
+    schema_version: int
+    superseded_issue: str
+    owner_issue: str
+    target: str
+    backend: str
+    readiness: Readiness
+    nextest: NextestContract
+    required_guest_env: tuple[GuestEnvVar, ...]
+    required_share_files: tuple[str, ...]
+    capabilities: GuestCapabilities
+    result_gate: ResultGate
+
+    def to_dict(self) -> dict:
+        """The JSON document; guest env is keyed by variable name."""
+        document = asdict(self)
+        document["required_guest_env"] = {
+            var.name: var.value for var in self.required_guest_env
+        }
+        return document
+
+
+def executor_contract() -> ExecutorContract:
     """Return the versioned handoff from soldr#3084 to soldr#3294 Phase 2.
 
     This is deliberately executable rather than prose-only.  The current
@@ -128,104 +234,104 @@ def executor_contract() -> dict[str, object]:
     ``default_enabled`` remains false until the reliability issues named here
     are resolved.  This contract does not claim Phase 2 is complete.
     """
-    return {
-        "schema_version": 1,
-        "superseded_issue": "soldr#3084",
-        "owner_issue": "soldr#3294",
-        "target": "x86_64-apple-darwin",
-        "backend": "macos-recovery",
-        "readiness": {
-            "default_enabled": False,
-            "blocked_by": ["soldr#3088", "soldr#3136"],
-            "unavailable_action": "fail-closed-with-no-run-guidance",
-        },
-        "nextest": {
+    return ExecutorContract(
+        schema_version=1,
+        superseded_issue="soldr#3084",
+        owner_issue="soldr#3294",
+        target="x86_64-apple-darwin",
+        backend="macos-recovery",
+        readiness=Readiness(
+            default_enabled=False,
+            blocked_by=("soldr#3088", "soldr#3136"),
+            unavailable_action="fail-closed-with-no-run-guidance",
+        ),
+        nextest=NextestContract(
             # cargo-nextest is a Cargo subcommand shim; omitting the second
             # `nextest` silently routes `run` to Cargo instead.
-            "argv_prefix": ["cargo-nextest", "nextest"],
-            "archive": "tests.tar.zst",
-            "inventory_arguments": [
+            argv_prefix=("cargo-nextest", "nextest"),
+            archive="tests.tar.zst",
+            inventory_arguments=(
                 "--archive-file=$WORK/tests.tar.zst",
                 "--extract-to=$WORK/extract",
                 "--workspace-remap=$WORK/workspace",
                 "--profile=target-run",
                 "--message-format=json-pretty",
-            ],
-            "reuse_arguments": {
-                "preferred": [
+            ),
+            reuse_arguments=ReuseArguments(
+                preferred=(
                     "--binaries-metadata=$REUSE_BIN_META",
                     "--cargo-metadata=$REUSE_CARGO_META",
                     "--target-dir-remap=$WORK/extract/target",
-                ],
-                "fallback": [
+                ),
+                fallback=(
                     "--archive-file=$WORK/tests.tar.zst",
                     "--extract-to=$WORK/extract",
                     "--extract-overwrite",
-                ],
-            },
-            "selection_filter": {
-                "source_file": "$WORK/filter.txt",
-                "expression_variable": "$FILTER",
-                "argument": "-E",
-            },
-            "selected_list_arguments": [
+                ),
+            ),
+            selection_filter=SelectionFilter(
+                source_file="$WORK/filter.txt",
+                expression_variable="$FILTER",
+                argument="-E",
+            ),
+            selected_list_arguments=(
                 "$REUSE_ARGS",
                 "--workspace-remap=$WORK/workspace",
                 "--profile=target-run",
                 "--partition=$REPLAY_PARTITION",
                 "-E=$FILTER",
                 "--message-format=json-pretty",
-            ],
-            "run_arguments": [
+            ),
+            run_arguments=(
                 "$REUSE_ARGS",
                 "--workspace-remap=$WORK/workspace",
                 "--profile=target-run",
                 "--partition=$REPLAY_PARTITION",
                 "-E=$FILTER",
                 "--no-fail-fast",
-            ],
-            "zero_tests_is_failure": True,
-        },
-        "required_guest_env": {
-            "HOME": "$WORK/home",
-            "TMPDIR": "$WORK/tmp",
-            "SOLDR_BIN": "/tmp/soldr",
-            "SOLDR_INTERNAL_DAEMON_EXE": "$WORK/soldr-daemon",
-            "NEXTEST_BIN": "$WORK/cargo-nextest",
-            "SOLDR_TEST_FIXTURES_DIR": "$WORK/fixtures",
-            "SOLDR_TEST_WORKSPACE_ROOT": "$WORK/workspace",
-            "SOLDR_USE_SYSTEM_CMAKE": "1",
-            "SOLDR_TARGET_WARN_FREE_GB": "1",
-            "SOLDR_TARGET_BLOCK_FREE_GB": "1",
-            "RUSTUP_TOOLCHAIN": "channel-from-toolchain-ensure",
-            "PATH": "$WORK/shims:$PATH",
-        },
-        "required_share_files": list(REPLAY_SHARE_FILES),
-        "capabilities": {
-            "shell": "bash-3.2-posix-sh",
-            "execution_model": "one-script-per-boot-no-command-exec",
-            "python3": False,
-            "git": False,
-            "dyld_shared_cache": False,
-            "system_c_compiler": False,
-            "xcrun": False,
-            "sdk": False,
-            "preinstalled_rust_toolchain": False,
-            "toolchain_provisioning": "soldr-managed-during-guest-script",
-            "isolated_toolchain_homes": False,
-            "tmp_storage": "ramdisk-bounded-by-guest-memory",
-            "scratch_storage": "formatted-qcow2-with-tmp-fallback",
-            "workspace_source_staged": True,
-            "fixtures_staged": True,
-        },
-        "result_gate": {
-            "guest_exit_code_must_be_zero": True,
-            "all_checks_must_pass": list(CHECKS),
-            "requires_inventory": True,
-            "requires_junit": True,
-            "diagnostics_are_always_collected": True,
-        },
-    }
+            ),
+            zero_tests_is_failure=True,
+        ),
+        required_guest_env=(
+            GuestEnvVar("HOME", "$WORK/home"),
+            GuestEnvVar("TMPDIR", "$WORK/tmp"),
+            GuestEnvVar("SOLDR_BIN", "/tmp/soldr"),
+            GuestEnvVar("SOLDR_INTERNAL_DAEMON_EXE", "$WORK/soldr-daemon"),
+            GuestEnvVar("NEXTEST_BIN", "$WORK/cargo-nextest"),
+            GuestEnvVar("SOLDR_TEST_FIXTURES_DIR", "$WORK/fixtures"),
+            GuestEnvVar("SOLDR_TEST_WORKSPACE_ROOT", "$WORK/workspace"),
+            GuestEnvVar("SOLDR_USE_SYSTEM_CMAKE", "1"),
+            GuestEnvVar("SOLDR_TARGET_WARN_FREE_GB", "1"),
+            GuestEnvVar("SOLDR_TARGET_BLOCK_FREE_GB", "1"),
+            GuestEnvVar("RUSTUP_TOOLCHAIN", "channel-from-toolchain-ensure"),
+            GuestEnvVar("PATH", "$WORK/shims:$PATH"),
+        ),
+        required_share_files=tuple(REPLAY_SHARE_FILES),
+        capabilities=GuestCapabilities(
+            shell="bash-3.2-posix-sh",
+            execution_model="one-script-per-boot-no-command-exec",
+            python3=False,
+            git=False,
+            dyld_shared_cache=False,
+            system_c_compiler=False,
+            xcrun=False,
+            sdk=False,
+            preinstalled_rust_toolchain=False,
+            toolchain_provisioning="soldr-managed-during-guest-script",
+            isolated_toolchain_homes=False,
+            tmp_storage="ramdisk-bounded-by-guest-memory",
+            scratch_storage="formatted-qcow2-with-tmp-fallback",
+            workspace_source_staged=True,
+            fixtures_staged=True,
+        ),
+        result_gate=ResultGate(
+            guest_exit_code_must_be_zero=True,
+            all_checks_must_pass=tuple(CHECKS),
+            requires_inventory=True,
+            requires_junit=True,
+            diagnostics_are_always_collected=True,
+        ),
+    )
 
 
 def build_guest_script(partition: str = "hash:1/1") -> str:
@@ -895,7 +1001,16 @@ def append_github_output_multiline(path: Path, name: str, value: str) -> None:
         handle.write(f"{name}<<{delimiter}\n{value}{delimiter}\n")
 
 
-def parse_summary(text: str) -> dict[str, tuple[bool, str]]:
+@dataclass(frozen=True)
+class CheckResult:
+    """One `name=pass[:detail]` / `name=fail[:detail]` line of the summary."""
+
+    name: str
+    passed: bool
+    detail: str
+
+
+def parse_summary(text: str) -> list[CheckResult]:
     """Parse the guest's flat `key=value` results file.
 
     Shared shape with `smoke_release_artifacts.parse_summary`: each line is
@@ -903,17 +1018,19 @@ def parse_summary(text: str) -> dict[str, tuple[bool, str]]:
     line (a wedged guest can be killed mid-write) is not silently dropped --
     it fails as its own diagnostic.
     """
-    results: dict[str, tuple[bool, str]] = {}
+    results: list[CheckResult] = []
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.strip()
         if not line:
             continue
         name, sep, rest = line.partition("=")
         if not sep:
-            results[f"summary_line_{lineno}"] = (False, f"malformed line: {raw!r}")
+            results.append(
+                CheckResult(f"summary_line_{lineno}", False, f"malformed line: {raw!r}")
+            )
             continue
         status, _, detail = rest.partition(":")
-        results[name] = (status == "pass", detail)
+        results.append(CheckResult(name, status == "pass", detail))
     return results
 
 
@@ -926,16 +1043,21 @@ def verify_collected(collected_dir: Path, *, guest_exit_code: str) -> int:
             "results (did the script even reach a shell? check the action's "
             "workdir/results/*.ppm screendumps)."
         )
-    results = parse_summary(summary_path.read_text(encoding="utf-8", errors="replace"))
+    # Later lines win on a repeated name, as the keyed lookup always did.
+    results = {
+        result.name: result
+        for result in parse_summary(
+            summary_path.read_text(encoding="utf-8", errors="replace")
+        )
+    }
 
     failures: list[str] = []
     for name in CHECKS:
         if name not in results:
             failures.append(f"{name}: no result recorded (guest script exited early?)")
             continue
-        ok, detail = results[name]
-        if not ok:
-            failures.append(f"{name}: {detail}")
+        if not results[name].passed:
+            failures.append(f"{name}: {results[name].detail}")
 
     if guest_exit_code.strip() != "0":
         failures.append(
@@ -1118,7 +1240,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.subcommand == "describe-executor":
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(
-            json.dumps(executor_contract(), indent=2, sort_keys=True) + "\n",
+            json.dumps(executor_contract().to_dict(), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         print(f"wrote Recovery executor contract to {args.output}")

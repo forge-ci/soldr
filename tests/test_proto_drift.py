@@ -205,10 +205,9 @@ def test_agreeing_pair_reports_nothing() -> None:
 
 def test_cross_repo_entries_name_where_the_type_lives() -> None:
     """An exception must identify the released external implementation."""
-    for messages in drift.CROSS_REPO_MESSAGES.values():
-        for message, location in messages.items():
-            assert message
-            assert "zccache 1.13.7" in location
+    for entry in drift.CROSS_REPO_MESSAGES:
+        assert entry.message
+        assert "zccache 1.13.7" in entry.location
 
 
 # --------------------------------------------------------------------------

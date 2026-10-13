@@ -167,30 +167,25 @@ def test_full_mode_overrides_old_fast_build_policy() -> None:
 def test_label_changes_recompute_mode_on_same_head_sha() -> None:
     labels = [{"name": "fast-build"}]
     event = {"pull_request": {"head": {"sha": SHA}, "labels": labels}}
-    assert MODE.select_mode("pull_request", event, "", author_permission="write") == (
-        "minimal",
-        SHA,
-    )
+    assert MODE.select_mode(
+        "pull_request", event, "", author_permission="write"
+    ) == MODE.ModeSelection("minimal", SHA)
     labels.append({"name": "ci-test"})
-    assert MODE.select_mode("pull_request", event, "", author_permission="write") == (
-        "test",
-        SHA,
-    )
+    assert MODE.select_mode(
+        "pull_request", event, "", author_permission="write"
+    ) == MODE.ModeSelection("test", SHA)
     labels.append({"name": "ci-full"})
-    assert MODE.select_mode("pull_request", event, "", author_permission="write") == (
-        "full",
-        SHA,
-    )
+    assert MODE.select_mode(
+        "pull_request", event, "", author_permission="write"
+    ) == MODE.ModeSelection("full", SHA)
     labels.pop()
-    assert MODE.select_mode("pull_request", event, "", author_permission="write") == (
-        "test",
-        SHA,
-    )
+    assert MODE.select_mode(
+        "pull_request", event, "", author_permission="write"
+    ) == MODE.ModeSelection("test", SHA)
     labels.pop()
-    assert MODE.select_mode("pull_request", event, "", author_permission="write") == (
-        "minimal",
-        SHA,
-    )
+    assert MODE.select_mode(
+        "pull_request", event, "", author_permission="write"
+    ) == MODE.ModeSelection("minimal", SHA)
 
 
 def test_ci_test_adds_the_linux_x64_e2e_cell_without_the_full_matrix() -> None:
@@ -199,8 +194,12 @@ def test_ci_test_adds_the_linux_x64_e2e_cell_without_the_full_matrix() -> None:
 
 
 def test_dispatch_requires_full_sha_and_push_is_minimal() -> None:
-    assert MODE.select_mode("workflow_dispatch", {}, SHA) == ("full", SHA)
-    assert MODE.select_mode("push", {"after": SHA}, "") == ("minimal", SHA)
+    assert MODE.select_mode("workflow_dispatch", {}, SHA) == MODE.ModeSelection(
+        "full", SHA
+    )
+    assert MODE.select_mode("push", {"after": SHA}, "") == MODE.ModeSelection(
+        "minimal", SHA
+    )
     with pytest.raises(ValueError, match="40-character"):
         MODE.select_mode("workflow_dispatch", {}, "main")
     MODE.verify_checkout(SHA, SHA.upper())
@@ -210,12 +209,24 @@ def test_dispatch_requires_full_sha_and_push_is_minimal() -> None:
 
 def test_full_sentinel_rejects_skipped_and_missing_canonical_jobs() -> None:
     contract = {"targets": [{"ci": {"build_job": "build-a", "run_job": "run-a"}}]}
-    needs = {job: {"result": "success"} for job in COVERAGE.required_jobs(contract)}
-    assert COVERAGE.coverage_failures(contract, needs) == []
+    needs = {
+        job: {"result": "success"}
+        for job in COVERAGE.required_jobs(COVERAGE.JsonDocument(contract))
+    }
+    assert (
+        COVERAGE.coverage_failures(
+            COVERAGE.JsonDocument(contract), COVERAGE.JsonDocument(needs)
+        )
+        == []
+    )
     needs["run-a"]["result"] = "skipped"
-    assert COVERAGE.coverage_failures(contract, needs) == ["run-a: skipped"]
+    assert COVERAGE.coverage_failures(
+        COVERAGE.JsonDocument(contract), COVERAGE.JsonDocument(needs)
+    ) == ["run-a: skipped"]
     del needs["build-a"]
-    assert COVERAGE.coverage_failures(contract, needs) == [
+    assert COVERAGE.coverage_failures(
+        COVERAGE.JsonDocument(contract), COVERAGE.JsonDocument(needs)
+    ) == [
         "build-a: missing",
         "run-a: skipped",
     ]
@@ -234,18 +245,31 @@ def test_full_sentinel_rejects_build_only_supported_platforms() -> None:
             }
         ]
     }
-    needs = {job: {"result": "success"} for job in COVERAGE.required_jobs(contract)}
-    assert COVERAGE.coverage_failures(contract, needs) == [
-        "aarch64-apple-darwin: no full-CI execution job (soldr#3071)"
-    ]
+    needs = {
+        job: {"result": "success"}
+        for job in COVERAGE.required_jobs(COVERAGE.JsonDocument(contract))
+    }
+    assert COVERAGE.coverage_failures(
+        COVERAGE.JsonDocument(contract), COVERAGE.JsonDocument(needs)
+    ) == ["aarch64-apple-darwin: no full-CI execution job (soldr#3071)"]
 
 
 def test_current_full_contract_requires_both_macos_execution_jobs() -> None:
     contract = json.loads((ROOT / "ci" / "canonical-targets.json").read_text())
-    needs = {job: {"result": "success"} for job in COVERAGE.required_jobs(contract)}
-    assert COVERAGE.coverage_failures(contract, needs) == []
+    needs = {
+        job: {"result": "success"}
+        for job in COVERAGE.required_jobs(COVERAGE.JsonDocument(contract))
+    }
+    assert (
+        COVERAGE.coverage_failures(
+            COVERAGE.JsonDocument(contract), COVERAGE.JsonDocument(needs)
+        )
+        == []
+    )
     needs["e2e-macos-arm64"]["result"] = "skipped"
-    assert COVERAGE.coverage_failures(contract, needs) == ["e2e-macos-arm64: skipped"]
+    assert COVERAGE.coverage_failures(
+        COVERAGE.JsonDocument(contract), COVERAGE.JsonDocument(needs)
+    ) == ["e2e-macos-arm64: skipped"]
 
 
 def test_native_arm_replay_provisions_rust_objcopy_runtime_before_tests() -> None:
@@ -296,7 +320,7 @@ def test_full_sentinel_has_all_required_dependencies() -> None:
     dependencies = {
         name.strip() for name in needs_line.split("[", 1)[1].split("]", 1)[0].split(",")
     }
-    for required in COVERAGE.required_jobs(contract):
+    for required in COVERAGE.required_jobs(COVERAGE.JsonDocument(contract)):
         assert required in dependencies, required
 
 
@@ -352,7 +376,7 @@ def test_external_author_is_full_without_labels(permission, association) -> None
     }
     assert MODE.select_mode(
         "pull_request", event, "", author_permission=permission
-    ) == ("full", SHA)
+    ) == MODE.ModeSelection("full", SHA)
 
 
 @pytest.mark.parametrize("permission", ["write", "maintain", "admin"])
@@ -366,29 +390,25 @@ def test_effective_writer_keeps_minimal_even_from_a_fork(permission) -> None:
     }
     assert MODE.select_mode(
         "pull_request", event, "", author_permission=permission
-    ) == ("minimal", SHA)
+    ) == MODE.ModeSelection("minimal", SHA)
 
 
 def test_external_label_removal_and_revoked_permission_cannot_downgrade() -> None:
     labels = [{"name": "ci-full"}]
     event = {"pull_request": {"head": {"sha": SHA}, "labels": labels}}
-    assert MODE.select_mode("pull_request", event, "", author_permission="read") == (
-        "full",
-        SHA,
-    )
+    assert MODE.select_mode(
+        "pull_request", event, "", author_permission="read"
+    ) == MODE.ModeSelection("full", SHA)
     labels.clear()
-    assert MODE.select_mode("pull_request", event, "", author_permission="read") == (
-        "full",
-        SHA,
-    )
-    assert MODE.select_mode("pull_request", event, "", author_permission="write") == (
-        "minimal",
-        SHA,
-    )
-    assert MODE.select_mode("pull_request", event, "", author_permission=None) == (
-        "full",
-        SHA,
-    )
+    assert MODE.select_mode(
+        "pull_request", event, "", author_permission="read"
+    ) == MODE.ModeSelection("full", SHA)
+    assert MODE.select_mode(
+        "pull_request", event, "", author_permission="write"
+    ) == MODE.ModeSelection("minimal", SHA)
+    assert MODE.select_mode(
+        "pull_request", event, "", author_permission=None
+    ) == MODE.ModeSelection("full", SHA)
 
 
 @pytest.mark.parametrize("age", [61, 3600, -60])
@@ -499,7 +519,7 @@ def test_permission_api_failure_is_unknown_and_selects_full(monkeypatch) -> None
     assert permission is None
     assert MODE.select_mode(
         "pull_request", event, "", author_permission=permission
-    ) == ("full", SHA)
+    ) == MODE.ModeSelection("full", SHA)
 
 
 @pytest.mark.parametrize(
@@ -548,11 +568,10 @@ def test_one_selector_is_portable_to_every_fleet_identity(
     assert MODE.SELECTOR_SCHEMA == "fleet-ci-mode/v1"
     assert MODE.select_mode(
         "pull_request", event, "", author_permission=permission
-    ) == ("full", SHA)
-    assert MODE.select_mode("pull_request", event, "", author_permission="write") == (
-        "minimal",
-        SHA,
-    )
+    ) == MODE.ModeSelection("full", SHA)
+    assert MODE.select_mode(
+        "pull_request", event, "", author_permission="write"
+    ) == MODE.ModeSelection("minimal", SHA)
 
 
 @pytest.mark.parametrize("job", ["setup-soldr-action", "cook-size-gate"])
@@ -563,7 +582,7 @@ def test_full_smokes_receive_no_repository_secrets(job) -> None:
 
 def test_merge_queue_keeps_full_validation_on_exact_group_identity():
     event = {"merge_group": {"head_sha": SHA}}
-    assert MODE.select_mode("merge_group", event, "") == ("full", SHA)
+    assert MODE.select_mode("merge_group", event, "") == MODE.ModeSelection("full", SHA)
     with pytest.raises(ValueError, match="merge_group"):
         MODE.select_mode("merge_group", {"merge_group": {"head_sha": "main"}}, "")
 
@@ -579,15 +598,15 @@ def test_reviewed_adapter_aliases_use_common_selection(alias, canonical, mode):
         event,
         "",
         author_permission="write",
-        label_aliases={alias: canonical},
-    ) == (mode, SHA)
+        label_aliases=MODE.LabelAliases((MODE.LabelAlias(alias, canonical),)),
+    ) == MODE.ModeSelection(mode, SHA)
     assert MODE.select_mode(
         "pull_request",
         event,
         "",
         author_permission="read",
-        label_aliases={alias: canonical},
-    ) == ("full", SHA)
+        label_aliases=MODE.LabelAliases((MODE.LabelAlias(alias, canonical),)),
+    ) == MODE.ModeSelection("full", SHA)
 
 
 @pytest.mark.parametrize(

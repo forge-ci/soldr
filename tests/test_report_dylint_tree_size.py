@@ -49,9 +49,9 @@ def test_each_tree_is_reported_separately(tmp_path) -> None:
 def test_sizes_and_counts_are_accurate(tmp_path) -> None:
     module = _module()
     _tree(tmp_path, "libraries", b"x" * 5000)
-    size, files = module.tree_bytes(tmp_path / "dylint" / "libraries")
-    assert size == 5000
-    assert files == 1
+    tree = module.tree_bytes(tmp_path / "dylint" / "libraries")
+    assert tree.total_bytes == 5000
+    assert tree.file_count == 1
 
 
 def test_a_missing_tree_is_labelled_rather_than_skipped(tmp_path) -> None:

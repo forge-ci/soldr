@@ -50,11 +50,13 @@ def required_jobs(
     groups = {}
     for name in ("minimal_jobs", "docs_jobs", "test_jobs"):
         groups[name] = COVERAGE["required_jobs"](
-            {
-                "schema_version": adapter.get("schema_version"),
-                "required_jobs": adapter.get(name),
-                "targets": [],
-            }
+            COVERAGE["JsonDocument"](
+                {
+                    "schema_version": adapter.get("schema_version"),
+                    "required_jobs": adapter.get(name),
+                    "targets": [],
+                }
+            )
         )
     policy_jobs = {"ci-mode", "path-selection", "full-coverage"}
     if any(group & policy_jobs for group in groups.values()):
@@ -71,7 +73,7 @@ def required_jobs(
             jobs
             | groups["minimal_jobs"]
             | groups["test_jobs"]
-            | COVERAGE["required_jobs"](full.fields)
+            | COVERAGE["required_jobs"](COVERAGE["JsonDocument"](full.fields))
             | {"full-coverage"}
         )
     raise ValueError("missing or unknown CI mode")
@@ -113,16 +115,18 @@ def summary_failures(
     # evidence furnished by a PR artifact, and never replaces test/full cells.
     jobs = required_jobs(adapter, full, mode, docs_only, trusted)
     failures += COVERAGE["coverage_failures"](
-        {"schema_version": 1, "required_jobs": sorted(jobs), "targets": []},
-        needs.fields,
+        COVERAGE["JsonDocument"](
+            {"schema_version": 1, "required_jobs": sorted(jobs), "targets": []}
+        ),
+        COVERAGE["JsonDocument"](needs.fields),
         expected_sha=expected_sha,
         selected_sha=selected_sha,
     )
     if mode == "full":
         # Retain the canonical refusal of build-only/blocked execution cells.
         failures += COVERAGE["coverage_failures"](
-            full.fields,
-            needs.fields,
+            COVERAGE["JsonDocument"](full.fields),
+            COVERAGE["JsonDocument"](needs.fields),
             expected_sha=expected_sha,
             selected_sha=selected_sha,
         )
@@ -135,13 +139,13 @@ def current_selection_failures(
     mode: str,
     selected_sha: str,
     permission: str,
-    aliases: dict[str, str],
+    aliases: Any,
 ) -> list[str]:
     """A rerun may exceed today's requested tier, but cannot undercut it."""
     if event is None:
         return ["current PR metadata is unavailable"]
     try:
-        current_mode, current_sha = SELECTOR["select_mode"](
+        selection = SELECTOR["select_mode"](
             "pull_request",
             event,
             "",
@@ -150,6 +154,7 @@ def current_selection_failures(
         )
     except (ValueError, TypeError, KeyError):
         return ["current PR selection is invalid"]
+    current_mode, current_sha = selection.mode, selection.checkout_sha
     failures = []
     if selected_sha.lower() != current_sha:
         failures.append("selected candidate is not the current PR head")

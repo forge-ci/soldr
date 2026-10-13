@@ -24,8 +24,9 @@ defect.
 
 from __future__ import annotations
 
-import collections
+import itertools
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 WORKFLOWS = sorted(
@@ -38,30 +39,40 @@ PIN = re.compile(
 )
 
 
-def _pins() -> "dict[tuple[str, str], dict[str, list[str]]]":
-    """{(repo, sha): {version_comment: [workflow, ...]}}"""
-    found: dict[tuple[str, str], dict[str, list[str]]] = collections.defaultdict(
-        lambda: collections.defaultdict(list)
-    )
+@dataclass(frozen=True)
+class PinUse:
+    """One SHA-pinned `uses:` line: what is pinned, how it is labelled, where."""
+
+    repo: str
+    sha: str
+    version: str
+    workflow: str
+
+
+def _pins() -> list[PinUse]:
+    """Every pinned `uses:` occurrence across the workflows."""
+    found: list[PinUse] = []
     for workflow in WORKFLOWS:
         for match in PIN.finditer(workflow.read_text(encoding="utf-8")):
             # Sub-action paths (owner/repo/sub) ship from the same commit as
             # their parent, so key on the repository root.
             repo = "/".join(match.group("repo").split("/")[:2])
-            found[(repo, match.group("sha"))][match.group("version")].append(
-                workflow.name
+            found.append(
+                PinUse(repo, match.group("sha"), match.group("version"), workflow.name)
             )
     return found
 
 
 def test_a_pinned_sha_has_one_version_comment() -> None:
     conflicts = []
-    for (repo, sha), versions in sorted(_pins().items()):
-        if len(versions) > 1:
-            detail = "; ".join(
-                f"{v} in {', '.join(sorted(files))}"
-                for v, files in sorted(versions.items())
-            )
+    uses = sorted(_pins(), key=lambda use: (use.repo, use.sha, use.version))
+    for (repo, sha), group in itertools.groupby(uses, key=lambda u: (u.repo, u.sha)):
+        by_version = [
+            (version, sorted(use.workflow for use in same))
+            for version, same in itertools.groupby(group, key=lambda u: u.version)
+        ]
+        if len(by_version) > 1:
+            detail = "; ".join(f"{v} in {', '.join(files)}" for v, files in by_version)
             conflicts.append(f"{repo}@{sha[:12]} is described as {detail}")
     assert not conflicts, (
         "the same pinned commit is labelled inconsistently:\n  "
@@ -73,8 +84,11 @@ def test_the_scan_finds_the_pins() -> None:
     # Without this, a regex that stopped matching would make the assertion
     # above vacuously true -- the failure mode the check exists to catch.
     pins = _pins()
-    assert len(pins) >= 15, f"expected many SHA-pinned actions, found {len(pins)}"
-    assert any(repo == "actions/checkout" for repo, _ in pins)
+    distinct = {(use.repo, use.sha) for use in pins}
+    assert len(distinct) >= 15, (
+        f"expected many SHA-pinned actions, found {len(distinct)}"
+    )
+    assert any(use.repo == "actions/checkout" for use in pins)
 
 
 # Deliberately NOT asserted here: that every SHA-pinned action carries a

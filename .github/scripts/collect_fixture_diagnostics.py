@@ -42,6 +42,7 @@ import json
 import os
 import sys
 import tempfile
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 # Fixture root name prefixes, matched against the *directory name* directly
@@ -144,7 +145,52 @@ def collect_files(fixture: Path, max_depth: int) -> list[Path]:
     return sorted(found)
 
 
-def copy_capped(source: Path, destination: Path, max_bytes: int) -> dict[str, object]:
+@dataclass(frozen=True)
+class CopyResult:
+    """What `copy_capped` wrote for one source file."""
+
+    bytes: int
+    original_bytes: int
+    truncated: bool
+
+
+@dataclass(frozen=True)
+class CopiedFile:
+    """An `index.json` `copied` row: where the file landed and how much."""
+
+    path: str
+    bytes: int
+    original_bytes: int
+    truncated: bool
+
+
+@dataclass(frozen=True)
+class SkippedFile:
+    """An `index.json` `skipped` row: the source and why it was left behind."""
+
+    path: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class CollectionIndex:
+    """Everything one collection run copied, truncated or skipped."""
+
+    schema_version: int
+    issue: str
+    roots_scanned: list[str]
+    fixture_roots: list[str]
+    collected_names: list[str]
+    copied: list[CopiedFile]
+    skipped: list[SkippedFile]
+    total_bytes: int
+
+    def to_dict(self) -> dict:
+        """The `index.json` payload."""
+        return asdict(self)
+
+
+def copy_capped(source: Path, destination: Path, max_bytes: int) -> CopyResult:
     """Copy `source` to `destination`, keeping at most the last `max_bytes`.
 
     The tail is kept rather than the head: a log that grew past the cap did so
@@ -160,7 +206,7 @@ def copy_capped(source: Path, destination: Path, max_bytes: int) -> dict[str, ob
             handle.seek(size - max_bytes)
         payload = handle.read()
     destination.write_bytes(payload)
-    return {"bytes": len(payload), "original_bytes": size, "truncated": truncated}
+    return CopyResult(len(payload), size, truncated)
 
 
 def collect(
@@ -171,12 +217,12 @@ def collect(
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
     max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
     max_depth: int = DEFAULT_MAX_DEPTH,
-) -> dict[str, object]:
+) -> CollectionIndex:
     """Copy every whitelisted fixture file into `output`. Returns the index."""
 
     output.mkdir(parents=True, exist_ok=True)
-    copied: list[dict[str, object]] = []
-    skipped: list[dict[str, object]] = []
+    copied: list[CopiedFile] = []
+    skipped: list[SkippedFile] = []
     scanned: list[str] = []
     total = 0
     seen_roots: set[Path] = set()
@@ -194,37 +240,38 @@ def collect(
             for source in collect_files(fixture, max_depth):
                 relative = Path(fixture.name) / source.relative_to(fixture)
                 if total >= max_total_bytes:
-                    skipped.append({"path": str(source), "reason": "total-cap"})
+                    skipped.append(SkippedFile(str(source), "total-cap"))
                     continue
                 try:
                     record = copy_capped(source, output / relative, max_file_bytes)
                 except OSError as error:
-                    skipped.append({"path": str(source), "reason": str(error)})
+                    skipped.append(SkippedFile(str(source), str(error)))
                     continue
-                bytes_copied = record["bytes"]
-                if isinstance(bytes_copied, int):
-                    total += bytes_copied
-                copied.append({"path": str(relative), **record})
+                total += record.bytes
+                copied.append(
+                    CopiedFile(
+                        path=str(relative),
+                        bytes=record.bytes,
+                        original_bytes=record.original_bytes,
+                        truncated=record.truncated,
+                    )
+                )
 
-    index = {
-        "schema_version": 1,
-        "issue": "soldr#3128",
-        "roots_scanned": [str(root) for root in sorted(seen_roots)],
-        "fixture_roots": scanned,
-        "collected_names": sorted(COLLECTED_NAMES),
-        "copied": copied,
-        "skipped": skipped,
-        "total_bytes": total,
-    }
+    index = CollectionIndex(
+        schema_version=1,
+        issue="soldr#3128",
+        roots_scanned=[str(root) for root in sorted(seen_roots)],
+        fixture_roots=scanned,
+        collected_names=sorted(COLLECTED_NAMES),
+        copied=copied,
+        skipped=skipped,
+        total_bytes=total,
+    )
     (output / "index.json").write_text(
-        json.dumps(index, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        json.dumps(index.to_dict(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
     )
     return index
-
-
-def _count(value: object) -> int:
-    """Length of an index list, tolerating a missing or non-list entry."""
-    return len(value) if isinstance(value, list) else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -257,12 +304,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"fixture diagnostics collection failed: {error}", file=sys.stderr)
         return 1 if args.strict else 0
 
-    fixture_root_count = _count(index.get("fixture_roots"))
-    copied_count = _count(index.get("copied"))
+    fixture_root_count = len(index.fixture_roots)
+    copied_count = len(index.copied)
     print(
         "fixture diagnostics: "
         f"{fixture_root_count} fixture roots, "
-        f"{copied_count} files, {index['total_bytes']} bytes -> {args.output}"
+        f"{copied_count} files, {index.total_bytes} bytes -> {args.output}"
     )
     return 0
 

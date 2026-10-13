@@ -56,7 +56,9 @@ from pathlib import Path
 # Use regular-file capture without an installed Python dependency.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 # pylint: disable-next=wrong-import-position
-from soldr._process import run_captured  # noqa: E402 -- source-relative bootstrap precedes this import
+from soldr._process import (  # noqa: E402 -- source-relative bootstrap precedes this import
+    run_captured,
+)
 
 ZCCACHE_REPO_URL = "https://github.com/zackees/zccache"
 DEFAULT_THRESHOLD = 5.0
@@ -115,9 +117,11 @@ def resolve_target(target: str) -> str | None:
     if target == "zccache":
         return ZCCACHE_REPO_URL
     if target.startswith("repo:"):
-        url = target[len("repo:"):]
+        url = target[len("repo:") :]
         if not url:
-            print("error: --target repo: requires a URL after the colon", file=sys.stderr)
+            print(
+                "error: --target repo: requires a URL after the colon", file=sys.stderr
+            )
             sys.exit(2)
         return url
     print(
@@ -229,11 +233,32 @@ def run_streaming(
         raise subprocess.CalledProcessError(rc, cmd)
 
 
+@dataclass(frozen=True)
+class ProcessCpu:
+    """Cumulative CPU seconds of one process id."""
+
+    pid: int
+    cpu_seconds: float
+
+
+@dataclass(frozen=True)
+class ProcessCpuTimes:
+    """Cumulative CPU time per pid at one snapshot."""
+
+    samples: tuple[ProcessCpu, ...] = ()
+
+    def cpu_for(self, pid: int) -> float | None:
+        for sample in self.samples:
+            if sample.pid == pid:
+                return sample.cpu_seconds
+        return None
+
+
 def _capture_process_snapshot(
     label: str,
     elapsed_seconds: float,
-    previous_cpu_times: dict[int, float],
-) -> dict[int, float]:
+    previous_cpu_times: ProcessCpuTimes,
+) -> ProcessCpuTimes:
     """Print top-N processes by CPU-time delta since the last snapshot.
 
     Compares cumulative CPU time per pid between successive calls. The
@@ -265,13 +290,14 @@ def _capture_process_snapshot(
         parsed = json.loads(result.stdout)
         if isinstance(parsed, dict):
             parsed = [parsed]
-        current: dict[int, float] = {}
+        current: list[ProcessCpu] = []
         rows = []
         for p in parsed:
             pid = int(p["Id"])
             cpu = float(p["CPU"])
-            current[pid] = cpu
-            delta = cpu - previous_cpu_times.get(pid, cpu)
+            current.append(ProcessCpu(pid, cpu))
+            before = previous_cpu_times.cpu_for(pid)
+            delta = cpu - (cpu if before is None else before)
             rows.append((delta, p))
         rows.sort(key=lambda r: r[0], reverse=True)
         stamp = datetime.now().strftime("%H:%M:%S")
@@ -290,8 +316,13 @@ def _capture_process_snapshot(
                 f"{name:30s} pid={pid:6d} cpu+={delta:7.2f}s mem={mem_mb:5d}MB handles={handles}",
                 flush=True,
             )
-        return current
-    except (subprocess.SubprocessError, OSError, json.JSONDecodeError, ValueError) as exc:
+        return ProcessCpuTimes(tuple(current))
+    except (
+        subprocess.SubprocessError,
+        OSError,
+        json.JSONDecodeError,
+        ValueError,
+    ) as exc:
         print(f"[profile-{label}] snapshot failed: {exc}", flush=True)
         return previous_cpu_times
 
@@ -311,7 +342,7 @@ def _stall_profiler(
     """
     if sys.platform != "win32" or threshold_seconds <= 0:
         return
-    cpu_times: dict[int, float] = {}
+    cpu_times = ProcessCpuTimes()
     while not stop_event.is_set():
         elapsed = time.monotonic() - start_time
         if elapsed >= threshold_seconds:
@@ -459,7 +490,9 @@ def main() -> int:  # noqa: C901
         else:
             worktree_a = Path.cwd()
 
-        print(f"=== parent-cache benchmark ({datetime.now().isoformat(timespec='seconds')}) ===")
+        print(
+            f"=== parent-cache benchmark ({datetime.now().isoformat(timespec='seconds')}) ==="
+        )
         print(f"  target:                          {args.target}")
         if target_url:
             print(f"  source URL:                      {target_url}")
@@ -471,7 +504,9 @@ def main() -> int:  # noqa: C901
 
         # Stage A: build the source repo cold.
         print("--- Stage A: build worktree A (cold, populate parent cache) ---")
-        a = time_build("A", cwd=worktree_a, stall_profile_seconds=args.stall_profile_seconds)
+        a = time_build(
+            "A", cwd=worktree_a, stall_profile_seconds=args.stall_profile_seconds
+        )
         print(f"Stage A finished in {a.seconds:.2f}s\n")
 
         # Stage B setup: add the sibling worktree.
@@ -536,7 +571,10 @@ def main() -> int:  # noqa: C901
         )
         return 0
     except subprocess.CalledProcessError as exc:
-        print(f"command failed (rc={exc.returncode}): {' '.join(exc.cmd)}", file=sys.stderr)
+        print(
+            f"command failed (rc={exc.returncode}): {' '.join(exc.cmd)}",
+            file=sys.stderr,
+        )
         return 1
     finally:
         if args.keep:

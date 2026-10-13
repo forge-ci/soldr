@@ -175,12 +175,18 @@ def line_count_worktree(path: str) -> int:
     return blob.count(b"\n") + (0 if blob.endswith(b"\n") else 1)
 
 
+@dataclass(frozen=True)
+class Evaluation:
+    violations: tuple[Violation, ...]
+    checked: int
+
+
 def evaluate(
     base_ref: str,
     roots: tuple[str, ...],
     ceiling: int,
     base_sha: str | None = None,
-) -> tuple[list[Violation], int]:
+) -> Evaluation:
     base = resolve_base(base_ref, base_sha)
     violations: list[Violation] = []
     checked = 0
@@ -197,7 +203,7 @@ def evaluate(
         baseline = line_count_at(base, baseline_path)
         if baseline is None or lines > baseline:
             violations.append(Violation(path=path, lines=lines, baseline=baseline))
-    return violations, checked
+    return Evaluation(violations=tuple(violations), checked=checked)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -218,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        violations, checked = evaluate(
+        evaluation = evaluate(
             args.base_ref, tuple(args.paths), args.ceiling, args.base_sha
         )
     except NoMergeBase:
@@ -230,12 +236,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if not violations:
-        print(f"loc_ratchet: {checked} changed file(s) checked, no violations.")
+    if not evaluation.violations:
+        print(
+            f"loc_ratchet: {evaluation.checked} changed file(s) checked, no violations."
+        )
         return 0
 
     print("loc_ratchet: FAIL", file=sys.stderr)
-    for violation in violations:
+    for violation in evaluation.violations:
         print(f"  - {violation.describe(args.ceiling)}", file=sys.stderr)
     print(
         "\nThe ceiling is a ratchet: files already over it are allowed to stay, "

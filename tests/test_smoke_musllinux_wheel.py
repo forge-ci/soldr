@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,14 @@ def test_docker_command_mounts_dist_read_only_and_sets_version(tmp_path: Path) -
     assert "soldr version --json" in command[-1]
 
 
+@dataclass(frozen=True)
+class RunCall:
+    """One recorded `subprocess.run` invocation."""
+
+    command: list[str]
+    check: bool
+
+
 def test_missing_dist_is_a_named_smoke_failure(tmp_path: Path) -> None:
     with pytest.raises(smoke.MusllinuxWheelSmokeError, match="does not exist"):
         smoke.smoke_musllinux_wheel(expected="0.9.2", dist=tmp_path / "missing")
@@ -41,16 +50,18 @@ def test_smoke_runs_the_checked_docker_command(
 ) -> None:
     dist = tmp_path / "dist"
     dist.mkdir()
-    observed: list[tuple[list[str], bool]] = []
+    observed: list[RunCall] = []
 
     def fake_run(command: list[str], *, check: bool) -> None:
-        observed.append((command, check))
+        observed.append(RunCall(command, check))
 
     monkeypatch.setattr(smoke.subprocess, "run", fake_run)
 
     smoke.smoke_musllinux_wheel(expected="0.9.2", dist=dist)
 
-    assert observed == [(smoke.docker_command(expected="0.9.2", dist=dist), True)]
+    assert observed == [
+        RunCall(smoke.docker_command(expected="0.9.2", dist=dist), True)
+    ]
 
 
 def test_workflow_invokes_the_script_instead_of_inlining_alpine_smoke() -> None:

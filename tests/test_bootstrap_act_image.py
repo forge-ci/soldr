@@ -30,6 +30,7 @@ at `target/x86_64-unknown-linux-gnu/{debug,release}/soldr`).
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -86,7 +87,15 @@ def describe_binary_incompatibility(path: Path) -> str | None:
     return None
 
 
-def _locate_linux_soldr_binary() -> tuple[Path | None, list[str]]:
+@dataclass(frozen=True)
+class BinaryLookup:
+    """The compatible binary (if any) and a line per rejected candidate."""
+
+    binary: Path | None
+    rejected: tuple[str, ...]
+
+
+def _locate_linux_soldr_binary() -> BinaryLookup:
     """Find a locally-built linux x86-64 soldr binary, if any.
 
     Returns the first *compatible* candidate together with a diagnostic line
@@ -106,9 +115,9 @@ def _locate_linux_soldr_binary() -> tuple[Path | None, list[str]]:
             continue
         reason = describe_binary_incompatibility(candidate)
         if reason is None:
-            return candidate, rejected
+            return BinaryLookup(candidate, tuple(rejected))
         rejected.append(f"  {candidate.relative_to(REPO_ROOT)}: {reason}")
-    return None, rejected
+    return BinaryLookup(None, tuple(rejected))
 
 
 @pytest.mark.act_integration
@@ -116,7 +125,8 @@ def test_soldr_bootstrap_installs_rustup_on_act_image(tmp_path: Path) -> None:
     if not docker_available():
         pytest.skip("docker daemon not reachable")
 
-    soldr_bin, rejected = _locate_linux_soldr_binary()
+    lookup = _locate_linux_soldr_binary()
+    soldr_bin, rejected = lookup.binary, lookup.rejected
     if soldr_bin is None:
         detail = (
             "\nrejected incompatible candidates:\n" + "\n".join(rejected)

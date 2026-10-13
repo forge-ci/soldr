@@ -22,7 +22,8 @@ def _module():
 def test_neither_ran_nor_hit_is_a_warning() -> None:
     """The soldr#3008 state: cook produced nothing and nobody knew."""
     module = _module()
-    level, message = module.classify(ran=False, hit=False, layer="none")
+    outcome = module.classify(ran=False, hit=False, layer="none")
+    level, message = outcome.level, outcome.message
     assert level == "warning"
     assert "no cook cache will be written" in message
     assert "soldr#3008" in message
@@ -30,13 +31,14 @@ def test_neither_ran_nor_hit_is_a_warning() -> None:
 
 def test_a_cache_hit_is_a_notice_not_a_warning() -> None:
     module = _module()
-    level, _ = module.classify(ran=False, hit=True, layer="none")
+    level = module.classify(ran=False, hit=True, layer="none").level
     assert level == "notice"
 
 
 def test_a_successful_cook_run_is_a_notice_and_names_the_layer() -> None:
     module = _module()
-    level, message = module.classify(ran=True, hit=False, layer="base")
+    outcome = module.classify(ran=True, hit=False, layer="base")
+    level, message = outcome.level, outcome.message
     assert level == "notice"
     assert "base" in message
 

@@ -34,17 +34,56 @@ import tempfile
 import urllib.error
 import urllib.request
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from urllib.parse import urljoin
 
 from catalogue_http import display_url, open_url, validate_https_url
 from release_artifacts import binary_suffix
 
+
+@dataclass(frozen=True)
+class PinnedConstant:
+    """A Rust string constant: the file holding it and its name."""
+
+    relative: str
+    constant: str
+
+
+@dataclass(frozen=True)
+class ToolchainPlatform:
+    """A soldr-toolchain platform selector; `libc`/`abi` are absent when `None`."""
+
+    os: str
+    arch: str
+    libc: str | None = None
+    abi: str | None = None
+
+    def to_dict(self) -> dict:
+        """The catalogue's JSON platform object (absent keys omitted)."""
+        wire = {"os": self.os, "arch": self.arch}
+        if self.libc is not None:
+            wire["libc"] = self.libc
+        if self.abi is not None:
+            wire["abi"] = self.abi
+        return wire
+
+
+@dataclass(frozen=True)
+class ToolCatalog:
+    """A verified per-tool catalogue: its URL and the decoded JSON document."""
+
+    url: str
+    document: dict
+
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ORIGIN = "https://zackees.github.io/soldr-toolchain"
 DEFAULT_ISSUE_URL = "https://github.com/zackees/soldr-toolchain/issues/47"
-CRGX_VERSION = ("crates/soldr-fetch/src/fetch/mod.rs", "MANAGED_CRGX_VERSION")
-CARGO_CHEF_VERSION = (
+CRGX_VERSION = PinnedConstant(
+    "crates/soldr-fetch/src/fetch/mod.rs", "MANAGED_CRGX_VERSION"
+)
+CARGO_CHEF_VERSION = PinnedConstant(
     "crates/soldr-fetch/src/fetch/known_tools.rs",
     "CARGO_CHEF_PINNED_VERSION",
 )
@@ -55,25 +94,21 @@ class SupportBinaryError(RuntimeError):
     """A catalogue, archive, or staging defect that must stop the release."""
 
 
-def platform_for_target(target: str) -> dict[str, str]:
+def platform_for_target(target: str) -> ToolchainPlatform:
     """Translate Soldr's target triple to a soldr-toolchain platform object."""
     table = {
-        "x86_64-unknown-linux-gnu": {"os": "linux", "arch": "x86_64", "libc": "glibc"},
-        "aarch64-unknown-linux-gnu": {
-            "os": "linux",
-            "arch": "aarch64",
-            "libc": "glibc",
-        },
-        "x86_64-unknown-linux-musl": {"os": "linux", "arch": "x86_64", "libc": "musl"},
-        "aarch64-unknown-linux-musl": {
-            "os": "linux",
-            "arch": "aarch64",
-            "libc": "musl",
-        },
-        "x86_64-apple-darwin": {"os": "darwin", "arch": "x86_64"},
-        "aarch64-apple-darwin": {"os": "darwin", "arch": "aarch64"},
-        "x86_64-pc-windows-msvc": {"os": "windows", "arch": "x86_64", "abi": "msvc"},
-        "aarch64-pc-windows-msvc": {"os": "windows", "arch": "aarch64", "abi": "msvc"},
+        "x86_64-unknown-linux-gnu": ToolchainPlatform("linux", "x86_64", libc="glibc"),
+        "aarch64-unknown-linux-gnu": ToolchainPlatform(
+            "linux", "aarch64", libc="glibc"
+        ),
+        "x86_64-unknown-linux-musl": ToolchainPlatform("linux", "x86_64", libc="musl"),
+        "aarch64-unknown-linux-musl": ToolchainPlatform(
+            "linux", "aarch64", libc="musl"
+        ),
+        "x86_64-apple-darwin": ToolchainPlatform("darwin", "x86_64"),
+        "aarch64-apple-darwin": ToolchainPlatform("darwin", "aarch64"),
+        "x86_64-pc-windows-msvc": ToolchainPlatform("windows", "x86_64", abi="msvc"),
+        "aarch64-pc-windows-msvc": ToolchainPlatform("windows", "aarch64", abi="msvc"),
     }
     try:
         return table[target]
@@ -83,9 +118,9 @@ def platform_for_target(target: str) -> dict[str, str]:
         ) from error
 
 
-def read_pinned_version(root: Path, spec: tuple[str, str]) -> str:
+def read_pinned_version(root: Path, spec: PinnedConstant) -> str:
     """Read a Rust string constant without maintaining a second version pin."""
-    relative, constant = spec
+    relative, constant = spec.relative, spec.constant
     text = (root / relative).read_text(encoding="utf-8")
     match = re.search(rf'{constant}\s*:\s*&str\s*=\s*"([^"]+)"', text)
     if not match:
@@ -231,7 +266,7 @@ def download_catalogued_asset(asset: dict, destination: Path) -> str:  # noqa: C
 
 def load_tool_catalog(
     origin: str, index: dict, tool: str, issue_url: str
-) -> tuple[str, dict]:
+) -> ToolCatalog:
     """Load a per-tool catalogue after verifying its index-recorded digest."""
     index_url = f"{origin}/manifest.json"
     entry = (index.get("tools") or {}).get(tool)
@@ -255,7 +290,7 @@ def load_tool_catalog(
             f"{display_url(index_url)} descriptor"
         )
     try:
-        return catalog_url, json.loads(raw.decode("utf-8"))
+        return ToolCatalog(catalog_url, json.loads(raw.decode("utf-8")))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise SupportBinaryError(
             f"invalid tool catalogue at {display_url(catalog_url)}: {error}"
@@ -361,7 +396,8 @@ def fetch_tool(
 ) -> None:
     """Download, verify, extract, and stage one tool for the requested target."""
     release_version = version if version.startswith("v") else f"v{version}"
-    catalog_url, catalog = load_tool_catalog(origin, index, tool, issue_url)
+    loaded = load_tool_catalog(origin, index, tool, issue_url)
+    catalog_url, catalog = loaded.url, loaded.document
     release = next(
         (
             entry
@@ -380,14 +416,14 @@ def fetch_tool(
         (
             entry
             for entry in release.get("platforms", [])
-            if entry.get("platform") == platform
+            if entry.get("platform") == platform.to_dict()
         ),
         None,
     )
     if platform_entry is None:
         raise SupportBinaryError(
             f"{display_url(catalog_url)} release {release_version} has no asset "
-            f"for {target} ({platform}); "
+            f"for {target} ({platform.to_dict()}); "
             f"support coverage is tracked in {issue_url}"
         )
     asset = platform_entry["asset"]

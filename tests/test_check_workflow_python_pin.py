@@ -55,7 +55,7 @@ jobs:
       - run: python3 .github/scripts/stage_release_binaries.py --out dist
 """,
     )
-    assert guard.unpinned_jobs(tmp_path) == {("release.yml", "build")}
+    assert guard.unpinned_jobs(tmp_path) == {guard.JobRef("release.yml", "build")}
 
 
 def test_ci_directory_scripts_count_too(guard, tmp_path):
@@ -71,7 +71,7 @@ jobs:
       - run: python3 ci/perf_local.py cargo build
 """,
     )
-    assert guard.unpinned_jobs(tmp_path) == {("perf.yml", "gate")}
+    assert guard.unpinned_jobs(tmp_path) == {guard.JobRef("perf.yml", "gate")}
 
 
 def test_every_unpinned_job_in_a_file_is_reported(guard, tmp_path):
@@ -89,8 +89,8 @@ jobs:
 """,
     )
     assert guard.unpinned_jobs(tmp_path) == {
-        ("many.yml", "first"),
-        ("many.yml", "second"),
+        guard.JobRef("many.yml", "first"),
+        guard.JobRef("many.yml", "second"),
     }
 
 
@@ -140,7 +140,7 @@ jobs:
       - run: uv run --no-project python .github/scripts/prepare_cook_fixture.py
 """,
     )
-    assert guard.unpinned_jobs(tmp_path) == {("cook.yml", "cook")}
+    assert guard.unpinned_jobs(tmp_path) == {guard.JobRef("cook.yml", "cook")}
 
 
 def test_release_scripts_require_setup_uv_and_no_project(guard, tmp_path):
@@ -169,8 +169,8 @@ jobs:
 """,
     )
     assert guard.unpinned_jobs(tmp_path) == {
-        ("release-auto.yml", "release"),
-        ("release-auto.yml", "missing-no-project"),
+        guard.JobRef("release-auto.yml", "release"),
+        guard.JobRef("release-auto.yml", "missing-no-project"),
     }
 
 
@@ -193,7 +193,7 @@ jobs:
       - run: python3 .github/scripts/stage_release_binaries.py
 """,
     )
-    assert guard.unpinned_jobs(tmp_path) == {("release.yml", "build")}
+    assert guard.unpinned_jobs(tmp_path) == {guard.JobRef("release.yml", "build")}
 
 
 def test_one_uv_run_does_not_cover_a_sibling_bare_call(guard, tmp_path):
@@ -210,7 +210,7 @@ jobs:
       - run: python3 .github/scripts/two.py
 """,
     )
-    assert guard.unpinned_jobs(tmp_path) == {("release.yml", "build")}
+    assert guard.unpinned_jobs(tmp_path) == {guard.JobRef("release.yml", "build")}
 
 
 @pytest.mark.parametrize("separator", ["&&", ";", "|", "&"])
@@ -233,7 +233,7 @@ jobs:
       - run: uv run --python 3.13 ci/one.py {separator} python3 ci/two.py
 """,
     )
-    assert guard.unpinned_jobs(tmp_path) == {("release.yml", "bare")}
+    assert guard.unpinned_jobs(tmp_path) == {guard.JobRef("release.yml", "bare")}
 
 
 def test_redirection_is_not_a_shell_command_boundary(guard, tmp_path):
@@ -271,7 +271,9 @@ jobs:
       - run: uv run --no-project --python 3.13 ci/one.py {separator} uv run python ci/two.py
 """,
     )
-    assert guard.unpinned_jobs(tmp_path) == {("release-auto.yml", "inherited-flags")}
+    assert guard.unpinned_jobs(tmp_path) == {
+        guard.JobRef("release-auto.yml", "inherited-flags")
+    }
 
 
 def test_a_container_job_is_not_flagged(guard, tmp_path):
@@ -324,7 +326,7 @@ jobs:
       - run: python3 ci/b.py
 """,
     )
-    assert guard.unpinned_jobs(tmp_path) == {("two.yml", "unpinned")}
+    assert guard.unpinned_jobs(tmp_path) == {guard.JobRef("two.yml", "unpinned")}
 
 
 # ---------------------------- the baseline is honest ---------------------------
@@ -344,7 +346,7 @@ def test_baseline_matches_the_repository_exactly(guard):
 
 def test_baseline_entries_name_workflows_that_exist(guard):
     """A renamed or deleted workflow must not leave a silent entry behind."""
-    for workflow in {entry[0] for entry in guard.BASELINE}:
+    for workflow in {entry.workflow for entry in guard.BASELINE}:
         assert (guard.WORKFLOW_DIR / workflow).is_file(), (
             f"BASELINE names {workflow}, which does not exist"
         )
@@ -398,7 +400,7 @@ jobs:
       - uses: {SETUP_UV}
 """,
     )
-    assert guard.unpinned_jobs(tmp_path) == {("late.yml", "build")}
+    assert guard.unpinned_jobs(tmp_path) == {guard.JobRef("late.yml", "build")}
 
 
 def test_uv_installed_before_use_is_accepted(guard, tmp_path):
@@ -468,7 +470,7 @@ jobs:
       - run: python3 .github/scripts/one.py
 """,
     )
-    assert guard.unpinned_jobs(tmp_path) == {("release.yml", "build")}
+    assert guard.unpinned_jobs(tmp_path) == {guard.JobRef("release.yml", "build")}
 
 
 def test_the_routing_must_precede_the_script_on_its_own_line(guard, tmp_path):
@@ -486,7 +488,7 @@ jobs:
           uv run --python 3.13 python .github/scripts/two.py
 """,
     )
-    assert guard.unpinned_jobs(tmp_path) == {("release.yml", "build")}
+    assert guard.unpinned_jobs(tmp_path) == {guard.JobRef("release.yml", "build")}
 
 
 def test_the_unrouted_list_names_the_offending_line(guard):
@@ -542,7 +544,7 @@ jobs:
       - run: python3 .github/scripts/check_cache_budget.py
 """,
     )
-    assert guard.unpinned_jobs(tmp_path) == {("ci-pre.yml", "cache-budget")}
+    assert guard.unpinned_jobs(tmp_path) == {guard.JobRef("ci-pre.yml", "cache-budget")}
 
 
 def test_a_non_allowlisted_script_beside_a_stdlib_one_is_unpinned(guard, tmp_path):
@@ -558,4 +560,4 @@ jobs:
       - run: python3 .github/scripts/stage_release_binaries.py
 """,
     )
-    assert guard.unpinned_jobs(tmp_path) == {("ci-pre.yml", "cache-budget")}
+    assert guard.unpinned_jobs(tmp_path) == {guard.JobRef("ci-pre.yml", "cache-budget")}

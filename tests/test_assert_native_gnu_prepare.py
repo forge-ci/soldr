@@ -57,9 +57,9 @@ def test_malformed_lines_are_skipped_not_raised() -> None:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX exec semantics")
 def test_a_missing_binary_is_reported_as_not_executable() -> None:
-    runnable, detail = is_executable_here("/definitely/not/here/cc")
-    assert not runnable
-    assert "Error" in detail or "error" in detail
+    probe = is_executable_here("/definitely/not/here/cc")
+    assert not probe.runnable
+    assert "Error" in probe.detail or "error" in probe.detail
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX exec semantics")
@@ -76,8 +76,7 @@ def test_a_file_that_is_not_a_valid_executable_is_reported_as_not_executable(
     fake = tmp_path / "cc"
     fake.write_bytes(b"\x7fELF this is not a loadable image for this machine")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-    runnable, _ = is_executable_here(str(fake))
-    assert not runnable
+    assert not is_executable_here(str(fake)).runnable
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX exec semantics")
@@ -87,12 +86,11 @@ def test_a_runnable_binary_passes_even_when_it_exits_non_zero() -> None:
     # conflating those would fail hosts that are perfectly fine.
     false_binary = shutil.which("false")
     assert false_binary is not None
-    runnable, _ = is_executable_here(false_binary)
-    assert runnable
+    assert is_executable_here(false_binary).runnable
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX exec semantics")
 def test_a_runnable_binary_reports_its_first_output_line() -> None:
-    runnable, detail = is_executable_here("/bin/echo")
-    assert runnable
-    assert detail is not None
+    probe = is_executable_here("/bin/echo")
+    assert probe.runnable
+    assert probe.detail is not None

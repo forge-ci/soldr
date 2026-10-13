@@ -35,10 +35,13 @@ def states():
 
 
 def test_foreign_adapter_does_not_inherit_soldr_jobs():
-    assert COVERAGE.required_jobs(contract()) == set(states())
+    assert COVERAGE.required_jobs(COVERAGE.JsonDocument(contract())) == set(states())
     assert (
         COVERAGE.coverage_failures(
-            contract(), states(), expected_sha=SHA, selected_sha=SHA
+            COVERAGE.JsonDocument(contract()),
+            COVERAGE.JsonDocument(states()),
+            expected_sha=SHA,
+            selected_sha=SHA,
         )
         == []
     )
@@ -51,7 +54,10 @@ def test_each_unsuccessful_cell_refuses_full_coverage(status):
     needs = states()
     needs["board-run"]["result"] = status
     assert COVERAGE.coverage_failures(
-        contract(), needs, expected_sha=SHA, selected_sha=SHA
+        COVERAGE.JsonDocument(contract()),
+        COVERAGE.JsonDocument(needs),
+        expected_sha=SHA,
+        selected_sha=SHA,
     )
 
 
@@ -59,10 +65,16 @@ def test_missing_cell_and_wrong_sha_refuse_full_coverage():
     needs = states()
     del needs["board-run"]
     assert COVERAGE.coverage_failures(
-        contract(), needs, expected_sha=SHA, selected_sha=SHA
+        COVERAGE.JsonDocument(contract()),
+        COVERAGE.JsonDocument(needs),
+        expected_sha=SHA,
+        selected_sha=SHA,
     ) == ["board-run: missing"]
     assert COVERAGE.coverage_failures(
-        contract(), states(), expected_sha=SHA, selected_sha="b" * 40
+        COVERAGE.JsonDocument(contract()),
+        COVERAGE.JsonDocument(states()),
+        expected_sha=SHA,
+        selected_sha="b" * 40,
     )
 
 
@@ -71,7 +83,7 @@ def test_invalid_adapter_required_job_list_is_rejected(jobs):
     manifest = contract()
     manifest["required_jobs"] = jobs
     with pytest.raises(ValueError):
-        COVERAGE.required_jobs(manifest)
+        COVERAGE.required_jobs(COVERAGE.JsonDocument(manifest))
 
 
 @pytest.mark.parametrize("selected_sha,passed", [(SHA, True), ("b" * 40, False)])
@@ -125,7 +137,10 @@ def test_cli_cannot_report_green_without_candidate_identity(tmp_path, monkeypatc
 def test_normalized_uppercase_candidate_is_the_same_identity():
     assert (
         COVERAGE.coverage_failures(
-            contract(), states(), expected_sha=SHA.upper(), selected_sha=SHA
+            COVERAGE.JsonDocument(contract()),
+            COVERAGE.JsonDocument(states()),
+            expected_sha=SHA.upper(),
+            selected_sha=SHA,
         )
         == []
     )
@@ -160,14 +175,14 @@ def test_malformed_target_job_ids_are_rejected(field, value):
     manifest = contract()
     manifest["targets"][0]["ci"][field] = value
     with pytest.raises(ValueError, match="valid job ID"):
-        COVERAGE.required_jobs(manifest)
+        COVERAGE.required_jobs(COVERAGE.JsonDocument(manifest))
 
 
 def test_duplicate_portable_target_identities_are_rejected():
     manifest = contract()
     manifest["targets"].append(manifest["targets"][0].copy())
     with pytest.raises(ValueError, match="unique"):
-        COVERAGE.required_jobs(manifest)
+        COVERAGE.required_jobs(COVERAGE.JsonDocument(manifest))
 
 
 @pytest.mark.parametrize("version", [1.0, True, "1", None, 2])
@@ -175,7 +190,7 @@ def test_portable_schema_version_requires_integer_one(version):
     manifest = contract()
     manifest["schema_version"] = version
     with pytest.raises(ValueError, match="schema_version 1"):
-        COVERAGE.required_jobs(manifest)
+        COVERAGE.required_jobs(COVERAGE.JsonDocument(manifest))
 
 
 def test_default_contract_report_requires_candidate_identity(tmp_path, monkeypatch):

@@ -6,6 +6,7 @@ release, and it encodes two shipped regressions. Neither was testable.
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import pytest
@@ -152,8 +153,8 @@ class TestInvocationDefaults:
     def test_main_derives_missing_driver_and_archive(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        captured: dict[str, object] = {}
-        monkeypatch.setattr(smoke, "smoke", lambda args: captured.update(vars(args)))
+        captured: list[argparse.Namespace] = []
+        monkeypatch.setattr(smoke, "smoke", captured.append)
 
         assert (
             smoke.main(
@@ -174,10 +175,11 @@ class TestInvocationDefaults:
             )
             == 0
         )
-        assert captured["archive"] == str(
+        args = captured[0]
+        assert args.archive == str(
             tmp_path / "dist" / "soldr-v0.9.2-x86_64-pc-windows-msvc.tar.zst"
         )
-        assert captured["driver"] == str(tmp_path / "release" / "soldr.exe")
+        assert args.driver == str(tmp_path / "release" / "soldr.exe")
 
 
 def test_workflow_invokes_the_script_instead_of_inlining_the_gate() -> None:

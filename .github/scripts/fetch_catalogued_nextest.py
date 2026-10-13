@@ -17,6 +17,7 @@ import shutil
 import tarfile
 import tempfile
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from download_catalogued_asset import download_verified as materialize_asset
@@ -25,19 +26,28 @@ from toolchain_asset_query import resolve_metadata
 CARGO_NEXTEST_RELEASE_PREFIX = "cargo-nextest-"
 
 
-def query_for_target(target: str) -> tuple[str, str, str | None]:
+@dataclass(frozen=True)
+class CatalogueQuery:
+    """The `(platform, arch, extra)` selector of a catalogue row."""
+
+    platform: str
+    arch: str
+    extra: str | None
+
+
+def query_for_target(target: str) -> CatalogueQuery:
     table = {
-        "x86_64-unknown-linux-gnu": ("linux", "x86", "gnu"),
-        "aarch64-unknown-linux-gnu": ("linux", "arm", "gnu"),
-        "x86_64-unknown-linux-musl": ("linux", "x86", "musl"),
-        "aarch64-unknown-linux-musl": ("linux", "arm", "musl"),
-        "x86_64-apple-darwin": ("mac", "x86", None),
-        "aarch64-apple-darwin": ("mac", "arm", None),
-        "x86_64-pc-windows-msvc": ("windows", "x86", "msvc"),
+        "x86_64-unknown-linux-gnu": CatalogueQuery("linux", "x86", "gnu"),
+        "aarch64-unknown-linux-gnu": CatalogueQuery("linux", "arm", "gnu"),
+        "x86_64-unknown-linux-musl": CatalogueQuery("linux", "x86", "musl"),
+        "aarch64-unknown-linux-musl": CatalogueQuery("linux", "arm", "musl"),
+        "x86_64-apple-darwin": CatalogueQuery("mac", "x86", None),
+        "aarch64-apple-darwin": CatalogueQuery("mac", "arm", None),
+        "x86_64-pc-windows-msvc": CatalogueQuery("windows", "x86", "msvc"),
         # nextest is a host tool. The published Windows x64 executable runs
         # the GNU-target test archive just as it runs the MSVC-target archive.
-        "x86_64-pc-windows-gnu": ("windows", "x86", "msvc"),
-        "aarch64-pc-windows-msvc": ("windows", "arm", "msvc"),
+        "x86_64-pc-windows-gnu": CatalogueQuery("windows", "x86", "msvc"),
+        "aarch64-pc-windows-msvc": CatalogueQuery("windows", "arm", "msvc"),
     }
     try:
         return table[target]
@@ -55,14 +65,14 @@ def canonical_catalogue_version(version: str) -> str:
 
 
 def resolve_catalogued_metadata(*, target: str, version: str, origin: str) -> dict:
-    platform, arch, extra = query_for_target(target)
+    query = query_for_target(target)
     return resolve_metadata(
         tool="cargo-nextest",
         origin=origin,
         tool_manifest_url_override=None,
-        platform=platform,
-        arch=arch,
-        extra=extra,
+        platform=query.platform,
+        arch=query.arch,
+        extra=query.extra,
         version=canonical_catalogue_version(version),
     )
 

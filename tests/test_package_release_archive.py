@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,12 @@ def test_driver_path_tracks_the_runner_not_the_archive_target(tmp_path: Path) ->
     assert package.driver_path("macOS", driver_dir) == driver_dir / "soldr"
 
 
+@dataclass(frozen=True)
+class RecordedRun:
+    command: list[str]
+    check: bool
+
+
 def test_archive_path_preserves_version_and_target(tmp_path: Path) -> None:
     assert package.archive_path("v0.9.2", "x86_64-unknown-linux-gnu", tmp_path) == (
         tmp_path / "soldr-v0.9.2-x86_64-unknown-linux-gnu.tar.zst"
@@ -37,10 +44,10 @@ def test_package_invokes_the_runner_specific_driver_and_reports_size(
     package_dir.mkdir()
     output_dir = tmp_path / "dist"
     driver_dir = tmp_path / "release"
-    calls: list[tuple[list[str], bool]] = []
+    calls: list[RecordedRun] = []
 
     def fake_run(command: list[str], check: bool) -> None:
-        calls.append((command, check))
+        calls.append(RecordedRun(command, check))
         output = Path(command[-1])
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(b"compressed")
@@ -57,7 +64,7 @@ def test_package_invokes_the_runner_specific_driver_and_reports_size(
     )
 
     assert calls == [
-        (
+        RecordedRun(
             [
                 str(driver_dir / "soldr.exe"),
                 "archive",

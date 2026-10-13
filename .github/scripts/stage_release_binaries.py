@@ -57,6 +57,7 @@ import os
 import platform
 import shutil
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from release_artifacts import binary_suffix
@@ -305,20 +306,28 @@ def find_cross_gnu_tool(target: str, name: str) -> str | None:
     return None
 
 
-def select_binutils(target: str) -> tuple[str, str]:
-    """Choose ``(objcopy, strip)`` able to process artifacts built for ``target``.
+@dataclass(frozen=True)
+class Binutils:
+    """The ``objcopy`` and ``strip`` tools selected for one target."""
+
+    objcopy: str
+    strip: str
+
+
+def select_binutils(target: str) -> Binutils:
+    """Choose the ``objcopy`` and ``strip`` tools able to process artifacts built for ``target``.
 
     Never returns a "skip" sentinel: a release that cannot carve symbols must
     say which tools it looked for and stop, not silently ship an unstripped
     binary with no sidecar.
     """
     if target_is_host_native(target):
-        return GNU_OBJCOPY, GNU_STRIP
+        return Binutils(GNU_OBJCOPY, GNU_STRIP)
 
     objcopy = find_llvm_tool(LLVM_OBJCOPY) or find_cross_gnu_tool(target, "objcopy")
     strip_tool = find_llvm_tool(LLVM_STRIP) or find_cross_gnu_tool(target, "strip")
     if objcopy and strip_tool:
-        return objcopy, strip_tool
+        return Binutils(objcopy, strip_tool)
 
     missing = [
         name
@@ -392,7 +401,7 @@ def verify_no_disallowed_dynamic_libs(paths: list[Path]) -> None:
         result = check_linked_libs.check_binary(path)
         if result is None:
             continue
-        kind, _needed, offenders = result
+        kind, offenders = result.kind, list(result.offenders)
         if offenders:
             raise StagingError(
                 f"{path} ({kind}) links disallowed shared librar{'y' if len(offenders) == 1 else 'ies'} "
@@ -502,7 +511,8 @@ def stage_debug_symbols(  # noqa: C901
         if explicit is not None:
             return explicit
         if not resolved:
-            selected_objcopy, selected_strip = select_binutils(target)
+            selected = select_binutils(target)
+            selected_objcopy, selected_strip = selected.objcopy, selected.strip
             resolved.update(
                 objcopy=selected_objcopy,
                 strip=selected_strip,

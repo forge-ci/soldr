@@ -7,6 +7,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -27,11 +28,23 @@ def _normalize_list(value: Any) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
+@dataclass(frozen=True)
+class ToolchainSpec:
+    """The resolved rust toolchain request (channel, profile, extras)."""
+
+    channel: str
+    profile: str
+    components: tuple[str, ...]
+    targets: tuple[str, ...]
+    source: str
+    file_hash: str
+
+
 def load_toolchain_spec(
     workspace: Path,
     toolchain_file: str,
     toolchain_override: str,
-) -> dict[str, Any]:
+) -> ToolchainSpec:
     channel = "stable"
     profile = "minimal"
     components: list[str] = []
@@ -59,14 +72,14 @@ def load_toolchain_spec(
         channel = toolchain_override.strip()
         source = "input"
 
-    return {
-        "channel": channel,
-        "profile": profile,
-        "components": components,
-        "targets": targets,
-        "source": source,
-        "file_hash": file_hash,
-    }
+    return ToolchainSpec(
+        channel=channel,
+        profile=profile,
+        components=tuple(components),
+        targets=tuple(targets),
+        source=source,
+        file_hash=file_hash,
+    )
 
 
 def _sanitize_fragment(value: str) -> str:
@@ -247,12 +260,12 @@ def main() -> None:
     cache_key_soldr_version = _normalize_release_tag(resolved_soldr_version) or "latest"
 
     toolchain_signature = {
-        "channel": toolchain["channel"],
-        "profile": toolchain["profile"],
-        "components": toolchain["components"],
-        "targets": toolchain["targets"],
-        "source": toolchain["source"],
-        "file_hash": toolchain["file_hash"],
+        "channel": toolchain.channel,
+        "profile": toolchain.profile,
+        "components": list(toolchain.components),
+        "targets": list(toolchain.targets),
+        "source": toolchain.source,
+        "file_hash": toolchain.file_hash,
         "soldr_repo": soldr_repo,
         "soldr_version": cache_key_soldr_version,
     }
@@ -318,10 +331,12 @@ def main() -> None:
     _write_env("CARGO_HOME", str(cargo_home))
     _write_env("RUSTUP_HOME", str(rustup_home))
     _write_env("ZCCACHE_CACHE_DIR", str(zccache_cache_dir))
-    _write_env("SETUP_SOLDR_TOOLCHAIN_CHANNEL", toolchain["channel"])
-    _write_env("SETUP_SOLDR_TOOLCHAIN_PROFILE", toolchain["profile"])
-    _write_env("SETUP_SOLDR_TOOLCHAIN_COMPONENTS", json.dumps(toolchain["components"]))
-    _write_env("SETUP_SOLDR_TOOLCHAIN_TARGETS", json.dumps(toolchain["targets"]))
+    _write_env("SETUP_SOLDR_TOOLCHAIN_CHANNEL", toolchain.channel)
+    _write_env("SETUP_SOLDR_TOOLCHAIN_PROFILE", toolchain.profile)
+    _write_env(
+        "SETUP_SOLDR_TOOLCHAIN_COMPONENTS", json.dumps(list(toolchain.components))
+    )
+    _write_env("SETUP_SOLDR_TOOLCHAIN_TARGETS", json.dumps(list(toolchain.targets)))
     if os.environ.get("INPUT_TRUST_MODE", "").strip():
         _write_env("SOLDR_TRUST_MODE", os.environ["INPUT_TRUST_MODE"].strip())
 
@@ -349,10 +364,10 @@ def main() -> None:
             "soldr_repo": soldr_repo,
             "soldr_version_requested": soldr_version,
             "soldr_version_resolved": resolved_soldr_version,
-            "toolchain_channel": toolchain["channel"],
-            "toolchain_profile": toolchain["profile"],
-            "toolchain_source": toolchain["source"],
-            "toolchain": toolchain["channel"],
+            "toolchain_channel": toolchain.channel,
+            "toolchain_profile": toolchain.profile,
+            "toolchain_source": toolchain.source,
+            "toolchain": toolchain.channel,
         }
     )
 

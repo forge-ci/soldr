@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,14 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-auto.yml"
 wheel = load_script_module(
     SCRIPTS / "prepare_release_wheel.py", "prepare_release_wheel"
 )
+
+
+@dataclass(frozen=True)
+class RecordedCall:
+    """One recorded `subprocess.run` invocation."""
+
+    command: list[str]
+    check: bool
 
 
 def test_driver_path_tracks_runner_os_not_cross_target(tmp_path: Path) -> None:
@@ -100,7 +109,7 @@ def test_empty_setup_soldr_hook_uses_the_documented_default() -> None:
 def test_prepare_runs_cleanup_validation_and_builder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[tuple[list[str], bool]] = []
+    calls: list[RecordedCall] = []
     monkeypatch.setattr(wheel, "clean_wheel_outputs", lambda _root: None)
     monkeypatch.setattr(
         wheel, "validate_workspace_version", lambda *_args, **_kwargs: None
@@ -109,7 +118,7 @@ def test_prepare_runs_cleanup_validation_and_builder(
     def fake_run(
         command: list[str], *, cwd: Path, check: bool, **_kwargs: object
     ) -> SimpleNamespace:
-        calls.append((command, check))
+        calls.append(RecordedCall(command, check))
         return SimpleNamespace(returncode=0, stdout="")
 
     monkeypatch.setattr(wheel.subprocess, "run", fake_run)
@@ -124,7 +133,7 @@ def test_prepare_runs_cleanup_validation_and_builder(
     )
 
     driver = str(tmp_path / "release" / "soldr.exe")
-    assert calls[0] == (
+    assert calls[0] == RecordedCall(
         [
             driver,
             "cargo",
@@ -137,7 +146,7 @@ def test_prepare_runs_cleanup_validation_and_builder(
         ],
         False,
     )
-    assert calls[1] == (
+    assert calls[1] == RecordedCall(
         [
             "git",
             "restore",
@@ -148,8 +157,8 @@ def test_prepare_runs_cleanup_validation_and_builder(
         ],
         False,
     )
-    assert calls[2] == (["uv", "python", "install", "3.13"], True)
-    assert calls[3] == (
+    assert calls[2] == RecordedCall(["uv", "python", "install", "3.13"], True)
+    assert calls[3] == RecordedCall(
         wheel.builder_command("x86_64-pc-windows-msvc", wheel.DEFAULT_WHEEL_HOOK),
         True,
     )

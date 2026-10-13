@@ -255,18 +255,20 @@ def test_macos_allowlist_rejects_a_third_party_dylib() -> None:
 def test_check_binary_passes_a_compliant_elf(tmp_path: Path) -> None:
     binary = tmp_path / "soldr"
     binary.write_bytes(build_elf64(["libc.so.6", "libm.so.6"]))
-    kind, needed, offenders = check_linked_libs.check_binary(binary)
-    assert kind == "elf"
-    assert needed == ["libc.so.6", "libm.so.6"]
-    assert offenders == []
+    result = check_linked_libs.check_binary(binary)
+    assert result is not None
+    assert result.kind == "elf"
+    assert result.linked == ("libc.so.6", "libm.so.6")
+    assert result.offenders == ()
 
 
 def test_check_binary_fails_an_elf_with_a_vendored_dependency(tmp_path: Path) -> None:
     binary = tmp_path / "soldr"
     binary.write_bytes(build_elf64(["libc.so.6", "liblzma.so.5"]))
-    kind, _needed, offenders = check_linked_libs.check_binary(binary)
-    assert kind == "elf"
-    assert offenders == ["liblzma.so.5"]
+    result = check_linked_libs.check_binary(binary)
+    assert result is not None
+    assert result.kind == "elf"
+    assert result.offenders == ("liblzma.so.5",)
 
 
 def test_check_binary_returns_none_for_an_unsupported_format(tmp_path: Path) -> None:

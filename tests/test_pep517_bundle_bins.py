@@ -17,6 +17,7 @@ import tempfile
 import types
 import unittest
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -422,6 +423,16 @@ class SoldrWheelCliTest(unittest.TestCase):
         self.assertEqual(wheel.read_bytes(), before)
 
 
+@dataclass(frozen=True)
+class BinBuildCall:
+    """One recorded `build_bundle_bin` invocation."""
+
+    entry: Any
+    command: list[str]
+    rustc_wrapper: str | None
+    pyo3_python: str | None
+
+
 class BackendIntegrationTest(unittest.TestCase):
     """The native maturin hooks build and stage configured bins."""
 
@@ -466,17 +477,19 @@ class BackendIntegrationTest(unittest.TestCase):
             self.addCleanup(env_patch.stop)
             os.environ.pop(name, None)
 
-    def _build(
-        self, hook: str, config_settings: Any = None
-    ) -> list[tuple[Any, list[str], dict[str, str]]]:
-        calls: list[tuple[Any, list[str], dict[str, str]]] = []
+    def _build(self, hook: str, config_settings: Any = None) -> list[BinBuildCall]:
+        calls: list[BinBuildCall] = []
 
         def maturin(subcommand: str, *args: str, **_kwargs: Any) -> None:
             self.assertEqual(subcommand, "build-wheel")
             _write_wheel(self.out / WHEEL_NAME)
 
         def build_bin(entry: Any, command: list[str], env: dict[str, str]) -> Path:
-            calls.append((entry, command, dict(env)))
+            calls.append(
+                BinBuildCall(
+                    entry, command, env.get("RUSTC_WRAPPER"), env.get("PYO3_PYTHON")
+                )
+            )
             path = self.scratch / entry.bin
             path.write_bytes(entry.bin.encode())
             return path
@@ -489,16 +502,19 @@ class BackendIntegrationTest(unittest.TestCase):
 
     def test_wheel_bundles_each_bin_with_maturins_profile_and_interpreter(self) -> None:
         calls = self._build("build_wheel", {"--target": "x86_64-unknown-linux-gnu"})
-        self.assertEqual([entry.bin for entry, _, _ in calls], ["demo-cli", "helper"])
-        _, command, env = calls[0]
+        self.assertEqual([call.entry.bin for call in calls], ["demo-cli", "helper"])
+        command = calls[0].command
         self.assertEqual(command[:4], ["soldr", "build", "--bin", "demo-cli"])
         self.assertIn("--package", command)
         self.assertEqual(
             command[-4:], ["--profile", "dev", "--target", "x86_64-unknown-linux-gnu"]
         )
-        self.assertEqual(env["RUSTC_WRAPPER"], os.environ.get("RUSTC_WRAPPER", "soldr"))
-        self.assertNotIn(
-            "PYO3_PYTHON", env, "a cross target must not inherit the host interpreter"
+        self.assertEqual(
+            calls[0].rustc_wrapper, os.environ.get("RUSTC_WRAPPER", "soldr")
+        )
+        self.assertIsNone(
+            calls[0].pyo3_python,
+            "a cross target must not inherit the host interpreter",
         )
         with zipfile.ZipFile(self.out / WHEEL_NAME) as archive:
             self.assertEqual(
@@ -510,10 +526,10 @@ class BackendIntegrationTest(unittest.TestCase):
         self,
     ) -> None:
         os.environ["SOLDR_PEP517_PROFILE"] = "none"
-        _, wheel_command, wheel_env = self._build("build_wheel")[0]
-        self.assertEqual(wheel_command[-1], "--release")
-        self.assertEqual(wheel_env["PYO3_PYTHON"], sys.executable)
-        _, editable_command, _ = self._build("build_editable")[0]
+        wheel_call = self._build("build_wheel")[0]
+        self.assertEqual(wheel_call.command[-1], "--release")
+        self.assertEqual(wheel_call.pyo3_python, sys.executable)
+        editable_command = self._build("build_editable")[0].command
         self.assertNotIn("--release", editable_command)
         self.assertNotIn("--profile", editable_command)
 
@@ -525,7 +541,7 @@ class BackendIntegrationTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        _, command, _ = self._build("build_wheel", {"profile": "release"})[0]
+        command = self._build("build_wheel", {"profile": "release"})[0].command
         manifest = command[command.index("--manifest-path") + 1]
         self.assertEqual(Path(manifest), self.root / "crates" / "demo" / "Cargo.toml")
         self.assertEqual(command[-2:], ["--profile", "release"])

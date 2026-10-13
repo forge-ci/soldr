@@ -64,6 +64,7 @@ import os
 import re
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -89,8 +90,16 @@ def is_bot(email: str) -> bool:
     return any(p.search(email) for p in BOT_EMAIL_PATTERNS)
 
 
-def walk_main_commits(limit: int, ref: str) -> Iterable[tuple[int, str]]:
-    """Yield `(unix_ts, author_email)` for the most recent `limit` commits on `ref`."""
+@dataclass(frozen=True)
+class Commit:
+    """One commit's unix timestamp and author email."""
+
+    unix_ts: int
+    author_email: str
+
+
+def walk_main_commits(limit: int, ref: str) -> Iterable[Commit]:
+    """Yield a `Commit` for the most recent `limit` commits on `ref`."""
     proc = run_captured(
         ["git", "log", f"-n{limit}", "--format=%at|%ae", ref],
         capture_output=True,
@@ -102,7 +111,7 @@ def walk_main_commits(limit: int, ref: str) -> Iterable[tuple[int, str]]:
         if not sep:
             continue
         try:
-            yield int(ts_str), email
+            yield Commit(int(ts_str), email)
         except ValueError:
             continue
 
@@ -152,11 +161,11 @@ def main() -> int:
 
     latest_human_ts: int | None = None
     latest_human_email: str | None = None
-    for ts, email in walk_main_commits(args.limit, args.ref):
-        if is_bot(email):
+    for commit in walk_main_commits(args.limit, args.ref):
+        if is_bot(commit.author_email):
             continue
-        latest_human_ts = ts
-        latest_human_email = email
+        latest_human_ts = commit.unix_ts
+        latest_human_email = commit.author_email
         break
 
     if latest_human_ts is None:

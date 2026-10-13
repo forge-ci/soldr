@@ -55,7 +55,7 @@ def test_folded_block_with_a_comment_is_reported() -> None:
     module = _module()
     found = module.offending_blocks(FOLDED_WITH_COMMENT)
     assert len(found) == 1
-    assert "explanation" in found[0][1]
+    assert "explanation" in found[0].line
 
 
 def test_literal_block_is_allowed() -> None:

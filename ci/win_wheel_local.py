@@ -40,6 +40,7 @@ import hashlib
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 # --- baked-in configuration -------------------------------------------------
@@ -97,7 +98,18 @@ WORKDIR /work
 # --- plumbing ---------------------------------------------------------------
 
 
-def volume_names() -> dict[str, str]:
+@dataclass(frozen=True)
+class VolumeNames:
+    """The two named Docker volumes that carry a checkout's warm state."""
+
+    soldr: str
+    target: str
+
+    def all(self) -> list[str]:
+        return [self.soldr, self.target]
+
+
+def volume_names() -> VolumeNames:
     """Per-checkout volume names, so sibling clones keep separate warm trees.
 
     Note neither is `~/.cargo` or `~/.rustup`: soldr keeps its managed
@@ -105,7 +117,7 @@ def volume_names() -> dict[str, str]:
     `/root/.soldr` carries the registry, toolchain, SDK and compiler cache.
     """
     suffix = hashlib.sha256(str(REPO_ROOT).encode("utf-8")).hexdigest()[:10]
-    return {"soldr": f"{IMAGE}-soldr-{suffix}", "target": f"{IMAGE}-target-{suffix}"}
+    return VolumeNames(f"{IMAGE}-soldr-{suffix}", f"{IMAGE}-target-{suffix}")
 
 
 def run(command: list[str], *, stdin: str | None = None) -> int:
@@ -135,7 +147,7 @@ def build_image(*, rebuild: bool) -> int:
 def build_wheel(*, release: bool) -> int:
     volumes = volume_names()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    for name in volumes.values():
+    for name in volumes.all():
         run(["docker", "volume", "create", name])
 
     profile = "--release" if release else ""
@@ -152,11 +164,11 @@ def build_wheel(*, release: bool) -> int:
             "-v",
             f"{OUT_DIR}:/out",
             "-v",
-            f"{volumes['target']}:/work/target",
+            f"{volumes.target}:/work/target",
             # Seeded from the image on first mount, so the baked toolchain and
             # SDK survive into the volume and stay warm from then on.
             "-v",
-            f"{volumes['soldr']}:/root/.soldr",
+            f"{volumes.soldr}:/root/.soldr",
             # Bounded on purpose: Docker Desktop's memory cap OOM-kills an
             # unbounded parallel rustc fleet mid-build (observed at 7 jobs;
             # soldr#2453 names the signature). 2 matches the release wheel
@@ -198,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.wipe:
-        return run(["docker", "volume", "rm", "--force", *volume_names().values()])
+        return run(["docker", "volume", "rm", "--force", *volume_names().all()])
 
     before = (
         {path.name for path in OUT_DIR.glob("*.whl")} if OUT_DIR.is_dir() else set()

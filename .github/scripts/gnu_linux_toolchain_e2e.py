@@ -17,7 +17,10 @@ import re
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 # Use regular-file capture without an installed Python dependency.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -39,16 +42,39 @@ OUTER_SOLDR_ENV = (
 )
 
 
-def fresh_checkout_env(source: dict[str, str] | None = None) -> dict[str, str]:
+@dataclass(frozen=True)
+class PreparedEnvironment:
+    """What `soldr prepare` yields for one target.
+
+    `build_env` is the full environment a build needs, which necessarily
+    inherits the ambient one. `managed` is only what soldr set, and is the only
+    thing the no-Zig assertion may inspect.
+    """
+
+    build_env: MappingProxyType[str, str]
+    managed: MappingProxyType[str, str]
+
+
+@dataclass(frozen=True)
+class ManagedRoots:
+    """The managed GNU toolchain root and the sysroot inside it."""
+
+    root: Path
+    sysroot: Path
+
+
+def fresh_checkout_env(
+    source: Mapping[str, str] | None = None,
+) -> MappingProxyType[str, str]:
     """Drop setup-soldr state before exercising the checkout-built binary."""
-    env = os.environ.copy() if source is None else source.copy()
+    env = dict(os.environ if source is None else source)
     for name in OUTER_SOLDR_ENV:
         env.pop(name, None)
-    return env
+    return MappingProxyType(env)
 
 
 def run(
-    args: list[str], *, env: dict[str, str] | None = None, cwd: Path | None = None
+    args: list[str], *, env: Mapping[str, str] | None = None, cwd: Path | None = None
 ) -> str:
     completed = run_captured(
         args,
@@ -66,7 +92,7 @@ def run(
     return completed.stdout
 
 
-def stop_soldr_broker(soldr: str, env: dict[str, str]) -> None:
+def stop_soldr_broker(soldr: str, env: Mapping[str, str]) -> None:
     # Routes are path-derived (soldr#2479), so this checkout-built binary's
     # broker is the isolated one; no program name is needed to reach it.
     try:
@@ -80,7 +106,7 @@ def stop_soldr_broker(soldr: str, env: dict[str, str]) -> None:
         print(f"warning: best-effort isolated broker stop failed: {exc}", flush=True)
 
 
-def stop_soldr_root(soldr: str, env: dict[str, str]) -> None:
+def stop_soldr_root(soldr: str, env: Mapping[str, str]) -> None:
     """Quiesce every soldr process writing under this root's cache dir.
 
     `broker stop` is not enough, and the failure says so out loud:
@@ -107,13 +133,13 @@ def stop_soldr_root(soldr: str, env: dict[str, str]) -> None:
             )
 
 
-def read_github_env(path: Path) -> dict[str, str]:
+def read_github_env(path: Path) -> MappingProxyType[str, str]:
     values: dict[str, str] = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
         key, separator, value = raw.partition("=")
         if separator and VALID_ENV.fullmatch(key):
             values[key] = value
-    return values
+    return MappingProxyType(values)
 
 
 ZIG_TOKEN = re.compile(
@@ -133,7 +159,7 @@ def require_no_zig(text: str, context: str) -> None:
         )
 
 
-def assert_plan(soldr: str, target: str, env: dict[str, str]) -> None:
+def assert_plan(soldr: str, target: str, env: Mapping[str, str]) -> None:
     payload = json.loads(run([soldr, "env", "--target", target, "--json"], env=env))
     plan = payload["target_plan"]
     rendered = json.dumps(plan, sort_keys=True)
@@ -151,15 +177,13 @@ def prepare(
     target: str,
     env_file: Path,
     *,
-    env: dict[str, str] | None = None,
+    env: Mapping[str, str] | None = None,
     save: Path | None = None,
     restore: Path | None = None,
-) -> tuple[dict[str, str], dict[str, str]]:
-    """Run `soldr prepare`; return `(env_to_build_with, vars_soldr_wrote)`.
+) -> PreparedEnvironment:
+    """Run `soldr prepare`; return the build environment and what soldr wrote.
 
-    Deliberately two values. The first is the full environment a build needs,
-    which necessarily inherits the ambient one. The second is only what soldr
-    set, and is the only thing the no-Zig assertion may inspect.
+    Deliberately two values (see `PreparedEnvironment`).
     """
     command = [soldr, "prepare", "--target", target, "--github-env", str(env_file)]
     if save is not None:
@@ -179,14 +203,14 @@ def prepare(
             "pkg-config cross probing was not enabled for the managed target"
         )
     managed = read_github_env(env_file)
-    prepared_env = os.environ.copy() if env is None else env.copy()
+    prepared_env = dict(os.environ if env is None else env)
     prepared_env.update(managed)
-    return prepared_env, managed
+    return PreparedEnvironment(MappingProxyType(prepared_env), managed)
 
 
 def assert_managed_environment(  # noqa: C901
-    env: dict[str, str], target: str, managed: dict[str, str]
-) -> tuple[Path, Path]:
+    env: Mapping[str, str], target: str, managed: Mapping[str, str]
+) -> ManagedRoots:
     suffix = target.replace("-", "_")
     upper = suffix.upper()
     root = Path(env["SOLDR_GNU_LINUX_TOOLCHAIN_ROOT"])
@@ -255,7 +279,7 @@ def assert_managed_environment(  # noqa: C901
     # environment unexpectedly references zig: /bin/bash", naming an
     # unrelated value because the message prints the whole blob.
     require_no_zig("\n".join(managed.values()), "prepared GNU environment")
-    return root, sysroot
+    return ManagedRoots(root, sysroot)
 
 
 def write_fixture(root: Path) -> None:
@@ -352,10 +376,10 @@ fn main() {
     )
 
 
-def build_fixture(soldr: str, target: str, env: dict[str, str], work: Path) -> Path:
+def build_fixture(soldr: str, target: str, env: Mapping[str, str], work: Path) -> Path:
     fixture = work / "fixture"
     write_fixture(fixture)
-    env = env.copy()
+    env = dict(env)
     env["CARGO_TARGET_DIR"] = str(work / "target")
     output = run(
         [
@@ -378,7 +402,7 @@ def build_fixture(soldr: str, target: str, env: dict[str, str], work: Path) -> P
 
 
 def verify_artifact(
-    repo: Path, target: str, root: Path, binary: Path, env: dict[str, str]
+    repo: Path, target: str, root: Path, binary: Path, env: Mapping[str, str]
 ) -> None:
     _, machine = TARGETS[target]
     readelf = next(root.glob("bin/*-readelf"), None)
@@ -420,37 +444,43 @@ def main() -> int:
         ) as raw:
             work = Path(raw)
             archive = work / "prepared.tar.zst"
-            source_env, source_managed = prepare(
+            source = prepare(
                 soldr,
                 args.target,
                 work / "source-github.env",
                 env=checkout_env,
                 save=archive,
             )
-            source_root, _ = assert_managed_environment(
-                source_env, args.target, source_managed
+            source_roots = assert_managed_environment(
+                source.build_env, args.target, source.managed
             )
             # Warm Cargo's fixture dependencies before proving that the restored
             # toolchain itself is enough when Soldr is forbidden from networking.
-            build_fixture(soldr, args.target, source_env, work / "source-build")
+            build_fixture(soldr, args.target, source.build_env, work / "source-build")
 
-            restored_env = fresh_checkout_env()
+            restored_env = dict(fresh_checkout_env())
             restored_env["SOLDR_CACHE_DIR"] = str(work / "restored-soldr")
             restored_env["SOLDR_TEST_NO_NETWORK"] = "1"
-            env, managed = prepare(
+            restored = prepare(
                 soldr,
                 args.target,
                 work / "restored-github.env",
                 env=restored_env,
                 restore=archive,
             )
-            root, _ = assert_managed_environment(env, args.target, managed)
-            if root == source_root:
+            roots = assert_managed_environment(
+                restored.build_env, args.target, restored.managed
+            )
+            if roots.root == source_roots.root:
                 raise RuntimeError(
                     "prepare archive did not restore into the clean Soldr root"
                 )
-            binary = build_fixture(soldr, args.target, env, work / "restored-build")
-            verify_artifact(args.repo, args.target, root, binary, env)
+            binary = build_fixture(
+                soldr, args.target, restored.build_env, work / "restored-build"
+            )
+            verify_artifact(
+                args.repo, args.target, roots.root, binary, restored.build_env
+            )
             # Stop everything that owns the restored root BEFORE
             # TemporaryDirectory.__exit__ rmtrees it (soldr#2521 B2): a live
             # daemon still writing under restored-soldr made teardown die

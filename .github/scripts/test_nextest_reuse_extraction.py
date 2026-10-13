@@ -76,20 +76,20 @@ class ResolveTests(unittest.TestCase):
     def test_an_unusable_extraction_falls_back(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             extract = Path(raw) / "nextest-archive"
-            args, reason = nextest_reuse_extraction.resolve(
+            resolution = nextest_reuse_extraction.resolve(
                 extract, Path("artifact/tests.tar.zst")
             )
-        self.assertIn("--archive-file", args)
-        self.assertIn("no reuse metadata found", reason)
+        self.assertIn("--archive-file", resolution.flags)
+        self.assertIn("no reuse metadata found", resolution.reason)
 
     def test_reuse_can_be_forced_off_without_a_code_change(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             extract = _extraction(Path(raw))
-            args, reason = nextest_reuse_extraction.resolve(
+            resolution = nextest_reuse_extraction.resolve(
                 extract, Path("artifact/tests.tar.zst"), allow_reuse=False
             )
-        self.assertIn("--archive-file", args)
-        self.assertIn("SOLDR_TARGET_RUN_EXTRACT_REUSE", reason)
+        self.assertIn("--archive-file", resolution.flags)
+        self.assertIn("SOLDR_TARGET_RUN_EXTRACT_REUSE", resolution.reason)
 
 
 class EnvTests(unittest.TestCase):

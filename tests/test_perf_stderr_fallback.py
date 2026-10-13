@@ -33,7 +33,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def fake_soldr(tmp_path: Path, code: int, stdout: str, stderr: str) -> dict[str, str]:
+def fake_soldr(tmp_path: Path, code: int, stdout: str, stderr: str) -> dict:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     tool = bin_dir / "soldr"
@@ -47,7 +47,7 @@ def fake_soldr(tmp_path: Path, code: int, stdout: str, stderr: str) -> dict[str,
     return env
 
 
-def run_bash(script: str, env: dict[str, str]) -> subprocess.CompletedProcess:
+def run_bash(script: str, env: dict) -> subprocess.CompletedProcess:
     assert BASH is not None
     return run_captured(
         [BASH, "-c", f'. "{COMMON_SH}"; {script}'],

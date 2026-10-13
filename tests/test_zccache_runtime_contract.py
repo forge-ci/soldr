@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,14 @@ def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _write_manifest_fixture(root: Path, *, windows: bool = False) -> dict[str, Any]:
+@dataclass(frozen=True)
+class ManifestFixture:
+    """A release manifest written for the validator, which takes raw JSON."""
+
+    document: dict  # raw manifest JSON, mutated by tests to break one field
+
+
+def _write_manifest_fixture(root: Path, *, windows: bool = False) -> ManifestFixture:
     module = _load_py_contract()
     names = module.release_binary_names(windows=windows)
     payloads: dict[str, bytes] = {}
@@ -46,49 +54,51 @@ def _write_manifest_fixture(root: Path, *, windows: bool = False) -> dict[str, A
                 "format": "pdb",
             }
         )
-    return {
-        "schema_version": 3,
-        "soldr": {
-            "version": "0.7.39",
-            "target": "x86_64-unknown-linux-gnu",
-            "binary": f"soldr{suffix}",
-            "sha256": _sha256(payloads[f"soldr{suffix}"]),
-            "sidecars": [
-                {
-                    "name": f"{base}{suffix}",
-                    "sha256": _sha256(payloads[f"{base}{suffix}"]),
-                }
-                for base in module.RELEASE_BUNDLED_BINARIES
-                if base not in {"soldr", "crgx", "cargo-chef"}
-            ],
-            "debug_info": soldr_debug_info,
-            "commit_sha": "abc123",
-        },
-        "zccache": {
-            "version": "embedded",
-            "target": "x86_64-unknown-linux-gnu",
-            "embedded": True,
-        },
-        "crgx": {
-            "version": module.CONTRACT.crgx_managed_version,
-            "target": "x86_64-unknown-linux-gnu",
-            "binary": f"crgx{suffix}",
-            "sha256": _sha256(payloads[f"crgx{suffix}"]),
-            "source_commit": "def456",
-        },
-        "cargo_chef": {
-            "version": module.CONTRACT.cargo_chef_managed_version,
-            "target": "x86_64-unknown-linux-gnu",
-            "binary": f"cargo-chef{suffix}",
-            "sha256": _sha256(payloads[f"cargo-chef{suffix}"]),
-            "source_commit": "789abc",
-        },
-        "archive": {
-            "format": module.ARCHIVE_EXT,
-            "compression_level": module.CONTRACT.compression_level,
-        },
-        "built_at": "2026-05-27T00:00:00Z",
-    }
+    return ManifestFixture(
+        {
+            "schema_version": 3,
+            "soldr": {
+                "version": "0.7.39",
+                "target": "x86_64-unknown-linux-gnu",
+                "binary": f"soldr{suffix}",
+                "sha256": _sha256(payloads[f"soldr{suffix}"]),
+                "sidecars": [
+                    {
+                        "name": f"{base}{suffix}",
+                        "sha256": _sha256(payloads[f"{base}{suffix}"]),
+                    }
+                    for base in module.RELEASE_BUNDLED_BINARIES
+                    if base not in {"soldr", "crgx", "cargo-chef"}
+                ],
+                "debug_info": soldr_debug_info,
+                "commit_sha": "abc123",
+            },
+            "zccache": {
+                "version": "embedded",
+                "target": "x86_64-unknown-linux-gnu",
+                "embedded": True,
+            },
+            "crgx": {
+                "version": module.CONTRACT.crgx_managed_version,
+                "target": "x86_64-unknown-linux-gnu",
+                "binary": f"crgx{suffix}",
+                "sha256": _sha256(payloads[f"crgx{suffix}"]),
+                "source_commit": "def456",
+            },
+            "cargo_chef": {
+                "version": module.CONTRACT.cargo_chef_managed_version,
+                "target": "x86_64-unknown-linux-gnu",
+                "binary": f"cargo-chef{suffix}",
+                "sha256": _sha256(payloads[f"cargo-chef{suffix}"]),
+                "source_commit": "789abc",
+            },
+            "archive": {
+                "format": module.ARCHIVE_EXT,
+                "compression_level": module.CONTRACT.compression_level,
+            },
+            "built_at": "2026-05-27T00:00:00Z",
+        }
+    )
 
 
 def test_contract_json_has_expected_shape() -> None:
@@ -140,7 +150,7 @@ def test_maturin_contract_matches_rust_constants_and_registry() -> None:
 
 def test_python_contract_validates_release_manifest_sha256s(tmp_path: Path) -> None:
     module = _load_py_contract()
-    manifest = _write_manifest_fixture(tmp_path)
+    manifest = _write_manifest_fixture(tmp_path).document
 
     module.validate_release_manifest(
         manifest,
@@ -161,7 +171,7 @@ def test_python_contract_validates_release_manifest_sha256s(tmp_path: Path) -> N
 
 def test_python_contract_validates_windows_soldr_pdb_sha256(tmp_path: Path) -> None:
     module = _load_py_contract()
-    manifest = _write_manifest_fixture(tmp_path, windows=True)
+    manifest = _write_manifest_fixture(tmp_path, windows=True).document
     manifest["soldr"]["target"] = "x86_64-pc-windows-msvc"
     manifest["zccache"]["target"] = "x86_64-pc-windows-msvc"
     manifest["crgx"]["target"] = "x86_64-pc-windows-msvc"
@@ -188,7 +198,7 @@ def test_python_contract_validates_windows_soldr_pdb_sha256(tmp_path: Path) -> N
 
 def test_python_contract_requires_windows_soldr_pdb(tmp_path: Path) -> None:
     module = _load_py_contract()
-    manifest = _write_manifest_fixture(tmp_path, windows=True)
+    manifest = _write_manifest_fixture(tmp_path, windows=True).document
     manifest["soldr"]["target"] = "x86_64-pc-windows-msvc"
     manifest["zccache"]["target"] = "x86_64-pc-windows-msvc"
     manifest["crgx"]["target"] = "x86_64-pc-windows-msvc"

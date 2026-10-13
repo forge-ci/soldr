@@ -5,6 +5,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -738,9 +739,17 @@ sys.exit(int(sys.argv[1]))
 """
 
 
+@dataclass(frozen=True)
+class TmpdirRun:
+    """A wrapped run's process result and the private TMPDIR the child saw."""
+
+    result: subprocess.CompletedProcess[str]
+    private: Path
+
+
 def _run_wrapper_under_tmpdir(
     base: Path, exit_code: int, extra_env: dict[str, str] | None = None
-) -> tuple[subprocess.CompletedProcess[str], Path]:
+) -> TmpdirRun:
     """Run the leaking child through the wrapper; return the TMPDIR it saw."""
 
     env = {**os.environ, "TMPDIR": str(base)}
@@ -760,14 +769,15 @@ def _run_wrapper_under_tmpdir(
         timeout=60,
         check=False,
     )
-    return result, Path(result.stdout.strip().splitlines()[0])
+    return TmpdirRun(result, Path(result.stdout.strip().splitlines()[0]))
 
 
 @_LINUX_ONLY
 def test_each_test_gets_a_private_tmpdir_removed_after_it_exits(
     tmp_path: Path,
 ) -> None:
-    result, private = _run_wrapper_under_tmpdir(tmp_path, 0)
+    run = _run_wrapper_under_tmpdir(tmp_path, 0)
+    result, private = run.result, run.private
 
     assert result.returncode == 0, result.stderr
     assert private != tmp_path, "the test must not write straight into TMPDIR"
@@ -778,7 +788,8 @@ def test_each_test_gets_a_private_tmpdir_removed_after_it_exits(
 
 @_LINUX_ONLY
 def test_private_tmpdir_is_removed_even_when_the_test_fails(tmp_path: Path) -> None:
-    result, private = _run_wrapper_under_tmpdir(tmp_path, 3)
+    run = _run_wrapper_under_tmpdir(tmp_path, 3)
+    result, private = run.result, run.private
 
     assert result.returncode == 3, result.stderr
     assert private != tmp_path
@@ -787,9 +798,8 @@ def test_private_tmpdir_is_removed_even_when_the_test_fails(tmp_path: Path) -> N
 
 @_LINUX_ONLY
 def test_keep_tmpdir_opt_out_leaves_it_for_inspection(tmp_path: Path) -> None:
-    result, private = _run_wrapper_under_tmpdir(
-        tmp_path, 0, {"SOLDR_NEXTEST_KEEP_TMPDIR": "1"}
-    )
+    run = _run_wrapper_under_tmpdir(tmp_path, 0, {"SOLDR_NEXTEST_KEEP_TMPDIR": "1"})
+    result, private = run.result, run.private
 
     assert result.returncode == 0, result.stderr
     assert private != tmp_path

@@ -8,6 +8,7 @@ import os
 import runpy
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 # Use regular-file capture without an installed Python dependency.
@@ -170,6 +171,17 @@ grep -F "soldr Dylint fixture diagnostic" "$DIAGNOSTICS/real_dylint.log"
 """
 
 
+@dataclass(frozen=True)
+class CookRow:
+    """One scenario row the Dylint cook acceptance run reported as JSON."""
+
+    name: object
+    outcome: object
+    wall_ms: object
+    hits: object
+    misses: object
+
+
 def main() -> int:  # noqa: C901
     common_result = run_captured(
         ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -246,14 +258,22 @@ def main() -> int:  # noqa: C901
     )
     if returncode:
         return returncode
-    rows: list[dict[str, object]] = []
+    rows: list[CookRow] = []
     for line in output_lines:
         try:
             value = json.loads(line)
         except json.JSONDecodeError:
             continue
         if isinstance(value, dict) and "name" in value and "wall_ms" in value:
-            rows.append(value)
+            rows.append(
+                CookRow(
+                    name=value["name"],
+                    outcome=value.get("outcome"),
+                    wall_ms=value["wall_ms"],
+                    hits=value.get("hits"),
+                    misses=value.get("misses"),
+                )
+            )
     expected = [
         "cold",
         "warm_same_target",
@@ -263,10 +283,10 @@ def main() -> int:  # noqa: C901
         "tests_warm_restored_target",
         "tests_object_cache_only",
     ]
-    if [row["name"] for row in rows] != expected:
+    if [row.name for row in rows] != expected:
         print(f"incomplete Dylint cook rows: {rows}", file=sys.stderr)
         return 2
-    outcomes = {row["name"]: row["outcome"] for row in rows}
+    outcomes = {row.name: row.outcome for row in rows}
     if outcomes != {
         "cold": "miss",
         "warm_same_target": "skip",
@@ -286,8 +306,8 @@ def main() -> int:  # noqa: C901
             output.write("|---|---|---:|---:|---:|\n")
             for row in rows:
                 output.write(
-                    f"| {row['name']} | {row['outcome']} | {row['wall_ms']} | "
-                    f"{row['hits']} | {row['misses']} |\n"
+                    f"| {row.name} | {row.outcome} | {row.wall_ms} | "
+                    f"{row.hits} | {row.misses} |\n"
                 )
     return 0
 

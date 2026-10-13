@@ -43,6 +43,7 @@ import hashlib
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -64,11 +65,17 @@ EXECUTION_STATUSES = {
 }
 
 
-def find_string_fields(value, path: str = "") -> "list[tuple[str, str]]":
+@dataclass(frozen=True)
+class StringField:
+    path: str
+    value: str
+
+
+def find_string_fields(value, path: str = "") -> "list[StringField]":
     """Every string leaf in the document, with its dotted path."""
-    found: list[tuple[str, str]] = []
+    found: list[StringField] = []
     if isinstance(value, str):
-        found.append((path, value))
+        found.append(StringField(path, value))
     elif isinstance(value, dict):
         for key, sub in value.items():
             found.extend(find_string_fields(sub, f"{path}.{key}" if path else str(key)))
@@ -81,7 +88,8 @@ def find_string_fields(value, path: str = "") -> "list[tuple[str, str]]":
 def env_leak_problems(manifest: dict) -> "list[str]":
     """Fields that look like they captured shell environment text."""
     problems: list[str] = []
-    for path, value in find_string_fields(manifest):
+    for field in find_string_fields(manifest):
+        path, value = field.path, field.value
         if "\n" in value or "\r" in value:
             problems.append(
                 f"{path} contains a newline, which no manifest field should: {value!r}"
@@ -96,7 +104,8 @@ def env_leak_problems(manifest: dict) -> "list[str]":
 def sha_problems(manifest: dict, package_dir: "Path | None") -> "list[str]":  # noqa: C901
     """Malformed digests, and mismatches when the files are available."""
     problems: list[str] = []
-    for path, value in find_string_fields(manifest):
+    for field in find_string_fields(manifest):
+        path, value = field.path, field.value
         if not path.endswith("sha256"):
             continue
         if not SHA256_RE.match(value):

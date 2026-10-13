@@ -8,6 +8,7 @@ verifier must fail loudly, naming every missing asset.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from conftest import load_script_module
@@ -46,11 +47,20 @@ V090_PRESENT = [
 ]
 
 
-def full_surface(tag: str) -> tuple[list[str], list[str], list[str]]:
+@dataclass(frozen=True)
+class Surfaces:
+    """A release's expected GitHub assets, PyPI files, and npm versions."""
+
+    github: list[str]
+    pypi: list[str]
+    npm: list[str]
+
+
+def full_surface(tag: str) -> Surfaces:
     triples = contract_triples()
     github = release_completeness.expected_github_assets(tag, triples)
     pypi = release_completeness.expected_pypi_files(tag, triples)
-    return github, pypi, [tag.lstrip("v")]
+    return Surfaces(github, pypi, [tag.lstrip("v")])
 
 
 def test_wheel_tag_table_covers_exactly_the_contract() -> None:
@@ -72,7 +82,8 @@ def test_the_0_9_0_incident_fails_the_gate() -> None:
     # that concluded green in run 31487675391 must fail here. (0.9.0 also
     # predates info.json, soldr#3343, the eleventh gap.)
     triples = contract_triples()
-    _, pypi, npm = full_surface("v0.9.0")
+    surface = full_surface("v0.9.0")
+    pypi, npm = surface.pypi, surface.npm
     failures = release_completeness.verify_surfaces(
         "v0.9.0", triples, V090_PRESENT, pypi, npm
     )
@@ -84,7 +95,8 @@ def test_the_0_9_0_incident_fails_the_gate() -> None:
 
 def test_a_complete_release_passes() -> None:
     triples = contract_triples()
-    github, pypi, npm = full_surface("v0.9.1")
+    surface = full_surface("v0.9.1")
+    github, pypi, npm = surface.github, surface.pypi, surface.npm
     assert (
         release_completeness.verify_surfaces("v0.9.1", triples, github, pypi, npm) == []
     )
@@ -99,7 +111,8 @@ def test_a_complete_release_passes() -> None:
 
 def test_missing_pypi_wheel_and_npm_version_are_named() -> None:
     triples = contract_triples()
-    github, pypi, _ = full_surface("v0.9.1")
+    surface = full_surface("v0.9.1")
+    github, pypi = surface.github, surface.pypi
     failures = release_completeness.verify_surfaces(
         "v0.9.1", triples, github, pypi[:-1], ["0.9.0"]
     )

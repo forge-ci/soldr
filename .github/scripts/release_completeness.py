@@ -31,6 +31,7 @@ import re
 import sys
 import tomllib
 import urllib.request
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -240,7 +241,18 @@ def release_execution_failures(  # noqa: C901
     return failures
 
 
-def build_matrix(contract_path: Path = CONTRACT) -> list[dict[str, str]]:
+@dataclass(frozen=True)
+class BuildMatrixRow:
+    """One `strategy.matrix.include` row; field order is the JSON key order."""
+
+    name: str
+    runner: str
+    target: str
+    setup_target: str
+    binary: str
+
+
+def build_matrix(contract_path: Path = CONTRACT) -> list[BuildMatrixRow]:
     """Contract-generated release build matrix (soldr#2469 step 2.1).
 
     Returns the `strategy.matrix.include` list for release-auto.yml's build
@@ -249,19 +261,19 @@ def build_matrix(contract_path: Path = CONTRACT) -> list[dict[str, str]]:
     #2455 shrink the matrix and the contract together with nothing failing.
     """
     data = json.loads(contract_path.read_text(encoding="utf-8"))
-    matrix = []
+    matrix: list[BuildMatrixRow] = []
     for entry in data["targets"]:
         if entry["release"]["status"] != "included":
             continue
         build = entry["release"]["build"]
         matrix.append(
-            {
-                "name": build["name"],
-                "runner": build["runner"],
-                "target": entry["triple"],
-                "setup_target": build["setup_target"],
-                "binary": build["binary"],
-            }
+            BuildMatrixRow(
+                name=build["name"],
+                runner=build["runner"],
+                target=entry["triple"],
+                setup_target=build["setup_target"],
+                binary=build["binary"],
+            )
         )
     return matrix
 
@@ -404,7 +416,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     opts = parser.parse_args(argv)
     if opts.build_matrix:
-        print(json.dumps(build_matrix(), separators=(",", ":")))
+        print(
+            json.dumps([asdict(row) for row in build_matrix()], separators=(",", ":"))
+        )
         return 0
     if opts.verify_execution_contract:
         failures = release_execution_failures()

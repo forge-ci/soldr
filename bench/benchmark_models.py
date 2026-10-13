@@ -6,10 +6,20 @@ from dataclasses import dataclass
 from typing import Any
 
 
-def object_field(value: Any) -> dict[str, Any]:
+@dataclass(frozen=True)
+class JsonObject:
+    """A decoded JSON object at the parse boundary; empty when not an object."""
+
+    fields: dict  # raw JSON object, keys normalized to str
+
+    def get(self, key: str) -> Any:
+        return self.fields.get(key)
+
+
+def object_field(value: Any) -> JsonObject:
     if not isinstance(value, dict):
-        return {}
-    return {str(key): item for key, item in value.items()}
+        return JsonObject({})
+    return JsonObject({str(key): item for key, item in value.items()})
 
 
 def text_field(value: Any, default: str = "") -> str:
@@ -37,7 +47,9 @@ class CanaryTimings:
         return cls(
             cold=number_field(row.get("cargo-build-medium-cold")),
             warm=number_field(row.get("cargo-build-medium-warm")),
-            from_warm_zccache=number_field(row.get("cargo-build-medium-from-warm-zccache")),
+            from_warm_zccache=number_field(
+                row.get("cargo-build-medium-from-warm-zccache")
+            ),
             cross_verb=number_field(row.get("cargo-check-medium-cross-verb")),
             touch_no_change=number_field(row.get("touch-no-change-medium-warm")),
             worktree_share=number_field(row.get("worktree-share-medium-warm")),
@@ -120,7 +132,9 @@ class ComparisonDocument:
             soldr_version=text_field(row.get("soldr_version")),
             sccache_version=text_field(row.get("sccache_version")),
             rustc_version=text_field(row.get("rustc_version")),
-            tools=[ToolLabel.from_json(item) for item in tools] if isinstance(tools, list) else [],
+            tools=[ToolLabel.from_json(item) for item in tools]
+            if isinstance(tools, list)
+            else [],
             results=[ComparisonResult.from_json(item) for item in results]
             if isinstance(results, list)
             else [],

@@ -10,14 +10,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / ".github" / "scripts"
 
 
-def _outer_env() -> dict[str, str]:
-    return {
-        "PATH": "/tools",
-        "RUSTC_WRAPPER": "/setup-soldr/shims/rustc",
-        "RUSTC_WORKSPACE_WRAPPER": "/setup-soldr/shims/workspace-rustc",
-        "SOLDR_BROKER_SERVICE": "old-route",
-        "SOLDR_INTERNAL_DAEMON_EXE": "/setup-soldr/soldr-daemon",
-    }
+def _fill_outer_env(env: dict[str, str]) -> None:
+    env.update(
+        {
+            "PATH": "/tools",
+            "RUSTC_WRAPPER": "/setup-soldr/shims/rustc",
+            "RUSTC_WORKSPACE_WRAPPER": "/setup-soldr/shims/workspace-rustc",
+            "SOLDR_BROKER_SERVICE": "old-route",
+            "SOLDR_INTERNAL_DAEMON_EXE": "/setup-soldr/soldr-daemon",
+        }
+    )
 
 
 def _assert_isolated(env: dict[str, str]) -> None:
@@ -28,10 +30,12 @@ def test_gnu_proof_uses_checkout_owned_wrapper_and_daemon() -> None:
     module = load_script_module(
         SCRIPTS / "gnu_linux_toolchain_e2e.py", "gnu_linux_toolchain_e2e_env"
     )
-    source = _outer_env()
+    source: dict[str, str] = {}
+    _fill_outer_env(source)
     _assert_isolated(module.fresh_checkout_env(source))
     assert source["SOLDR_BROKER_SERVICE"] == "old-route"
-    env = _outer_env()
+    env: dict[str, str] = {}
+    _fill_outer_env(env)
     with mock.patch.object(module.subprocess, "run") as run:
         module.stop_soldr_broker("soldr", env)
     # Routes are path-derived (soldr#2479); the checkout-built binary's
@@ -48,10 +52,14 @@ def test_pep517_smoke_uses_wheel_owned_wrapper_and_daemon() -> None:
     module = load_script_module(
         SCRIPTS / "pep517_daemon_smoke.py", "pep517_daemon_smoke_env"
     )
-    source = _outer_env()
-    _assert_isolated(module.isolated_smoke_env(source))
+    source: dict[str, str] = {}
+    _fill_outer_env(source)
+    scrubbed = dict(source)
+    module.scrub_outer_soldr_env(scrubbed)
+    _assert_isolated(scrubbed)
     assert source["SOLDR_BROKER_SERVICE"] == "old-route"
-    env = _outer_env()
+    env: dict[str, str] = {}
+    _fill_outer_env(env)
     with mock.patch.object(module.subprocess, "run") as run:
         module.stop_soldr_broker(Path("soldr"), env)
     run.assert_called_once_with(
@@ -120,7 +128,8 @@ def test_temporary_root_teardown_stops_the_daemon_before_the_broker() -> None:
     module = load_script_module(
         SCRIPTS / "gnu_linux_toolchain_e2e.py", "gnu_linux_toolchain_e2e_teardown"
     )
-    env = _outer_env()
+    env: dict[str, str] = {}
+    _fill_outer_env(env)
     with mock.patch.object(module.subprocess, "run") as run:
         module.stop_soldr_root("soldr", env)
 

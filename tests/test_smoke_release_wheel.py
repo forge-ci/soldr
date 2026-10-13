@@ -76,10 +76,10 @@ def test_smoke_installs_all_wheels_and_exercises_both_cli_paths(
     first.write_bytes(b"")
     second.write_bytes(b"")
     venv = tmp_path / ".venv"
-    calls: list[tuple[list[str], dict[str, object]]] = []
+    calls: list[list[str]] = []
 
-    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
-        calls.append((command, kwargs))
+    def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(command)
         if command[:2] == ["uv", "venv"]:
             return SimpleNamespace(stdout="")
         if command == uv_pip_install_command(venv, str(first), str(second)):
@@ -96,10 +96,10 @@ def test_smoke_installs_all_wheels_and_exercises_both_cli_paths(
 
     smoke.smoke_wheel(expected_version="v0.9.2", dist=dist, venv=venv)
 
-    assert calls[0][0] == ["uv", "venv", str(venv)]
-    assert calls[1][0] == uv_pip_install_command(venv, str(first), str(second))
-    assert calls[2][0] == [str(venv / "bin" / "soldr"), "--version"]
-    assert calls[3][0] == [str(venv / "bin" / "soldr"), "version", "--json"]
+    assert calls[0] == ["uv", "venv", str(venv)]
+    assert calls[1] == uv_pip_install_command(venv, str(first), str(second))
+    assert calls[2] == [str(venv / "bin" / "soldr"), "--version"]
+    assert calls[3] == [str(venv / "bin" / "soldr"), "version", "--json"]
 
 
 def test_workflow_invokes_the_script_instead_of_inlining_wheel_smoke() -> None:

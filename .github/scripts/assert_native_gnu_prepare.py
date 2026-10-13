@@ -23,7 +23,9 @@ import argparse
 import platform
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 # Use regular-file capture without an installed Python dependency.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -51,7 +53,7 @@ def compiler_keys(target: str) -> tuple[str, ...]:
     )
 
 
-def parse_env_file(text: str) -> dict[str, str]:
+def parse_env_file(text: str) -> MappingProxyType[str, str]:
     """`KEY=VALUE` lines, as `--github-env` writes them.
 
     Blank lines and lines without `=` are skipped rather than raising: this
@@ -65,10 +67,18 @@ def parse_env_file(text: str) -> dict[str, str]:
             continue
         key, _, value = line.partition("=")
         env[key.strip()] = value.strip()
-    return env
+    return MappingProxyType(env)
 
 
-def is_executable_here(path: str) -> tuple[bool, str]:
+@dataclass(frozen=True)
+class ExecutionProbe:
+    """Whether the host could execute a binary, and the evidence."""
+
+    runnable: bool
+    detail: str
+
+
+def is_executable_here(path: str) -> ExecutionProbe:
     """Run `<path> --version` and report whether the host could execute it.
 
     An `Exec format error` is `OSError` with `errno == 8` on Linux, which is
@@ -83,9 +93,11 @@ def is_executable_here(path: str) -> tuple[bool, str]:
             check=False,
         )
     except OSError as error:
-        return False, f"{type(error).__name__}: {error}"
+        return ExecutionProbe(False, f"{type(error).__name__}: {error}")
     first_line = completed.stdout.decode("utf-8", "replace").splitlines()
-    return True, first_line[0] if first_line else f"exit {completed.returncode}"
+    return ExecutionProbe(
+        True, first_line[0] if first_line else f"exit {completed.returncode}"
+    )
 
 
 def check(soldr: str, target: str) -> int:
@@ -119,11 +131,11 @@ def check(soldr: str, target: str) -> int:
             print(f"  {key}: (not exported -- host compiler)")
             continue
         checked += 1
-        runnable, detail = is_executable_here(value)
-        status = "runs" if runnable else "CANNOT EXECUTE"
-        print(f"  {key}={value} -> {status}: {detail}")
-        if not runnable:
-            failures.append(f"{key}={value}: {detail}")
+        probe = is_executable_here(value)
+        status = "runs" if probe.runnable else "CANNOT EXECUTE"
+        print(f"  {key}={value} -> {status}: {probe.detail}")
+        if not probe.runnable:
+            failures.append(f"{key}={value}: {probe.detail}")
 
     if failures:
         print(
