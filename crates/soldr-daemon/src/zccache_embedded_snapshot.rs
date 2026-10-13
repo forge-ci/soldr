@@ -21,17 +21,46 @@ fn compatibility() -> String {
         .to_string()
 }
 
+/// The dep-graph file under a store version root.
+///
+/// Perf Matrix `cold-tar-untar-warm` (0% rustc hits since the per-route
+/// private caches of soldr#3568): the backend's store snapshot carries the
+/// artifacts and their index but not the dep-graph, and a rustc lookup needs
+/// the unit's dep-graph *context* before it consults the index. A restored
+/// store therefore missed every unit with `context_not_found`. The adapter
+/// carries the dep-graph beside the store snapshot. Its compatibility is the
+/// same store version [`compatibility`] already pins.
+const DEPGRAPH: &str = "depgraph/depgraph.bin";
+
 /// The caller must checkpoint and gracefully stop the selected daemon first.
 pub fn export(paths: &SoldrPaths, destination: &Path) -> io::Result<Option<SnapshotReceipt>> {
     let source = crate::zccache_embedded::embedded_version_root(paths);
     if !source.exists() {
         return Ok(None);
     }
-    export_store_snapshot(&source, &compatibility(), destination).map(Some)
+    let receipt = export_store_snapshot(&source, &compatibility(), destination)?;
+    copy_if_present(&source.join(DEPGRAPH), &destination.join(DEPGRAPH))?;
+    Ok(Some(receipt))
 }
 
-/// Import before daemon startup. Existing destination stores are never replaced.
+/// Import before daemon startup. Existing destination stores are never
+/// replaced, and neither is an existing dep-graph.
 pub fn import(paths: &SoldrPaths, source: &Path) -> io::Result<SnapshotReceipt> {
     let destination = crate::zccache_embedded::embedded_version_root(paths);
-    import_snapshot(source, &compatibility(), &destination)
+    let receipt = import_snapshot(source, &compatibility(), &destination)?;
+    let target = destination.join(DEPGRAPH);
+    if !target.exists() {
+        copy_if_present(&source.join(DEPGRAPH), &target)?;
+    }
+    Ok(receipt)
+}
+
+fn copy_if_present(from: &Path, to: &Path) -> io::Result<()> {
+    if !from.is_file() {
+        return Ok(());
+    }
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(from, to).map(|_| ())
 }

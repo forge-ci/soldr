@@ -153,8 +153,12 @@ fn cargo_clippy_in_configured_lint_crate_gets_managed_dylint_link_on_path() {
     // from the config-declared ensure, not from ambient PATH or some
     // unrelated bin-dir plumbing.
     let ordinary = run(false);
+    // The pinned managed bin dir's name, not a bare `dylint-link-` substring:
+    // this fixture's own temp root is named `...-dylint-link-...`, and its
+    // generated linker-shim dir is legitimately on the child PATH.
+    let managed = format!("dylint-link-{}", pinned_dylint_link_version());
     assert!(
-        !ordinary.contains("dylint-link-"),
+        !ordinary.contains(&managed),
         "an ordinary crate must never gain the dylint tools merely because \
          it invoked Clippy (soldr#3571): {ordinary}"
     );
@@ -172,7 +176,7 @@ fn cargo_clippy_in_configured_lint_crate_gets_managed_dylint_link_on_path() {
         seeded.display()
     );
     assert!(
-        configured.contains(&format!("dylint-link-{}", pinned_dylint_link_version())),
+        configured.contains(&managed),
         "the PATH entry must name the pinned dylint-link version: {configured}"
     );
 }

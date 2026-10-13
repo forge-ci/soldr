@@ -377,6 +377,7 @@ pub async fn apply_pep517_override(
     if !cached_fallback {
         if let Some(linker) = injection.linker.as_deref() {
             if !effective_command_env_is_non_empty(command, &linker_key) {
+                let linker = crate::linker_shim::linker_value_for_command(command, linker)?;
                 command.env(&linker_key, linker);
                 injected_env.push(linker_key.clone());
             }

@@ -163,7 +163,7 @@ pub(super) async fn apply_linker_override(
             .await
             .map_err(linker::reld_fetch_error)?;
         if let Some(dir) = reld.parent() {
-            prepend_command_path(command, dir)?;
+            crate::linker_shim::prepend_command_path(command, dir)?;
         }
         return Ok(());
     }
@@ -186,7 +186,8 @@ pub(super) async fn apply_linker_override(
     // explicit target toolchain with the host clang/LLD fallback.
     if let Some(linker_path) = injection.linker {
         if !linker::effective_command_env_is_non_empty(command, &linker_key) {
-            command.env(&linker_key, linker_path);
+            let value = crate::linker_shim::linker_value_for_command(command, &linker_path)?;
+            command.env(&linker_key, value);
         }
     }
     if let Some(rustflags) = injection.rustflags {
@@ -220,25 +221,6 @@ pub(super) fn apply_linker_override_blocking(
 
 /// Prepend `dir` to the PATH the cargo child will see (the command's own
 /// PATH override if set, else the inherited process PATH).
-fn prepend_command_path(
-    command: &mut std::process::Command,
-    dir: &std::path::Path,
-) -> Result<(), SoldrError> {
-    let existing = command
-        .get_envs()
-        .find(|(key, _)| *key == std::ffi::OsStr::new("PATH"))
-        .map(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
-        .unwrap_or_else(|| std::env::var_os("PATH"));
-    let mut entries = vec![dir.to_path_buf()];
-    if let Some(existing) = existing {
-        entries.extend(std::env::split_paths(&existing));
-    }
-    let joined = std::env::join_paths(entries)
-        .map_err(|error| SoldrError::Other(format!("invalid PATH: {error}")))?;
-    command.env("PATH", joined);
-    Ok(())
-}
-
 fn resolve_active_target_triple(
     args: &[String],
     explicit_target: Option<&str>,
