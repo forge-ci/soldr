@@ -285,6 +285,7 @@ pub mod daemon_entry;
 pub(crate) mod daemon_status_render;
 pub mod docker_cross;
 pub mod doctor;
+pub(crate) mod doctor_cook;
 mod dylint_cook;
 /// soldr#3042 step 3 — which of the two Dylint target trees a
 /// `soldr dylint cook` invocation is preparing (`target/dylint/target` vs.
@@ -407,6 +408,7 @@ pub mod version_trampoline;
 pub mod wheel_bundle;
 pub mod wheel_cmd;
 pub mod wheel_stamp;
+pub(crate) mod worktree_target;
 pub mod wrapper;
 pub mod wrapper_identity;
 /// `wrapper_target` holds the wrapper hot-path target-registry routing

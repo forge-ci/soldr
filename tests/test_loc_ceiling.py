@@ -26,7 +26,7 @@ def test_ceiling_is_one_thousand() -> None:
 
 def test_violations_are_sorted_and_measured() -> None:
     over = _ceiling.violations()
-    counts = [count for _, count in over]
+    counts = [entry.lines for entry in over]
     assert counts == sorted(counts, reverse=True)
     assert all(count > 1000 for count in counts)
 
