@@ -8,6 +8,13 @@
 use crate::broker_cmd::BrokerSubcommand;
 use crate::{optimize, save_load};
 
+/// soldr#2748 option C: parse an env-bound switch with the one owned-flag
+/// rule (soldr#2740) -- `1/true/yes/on` is on, anything else off -- instead
+/// of clap's own boolish set, so `--flag` and its `SOLDR_*` variable agree.
+pub(crate) fn owned_flag(value: &str) -> Result<bool, std::convert::Infallible> {
+    Ok(crate::core::flag_value(value))
+}
+
 const ROOT_LONG_ABOUT: &str = "Instant tools. Instant builds.\n\n\
 soldr wraps cargo and the rustup toolchain so every Rust command goes through a\n\
 managed, content-addressable cache and a repo-pinned toolchain.";
@@ -85,9 +92,14 @@ supported kill-switch for soldr's compilation cache. Hidden; retained for compat
     /// Trust inherited soldr/zccache workspace environment for cargo runs
     #[arg(
         long,
+        env = crate::TRUST_INHERITED_SOLDR_ENV_VAR,
+        value_parser = owned_flag,
+        num_args = 0,
+        default_missing_value = "1",
+        hide_env = true,
         help = "Trust inherited soldr/zccache workspace env for cargo runs",
         long_help = "Trust inherited soldr/zccache workspace environment for cargo runs.\n\n\
-By default, `soldr cargo ...` resolves a fresh soldr workspace context from the current cwd/manifest while preserving normal OS, Cargo, Rust, proxy, cert, and CI environment. This flag is an advanced escape hatch for CI/action workflows that intentionally inject soldr/zccache workspace state."
+By default, `soldr cargo ...` resolves a fresh soldr workspace context from the current cwd/manifest while preserving normal OS, Cargo, Rust, proxy, cert, and CI environment. This flag is an advanced escape hatch for CI/action workflows that intentionally inject soldr/zccache workspace state. Equivalent to SOLDR_TRUST_INHERITED_ENV=1."
     )]
     pub(crate) trust_inherited_soldr_env: bool,
     #[arg(

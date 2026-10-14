@@ -236,6 +236,24 @@ fn cli_parses_trust_inherited_soldr_env_flag() {
 }
 
 #[test]
+fn trust_inherited_flag_is_bound_to_its_env_var_with_owned_flag_rules() {
+    // soldr#2748 option C: one binding, visible in --help, parsed like every
+    // other owned SOLDR_* switch (soldr#2740) rather than clap's boolish set.
+    let command = Cli::command();
+    let arg = command
+        .get_arguments()
+        .find(|a| a.get_id() == "trust_inherited_soldr_env")
+        .unwrap();
+    assert_eq!(
+        arg.get_env().and_then(|v| v.to_str()),
+        Some(crate::TRUST_INHERITED_SOLDR_ENV_VAR)
+    );
+    for (raw, want) in [("1", true), ("on", true), ("off", false), ("maybe", false)] {
+        assert_eq!(crate::cli_args::owned_flag(raw), Ok(want), "{raw}");
+    }
+}
+
+#[test]
 fn root_help_groups_commands_and_keeps_lines_short() {
     let help = Cli::command().render_help().to_string();
 
