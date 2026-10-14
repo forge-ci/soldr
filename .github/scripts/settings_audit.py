@@ -72,7 +72,19 @@ def _compare(prefix: str, expected: object, actual: object, out: list[Finding]) 
     if not isinstance(expected, dict) or not isinstance(actual, dict):
         raise ValueError(f"{prefix}: baseline and live value must both be objects")
     for key, want in expected.items():
-        got = actual.get(key)
+        if key not in actual:
+            # GitHub omits some fields (e.g. the allow_* merge methods) unless
+            # the token has admin read: absent means unreadable, not changed.
+            out.append(
+                Finding(
+                    f"{prefix}.{key}",
+                    json.dumps(want),
+                    "field not returned",
+                    "unverified",
+                )
+            )
+            continue
+        got = actual[key]
         if got != want:
             out.append(
                 Finding(f"{prefix}.{key}", json.dumps(want), json.dumps(got), "drift")
