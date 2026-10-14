@@ -124,6 +124,7 @@ fn persistent_shim_dir_in(
     let dir_path = base.join(&key);
 
     if shim_dir_is_complete(&dir_path, tools) {
+        mark_shim_dir_used(&dir_path);
         return Ok(ShimDirGuard {
             path: dir_path,
             persistent: true,
@@ -134,11 +135,15 @@ fn persistent_shim_dir_in(
     for tool in tools {
         write_shim(&dir_path, tool, soldr_bin)?;
     }
+    mark_shim_dir_used(&dir_path);
     // Best-effort: drop sibling key dirs from previous soldr binary
-    // identities. A concurrent run may still hold one of these open
-    // (Windows can't delete an in-use exe) — ignore failures, they are
-    // harmless and self-heal on the next successful prune.
-    prune_stale_sibling_shim_dirs(base, &key);
+    // identities, but only idle ones. Two soldr binaries legitimately share
+    // one root (an installed soldr and a source build running the local
+    // gate); pruning a sibling on sight deleted the other's in-use
+    // `soldr-daemon` shim, so its broker route failed to spawn on every
+    // alternate run. Failures are ignored: a held-open exe on Windows
+    // self-heals on the next prune.
+    prune_stale_sibling_shim_dirs(base, &key, SHIM_DIR_IDLE_BEFORE_PRUNE);
     Ok(ShimDirGuard {
         path: dir_path,
         persistent: true,
@@ -176,15 +181,39 @@ fn dylint_shim_dir_key(soldr_bin: &Path) -> Result<String, SoldrError> {
     Ok(format!("{:016x}", hasher.finish()))
 }
 
-fn prune_stale_sibling_shim_dirs(base: &Path, keep_key: &str) {
+/// A sibling key dir unused for this long belongs to a binary that is gone.
+const SHIM_DIR_IDLE_BEFORE_PRUNE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// Marker whose mtime records the last run that used a persistent shim dir.
+const SHIM_DIR_LAST_USED: &str = ".last-used";
+
+fn mark_shim_dir_used(dir: &Path) {
+    // Rewriting the marker refreshes its mtime without a file-time setter.
+    let _ = std::fs::write(dir.join(SHIM_DIR_LAST_USED), b"used\n");
+}
+
+fn shim_dir_last_used(dir: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(dir.join(SHIM_DIR_LAST_USED))
+        .or_else(|_| std::fs::metadata(dir))
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
+
+fn prune_stale_sibling_shim_dirs(base: &Path, keep_key: &str, max_idle: std::time::Duration) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
     };
+    let now = std::time::SystemTime::now();
     for entry in entries.flatten() {
         if entry.file_name().to_string_lossy() == keep_key {
             continue;
         }
-        let _ = std::fs::remove_dir_all(entry.path());
+        let idle = shim_dir_last_used(&entry.path())
+            .and_then(|used| now.duration_since(used).ok())
+            .unwrap_or_default();
+        if idle >= max_idle {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
     }
 }
 
@@ -595,10 +624,39 @@ mod tests {
             first.path, second.path,
             "a changed binary identity must mint a new key dir"
         );
+        assert!(first.path.is_dir(), "a just-used sibling must survive");
+        let key = second
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        prune_stale_sibling_shim_dirs(&base, &key, std::time::Duration::ZERO);
         assert!(
             !first.path.is_dir(),
-            "the previous key dir is now a stale sibling and must be pruned"
+            "an idle sibling key dir is stale and must be pruned"
         );
         assert!(second.path.is_dir());
+    }
+
+    #[test]
+    fn persistent_shim_dir_keeps_a_sibling_another_binary_is_using() {
+        // Two soldr binaries share one root (installed soldr + a source build
+        // in the local gate). Neither may delete the other's live shim dir.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base = temp.path().join("base");
+        let installed = temp.path().join("installed-soldr");
+        let source_built = temp.path().join("source-soldr-build");
+        std::fs::write(&installed, b"installed").expect("write installed");
+        std::fs::write(&source_built, b"source-built-binary").expect("write source");
+        let tools: &[&str] = &["cargo"];
+
+        let a = persistent_shim_dir_in(&base, &installed, tools).expect("installed build");
+        let b = persistent_shim_dir_in(&base, &source_built, tools).expect("source build");
+        assert_ne!(a.path, b.path);
+        assert!(
+            shim_tool_path(&a.path, "cargo").is_file(),
+            "a recently used sibling shim dir must survive another binary's build"
+        );
     }
 }
