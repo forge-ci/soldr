@@ -1,0 +1,33 @@
+name: Settings audit
+
+# soldr#2469 6.2 (owner-approved 2026-10-13): report drift between the live
+# repository settings and the reviewed baseline in ci/repo-settings.json.
+# Weekly plus on demand; it never runs on PRs or pushes, so it adds nothing to
+# the PR loop.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: settings-audit
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Repository settings audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+      - name: Compare live settings with ci/repo-settings.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOLDR_SETTINGS_AUDIT_TOKEN: ${{ secrets.SOLDR_SETTINGS_AUDIT_TOKEN }}
+        run: python3 .github/scripts/settings_audit.py
