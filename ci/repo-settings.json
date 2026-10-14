@@ -1,0 +1,23 @@
+{
+  "_comment": "Reviewed baseline of zackees/soldr repository settings (soldr#2469 6.2). .github/scripts/settings_audit.py compares the live settings against it on a schedule and reports drift. Change a value here only together with the deliberate settings change it records. branch_protected is false by owner decision (2026-10-13): main stays unprotected; the local gate and ci-mode attestation are the merge gate.",
+  "repository": {
+    "default_branch": "main",
+    "visibility": "public",
+    "allow_squash_merge": true,
+    "allow_merge_commit": true,
+    "allow_rebase_merge": true,
+    "allow_auto_merge": false
+  },
+  "immutable_releases": {
+    "enabled": true
+  },
+  "actions_permissions": {
+    "enabled": true,
+    "sha_pinning_required": true
+  },
+  "workflow_permissions": {
+    "default_workflow_permissions": "read",
+    "can_approve_pull_request_reviews": false
+  },
+  "branch_protected": false
+}
