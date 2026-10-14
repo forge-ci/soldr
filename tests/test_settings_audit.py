@@ -84,3 +84,12 @@ def test_only_drift_fails_the_audit(monkeypatch) -> None:
     )
     monkeypatch.setattr(AUDIT, "http_fetch", lambda _token: drifted)
     assert AUDIT.main(["--repo", REPO]) == 1
+
+
+def test_a_field_github_omits_without_admin_is_unverified() -> None:
+    """The workflow token's GET /repos omits allow_*: not drift (run 38519933179)."""
+    trimmed = {
+        k: v for k, v in BASELINE["repository"].items() if not k.startswith("allow_")
+    }
+    findings = AUDIT.audit(REPO, BASELINE, live(**{f"/repos/{REPO}": trimmed}))
+    assert findings and all(f.kind == "unverified" for f in findings)
