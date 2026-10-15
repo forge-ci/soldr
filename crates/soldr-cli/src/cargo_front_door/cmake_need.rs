@@ -34,7 +34,10 @@ fn decide(subcommand: Option<&str>, manifest_dir: &Path) -> bool {
     };
     // A manifest edited after the last resolve (clud#500: a just-added
     // `whisper-rs-sys`) makes the lock untrustworthy.
-    if manifests_to_check(manifest_dir, lock_dir)
+    let Some(manifests) = manifests_to_check(manifest_dir, lock_dir) else {
+        return true;
+    };
+    if manifests
         .iter()
         .any(|manifest| mtime(manifest).is_none_or(|time| time > lock_mtime))
     {
@@ -43,11 +46,11 @@ fn decide(subcommand: Option<&str>, manifest_dir: &Path) -> bool {
     lock_has_cmake_package(&text)
 }
 
-/// The manifest dir's and lock dir's `Cargo.toml`, plus the lock dir's
-/// workspace `members` that are plain paths. Glob members are not expanded:
-/// that is a documented limit, covered by the two manifests above in the
-/// common case of editing the member being built.
-fn manifests_to_check(manifest_dir: &Path, lock_dir: &Path) -> Vec<PathBuf> {
+/// The manifest dir's and lock dir's `Cargo.toml`, plus every workspace
+/// member's. A member pattern ending in a single `/*` component is expanded
+/// by listing that directory; any other glob shape returns `None`, which
+/// provisions rather than guess.
+fn manifests_to_check(manifest_dir: &Path, lock_dir: &Path) -> Option<Vec<PathBuf>> {
     let mut out = vec![manifest_dir.join("Cargo.toml"), lock_dir.join("Cargo.toml")];
     let members = std::fs::read_to_string(lock_dir.join("Cargo.toml"))
         .ok()
@@ -57,12 +60,20 @@ fn manifests_to_check(manifest_dir: &Path, lock_dir: &Path) -> Vec<PathBuf> {
     for member in members.iter().filter_map(toml::Value::as_str) {
         if !member.contains(['*', '?', '[']) {
             out.push(lock_dir.join(member).join("Cargo.toml"));
+            continue;
+        }
+        let parent = member.strip_suffix("/*")?;
+        if parent.contains(['*', '?', '[']) {
+            return None;
+        }
+        for entry in std::fs::read_dir(lock_dir.join(parent)).ok()?.flatten() {
+            out.push(entry.path().join("Cargo.toml"));
         }
     }
     out.sort();
     out.dedup();
     out.retain(|path| path.is_file());
-    out
+    Some(out)
 }
 
 fn lock_has_cmake_package(text: &str) -> bool {
@@ -172,6 +183,39 @@ mod tests {
         // A stale lock relative to the member manifest provisions.
         set_mtime(&manifest, SystemTime::now() + Duration::from_secs(1000));
         assert!(managed_cmake_needed(&a, Path::new("/nonexistent")));
+    }
+
+    /// Workspace whose root lists `members = [<pattern>]`, with one member
+    /// at `crates/m`; every file older than the lock.
+    fn workspace(pattern: &str) -> tempfile::TempDir {
+        let tmp = project(Some(NO_CMAKE));
+        let old = SystemTime::now() - Duration::from_secs(1000);
+        let root = tmp.path().join("Cargo.toml");
+        std::fs::write(&root, format!("[workspace]\nmembers = [\"{pattern}\"]\n")).unwrap();
+        set_mtime(&root, old);
+        let member = tmp.path().join("crates").join("m");
+        std::fs::create_dir_all(&member).unwrap();
+        let manifest = member.join("Cargo.toml");
+        std::fs::write(&manifest, "[package]\nname = \"m\"\n").unwrap();
+        set_mtime(&manifest, old);
+        tmp
+    }
+
+    #[test]
+    fn glob_member_edited_after_resolve_is_needed() {
+        // clud#500 shape in a `crates/*` workspace: building from the root,
+        // a member just gained a cmake-driven dependency.
+        let tmp = workspace("crates/*");
+        assert!(!managed_cmake_needed(&args(&["build"]), tmp.path()));
+        let manifest = tmp.path().join("crates").join("m").join("Cargo.toml");
+        set_mtime(&manifest, SystemTime::now() + Duration::from_secs(1000));
+        assert!(managed_cmake_needed(&args(&["build"]), tmp.path()));
+    }
+
+    #[test]
+    fn unsupported_glob_shape_is_needed() {
+        let tmp = workspace("crates/m*");
+        assert!(managed_cmake_needed(&args(&["build"]), tmp.path()));
     }
 
     #[test]
