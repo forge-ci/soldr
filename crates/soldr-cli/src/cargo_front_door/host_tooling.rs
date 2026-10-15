@@ -16,6 +16,11 @@ pub(super) async fn inject(
     if !should_inject_native_cmake(args) {
         return;
     }
+    // soldr#3783: skip the provisioning cost when the lockfile provably has no cmake.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if !super::cmake_need::managed_cmake_needed(args, &cwd) {
+        return;
+    }
 
     let mut prep = crate::blessed_build::BlessedPrep::default();
     crate::blessed_build::inject_cmake_tooling(paths, &mut prep).await;
@@ -83,6 +88,20 @@ mod tests {
             std::fs::write(install.join(".complete"), b"").expect("write stamp");
         }
 
+        // soldr#3783: the project graph must contain cmake for provisioning to run.
+        let project = tempfile::tempdir().expect("project");
+        std::fs::write(
+            project.path().join("Cargo.toml"),
+            "[package]\nname = \"x\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            project.path().join("Cargo.lock"),
+            "[[package]]\nname = \"cmake\"\n",
+        )
+        .expect("lock");
+        let manifest = project.path().join("Cargo.toml").display().to_string();
+
         let mut bootstrap = super::super::SubcommandToolBootstrap {
             bin_dirs: Vec::new(),
             env: Vec::new(),
@@ -90,7 +109,11 @@ mod tests {
         };
         tokio::runtime::Runtime::new()
             .expect("runtime")
-            .block_on(inject(&args(&["test"]), &paths, &mut bootstrap));
+            .block_on(inject(
+                &args(&["test", "--manifest-path", &manifest]),
+                &paths,
+                &mut bootstrap,
+            ));
 
         assert!(bootstrap.env.iter().any(|(key, _)| key == "CMAKE"));
         assert!(bootstrap
