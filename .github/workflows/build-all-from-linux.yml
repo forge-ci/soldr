@@ -25,9 +25,9 @@ on:
   workflow_dispatch:
     inputs:
       soldr_version:
-        description: "Pinned soldr version from PyPI (>= 0.9.5)"
+        description: "soldr version from PyPI (default: latest release)"
         required: false
-        default: "0.9.6"
+        default: ""
         type: string
 
 permissions:
@@ -97,15 +97,15 @@ jobs:
 
       # The pinned driver — the ONLY way soldr enters this workflow.
       # A venv sidesteps PEP 668 and exposes soldr's console entry point.
-      - name: Install pinned soldr from PyPI
+      - name: Install soldr from PyPI
         shell: bash
         run: |
           set -euo pipefail
-          soldr_version="${{ inputs.soldr_version || '0.9.6' }}"
-          echo "pinned soldr driver: $soldr_version"
+          soldr_version="${{ inputs.soldr_version }}"
+          echo "soldr driver: ${soldr_version:-latest}"
           python3 -m venv "$RUNNER_TEMP/soldr-venv"
           "$RUNNER_TEMP/soldr-venv/bin/pip" install --disable-pip-version-check \
-            "soldr==${soldr_version}"
+            "soldr${soldr_version:+==${soldr_version}}"
           echo "$RUNNER_TEMP/soldr-venv/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/soldr-venv/bin/soldr" --version
 

@@ -177,7 +177,6 @@ jobs:
           # (0.8.23) predates #1820 and GCs live target/ artifacts after every
           # build, so the next build recompiles the world. See
           # tests/test_setup_soldr_version_pins.py.
-          version: 0.9.27
           toolchain-file: rust-toolchain.ci.toml
           # soldr#2451: turn off every setup-soldr reuse layer, not just the
           # `cache` umbrella (which does not gate soldr-mini / solo-toolchain /

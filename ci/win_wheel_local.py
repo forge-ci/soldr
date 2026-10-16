@@ -51,13 +51,10 @@ IMAGE = "soldr-win-wheel"
 TARGET = "x86_64-pc-windows-msvc"
 RUST_TOOLCHAIN = "1.98.1"
 
-# The soldr that DRIVES the build, pinned deliberately. 0.9.1 carries the
-# `soldr maturin` blessed-target wiring (MATURIN_USE_XWIN policy + prepared
-# SDK env, soldr#2519), so maturin uses the baked xwin cache instead of
-# hanging in its own MSVC CRT download the way the 0.8.44 driver did.
-# (0.9.0 stays unusable as a driver: its broker cannot dial its daemon
-# route -- that is what wedged the host this harness exists to rescue.)
-SOLDR_VERSION = "0.9.6"
+# The soldr that DRIVES the build is the latest published release. Only
+# setup-soldr's default pins a soldr version; a pin here drifts stale and an
+# old driver is exactly what wedged hosts before (0.9.0's broker could not dial
+# its daemon route).
 
 # `soldr wheel` refuses this workspace ("could not read Cargo metadata, so
 # soldr cannot prove this workspace is abi3-safe") even though `soldr cargo
@@ -79,7 +76,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
 COPY --from=ghcr.io/astral-sh/uv:0.9.18 /uv /uvx /usr/local/bin/
 
 RUN --mount=type=cache,target=/root/.cache/uv \\
-    uv pip install --system --break-system-packages "soldr=={SOLDR_VERSION}"
+    uv pip install --system --break-system-packages soldr
 
 # Bake the toolchain and the target lifecycle so a cold run downloads nothing.
 # `--allow-unpinned` is required and honest here: there is no
