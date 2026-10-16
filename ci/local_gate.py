@@ -32,6 +32,9 @@ Lanes:
   `aarch64-apple-darwin`, cross-checked from this Linux host (zackees/ci.yml
   #198 phase 2). They attest `rust/<target>/{clippy,dylint}`; no PR job
   covers those targets, so this is added coverage, not a skipped job.
+  Per-target Dylint skips on proof (`ci/cross_dylint.py`, soldr#3787): a
+  change outside `soldr-platform`, `Cargo.toml` and `build.rs` is covered by
+  host Dylint; cross Clippy always runs.
 - `wine`: Windows-MSVC unit tests of the crates that pass in full under
   Wine, cross-built here and executed in `docker/wine-test`, never on the
   host (`ci/wine_lane.py`; zackees/ci.yml#202 phase 3).
@@ -689,17 +692,7 @@ def checks() -> list[Check]:
             ),
             Check(
                 f"dylint ({target})",
-                (
-                    "soldr",
-                    "cargo",
-                    "dylint",
-                    "--all",
-                    "--",
-                    "--workspace",
-                    "--all-targets",
-                    "--target",
-                    target,
-                ),
+                (*PY, "python", "ci/cross_dylint.py", target),
                 "cross",
                 exclusive=True,
             ),
