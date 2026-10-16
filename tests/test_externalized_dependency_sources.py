@@ -190,20 +190,25 @@ def dependency_specs(manifest_text: str) -> list[DependencySpec]:
     return specs
 
 
+def _is_reintroduced_path_dependency(dep: DependencySpec) -> bool:
+    """A path dependency on an externalized crate, or on a vendored
+    amalgamation anywhere but its one sanctioned location."""
+    if "path" not in dep.spec:
+        return False
+    if is_externalized(dep.name) and "_vender" in dep.spec:
+        return True
+    return (
+        dep.name in VENDORED_AMALGAMATIONS
+        and f'"{VENDORED_AMALGAMATIONS[dep.name]}"' not in dep.spec
+    )
+
+
 def test_no_manifest_declares_a_path_dependency_on_them() -> None:
     offenders: list[str] = []
     for manifest in workspace_manifests():
         text = manifest.read_text(encoding="utf-8")
         for dep in dependency_specs(text):
-            if (
-                is_externalized(dep.name)
-                and "path" in dep.spec
-                and "_vender" in dep.spec
-            ) or (
-                dep.name in VENDORED_AMALGAMATIONS
-                and "path" in dep.spec
-                and f'"{VENDORED_AMALGAMATIONS[dep.name]}"' not in dep.spec
-            ):
+            if _is_reintroduced_path_dependency(dep):
                 offenders.append(f"{manifest.relative_to(REPO_ROOT)}: {dep.spec}")
     assert not offenders, "path dependencies reintroduced (soldr#2835):\n" + "\n".join(
         offenders
