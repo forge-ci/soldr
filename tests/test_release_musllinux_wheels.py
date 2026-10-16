@@ -41,7 +41,7 @@ def test_release_workflow_builds_and_publishes_musllinux_wheels() -> None:
     assert (
         "uses: zackees/setup-soldr@a07bab94f16124b5c6857b137a237a53a61e06d1" in workflow
     )
-    assert "version: 0.9.27" in workflow
+    assert "version: 0.9.27" not in workflow  # one pin: setup-soldr's default
     assert "cross-targets: ${{ matrix.setup_target }}" in workflow
     assert "target-wheel-hook" in workflow
     assert ".github/scripts/prepare_release_wheel.py" in workflow

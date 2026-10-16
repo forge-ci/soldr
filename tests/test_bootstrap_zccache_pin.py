@@ -77,10 +77,15 @@ def bootstrap_matches_workspace(
     return pending == workspace and declared != workspace
 
 
-def bootstrap_version(workflow: str) -> str:
+def bootstrap_version(workflow: str) -> str | None:
+    """The call site's pinned setup-soldr version, or None for the default.
+
+    Call sites take setup-soldr's default (the one soldr pin), so normally
+    there is none; the release-tag cross-check below then has nothing local to
+    read and skips, while the declaration test still guards the workflow.
+    """
     match = SETUP_VERSION.search(workflow)
-    assert match, "_build-and-test.yml has no pinned setup-soldr version"
-    return match.group(1)
+    return match.group(1) if match else None
 
 
 def test_bootstrap_declares_the_workspace_zccache() -> None:
@@ -103,7 +108,10 @@ def test_declaration_matches_the_pinned_release_when_its_tag_is_present() -> Non
     is the one that runs everywhere.
     """
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    tag = f"v{bootstrap_version(workflow)}"
+    version = bootstrap_version(workflow)
+    if version is None:
+        pytest.skip("the bootstrap takes setup-soldr's default; no local tag to check")
+    tag = f"v{version}"
     shown = None
     for manifest in (WORKSPACE_MANIFEST, LEGACY_DAEMON_MANIFEST):
         shown = run_captured(
