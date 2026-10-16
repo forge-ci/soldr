@@ -76,8 +76,6 @@ impl FrontDoorSetup {
         // soldr#3518: restore a killed cook's journaled sources before Cargo reads them.
         crate::cook_source_journal::recover_stale_cook_journals(&std::env::current_dir()?)?;
 
-        let trust_inherited_soldr_env =
-            trust_inherited_soldr_env || env_flag_truthy(crate::TRUST_INHERITED_SOLDR_ENV_VAR);
         // The stable-rustc fallback re-enters this front door. Snapshot the caller-facing
         // contract before toolchain directives and Soldr-private Cargo flags are
         // normalized so the retry performs the same processing exactly once.
