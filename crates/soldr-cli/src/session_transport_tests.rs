@@ -329,3 +329,44 @@ fn relay_probe_records_first_and_metadata_frames_only_when_enabled() {
         "only the first metadata frame counts"
     );
 }
+
+/// soldr#3815: a lost or unreachable daemon connection ends in a stand-alone
+/// error naming the route, elapsed time, and recovery commands.
+#[test]
+fn connection_loss_is_a_loud_error_with_recovery_steps() {
+    let err = SessionError::broker_unreachable(io::Error::new(
+        io::ErrorKind::ConnectionRefused,
+        "nothing listening",
+    ));
+    assert!(is_connection_failure(&err));
+    let plain = connection_failure_message(&err, "soldr-daemon-x", Duration::from_secs(30), false);
+    assert!(plain.contains("could not connect") && plain.contains("soldr-daemon-x"));
+    assert!(plain.contains("30.0s") && plain.contains("soldr daemon status"));
+    assert!(plain.contains("soldr daemon stop") && plain.contains("soldr logs paths"));
+    assert!(!plain.contains('\x1b'));
+    assert!(connection_failure_message(&err, "x", Duration::ZERO, true).starts_with("\x1b[1;31m"));
+    let eof = SessionError {
+        output_started: true,
+        broker_unreachable: false,
+        source: io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "SESSION relay closed before Exit",
+        ),
+    };
+    assert!(connection_failure_message(&eof, "x", Duration::ZERO, false)
+        .contains("lost the connection"));
+}
+
+/// A long compile on a live daemon is not a connection failure.
+#[test]
+fn reply_timeout_is_not_a_connection_failure() {
+    let err = SessionError {
+        output_started: false,
+        broker_unreachable: false,
+        source: io::Error::new(
+            io::ErrorKind::TimedOut,
+            "SESSION compile reply did not complete within 1800s",
+        ),
+    };
+    assert!(!is_connection_failure(&err));
+}

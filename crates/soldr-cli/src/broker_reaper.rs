@@ -269,6 +269,16 @@ impl RouteOwnership {
         verdicts
     }
 
+    /// Record that `service_name` was observed in use at `now`, restarting its
+    /// grace window (soldr#3815). The daemon, not the requester table, is the
+    /// authority on whether a route is in use: a requester that exited can
+    /// leave compiles running on the daemon it started.
+    pub(crate) fn mark_live(&mut self, service_name: &str, now: Instant) {
+        if let Some(owners) = self.routes.get_mut(service_name) {
+            owners.last_live_at = now;
+        }
+    }
+
     /// Forget a route once its daemon is gone.
     pub(crate) fn forget(&mut self, service_name: &str) {
         self.routes.remove(service_name);
@@ -343,6 +353,84 @@ pub(crate) fn record_route_request(
         .record_request(service_name, key, Instant::now());
 }
 
+/// What a route's daemon reports about its own workload (soldr#3815).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DaemonLoad {
+    /// Compiles are in flight: the route is in use whoever started it.
+    Busy,
+    /// The daemon answered and has nothing in flight, or is not running.
+    Idle,
+    /// The daemon could not be asked (timeout, protocol error). Fail safe:
+    /// a daemon that cannot be shown idle is not reaped on this sweep.
+    Unknown,
+}
+
+/// Drop reap candidates whose daemon is still working.
+///
+/// `probe` runs without the table lock held (it is socket I/O that may take
+/// seconds, and every route request needs that lock). A `Busy` route has its
+/// grace window restarted, so it is reaped only after it has been idle, and
+/// requester-free, for the full window. `Unknown` is skipped without touching
+/// the window so the next sweep asks again.
+pub(crate) fn defer_busy_candidates(
+    route_owners: &Mutex<RouteOwnership>,
+    candidates: Vec<String>,
+    now: Instant,
+    mut probe: impl FnMut(&str) -> DaemonLoad,
+) -> Vec<String> {
+    let mut reapable = Vec::new();
+    for service_name in candidates {
+        match probe(&service_name) {
+            DaemonLoad::Idle => reapable.push(service_name),
+            DaemonLoad::Busy => {
+                println!(
+                    "soldr broker: route {service_name} has no live requester but its daemon \
+                     has compiles in flight; keeping it (soldr#3815)"
+                );
+                route_owners
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .mark_live(&service_name, now);
+            }
+            DaemonLoad::Unknown => {
+                println!(
+                    "soldr broker: could not ask daemon of route {service_name} whether it is \
+                     busy; not reaping this sweep (soldr#3815)"
+                );
+            }
+        }
+    }
+    reapable
+}
+
+/// Ask the daemon behind `service_name` whether it has work in flight.
+fn probe_daemon_load(registry: &Mutex<BackendRegistry>, service_name: &str) -> DaemonLoad {
+    use crate::daemon::client::{status_direct, ClientError};
+
+    let endpoint = {
+        let registry = registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let found = registry.iter().find_map(|(key, handle)| {
+            (key.service_name == service_name).then(|| {
+                crate::daemon::session_endpoint::private_control_endpoint_from_session(
+                    &handle.daemon_process.ipc_endpoint.path,
+                )
+            })
+        });
+        found
+    };
+    // No registry entry: no daemon for the reaper to stop.
+    let Some(endpoint) = endpoint else {
+        return DaemonLoad::Idle;
+    };
+    match status_direct(std::path::Path::new(&endpoint)) {
+        Ok(info) if info.in_flight_compiles > 0 => DaemonLoad::Busy,
+        Ok(_) | Err(ClientError::NotRunning) => DaemonLoad::Idle,
+        Err(_) => DaemonLoad::Unknown,
+    }
+}
+
 /// Stop the daemons of routes whose requesters have all exited.
 ///
 /// Returns the service names reaped, for the log line and for tests.
@@ -362,12 +450,17 @@ pub(crate) fn reap_orphaned_routes(
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         owners.sweep(Instant::now(), grace, requester_is_alive)
     };
+    let candidates: Vec<String> = verdicts
+        .into_iter()
+        .filter_map(|(name, verdict)| (verdict == RouteVerdict::Reap).then_some(name))
+        .collect();
+    // soldr#3815: requesters gone is not the same as route unused.
+    let candidates = defer_busy_candidates(route_owners, candidates, Instant::now(), |name| {
+        probe_daemon_load(registry, name)
+    });
 
     let mut reaped = Vec::new();
-    for (service_name, verdict) in verdicts {
-        if verdict != RouteVerdict::Reap {
-            continue;
-        }
+    for service_name in candidates {
         // Read the daemon pid under the registry lock, then release it
         // before signalling: the signal is a syscall on another process
         // and must not be holding the lock every route request needs.

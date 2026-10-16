@@ -38,6 +38,7 @@ pub(crate) fn render(info: &StatusInfo, paths: &SoldrPaths, json: bool) {
             "generation": info.generation,
             "uptime_secs": info.uptime_secs,
             "request_count": info.request_count,
+            "in_flight_compiles": info.in_flight_compiles,
             "compile_jobs": {
                 "daemon": info.compile_jobs,
                 "daemon_source": info.compile_jobs_source,
@@ -59,6 +60,7 @@ pub(crate) fn render(info: &StatusInfo, paths: &SoldrPaths, json: bool) {
         "soldr-daemon: pid={} generation={} uptime={}s requests={} protocol={}",
         info.pid, info.generation, info.uptime_secs, info.request_count, info.version
     );
+    println!("  in-flight compiles: {}", info.in_flight_compiles);
     println!(
         "  pkg version: {} (this cli: {})",
         claimed_pkg,

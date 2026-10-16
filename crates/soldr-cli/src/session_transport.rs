@@ -99,6 +99,7 @@ pub fn session_hot_path(rustc_argv: &[String]) -> SessionHotPathOutcome {
         .map(|(key, value)| SessionEnvVar { key, value })
         .collect();
 
+    let started = std::time::Instant::now();
     let mut attempt =
         run_session_compile_for_service(&service_name, rustc_argv, cwd.clone(), env.clone());
     if let Err(err) = &attempt {
@@ -126,12 +127,87 @@ pub fn session_hot_path(rustc_argv: &[String]) -> SessionHotPathOutcome {
             }
             SessionHotPathOutcome::Served(outcome.exit_code)
         }
-        Err(err) if err.broker_unreachable => SessionHotPathOutcome::HardFail(io::Error::other(
-            format!(
-                "soldr broker is unreachable: {err}; invoke this compiler through `soldr cargo ...` (or another soldr build front door) so the singleton broker is resurrected"
-            ),
-        )),
+        Err(err) if is_connection_failure(&err) => {
+            use std::io::IsTerminal;
+            SessionHotPathOutcome::HardFail(io::Error::other(connection_failure_message(
+                &err,
+                &service_name,
+                started.elapsed(),
+                io::stderr().is_terminal(),
+            )))
+        }
         Err(err) => SessionHotPathOutcome::HardFail(err.source),
+    }
+}
+
+/// Liveness deadline for reaching a working daemon connection (soldr#3815):
+/// connect, and re-connect after a dropped connection. It bounds connection
+/// liveness only; a live, connected daemon may compile for as long as it likes
+/// (that wait is `SOLDR_COMPILE_REPLY_TIMEOUT_SECS`).
+pub(crate) const CONNECTION_LIVENESS_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Env override for [`CONNECTION_LIVENESS_DEADLINE`], in seconds.
+pub(crate) const CONNECTION_LIVENESS_DEADLINE_ENV: &str = "SOLDR_CONNECT_DEADLINE_SECS";
+
+fn connection_liveness_deadline() -> Duration {
+    std::env::var(CONNECTION_LIVENESS_DEADLINE_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .map_or(CONNECTION_LIVENESS_DEADLINE, Duration::from_secs)
+}
+
+/// Is this failure about reaching or keeping the daemon connection, as
+/// opposed to the compiler's own result?
+fn is_connection_failure(err: &SessionError) -> bool {
+    use io::ErrorKind::{
+        BrokenPipe, ConnectionAborted, ConnectionRefused, ConnectionReset, NotFound, TimedOut,
+        UnexpectedEof,
+    };
+    if err.broker_unreachable {
+        return true;
+    }
+    let reply_timeout = err.source.to_string().contains("reply did not complete");
+    !reply_timeout
+        && matches!(
+            err.source.kind(),
+            BrokenPipe
+                | ConnectionAborted
+                | ConnectionRefused
+                | ConnectionReset
+                | NotFound
+                | TimedOut
+                | UnexpectedEof
+        )
+}
+
+/// The loud, stand-alone failure printed when the daemon connection cannot be
+/// established or re-established in time (soldr#3815). Red on a terminal; the
+/// text reads the same without colour.
+fn connection_failure_message(
+    err: &SessionError,
+    service_name: &str,
+    elapsed: Duration,
+    color: bool,
+) -> String {
+    let what = if err.broker_unreachable || err.source.kind() == io::ErrorKind::TimedOut {
+        "could not connect to the soldr daemon"
+    } else {
+        "lost the connection to the soldr daemon"
+    };
+    let text = format!(
+        "soldr: ERROR: {what} (route {service_name}) after {:.1}s: {}\n\
+         soldr: the compile was not completed; this build cannot continue. Recover with:\n\
+         soldr:   soldr daemon status\n\
+         soldr:   soldr daemon stop && soldr daemon start\n\
+         soldr:   soldr logs paths   (daemon and broker logs)",
+        elapsed.as_secs_f64(),
+        err.source
+    );
+    if color {
+        format!("\x1b[1;31m{text}\x1b[0m")
+    } else {
+        text
     }
 }
 
@@ -320,7 +396,9 @@ async fn run_session_compile_async(
     cwd: String,
     env: Vec<SessionEnvVar>,
 ) -> Result<SessionCompileOutcome, SessionError> {
-    let setup_timeout = crate::broker_deadlines::BrokerDeadlines::from_env().route_ceiling;
+    let setup_timeout = crate::broker_deadlines::BrokerDeadlines::from_env()
+        .route_ceiling
+        .min(connection_liveness_deadline());
     let mut stream = match tokio::time::timeout(
         setup_timeout,
         establish_session(service_name, rustc_argv, cwd, env),

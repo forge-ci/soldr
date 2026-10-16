@@ -266,6 +266,24 @@ fn submit_direct_request_for_version(
     }
 }
 
+/// Status read that dials `sock_path` directly instead of re-entering the
+/// installed broker connector. For the broker itself (soldr#3815), which
+/// holds a route's private control endpoint and must not tunnel through
+/// itself to ask a daemon whether it is busy.
+pub fn status_direct(sock_path: &Path) -> Result<StatusInfo, ClientError> {
+    match submit_direct_request_for_version(
+        sock_path,
+        &Request::Status,
+        crate::daemon::protocol::PROTOCOL_VERSION,
+    )? {
+        Response::Status(info) => Ok(info),
+        Response::Error(msg) => Err(ClientError::Protocol(msg)),
+        other => Err(ClientError::Protocol(format!(
+            "unexpected response: {other:?}"
+        ))),
+    }
+}
+
 pub fn status(sock_path: &Path) -> Result<StatusInfo, ClientError> {
     match submit_request(sock_path, &Request::Status)? {
         Response::Status(info) => Ok(info),
