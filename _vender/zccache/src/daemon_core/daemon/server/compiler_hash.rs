@@ -86,15 +86,20 @@ struct ProbeOutput {
 /// Spawn `cmd` and wait up to `timeout`, killing the child on timeout. Used to
 /// bound the sync `-vV` probe. Capture, descendant containment, reader
 /// cancellation, and the aggregate byte limit all belong to kernal-api.
+///
+/// No spawn/materialization guard here (soldr#3815 deadlock, 2026-10-16): a
+/// bounded run spawns *and waits* inside running-process, and holding the
+/// shared guard across that wait made the guard a lifetime lock. A waiting
+/// materializer then queued every later reader -- including running-process's
+/// own actor threads, which take the shared guard per fork/exec -- so the
+/// actor could never answer this probe's `try_wait`: the probe never released
+/// its guard, its children became zombies, and every compile on the daemon
+/// stalled. kernal-api refuses an admission on a bounded run for this reason.
+/// The fork-to-exec inheritance this guard used to cover is handled for every
+/// spawner by `spawn_exclusion::await_publishable` (soldr#3350).
 fn output_within(cmd: kernal_api::SpawnSpec, timeout: std::time::Duration) -> ProbeOutcome {
     const PROBE_OUTPUT_LIMIT: usize = 1024 * 1024;
 
-    // zccache#1562: running-process owns spawn *and* wait here, so the shared
-    // materialization/spawn guard has to bracket the whole bounded run rather
-    // than the spawn alone. A shared guard only blocks materialization (the
-    // exclusive side), never other spawns; this probe is a cold path taken
-    // once per compiler identity, normally ~10 ms, and bounded by `timeout`.
-    let _spawn_guard = crate::daemon_core::daemon::spawn_exclusion::spawn_shared();
     match kernal_api::run_bounded_command(cmd, Some(timeout), PROBE_OUTPUT_LIMIT) {
         Ok(output) => ProbeOutcome::Completed(ProbeOutput {
             success: output.exit.raw_code() == 0,
@@ -109,24 +114,29 @@ async fn output_within_async(
     cmd: kernal_api::SpawnSpec,
     timeout: std::time::Duration,
 ) -> ProbeOutcome {
-    const PROBE_OUTPUT_LIMIT: usize = 1024 * 1024;
-
-    // Keep the shared spawn/materialization exclusion inside the blocking
-    // operation. Holding its synchronous guard across `.await` would make the
-    // async probe non-Send and, more importantly, would not cover the actual
-    // native child creation on the kernel blocking lane.
-    match kernal_api::async_engine::launch_blocking(move || {
-        let _spawn_guard = crate::daemon_core::daemon::spawn_exclusion::spawn_shared();
-        kernal_api::run_bounded_command(cmd, Some(timeout), PROBE_OUTPUT_LIMIT)
-    })
-    .await
-    {
-        Ok(Ok(output)) => ProbeOutcome::Completed(ProbeOutput {
-            success: output.exit.raw_code() == 0,
+    // The canonical session path takes the shared spawn/materialization guard
+    // on running-process's actor thread around fork/exec only (zccache#1562),
+    // never across the wait -- see `output_within` for the deadlock a
+    // lifetime guard caused (soldr#3815).
+    // Boxed as `dyn Future + Send`: inlining the session future's type into
+    // the compile pipeline overflows the `Send` check (E0275).
+    let probe: std::pin::Pin<
+        Box<dyn std::future::Future<Output = std::io::Result<std::process::Output>> + Send>,
+    > = Box::pin(
+        crate::daemon_core::daemon::process::async_builder_output_with_priority_timeout(
+            cmd,
+            crate::daemon_core::daemon::process::CompilePriority::Normal,
+            timeout,
+            "compiler identity probe".to_string(),
+        ),
+    );
+    match probe.await {
+        Ok(output) => ProbeOutcome::Completed(ProbeOutput {
+            success: output.status.success(),
             stdout: output.stdout,
         }),
-        Ok(Err(kernal_api::BoundedProcessError::TimedOut)) => ProbeOutcome::TimedOut,
-        Ok(Err(_)) | Err(_) => ProbeOutcome::SpawnFailed,
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => ProbeOutcome::TimedOut,
+        Err(_) => ProbeOutcome::SpawnFailed,
     }
 }
 
@@ -842,6 +852,35 @@ mod probe_timeout_tests {
                 std::mem::discriminant(&other)
             ),
         }
+    }
+
+    /// soldr#3815 (2026-10-16 daemon deadlock): a running probe must not hold
+    /// the spawn/materialization guard while it waits. When it did, a queued
+    /// materializer blocked running-process's actor threads (they take the
+    /// shared guard per fork/exec), the actor could not answer the probe's
+    /// `try_wait`, and the whole daemon wedged with zombie probe children.
+    #[test]
+    fn probe_does_not_hold_the_spawn_guard_while_it_waits() {
+        let sleeper = if crate::daemon_core::platform::host::is_windows() {
+            kernal_api::SpawnSpec::new("cmd")
+                .arg("/c")
+                .arg("ping -n 4 127.0.0.1 >nul")
+        } else {
+            kernal_api::SpawnSpec::new("sh").arg("-c").arg("sleep 3")
+        };
+        let probe = std::thread::spawn(move || output_within(sleeper, Duration::from_secs(20)));
+        std::thread::sleep(Duration::from_millis(300));
+        let (acquired, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _exclusive = crate::daemon_core::daemon::spawn_exclusion::materialize_exclusive();
+            let _ = acquired.send(());
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(1500)).is_ok(),
+            "materialization could not take the exclusive guard while a probe was \
+             waiting on its child: the probe holds the spawn guard for its lifetime"
+        );
+        let _ = probe.join();
     }
 
     #[test]
