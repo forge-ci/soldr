@@ -64,6 +64,26 @@ pub fn retire_endpoint(endpoint: &str) {
     let _ = std::fs::remove_file(endpoint);
 }
 
+/// Device, inode and change time of the socket file at `endpoint`, or `None`
+/// when absent. soldr#3815: compared before unlinking so a broker only retires
+/// its own file. The change time is part of it because a rebind can reuse the
+/// freed inode number.
+pub fn endpoint_identity(endpoint: &str) -> Option<(u64, u64, i128)> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::symlink_metadata(endpoint).ok().map(|meta| {
+        let ctime = i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec());
+        (meta.dev(), meta.ino(), ctime)
+    })
+}
+
+/// Unlink `endpoint` only while it is still the file identified by `identity`.
+/// A successor broker that rebound the path keeps its socket.
+pub fn retire_endpoint_if_identity(endpoint: &str, identity: Option<(u64, u64, i128)>) {
+    if identity.is_some() && endpoint_identity(endpoint) == identity {
+        let _ = std::fs::remove_file(endpoint);
+    }
+}
+
 pub fn seed_stale_endpoint(endpoint: &std::path::Path) -> io::Result<()> {
     drop(std::os::unix::net::UnixListener::bind(endpoint)?);
     Ok(())

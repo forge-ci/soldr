@@ -379,10 +379,11 @@ async fn serve_loop(
     // `soldr broker stop` burned its full drain deadline and force-killed
     // a broker that had accepted the request and simply never heard it.
     let shutdown = Arc::new(crate::daemon::shutdown_signal::ShutdownSignal::default());
+    let claim = crate::broker_endpoint_owner::EndpointClaim::shared(&endpoint);
     let reaper = tokio::spawn(crate::broker_reaper::run_route_reaper(
         Arc::clone(&state.route_owners),
         Arc::clone(&state.registry),
-        Arc::clone(&shutdown),
+        (Arc::clone(&shutdown), Arc::clone(&claim)),
     ));
     // soldr#3075: a broker whose install directory was deleted (a disposable
     // HOME) can never be reached again, so it stands itself down.
@@ -470,9 +471,8 @@ async fn serve_loop(
     // drain. A bounded stop command may still terminate this process if a
     // client never closes.
     drop(listener);
-    // The reaper watches for shutdown too, but abort rather than await it:
-    // it may be mid-sleep, and a retiring broker must not wait a sweep
-    // interval to finish.
+    // The reaper watches for shutdown too, but abort rather than await it: it
+    // may be mid-sleep, and a retiring broker must not wait out a sweep.
     reaper.abort();
     home_watch.abort();
     // Same reasoning as the reaper: a retiring broker must not wait out an
@@ -480,7 +480,7 @@ async fn serve_loop(
     for handle in [rss_watchdog, idle_standdown].into_iter().flatten() {
         handle.abort();
     }
-    crate::platform::ipc::broker::retire_endpoint(&endpoint);
+    claim.retire(); // soldr#3815: never a successor's socket
     while let Some(joined) = connections.join_next().await {
         if let Err(error) = joined {
             eprintln!("soldr broker: draining connection task failed: {error}");

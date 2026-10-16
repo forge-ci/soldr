@@ -48,6 +48,15 @@ pub fn duplicate_stream(
 
 pub fn retire_endpoint(_endpoint: &str) {}
 
+/// Named pipes have no filesystem entry a successor could rebind, so the
+/// endpoint identity is constant and ownership never changes underneath us.
+pub fn endpoint_identity(_endpoint: &str) -> Option<(u64, u64, i128)> {
+    Some((0, 0, 0))
+}
+
+/// Named-pipe listeners have no filesystem entry to retire.
+pub fn retire_endpoint_if_identity(_endpoint: &str, _identity: Option<(u64, u64, i128)>) {}
+
 pub fn seed_stale_endpoint(_endpoint: &std::path::Path) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "Windows named pipes do not leave stale filesystem endpoints"))
 }

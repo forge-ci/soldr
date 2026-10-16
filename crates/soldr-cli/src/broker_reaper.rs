@@ -601,7 +601,10 @@ fn route_endpoint_dir() -> std::path::PathBuf {
 pub(crate) async fn run_route_reaper(
     route_owners: Arc<Mutex<RouteOwnership>>,
     registry: Arc<Mutex<BackendRegistry>>,
-    shutdown: Arc<crate::daemon::shutdown_signal::ShutdownSignal>,
+    (shutdown, claim): (
+        Arc<crate::daemon::shutdown_signal::ShutdownSignal>,
+        Arc<crate::broker_endpoint_owner::EndpointClaim>,
+    ),
 ) {
     let grace = DEFAULT_GRACE;
     // soldr#3251: daemon-disk reclamation shares this loop at its own slower
@@ -612,6 +615,13 @@ pub(crate) async fn run_route_reaper(
         tokio::select! {
             () = shutdown.wait() => return,
             _ = tokio::time::sleep(REAP_SWEEP_INTERVAL) => {}
+        }
+        // soldr#3815: an orphaned broker's table is stale by construction;
+        // reaping from it kills daemons the live broker's clients are using.
+        if !claim.still_owned() {
+            eprintln!("{}", claim.orphaned_message());
+            shutdown.request();
+            return;
         }
         let disk_sweep_due = last_disk_sweep.is_none_or(|last| {
             last.elapsed() >= crate::broker_daemon_disk::DAEMON_DISK_SWEEP_INTERVAL
