@@ -21,6 +21,11 @@ pub(crate) fn resolve_remote_sha(clone_url: &str, git_ref: &Ref) -> Result<Strin
     };
     let mut command = std::process::Command::new("git");
     command.args(["ls-remote", clone_url, &pattern]);
+    // `ls-remote` needs no repository, but git still discovers one from the
+    // cwd and dies (exit 128) on a dangling `.git` gitfile, e.g. a worktree
+    // mounted into a container without its parent repo. `clone_url` is always
+    // absolute, so a neutral cwd is safe.
+    command.current_dir(std::env::temp_dir());
     suppress_windows_console_window(&mut command);
     let out = command
         .output()
