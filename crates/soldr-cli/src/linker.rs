@@ -109,7 +109,6 @@ impl Pep517LinkerState {
 
 pub use crate::linker_shim::{
     inject_resolved_reld, materialize_linker_driver_shim, materialize_linker_driver_shim_resolving,
-    FetchMode,
 };
 
 impl LinkerInjection {
@@ -369,16 +368,7 @@ pub async fn apply_pep517_override(
             .collect::<Vec<_>>(),
         injection.rustflags.as_deref(),
     );
-    // The PEP 517 backend has no soldr wrapper to wait for a background
-    // fetch, so it awaits the download here (soldr#3801).
-    materialize_linker_driver_shim_resolving(
-        paths,
-        target,
-        &mut injection,
-        rustc_lld,
-        FetchMode::Await,
-    )
-    .await?;
+    materialize_linker_driver_shim_resolving(paths, target, &mut injection, rustc_lld).await?;
     let prefix = cargo_target_env_prefix(target);
     let linker_key = format!("CARGO_TARGET_{prefix}_LINKER");
     let rustflags_key = format!("CARGO_TARGET_{prefix}_RUSTFLAGS");

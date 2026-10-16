@@ -332,7 +332,6 @@ pub mod gc;
 /// globally-installed soldr binary.
 pub mod global_upgrade;
 pub(crate) mod host_pressure;
-pub(crate) mod host_tool_link;
 /// soldr#2310 — `soldr install <github-url|path>` prebuilt-first tool install.
 pub mod install;
 pub mod install_shims;
@@ -345,7 +344,6 @@ pub mod lint_ci;
 /// soldr#820 — `soldr logs` discoverable runtime-log surface.
 /// soldr#1721 - cache-aware unified validation command.
 pub mod lint_cmd;
-pub(crate) mod llvm_fetch_wait;
 pub mod logs_cmd;
 /// soldr#3698 — `soldr logs view` / `soldr logs prune`.
 pub mod logs_retention;

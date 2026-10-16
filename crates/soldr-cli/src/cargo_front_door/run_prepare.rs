@@ -152,13 +152,6 @@ async fn prepare_child_cargo(
         profile,
     )
     .await?;
-    // soldr#3801: the managed LLVM fetches in the background and linking
-    // wrappers wait for it. With no soldr wrapper in the loop nobody would,
-    // so the front door waits here instead.
-    if !cache_plan.uses_managed_zccache() || dylint.plan.is_some() {
-        crate::linker_shim::await_pending_fetch(&command, &paths).await?;
-        profile.mark("llvm_fetch_wait");
-    }
     let capture_cargo_artifacts = run_pre_spawn_checks(
         &mut command,
         &cache_plan,
