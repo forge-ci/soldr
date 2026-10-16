@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.request
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -286,26 +287,83 @@ def driver_probe_command(soldr: Path, *, repo_root: Path, manifest: Path) -> lis
     ]
 
 
+PYPI_SIMPLE_INDEX = "https://pypi.org/simple"
+
+# soldr#3834: how long to keep asking PyPI for a version that was uploaded
+# moments ago before calling the release broken. The smoke starts seconds
+# after the upload job, and the simple index can lag the upload.
+INSTALL_ATTEMPTS = 6
+INSTALL_RETRY_SECONDS = 30.0
+
+# uv's wording for "this exact version is not (yet) resolvable".
+_NOT_YET_RESOLVABLE = ("No solution found", "there is no version of")
+
+
+def published_install_command(venv: Path, version: str) -> list[str]:
+    """The exact ``uv pip install`` of one published PyPI version.
+
+    soldr#3834: ``--no-config`` keeps uv from discovering any ``uv.toml`` /
+    ``pyproject.toml`` (the repository's, or a runner's user-level config)
+    that could change resolution, ``--refresh`` bypasses cached index data,
+    and the index is named explicitly: this smoke proves what PyPI serves.
+    """
+
+    return [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        str(venv),
+        "--no-config",
+        "--refresh",
+        "--index-url",
+        PYPI_SIMPLE_INDEX,
+        "--only-binary=:all:",
+        f"soldr=={version}",
+    ]
+
+
+def install_published(
+    *,
+    venv: Path,
+    version: str,
+    env: Mapping[str, str],
+    cwd: Path,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Install ``soldr==version`` from PyPI, waiting out index propagation.
+
+    Only the "not resolvable yet" failure is retried; any other install error
+    is reported on the first attempt.
+    """
+
+    command = published_install_command(venv, version)
+    for attempt in range(1, INSTALL_ATTEMPTS + 1):
+        try:
+            run(command, env=env, cwd=cwd, timeout=600)
+            return
+        except PublishedDylintSmokeError as error:
+            message = str(error)
+            if attempt == INSTALL_ATTEMPTS or not any(
+                marker in message for marker in _NOT_YET_RESOLVABLE
+            ):
+                raise
+            print(
+                f"soldr=={version} not resolvable from PyPI yet "
+                f"(attempt {attempt}/{INSTALL_ATTEMPTS}); retrying in "
+                f"{INSTALL_RETRY_SECONDS:.0f}s",
+                file=sys.stderr,
+            )
+            sleep(INSTALL_RETRY_SECONDS)
+
+
 def smoke(*, version: str, repo_root: Path, venv: Path, state_root: Path) -> None:
     """Install exactly one PyPI version and exercise its real Dylint boundary."""
 
     expected_channel = authoritative_channel(repo_root)
     env = isolated_environment(state_root)
     run(["uv", "venv", "--clear", str(venv)], env=env, cwd=repo_root, timeout=300)
-    run(
-        [
-            "uv",
-            "pip",
-            "install",
-            "--python",
-            str(venv),
-            "--only-binary=:all:",
-            f"soldr=={version}",
-        ],
-        env=env,
-        cwd=repo_root,
-        timeout=600,
-    )
+    install_published(venv=venv, version=version, env=env, cwd=repo_root)
     soldr = published_console_script(venv)
     observed_version = installed_version(soldr, env=env, cwd=repo_root)
     if observed_version != version:
