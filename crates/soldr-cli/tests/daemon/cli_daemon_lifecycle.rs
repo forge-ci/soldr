@@ -313,9 +313,11 @@ fn windows_stop_start_is_immediately_status_ready() {
 
 impl Drop for DetachedDaemonCleanup {
     fn drop(&mut self) {
-        let pid = soldr_cli::daemon::lifecycle::read_route_claim_identity(&SoldrPaths::with_root(
-            self.cache_root.clone(),
-        ))
+        // soldr#3823: read under the daemon's generation key (soldr#3374).
+        let paths = SoldrPaths::with_root(self.cache_root.clone());
+        let pid = common::route_claim::with_published_generation(&self.cache_root, || {
+            soldr_cli::daemon::lifecycle::read_route_claim_identity(&paths)
+        })
         .map(|(pid, _)| pid);
         let _ = run_soldr(&["daemon", "stop"], &self.cache_root, &self.home_root);
         if let Some(pid) = pid {
@@ -444,7 +446,11 @@ fn managed_windows_start_has_one_consoleless_owner() {
         "second detached start failed: {second:?}"
     );
     assert_eq!(
-        soldr_cli::daemon::lifecycle::read_route_claim_identity(&paths).map(|(pid, _)| pid),
+        // soldr#3823: read under the daemon's generation key (soldr#3374).
+        common::route_claim::with_published_generation(&cache_root, || {
+            soldr_cli::daemon::lifecycle::read_route_claim_identity(&paths)
+        })
+        .map(|(pid, _)| pid),
         Some(pid),
         "a second managed start must preserve the one root owner"
     );
