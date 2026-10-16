@@ -149,6 +149,10 @@ pub(crate) struct RouteOwners {
     /// tick of a broker that sweeps more often than the grace window, and
     /// nothing would ever be reaped.
     last_live_at: Instant,
+    /// Consecutive reap sweeps on which this route's daemon could not say
+    /// whether it is busy (soldr#3815). Reset by any answer and by any new
+    /// request; see [`MAX_UNANSWERED_BUSY_PROBES`].
+    unanswered_busy_probes: u32,
 }
 
 impl RouteOwners {
@@ -157,6 +161,7 @@ impl RouteOwners {
             requesters: BTreeSet::new(),
             has_unidentified_requester: false,
             last_live_at: now,
+            unanswered_busy_probes: 0,
         };
         owners.record(first);
         owners
@@ -224,6 +229,7 @@ impl RouteOwnership {
             Some(owners) => {
                 owners.record(key);
                 owners.last_live_at = now;
+                owners.unanswered_busy_probes = 0;
             }
             None => {
                 self.routes
@@ -276,6 +282,23 @@ impl RouteOwnership {
     pub(crate) fn mark_live(&mut self, service_name: &str, now: Instant) {
         if let Some(owners) = self.routes.get_mut(service_name) {
             owners.last_live_at = now;
+            owners.unanswered_busy_probes = 0;
+        }
+    }
+
+    /// Record one more consecutive sweep on which the route's daemon could
+    /// not say whether it is busy; returns the new count.
+    pub(crate) fn note_unanswered_busy_probe(&mut self, service_name: &str) -> u32 {
+        self.routes.get_mut(service_name).map_or(0, |owners| {
+            owners.unanswered_busy_probes = owners.unanswered_busy_probes.saturating_add(1);
+            owners.unanswered_busy_probes
+        })
+    }
+
+    /// The daemon answered the busy probe: its silence streak is over.
+    pub(crate) fn clear_unanswered_busy_probes(&mut self, service_name: &str) {
+        if let Some(owners) = self.routes.get_mut(service_name) {
+            owners.unanswered_busy_probes = 0;
         }
     }
 
@@ -360,10 +383,25 @@ pub(crate) enum DaemonLoad {
     Busy,
     /// The daemon answered and has nothing in flight, or is not running.
     Idle,
-    /// The daemon could not be asked (timeout, protocol error). Fail safe:
-    /// a daemon that cannot be shown idle is not reaped on this sweep.
+    /// The daemon could not be asked (timeout, protocol error), or answered
+    /// without the in-flight count (an image that predates it). Fail safe:
+    /// a daemon that cannot be shown idle is not reaped on this sweep -- but
+    /// only for [`MAX_UNANSWERED_BUSY_PROBES`] sweeps in a row.
     Unknown,
 }
+
+/// Consecutive unanswered busy probes after which a requester-free route is
+/// reaped anyway (soldr#3815).
+///
+/// `Unknown` alone used to defer forever, so a daemon that never answers --
+/// a fixture daemon from an older image, or one wedged on its control
+/// socket -- leaked until someone killed it by hand (observed: eight
+/// back-to-back "could not ask" sweeps on one route, ended only by a manual
+/// `soldr daemon stop`). By the time a route is a reap candidate every
+/// requester has already been gone for the full grace window, so after this
+/// many further sweeps (~2 min at [`REAP_SWEEP_INTERVAL`]) silence is treated
+/// as idleness. Any answer, or any new request, resets the count.
+pub(crate) const MAX_UNANSWERED_BUSY_PROBES: u32 = 4;
 
 /// Drop reap candidates whose daemon is still working.
 ///
@@ -371,7 +409,8 @@ pub(crate) enum DaemonLoad {
 /// seconds, and every route request needs that lock). A `Busy` route has its
 /// grace window restarted, so it is reaped only after it has been idle, and
 /// requester-free, for the full window. `Unknown` is skipped without touching
-/// the window so the next sweep asks again.
+/// the window so the next sweep asks again, until it has gone unanswered for
+/// [`MAX_UNANSWERED_BUSY_PROBES`] consecutive sweeps; then it is reaped.
 pub(crate) fn defer_busy_candidates(
     route_owners: &Mutex<RouteOwnership>,
     candidates: Vec<String>,
@@ -381,7 +420,13 @@ pub(crate) fn defer_busy_candidates(
     let mut reapable = Vec::new();
     for service_name in candidates {
         match probe(&service_name) {
-            DaemonLoad::Idle => reapable.push(service_name),
+            DaemonLoad::Idle => {
+                route_owners
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clear_unanswered_busy_probes(&service_name);
+                reapable.push(service_name);
+            }
             DaemonLoad::Busy => {
                 println!(
                     "soldr broker: route {service_name} has no live requester but its daemon \
@@ -393,10 +438,24 @@ pub(crate) fn defer_busy_candidates(
                     .mark_live(&service_name, now);
             }
             DaemonLoad::Unknown => {
-                println!(
-                    "soldr broker: could not ask daemon of route {service_name} whether it is \
-                     busy; not reaping this sweep (soldr#3815)"
-                );
+                let unanswered = route_owners
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .note_unanswered_busy_probe(&service_name);
+                if unanswered >= MAX_UNANSWERED_BUSY_PROBES {
+                    println!(
+                        "soldr broker: daemon of route {service_name} has not said whether it \
+                         is busy for {unanswered} sweeps and has no live requester; reaping it \
+                         (soldr#3815)"
+                    );
+                    reapable.push(service_name);
+                } else {
+                    println!(
+                        "soldr broker: could not ask daemon of route {service_name} whether it \
+                         is busy; not reaping this sweep ({unanswered}/\
+                         {MAX_UNANSWERED_BUSY_PROBES}) (soldr#3815)"
+                    );
+                }
             }
         }
     }
@@ -425,8 +484,14 @@ fn probe_daemon_load(registry: &Mutex<BackendRegistry>, service_name: &str) -> D
         return DaemonLoad::Idle;
     };
     match status_direct(std::path::Path::new(&endpoint)) {
-        Ok(info) if info.in_flight_compiles > 0 => DaemonLoad::Busy,
-        Ok(_) | Err(ClientError::NotRunning) => DaemonLoad::Idle,
+        Ok(info) => match info.in_flight_compiles {
+            Some(0) => DaemonLoad::Idle,
+            Some(_) => DaemonLoad::Busy,
+            // A daemon image that predates the field: it answered, but not
+            // the question asked. Unknown, never idle.
+            None => DaemonLoad::Unknown,
+        },
+        Err(ClientError::NotRunning) => DaemonLoad::Idle,
         Err(_) => DaemonLoad::Unknown,
     }
 }

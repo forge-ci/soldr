@@ -371,7 +371,7 @@ fn status_response_round_trips_with_cook_stats() {
         compile_backend: "embedded".to_string(),
         compile_jobs: 12,
         compile_jobs_source: "SOLDR_JOBS".to_string(),
-        in_flight_compiles: 5,
+        in_flight_compiles: Some(5),
     };
     let resp = Response::Status(info.clone());
     let bytes = encode_response(&resp);
@@ -379,6 +379,35 @@ fn status_response_round_trips_with_cook_stats() {
     match decoded {
         Response::Status(decoded_info) => assert_eq!(decoded_info, info),
         other => panic!("unexpected variant: {other:?}"),
+    }
+}
+
+/// soldr#3815: a status from a daemon that does not report its in-flight
+/// count must decode as `None`, never `Some(0)`. The broker reads `Some(0)`
+/// as idle and reaps; an absent field decoded as zero let it SIGTERM a daemon
+/// that was cutting a compile in flight. An idle daemon that does report the
+/// field still round-trips as `Some(0)`.
+#[test]
+fn status_in_flight_count_distinguishes_absent_from_zero() {
+    let mut info = StatusInfo {
+        version: 7,
+        pid: 1,
+        generation: 1,
+        uptime_secs: 1,
+        request_count: 0,
+        cook_stats: None,
+        compile_backend: "embedded".to_string(),
+        compile_jobs: 1,
+        compile_jobs_source: "default".to_string(),
+        in_flight_compiles: None,
+    };
+    for expected in [None, Some(0), Some(3)] {
+        info.in_flight_compiles = expected;
+        let bytes = encode_response(&Response::Status(info.clone()));
+        match decode_response(&bytes).expect("decode") {
+            Response::Status(decoded) => assert_eq!(decoded.in_flight_compiles, expected),
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 }
 

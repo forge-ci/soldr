@@ -481,3 +481,51 @@ fn busy_query_failure_is_not_reaped_and_is_retried_next_sweep() {
     let again = table.lock().unwrap().sweep(at, DEFAULT_GRACE, |_| false);
     assert_eq!(again[0].1, RouteVerdict::Reap);
 }
+
+/// soldr#3815: a daemon that never answers the busy probe must not leak
+/// forever. Below the limit it is deferred; at the limit it is reaped.
+#[test]
+fn unanswered_busy_probe_is_reaped_after_the_limit() {
+    let (table, start) = reap_candidate_table();
+    let at = start + DEFAULT_GRACE;
+    let route = || vec!["soldr-daemon-a".to_string()];
+    for _ in 1..MAX_UNANSWERED_BUSY_PROBES {
+        let reapable = defer_busy_candidates(&table, route(), at, |_| DaemonLoad::Unknown);
+        assert!(reapable.is_empty(), "deferred below the limit");
+    }
+    let reapable = defer_busy_candidates(&table, route(), at, |_| DaemonLoad::Unknown);
+    assert_eq!(reapable, route(), "reaped once the limit is reached");
+}
+
+/// Any answer ends the silence streak: a daemon that answers between
+/// unanswered probes starts counting from zero again.
+#[test]
+fn a_busy_answer_resets_the_unanswered_streak() {
+    let (table, start) = reap_candidate_table();
+    let at = start + DEFAULT_GRACE;
+    let route = || vec!["soldr-daemon-a".to_string()];
+    for _ in 1..MAX_UNANSWERED_BUSY_PROBES {
+        assert!(defer_busy_candidates(&table, route(), at, |_| DaemonLoad::Unknown).is_empty());
+    }
+    assert!(defer_busy_candidates(&table, route(), at, |_| DaemonLoad::Busy).is_empty());
+    assert!(
+        defer_busy_candidates(&table, route(), at, |_| DaemonLoad::Unknown).is_empty(),
+        "one unanswered probe after an answer must not reap"
+    );
+}
+
+/// A new request for the route also ends the streak.
+#[test]
+fn a_new_request_resets_the_unanswered_streak() {
+    let (table, start) = reap_candidate_table();
+    let at = start + DEFAULT_GRACE;
+    let route = || vec!["soldr-daemon-a".to_string()];
+    for _ in 1..MAX_UNANSWERED_BUSY_PROBES {
+        assert!(defer_busy_candidates(&table, route(), at, |_| DaemonLoad::Unknown).is_empty());
+    }
+    table
+        .lock()
+        .unwrap()
+        .record_request("soldr-daemon-a", identified(2, 2), at);
+    assert!(defer_busy_candidates(&table, route(), at, |_| DaemonLoad::Unknown).is_empty());
+}

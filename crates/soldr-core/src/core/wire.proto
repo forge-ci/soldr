@@ -333,8 +333,11 @@ message WireStatusInfo {
   uint32 compile_jobs = 10;
   string compile_jobs_source = 11;
   // soldr#3815 — compiles in flight in this daemon right now. The broker
-  // reads it before reaping a route; zero from an older daemon.
-  uint32 in_flight_compiles = 12;
+  // reads it before reaping a route. `optional` so presence is explicit: a
+  // daemon image that predates the field (or encodes 0 as "absent") must read
+  // as unknown, never as idle -- an absent field decoded as 0 let the reaper
+  // SIGTERM a daemon that was cutting a compile in flight.
+  optional uint32 in_flight_compiles = 12;
 }
 
 message WireCookStats {

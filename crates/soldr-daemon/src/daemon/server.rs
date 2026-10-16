@@ -396,8 +396,9 @@ impl State {
             compile_backend: COMPILE_BACKEND_EMBEDDED.to_string(),
             compile_jobs,
             compile_jobs_source,
-            in_flight_compiles: u32::try_from(crate::daemon::inflight_compiles::count())
-                .unwrap_or(u32::MAX),
+            in_flight_compiles: Some(
+                u32::try_from(crate::daemon::inflight_compiles::count()).unwrap_or(u32::MAX),
+            ),
         }
     }
 }

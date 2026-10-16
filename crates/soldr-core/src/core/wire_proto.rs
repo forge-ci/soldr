@@ -474,9 +474,11 @@ pub struct WireStatusInfo {
     pub compile_jobs: u32,
     #[prost(string, tag = "11")]
     pub compile_jobs_source: String,
-    /// soldr#3815 — compiles in flight in this daemon right now.
-    #[prost(uint32, tag = "12")]
-    pub in_flight_compiles: u32,
+    /// soldr#3815 — compiles in flight in this daemon right now. `None` when
+    /// the daemon did not report it (an older image), which the broker must
+    /// treat as unknown rather than idle.
+    #[prost(uint32, optional, tag = "12")]
+    pub in_flight_compiles: Option<u32>,
 }
 
 #[derive(Clone, PartialEq, Message)]
