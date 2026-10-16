@@ -1,0 +1,456 @@
+syntax = "proto3";
+
+package zccache.v1;
+
+message Frame {
+  uint32 protocol_version = 1;
+  bytes payload = 2;
+  string payload_type = 3;
+}
+
+message Empty {}
+
+message Path {
+  string value = 1;
+}
+
+message EnvVar {
+  string name = 1;
+  string value = 2;
+}
+
+message Request {
+  oneof body {
+    Empty ping = 1;
+    Empty shutdown = 2;
+    Empty status = 3;
+    Lookup lookup = 4;
+    Store store = 5;
+    SessionStart session_start = 6;
+    Compile compile = 7;
+    SessionEnd session_end = 8;
+    Empty clear = 9;
+    CompileEphemeral compile_ephemeral = 10;
+    LinkEphemeral link_ephemeral = 11;
+    SessionStatsRequest session_stats = 12;
+    FingerprintCheck fingerprint_check = 13;
+    FingerprintMarkSuccess fingerprint_mark_success = 14;
+    FingerprintMarkFailure fingerprint_mark_failure = 15;
+    FingerprintInvalidate fingerprint_invalidate = 16;
+    Empty list_rust_artifacts = 17;
+    GenericToolExec generic_tool_exec = 18;
+    ReleaseWorktreeHandles release_worktree_handles = 19;
+    ExecProbe exec_probe = 20;
+    ExecStore exec_store = 21;
+  }
+  string request_id = 100;
+}
+
+message Response {
+  oneof body {
+    Empty pong = 1;
+    Empty shutting_down = 2;
+    DaemonStatus status = 3;
+    LookupResult lookup_result = 4;
+    StoreResult store_result = 5;
+    SessionStarted session_started = 6;
+    CompileResult compile_result = 7;
+    SessionEnded session_ended = 8;
+    LinkResult link_result = 9;
+    Error error = 10;
+    Cleared cleared = 11;
+    SessionStatsResult session_stats_result = 12;
+    FingerprintCheckResult fingerprint_check_result = 13;
+    Empty fingerprint_ack = 14;
+    RustArtifactList rust_artifact_list = 15;
+    GenericToolExecResult generic_tool_exec_result = 16;
+    Backpressure backpressure = 17;
+    ReleaseWorktreeHandlesResult release_worktree_handles_result = 18;
+    CompileProgress compile_progress = 19;
+    ExecProbeResult exec_probe_result = 20;
+    ExecStoreAck exec_store_ack = 21;
+  }
+  string request_id = 100;
+}
+
+message Lookup {
+  string cache_key = 1;
+}
+
+message Store {
+  string cache_key = 1;
+  ArtifactData artifact = 2;
+}
+
+message SessionStart {
+  uint32 client_pid = 1;
+  Path working_dir = 2;
+  optional Path log_file = 3;
+  bool track_stats = 4;
+  optional Path journal_path = 5;
+  bool profile = 6;
+  optional PrivateDaemonSessionOptions private_daemon = 7;
+}
+
+message PrivateDaemonSessionOptions {
+  optional string daemon_name = 1;
+  optional string endpoint = 2;
+  optional Path cache_dir = 3;
+  repeated uint32 owner_pids = 4;
+  repeated EnvVar env = 5;
+}
+
+message Compile {
+  string session_id = 1;
+  repeated string args = 2;
+  Path cwd = 3;
+  Path compiler = 4;
+  repeated EnvVar env = 5;
+  bool env_is_set = 6;
+  bytes stdin = 7;
+}
+
+message SessionEnd {
+  string session_id = 1;
+}
+
+message CompileEphemeral {
+  uint32 client_pid = 1;
+  Path working_dir = 2;
+  Path compiler = 3;
+  repeated string args = 4;
+  Path cwd = 5;
+  repeated EnvVar env = 6;
+  bool env_is_set = 7;
+  bytes stdin = 8;
+}
+
+message LinkEphemeral {
+  uint32 client_pid = 1;
+  Path tool = 2;
+  repeated string args = 3;
+  Path cwd = 4;
+  repeated EnvVar env = 5;
+  bool env_is_set = 6;
+}
+
+message SessionStatsRequest {
+  string session_id = 1;
+}
+
+message FingerprintCheck {
+  Path cache_file = 1;
+  string cache_type = 2;
+  Path root = 3;
+  repeated string extensions = 4;
+  repeated string include_globs = 5;
+  repeated string exclude = 6;
+}
+
+message FingerprintMarkSuccess {
+  Path cache_file = 1;
+}
+
+message FingerprintMarkFailure {
+  Path cache_file = 1;
+}
+
+message FingerprintInvalidate {
+  Path cache_file = 1;
+}
+
+message GenericToolExec {
+  Path tool = 1;
+  repeated string args = 2;
+  Path cwd = 3;
+  repeated EnvVar env = 4;
+  repeated Path input_files = 5;
+  bytes input_extra = 6;
+  ExecOutputStreams output_streams = 7;
+  repeated Path output_files = 8;
+  optional bytes tool_hash = 9;
+  ExecCachePolicy cache_policy = 10;
+  bool cwd_in_key = 11;
+  repeated Path include_scan_files = 12;
+  repeated Path include_dirs = 13;
+  repeated Path system_include_dirs = 14;
+  repeated Path iquote_dirs = 15;
+  optional Path depfile = 16;
+  bool non_deterministic = 17;
+  repeated string key_args_filter = 18;
+}
+
+message ReleaseWorktreeHandles {
+  Path path = 1;
+}
+
+message ArtifactData {
+  repeated ArtifactOutput outputs = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+  int32 exit_code = 4;
+}
+
+message ArtifactOutput {
+  string name = 1;
+  ArtifactPayload payload = 2;
+}
+
+message ArtifactPayload {
+  oneof body {
+    bytes bytes = 1;
+    Path path = 2;
+  }
+}
+
+message LookupResult {
+  oneof body {
+    ArtifactData hit = 1;
+    Empty miss = 2;
+  }
+}
+
+message StoreResult {
+  StoreResultKind kind = 1;
+}
+
+enum StoreResultKind {
+  STORE_RESULT_KIND_UNSPECIFIED = 0;
+  STORE_RESULT_KIND_STORED = 1;
+  STORE_RESULT_KIND_ALREADY_EXISTS = 2;
+}
+
+message ExecOutputStreams {
+  bool stdout = 1;
+  bool stderr = 2;
+}
+
+enum ExecCachePolicy {
+  EXEC_CACHE_POLICY_UNSPECIFIED = 0;
+  EXEC_CACHE_POLICY_NORMAL = 1;
+  EXEC_CACHE_POLICY_BYPASS = 2;
+  EXEC_CACHE_POLICY_READ_ONLY = 3;
+}
+
+message DaemonStatus {
+  string version = 1;
+  string daemon_namespace = 2;
+  string endpoint = 3;
+  PrivateDaemonStatus private_daemon = 4;
+  uint64 artifact_count = 5;
+  uint64 cache_size_bytes = 6;
+  uint64 metadata_entries = 7;
+  uint64 uptime_secs = 8;
+  uint64 cache_hits = 9;
+  uint64 cache_misses = 10;
+  uint64 total_compilations = 11;
+  uint64 non_cacheable = 12;
+  uint64 compile_errors = 13;
+  uint64 compile_errors_cached = 14;
+  uint64 time_saved_ms = 15;
+  uint64 total_links = 16;
+  uint64 link_hits = 17;
+  uint64 link_misses = 18;
+  uint64 link_non_cacheable = 19;
+  uint64 dep_graph_contexts = 20;
+  uint64 dep_graph_files = 21;
+  uint64 sessions_total = 22;
+  uint64 sessions_active = 23;
+  Path cache_dir = 24;
+  uint32 dep_graph_version = 25;
+  uint64 dep_graph_disk_size = 26;
+  bool dep_graph_persisted = 27;
+  bool watcher_active = 28;
+  uint64 watcher_degradations = 29;
+  bool index_writer_gone = 30;
+  // #840 retired the bincode IPC telemetry. Reserve both tags and names so
+  // neither can be reused by a future prost field.
+  reserved 31, 32;
+  reserved "bincode_requests_by_type", "bincode_request_telemetry_available";
+  // ZCCACHE_MODE delivery diagnostics (#1683).
+  MaterializationStatus materialization = 33;
+}
+
+message MaterializationStatus {
+  string mode = 1;
+  uint64 reflink = 2;
+  uint64 hardlink = 3;
+  uint64 copy = 4;
+  uint64 reflink_fallbacks = 5;
+}
+
+message PrivateDaemonOwnerStatus {
+  uint32 pid = 1;
+  uint64 ref_count = 2;
+}
+
+message PrivateDaemonStatus {
+  bool enabled = 1;
+  repeated PrivateDaemonOwnerStatus owners = 2;
+  repeated string private_env_keys = 3;
+}
+
+message SessionStats {
+  uint64 duration_ms = 1;
+  uint64 compilations = 2;
+  uint64 hits = 3;
+  uint64 misses = 4;
+  uint64 non_cacheable = 5;
+  uint64 errors = 6;
+  uint64 errors_cached = 7;
+  uint64 time_saved_ms = 8;
+  uint64 unique_sources = 9;
+  uint64 bytes_read = 10;
+  uint64 bytes_written = 11;
+  optional PhaseProfileSummary phase_profile = 12;
+  optional LookupOutcomes lookup_outcomes = 13;
+}
+
+message LookupOutcomes {
+  uint64 depgraph_hit_artifact_hit = 1;
+  uint64 depgraph_hit_artifact_miss = 2;
+  uint64 depgraph_cold_skip = 3;
+  map<string, uint64> depgraph_other_miss = 4;
+}
+
+message PhaseProfileSummary {
+  uint64 hit_count = 1;
+  uint64 miss_count = 2;
+  uint64 parse_args_ns = 3;
+  uint64 build_context_ns = 4;
+  uint64 hash_source_ns = 5;
+  uint64 hash_headers_ns = 6;
+  uint64 depgraph_check_ns = 7;
+  uint64 request_cache_lookup_ns = 8;
+  uint64 cross_root_validate_ns = 9;
+  uint64 artifact_lookup_ns = 10;
+  uint64 write_output_ns = 11;
+  uint64 bookkeeping_ns = 12;
+  uint64 total_hit_ns = 13;
+  uint64 compiler_exec_ns = 14;
+  uint64 include_scan_ns = 15;
+  uint64 hash_all_ns = 16;
+  uint64 artifact_store_ns = 17;
+  uint64 total_miss_ns = 18;
+  StagedProfileSummary staged = 19;
+}
+
+message StagedProfileSummary {
+  map<string, uint64> counters = 1;
+  map<string, uint64> timings_ns = 2;
+  map<string, uint64> bytes = 3;
+  map<string, uint64> failures = 4;
+}
+
+message SessionStarted {
+  string session_id = 1;
+  optional Path journal_path = 2;
+}
+
+message CompileResult {
+  int32 exit_code = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+  bool cached = 4;
+}
+
+message SessionEnded {
+  optional SessionStats stats = 1;
+}
+
+message LinkResult {
+  int32 exit_code = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+  bool cached = 4;
+  optional string warning = 5;
+}
+
+message Error {
+  string message = 1;
+}
+
+message Cleared {
+  uint64 artifacts_removed = 1;
+  uint64 metadata_cleared = 2;
+  uint64 dep_graph_contexts_cleared = 3;
+  uint64 on_disk_bytes_freed = 4;
+}
+
+message SessionStatsResult {
+  optional SessionStats stats = 1;
+}
+
+message FingerprintCheckResult {
+  string decision = 1;
+  optional string reason = 2;
+  repeated string changed_files = 3;
+}
+
+message RustArtifactInfo {
+  string cache_key = 1;
+  repeated string output_names = 2;
+  uint64 payload_count = 3;
+}
+
+message RustArtifactList {
+  repeated RustArtifactInfo artifacts = 1;
+}
+
+message GenericToolExecResult {
+  int32 exit_code = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+  repeated ArtifactOutput output_files = 4;
+  bool cached = 5;
+  string cache_key_hex = 6;
+}
+
+message Backpressure {
+  uint32 queue_depth = 1;
+  uint32 retry_after_ms = 2;
+  string reason = 3;
+}
+
+message CompileProgress {
+  uint32 queue_position = 1;
+  uint32 queue_depth = 2;
+  uint32 in_flight = 3;
+  string phase = 4;
+}
+
+message ReleaseWorktreeHandlesResult {
+  uint32 inspected = 1;
+  uint32 released = 2;
+  repeated string sessions_dropped = 3;
+  repeated Path unreleased = 4;
+}
+
+// Issue #838 / #840: caller-owned-tool exec cache. Where GenericToolExec
+// ships the command to the daemon, ExecProbe keeps the runner with the
+// caller and asks the daemon only for key derivation + lookup.
+message ExecProbe {
+  string name = 1;
+  repeated Path input_files = 2;
+  repeated EnvVar input_env = 3;
+  bytes input_extra = 4;
+}
+
+message ExecStore {
+  string cache_key_hex = 1;
+  bytes result_bytes = 2;
+}
+
+message ExecProbeResult {
+  string cache_key_hex = 1;
+  // Absent on miss. `optional` is load-bearing: an empty cached result is a
+  // legitimate hit, so it must stay distinguishable from "not cached".
+  optional bytes cached_bytes = 2;
+  // False is the safe default for daemons predating durable exec caching.
+  bool persistent = 3;
+}
+
+message ExecStoreAck {
+  bool stored = 1;
+  bool persistent = 2;
+}

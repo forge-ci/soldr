@@ -1,0 +1,779 @@
+//! In-memory ledger for hardlink-tier materializations (#1039).
+
+use super::*;
+use crate::daemon_core::core::NormalizedPath;
+use crate::daemon_core::platform::fs::FileIdentity;
+use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+
+/// Cheap change signal for a registered blob: the `(mtime_ns, size)` pair
+/// observed at the moment its `expected_hash` was computed. Writing through
+/// any hardlink alias mutates the shared inode, so a changed signature on the
+/// blob path is evidence that some alias touched the bytes. This is the same
+/// signal the metadata cache already trusts at `Confidence::Medium`; it is
+/// used only to *avoid* work (skip a re-hash), never to accept bytes that
+/// failed a hash check.
+type StatSignature = (i128, u64);
+
+#[derive(Clone, Debug)]
+struct LinkRecord {
+    blob_path: NormalizedPath,
+    expected_hash: [u8; 32],
+    /// `None` when the stat could not be taken at registration time — such a
+    /// record has no cheap signal and always falls back to a full re-hash.
+    stat_signature: Option<StatSignature>,
+    outputs: BTreeSet<NormalizedPath>,
+    suspect: bool,
+}
+
+static REGISTRY: OnceLock<dashmap::DashMap<FileIdentity, LinkRecord>> = OnceLock::new();
+static OUTPUT_IDS: OnceLock<dashmap::DashMap<NormalizedPath, FileIdentity>> = OnceLock::new();
+static WATCHER_AVAILABLE: AtomicBool = AtomicBool::new(true);
+
+fn stat_signature(path: &Path) -> Option<StatSignature> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let mtime = kernal_api::platform::fs::FileTime::from_last_modification_time(&metadata);
+    let mtime_ns =
+        i128::from(mtime.unix_seconds()) * 1_000_000_000 + i128::from(mtime.nanoseconds());
+    Some((mtime_ns, metadata.len()))
+}
+
+fn registry() -> &'static dashmap::DashMap<FileIdentity, LinkRecord> {
+    REGISTRY.get_or_init(dashmap::DashMap::new)
+}
+
+fn output_ids() -> &'static dashmap::DashMap<NormalizedPath, FileIdentity> {
+    OUTPUT_IDS.get_or_init(dashmap::DashMap::new)
+}
+
+fn hash_file(path: &Path) -> std::io::Result<[u8; 32]> {
+    use std::io::Read;
+
+    #[cfg(test)]
+    super::staged_store::perf_counters::record_hash();
+
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = kernal_api::hash::Blake3Hasher::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn digest_path(blob_path: &Path) -> NormalizedPath {
+    let name = blob_path.file_name().unwrap_or_default().to_string_lossy();
+    let sidecar_name = format!(
+        ".cowhash-{}",
+        kernal_api::hash::blake3_bytes(name.as_bytes()).to_hex()
+    );
+    blob_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(sidecar_name)
+        .into()
+}
+
+/// Writes the digest sidecar keyed by `named_as`'s digest path, but hashes
+/// `hash_source`'s bytes. Lets a caller compute and persist the digest for a
+/// blob's *final* resting name while its bytes are still at a private tmp
+/// path, so the digest write can complete (or fail) before the rename that
+/// publishes the blob — avoiding an orphaned, digest-less blob if the
+/// digest write fails after publication (issue #1042).
+pub(in crate::daemon_core::daemon::server) fn write_authoritative_blob_digest_for(
+    hash_source: &Path,
+    named_as: &Path,
+) -> std::io::Result<()> {
+    write_authoritative_blob_digest_for_with_cleanup(hash_source, named_as).map(|digest| {
+        digest.commit();
+    })
+}
+
+/// Same contract as [`write_authoritative_blob_digest_for_with_cleanup`], but
+/// for a caller that already hashed `named_as`'s bytes (e.g. staged
+/// publication's own output digest). Reusing that digest instead of hashing
+/// the file a second time is the fix for #1774: publication used to hash
+/// each output once for its own manifest and a second time here for the
+/// `.cowhash` sidecar.
+pub(in crate::daemon_core::daemon::server) fn write_authoritative_blob_digest_for_precomputed(
+    digest: [u8; 32],
+    named_as: &Path,
+) -> std::io::Result<AuthoritativeBlobDigest> {
+    write_digest_sidecar(digest, named_as)
+}
+
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) fn write_authoritative_blob_digest(
+    blob_path: &Path,
+) -> std::io::Result<()> {
+    write_authoritative_blob_digest_for(blob_path, blob_path)
+}
+
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) fn register_trusted_blob_for_test(
+    blob_path: &Path,
+) -> std::io::Result<()> {
+    let id = crate::daemon_core::platform::fs::identity::file_identity(blob_path).map_err(|_| {
+        std::io::Error::other(format!(
+            "unable to identify test cache blob {}",
+            blob_path.display()
+        ))
+    })?;
+    if let Some((_, stale)) = registry().remove(&id) {
+        for output in stale.outputs {
+            output_ids().remove(&output);
+        }
+    }
+    registry().insert(
+        id,
+        LinkRecord {
+            blob_path: blob_path.into(),
+            expected_hash: [0; 32],
+            stat_signature: stat_signature(blob_path),
+            outputs: BTreeSet::new(),
+            suspect: false,
+        },
+    );
+    Ok(())
+}
+
+/// Owns the digest sidecar published by one artifact-write attempt.
+///
+/// Dropping an uncommitted guard removes only the sidecar installed by that
+/// attempt. This lets artifact_io clean up after a later blob-rename failure
+/// without deleting a sidecar that existed before the attempt started.
+pub(in crate::daemon_core::daemon::server) struct AuthoritativeBlobDigest {
+    path: Option<NormalizedPath>,
+    digest: [u8; 32],
+}
+
+impl AuthoritativeBlobDigest {
+    /// Keep the sidecar after its blob has been published successfully.
+    pub(in crate::daemon_core::daemon::server) fn commit(mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for AuthoritativeBlobDigest {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let matches = std::fs::read(&path)
+                .map(|bytes| bytes.as_slice() == self.digest.as_slice())
+                .unwrap_or(false);
+            if matches {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
+/// Writes and atomically publishes an authoritative digest sidecar, returning
+/// an ownership guard for cleanup if the subsequent blob publication fails.
+/// The final sidecar is never opened for writing, so a partial write cannot
+/// truncate an existing valid sidecar.
+pub(in crate::daemon_core::daemon::server) fn write_authoritative_blob_digest_for_with_cleanup(
+    hash_source: &Path,
+    named_as: &Path,
+) -> std::io::Result<AuthoritativeBlobDigest> {
+    let digest = hash_file(hash_source)?;
+    write_digest_sidecar(digest, named_as)
+}
+
+/// Shared sidecar-write body for both the hash-here and hash-already-known
+/// callers.
+///
+/// #1774: the sidecar is not fsynced. It merely mirrors the blake3 digest the
+/// manifest (or the artifact index) already records durably, so a lost
+/// sidecar after a crash costs nothing but an eviction — the next lookup
+/// re-hashes and misses. Fsyncing it on every publication bought no
+/// additional durability for that cost.
+fn write_digest_sidecar(
+    digest: [u8; 32],
+    named_as: &Path,
+) -> std::io::Result<AuthoritativeBlobDigest> {
+    use std::io::Write;
+
+    let final_path = digest_path(named_as);
+
+    // `create_new` prevents two writers from sharing a temporary file. A
+    // retry also handles a stale file left by an interrupted prior attempt
+    // (including a reused process id) without falling back to the final path.
+    let (temp_path, result) = loop {
+        let counter = ARTIFACT_PERSIST_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temp_path = final_path.with_file_name(format!(
+            ".{}.tmp-{}-{}",
+            final_path.file_name().unwrap_or_default().to_string_lossy(),
+            std::process::id(),
+            counter
+        ));
+        let mut temp = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(temp) => temp,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let result = (|| {
+            temp.write_all(&digest)?;
+            drop(temp);
+            replace_digest_sidecar(&temp_path, &final_path)
+        })();
+        break (temp_path, result);
+    };
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+
+    Ok(AuthoritativeBlobDigest {
+        path: Some(final_path),
+        digest,
+    })
+}
+
+fn replace_digest_sidecar(temp_path: &Path, final_path: &Path) -> std::io::Result<()> {
+    crate::daemon_core::platform::fs::replace::atomic_replace(temp_path, final_path)
+}
+
+/// Best-effort cleanup of a blob's digest sidecar. Used when a publish
+/// attempt fails after the digest was already written but before (or during)
+/// the rename that would have made the blob visible — avoids leaving a
+/// stray digest sidecar with no corresponding blob.
+pub(in crate::daemon_core::daemon::server) fn remove_authoritative_blob_digest(blob_path: &Path) {
+    let _ = std::fs::remove_file(digest_path(blob_path));
+}
+
+fn read_authoritative_blob_digest(blob_path: &Path) -> std::io::Result<Option<[u8; 32]>> {
+    match std::fs::read(digest_path(blob_path)) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut digest = [0_u8; 32];
+            digest.copy_from_slice(&bytes);
+            Ok(Some(digest))
+        }
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn is_digest_migration_excluded(path: &Path) -> bool {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    name.starts_with(".cowhash-") || name.contains(".tmp-")
+}
+
+/// Backfill digest sidecars for blobs written before durable sidecars existed.
+///
+/// This is intended as a one-time startup migration. A valid sidecar makes a
+/// blob a no-op on subsequent runs; files that disappear between enumeration
+/// and hashing or sidecar publication are ignored as stale entries.
+pub(in crate::daemon_core::daemon::server) fn migrate_legacy_blob_digests(
+    artifact_dir: &Path,
+) -> std::io::Result<usize> {
+    let mut migrated = 0;
+    for entry in std::fs::read_dir(artifact_dir)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if is_digest_migration_excluded(&path) {
+            continue;
+        }
+        let is_file = match entry.file_type() {
+            Ok(file_type) => file_type.is_file(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if !is_file {
+            continue;
+        }
+        if read_authoritative_blob_digest(&path)?.is_some() {
+            continue;
+        }
+        match write_authoritative_blob_digest_for(&path, &path) {
+            Ok(()) => migrated += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(migrated)
+}
+
+pub(in crate::daemon_core::daemon::server) fn register_hardlink(
+    blob_path: &Path,
+    output_path: &Path,
+) -> std::io::Result<()> {
+    let id = prepare_hardlink_registration(blob_path, output_path)?;
+    commit_hardlink_registration(id, output_path)
+}
+
+/// Establish the authoritative digest before a shared output name is
+/// published. Watcher events can then resolve the inode to this record even
+/// during the narrow hardlink-creation/commit window.
+pub(in crate::daemon_core::daemon::server) fn prepare_hardlink_registration(
+    blob_path: &Path,
+    output_path: &Path,
+) -> std::io::Result<FileIdentity> {
+    let id = crate::daemon_core::platform::fs::identity::file_identity(blob_path).map_err(|_| {
+        std::io::Error::other(format!(
+            "unable to identify cache blob {}",
+            blob_path.display()
+        ))
+    })?;
+    match registry().entry(id) {
+        dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+            if entry.get().blob_path != blob_path {
+                // File identifiers may be reused after a prior blob is deleted.
+                // A path mismatch means this is a new identity generation, not
+                // another output for the stale registry record.
+                for stale in &entry.get().outputs {
+                    output_ids().remove(stale);
+                }
+                // Stat before hashing: if the bytes change mid-hash the
+                // recorded signature is the pre-change one, so a later
+                // comparison reports "changed" and falls back to the full
+                // re-hash. Stat-after would record the post-change value and
+                // could vouch for a torn read.
+                let stat_signature = stat_signature(blob_path);
+                let expected_hash = hash_file(blob_path)?;
+                entry.insert(LinkRecord {
+                    blob_path: blob_path.into(),
+                    expected_hash,
+                    stat_signature,
+                    outputs: BTreeSet::new(),
+                    suspect: false,
+                });
+            }
+        }
+        dashmap::mapref::entry::Entry::Vacant(entry) => {
+            let stat_signature = stat_signature(blob_path);
+            let expected_hash = hash_file(blob_path)?;
+            entry.insert(LinkRecord {
+                blob_path: blob_path.into(),
+                expected_hash,
+                stat_signature,
+                outputs: BTreeSet::new(),
+                suspect: false,
+            });
+        }
+    }
+    output_ids().insert(output_path.into(), id);
+    Ok(id)
+}
+
+pub(in crate::daemon_core::daemon::server) fn cancel_hardlink_registration(
+    id: FileIdentity,
+    output_path: &Path,
+) {
+    let output_path = NormalizedPath::new(output_path);
+    if output_ids()
+        .get(&output_path)
+        .is_some_and(|entry| *entry == id)
+    {
+        output_ids().remove(&output_path);
+    }
+}
+
+pub(in crate::daemon_core::daemon::server) fn commit_hardlink_registration(
+    id: FileIdentity,
+    output_path: &Path,
+) -> std::io::Result<()> {
+    let Some(mut record) = registry().get_mut(&id) else {
+        cancel_hardlink_registration(id, output_path);
+        return Err(std::io::Error::other(
+            "hardlink registration disappeared before commit",
+        ));
+    };
+    let output_path = NormalizedPath::new(output_path);
+    match crate::daemon_core::platform::fs::identity::file_identity(output_path.as_path()).ok() {
+        Some(actual) if actual == id => {}
+        Some(_mismatched) => {
+            // The path now resolves to a *different* file identity than the
+            // hardlink we just created — genuine evidence of a race/swap.
+            // Mark the blob suspect so the next read-path verification
+            // re-hashes it before serving it.
+            record.suspect = true;
+            drop(record);
+            cancel_hardlink_registration(id, output_path.as_path());
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "hardlink output identity changed before registration commit",
+            ));
+        }
+        None => {
+            // Identity could not be resolved at all (e.g. a transient
+            // stat/handle failure — an AV scanner momentarily holding the
+            // handle). This is not evidence of corruption, just an
+            // inconclusive check, so the blob must not be marked suspect
+            // here. Cancel this registration and surface a plain error;
+            // the caller (write_cached.rs) falls back to a copy on any
+            // commit failure the same way it already does for a failed
+            // std::fs::hard_link, instead of hard-failing (issue #1042).
+            drop(record);
+            cancel_hardlink_registration(id, output_path.as_path());
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "hardlink output identity transiently unavailable before registration commit",
+            ));
+        }
+    }
+    record.outputs.insert(output_path);
+    drop(record);
+    Ok(())
+}
+
+pub(in crate::daemon_core::daemon::server) fn prepare_registered_detach(
+    path: &Path,
+) -> Option<(FileIdentity, NormalizedPath)> {
+    let path = NormalizedPath::new(path);
+    let id = output_ids()
+        .get(&path)
+        .map(|entry| *entry)
+        .or_else(|| crate::daemon_core::platform::fs::identity::file_identity(path.as_path()).ok())?;
+    registry()
+        .get(&id)
+        .map(|record| (id, record.blob_path.clone()))
+}
+
+pub(in crate::daemon_core::daemon::server) fn commit_registered_detach(id: FileIdentity, path: &Path) {
+    let path = NormalizedPath::new(path);
+    output_ids().remove(&path);
+    let remove = if let Some(mut record) = registry().get_mut(&id) {
+        record.outputs.remove(&path);
+        record.outputs.is_empty() && !record.suspect
+    } else {
+        false
+    };
+    if remove {
+        registry().remove(&id);
+    }
+}
+
+pub(in crate::daemon_core::daemon::server) fn verify_registered_blob(blob_path: &Path) -> std::io::Result<()> {
+    let started = std::time::Instant::now();
+    let Some(id) = crate::daemon_core::platform::fs::identity::file_identity(blob_path).ok() else {
+        return Ok(());
+    };
+    // A prior blob at this same (volume, inode) identity may have been
+    // deleted and the identity reused by an unrelated file — ephemeral
+    // test fixtures (loop-mounted / disk-image filesystems) reliably
+    // reissue low inode numbers after unmount/remount. Trusting a
+    // mismatched record would either skip real verification or reject a
+    // perfectly valid blob against someone else's expected hash.
+    // `prepare_hardlink_registration` already guards this same hazard on
+    // the write path; mirror it here on the read/verify path.
+    if registry()
+        .get(&id)
+        .is_some_and(|record| record.blob_path != blob_path)
+    {
+        registry().remove(&id);
+    }
+    let Some(record) = registry().get(&id) else {
+        // Registry state is process-local, so restart verification must use a
+        // digest persisted when the immutable blob was stored. Link count is
+        // not evidence: a poisoned alias may have been deleted before restart.
+        if let Some(expected_hash) = read_authoritative_blob_digest(blob_path)? {
+            let stat_signature = stat_signature(blob_path);
+            if hash_file(blob_path)? == expected_hash {
+                registry().insert(
+                    id,
+                    LinkRecord {
+                        blob_path: blob_path.into(),
+                        expected_hash,
+                        stat_signature,
+                        outputs: BTreeSet::new(),
+                        suspect: false,
+                    },
+                );
+                return Ok(());
+            }
+        }
+        // Either a digest existed and the hash didn't match (real
+        // corruption evidence), or no digest exists at all. Issue #1042
+        // considered trusting a digest-less blob when its current hardlink
+        // count is <= 1 (reasoning: no *current* alias, so no mechanism to
+        // have poisoned it). That reasoning is unsound: a since-deleted
+        // alias could have mutated the shared inode before being removed,
+        // and the blob's current bytes would already reflect that
+        // poisoning — link count only reflects the *present*, not whether
+        // a risky window existed in the past. (Confirmed by the existing
+        // failed_restart_eviction_restores_readonly_and_retries_after_alias_delete
+        // regression test, which specifically covers this sequence.) A
+        // digest-less blob is therefore always evicted here. Fix #1
+        // (issue #1042) already prevents the main real-world trigger for
+        // this — a freshly-persisted blob can no longer become visible
+        // without its digest, since the digest is now written *before*
+        // the publishing rename. The remaining cost is a one-time cache
+        // miss for blobs written by a pre-#1039 zccache version on
+        // upgrade, which is the safer trade-off.
+        let link_count = crate::daemon_core::platform::fs::links::hard_link_count(blob_path).unwrap_or_default();
+        tracing::warn!(
+            event = "cow_unregistered_blob_evicted",
+            blob_path = %blob_path.display(),
+            link_count,
+            "unregistered cache blob failed durable verification; evicting"
+        );
+        crate::daemon_core::core::lifecycle::write_event(
+            crate::daemon_core::core::lifecycle::EVENT_COW_UNREGISTERED_BLOB_EVICTED,
+            serde_json::json!({
+                "blob_path": blob_path,
+                "link_count": link_count,
+            }),
+        );
+        remove_registered_blob(blob_path)?;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unregistered cache blob failed durable verification",
+        ));
+    };
+    if !record.suspect
+        && (WATCHER_AVAILABLE.load(Ordering::Acquire)
+            || crate::daemon_core::platform::fs::links::hard_link_count(blob_path).unwrap_or_default() <= 1)
+    {
+        return Ok(());
+    }
+    let refreshed_signature = stat_signature(blob_path);
+    let actual = hash_file(blob_path)?;
+    if actual == record.expected_hash {
+        let remove = record.outputs.is_empty();
+        drop(record);
+        if remove {
+            registry().remove(&id);
+        } else if let Some(mut record) = registry().get_mut(&id) {
+            record.suspect = false;
+            record.stat_signature = refreshed_signature;
+        }
+        return Ok(());
+    }
+    let elapsed_ns = started.elapsed().as_nanos() as u64;
+    let link_count = crate::daemon_core::platform::fs::links::hard_link_count(blob_path).unwrap_or_default();
+    let outputs = record.outputs.iter().cloned().collect::<Vec<_>>();
+    let cache_key = record
+        .blob_path
+        .file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+    tracing::warn!(
+        event = "cow_blob_corruption_detected",
+        cache_key,
+        blob_path = %record.blob_path.display(),
+        expected_hash = %kernal_api::hash::Blake3Digest::from_bytes(record.expected_hash),
+        actual_hash = %kernal_api::hash::Blake3Digest::from_bytes(actual),
+        link_count,
+        outputs = ?outputs,
+        elapsed_ns,
+        "suspect hardlinked cache blob failed verification; refusing to serve it"
+    );
+    crate::daemon_core::core::lifecycle::write_event(
+        crate::daemon_core::core::lifecycle::EVENT_COW_BLOB_CORRUPTION_DETECTED,
+        serde_json::json!({
+            "blob_path": record.blob_path,
+            "cache_key": cache_key,
+            "expected_hash": kernal_api::hash::Blake3Digest::from_bytes(record.expected_hash).to_hex().to_string(),
+            "actual_hash": kernal_api::hash::Blake3Digest::from_bytes(actual).to_hex().to_string(),
+            "link_count": link_count,
+            "registered_outputs": outputs,
+            "elapsed_ns": elapsed_ns,
+        }),
+    );
+    drop(record);
+    remove_registered_blob(blob_path)?;
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "cache blob {} was modified through a hardlink",
+            blob_path.display()
+        ),
+    ))
+}
+
+pub(in crate::daemon_core::daemon::server) fn set_registry_watcher_available(available: bool) {
+    WATCHER_AVAILABLE.store(available, Ordering::Release);
+}
+
+/// Test-only seam: `WATCHER_AVAILABLE` is process-global, so a test that
+/// exercises watcher degradation must restore whatever it observed rather
+/// than assume the static's initial value. See `tests::watcher_lifecycle`.
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) fn registry_watcher_available() -> bool {
+    WATCHER_AVAILABLE.load(Ordering::Acquire)
+}
+
+pub(in crate::daemon_core::daemon::server) fn mark_registered_links_suspect<'a>(
+    paths: impl IntoIterator<Item = &'a Path>,
+) {
+    for path in paths {
+        let Some(id) = crate::daemon_core::platform::fs::identity::file_identity(path).ok() else {
+            continue;
+        };
+        if let Some(mut record) = registry().get_mut(&id) {
+            record.suspect = true;
+        }
+    }
+}
+
+/// A remove event may arrive after the directory entry is already gone, so
+/// native file identity is no longer queryable. The reverse index preserves
+/// enough identity to mark the blob suspect before forgetting the output.
+pub(in crate::daemon_core::daemon::server) fn mark_removed_links_suspect<'a>(
+    paths: impl IntoIterator<Item = &'a Path>,
+) {
+    for path in paths {
+        let path = NormalizedPath::new(path);
+        let Some((_, id)) = output_ids().remove(&path) else {
+            continue;
+        };
+        if let Some(mut record) = registry().get_mut(&id) {
+            record.suspect = true;
+            record.outputs.remove(&path);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) fn mark_all_registered_links_suspect() {
+    for mut record in registry().iter_mut() {
+        record.suspect = true;
+    }
+}
+
+/// Outcome of a scoped overflow sweep, for logging.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(in crate::daemon_core::daemon::server) struct OverflowSweep {
+    /// Records whose cheap stat signature is unchanged — left trusted.
+    pub(in crate::daemon_core::daemon::server) unchanged: usize,
+    /// Records newly marked suspect (signature changed, missing, or unstattable).
+    pub(in crate::daemon_core::daemon::server) suspect: usize,
+}
+
+/// Watcher-overflow recovery that does not indiscriminately condemn the whole
+/// hardlink cache (issue #1156).
+///
+/// Overflow means "the event queue saturated", not "every file changed". A
+/// blanket `mark_all_registered_links_suspect()` turns one momentary burst —
+/// a wide `git checkout`, a parallel build — into a full blake3 re-hash of
+/// every shared blob on its next read. Instead, re-verify each record against
+/// the cheap `(mtime, size)` signature captured at registration: unchanged
+/// blobs stay trusted, and anything that changed, vanished, or cannot be
+/// stat'd is marked suspect so the read path still falls back to the full
+/// re-hash. Correctness is unchanged — the expensive check is skipped only
+/// where there is positive evidence the bytes were not touched.
+pub(in crate::daemon_core::daemon::server) fn mark_changed_registered_links_suspect() -> OverflowSweep {
+    // Snapshot the non-suspect records under a short read guard, stat every
+    // blob with NO guard alive, then apply the verdicts under per-key write
+    // guards — the same lock discipline as `fingerprint/verify.rs` (#1908,
+    // the #724 class). `registry().iter_mut()` previously held write guards
+    // on every shard across one `stat()` per record.
+    let mut sweep = OverflowSweep::default();
+    let mut snapshot: Vec<(FileIdentity, NormalizedPath, Option<StatSignature>)> = Vec::new();
+    for record in registry().iter() {
+        if record.suspect {
+            sweep.suspect += 1;
+            continue;
+        }
+        snapshot.push((
+            *record.key(),
+            record.blob_path.clone(),
+            record.stat_signature,
+        ));
+    }
+
+    for (id, blob_path, recorded) in snapshot {
+        let unchanged =
+            recorded.is_some_and(|recorded| stat_signature(blob_path.as_path()) == Some(recorded));
+        if unchanged {
+            sweep.unchanged += 1;
+            continue;
+        }
+        sweep.suspect += 1;
+        if let Some(mut record) = registry().get_mut(&id) {
+            // A concurrent registration may have replaced this record while
+            // the stat ran; only a record still at the snapshot signature
+            // gets our verdict, mirroring the old under-lock comparison.
+            if !record.suspect && record.stat_signature == recorded {
+                record.suspect = true;
+            }
+        }
+    }
+    sweep
+}
+
+/// Test-only seam: the suspect flag of a single record. The registry is a
+/// process-global static, so tests running in parallel cannot assert on the
+/// aggregate sweep counters — they must scope assertions to their own blob.
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) fn registered_link_suspect(id: FileIdentity) -> Option<bool> {
+    registry().get(&id).map(|record| record.suspect)
+}
+
+pub(in crate::daemon_core::daemon::server) fn registered_blob_id(blob_path: &Path) -> Option<FileIdentity> {
+    let id = crate::daemon_core::platform::fs::identity::file_identity(blob_path).ok()?;
+    registry().contains_key(&id).then_some(id)
+}
+
+pub(in crate::daemon_core::daemon::server) fn unregister_blob_id(id: FileIdentity) {
+    if let Some((_, record)) = registry().remove(&id) {
+        for output in record.outputs {
+            output_ids().remove(&output);
+        }
+    }
+}
+
+pub(in crate::daemon_core::daemon::server) fn remove_registered_blob(blob_path: &Path) -> std::io::Result<()> {
+    let registration = registered_blob_id(blob_path);
+    let was_readonly = std::fs::metadata(blob_path)
+        .map(|metadata| crate::daemon_core::platform::fs::permissions::is_sealed(&metadata))
+        .unwrap_or(false);
+    let restore_readonly = was_readonly || readonly_enabled();
+    crate::daemon_core::platform::fs::permissions::make_writable(blob_path)?;
+    if let Err(error) = remove_output_file(blob_path) {
+        if restore_readonly {
+            let _ = crate::daemon_core::platform::fs::permissions::seal_cache_blob(blob_path);
+        }
+        return Err(error);
+    }
+    if let Some(id) = registration {
+        unregister_blob_id(id);
+    }
+    let _ = std::fs::remove_file(digest_path(blob_path));
+    Ok(())
+}
+
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) fn registered_output_count(blob_path: &Path) -> usize {
+    crate::daemon_core::platform::fs::identity::file_identity(blob_path)
+        .ok()
+        .and_then(|id| registry().get(&id).map(|record| record.outputs.len()))
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) fn is_file_id_registered(id: FileIdentity) -> bool {
+    registry().contains_key(&id)
+}
+
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) fn is_blob_suspect_for_test(blob_path: &Path) -> bool {
+    crate::daemon_core::platform::fs::identity::file_identity(blob_path)
+        .ok()
+        .and_then(|id| registry().get(&id).map(|record| record.suspect))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) fn forget_blob_registration_for_restart_test(blob_path: &Path) {
+    let Some(id) = crate::daemon_core::platform::fs::identity::file_identity(blob_path).ok() else {
+        return;
+    };
+    if let Some((_, record)) = registry().remove(&id) {
+        for output in record.outputs {
+            output_ids().remove(&output);
+        }
+    }
+}

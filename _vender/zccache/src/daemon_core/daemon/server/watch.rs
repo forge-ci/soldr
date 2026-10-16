@@ -1,0 +1,147 @@
+//! Directory watch registration helpers.
+//!
+//! Compile/link requests call into these to ensure that the directories
+//! holding their source/header files are being watched. Canonicalization is
+//! deferred behind a raw-path pre-filter because `canonicalize()` is 1-5ms on
+//! Windows for paths already known to be watched.
+
+use super::*;
+
+/// Watch a directory for file changes, if not already watched.
+pub(super) async fn watch_directory(state: &SharedState, dir: &Path) {
+    watch_directories(state, &[dir.into()]).await;
+}
+
+/// Canonicalize a batch of raw watch-registration paths.
+///
+/// Returns `(raw, canonical)` pairs rather than bare canonical paths so the
+/// caller can roll the raw pre-filter entry back when a registration fails.
+/// Raw paths whose canonicalize fails are dropped here and stay marked in
+/// `watched_raw_dirs` — retrying them would just re-issue a failing syscall on
+/// every subsequent call.
+async fn canonicalize_watch_registration_batch(
+    dirs: Vec<NormalizedPath>,
+) -> Vec<(NormalizedPath, NormalizedPath)> {
+    kernal_api::async_engine::launch_blocking(move || {
+        dirs.into_iter()
+            .filter_map(|dir| match dir.canonicalize() {
+                Ok(p) => Some((
+                    dir,
+                    crate::daemon_core::platform::fs::path::strip_verbatim_prefix(&p).into(),
+                )),
+                Err(e) => {
+                    tracing::debug!("cannot canonicalize {}: {e}", dir.display());
+                    None
+                }
+            })
+            .collect()
+    })
+    .detach_on_drop()
+    .await
+    .unwrap_or_else(|err| {
+        tracing::warn!("watch canonicalization worker failed: {err}");
+        Vec::new()
+    })
+}
+
+/// Watch multiple directories in a single batch.
+///
+/// Canonicalizes all paths up front, reserves unwatched paths under
+/// `watched_dirs`, then registers each new watch independently.
+pub(super) async fn watch_directories(state: &SharedState, dirs: &[NormalizedPath]) {
+    if dirs.is_empty() {
+        return;
+    }
+
+    // Pre-filter: skip dirs we've already processed (by raw path).
+    // This avoids expensive canonicalize() syscalls (~1-5ms each on Windows)
+    // for directories that are already being watched.
+    let new_raw: Vec<NormalizedPath> = dirs
+        .iter()
+        .filter(|d| !state.watched_raw_dirs.contains_key(*d))
+        .cloned()
+        .collect();
+    if new_raw.is_empty() {
+        return;
+    }
+
+    let pairs = canonicalize_watch_registration_batch(new_raw.clone()).await;
+
+    // Mark raw paths as processed (even if canonicalize failed) so we don't
+    // retry them on every subsequent call.
+    for d in &new_raw {
+        state.watched_raw_dirs.insert(d.clone(), ());
+    }
+
+    if pairs.is_empty() {
+        return;
+    }
+
+    // Reserve already-watched paths without holding the set lock across
+    // notify's blocking watch registration.
+    // Each directory here is the exact parent of a source/header file from
+    // depfile scanning — no need to walk children or parents.
+    let new_dirs: Vec<(NormalizedPath, NormalizedPath)> = {
+        let mut watched = state.watched_dirs.lock().await;
+        pairs
+            .into_iter()
+            .filter(|(_, canonical)| watched.insert(canonical.clone()))
+            .collect()
+    };
+
+    if new_dirs.is_empty() {
+        return;
+    }
+
+    // Batch the per-dir watcher-mutex acquisition: acquire the watcher
+    // lock once and register every directory under a single guard. Each
+    // `w.watch(dir)` is a synchronous syscall (~50us inotify_add_watch on
+    // Linux); holding the tokio Mutex across N back-to-back syscalls
+    // costs far less futex traffic than N separate acquire/release pairs,
+    // and serialises 50 concurrent cold-miss handlers through one
+    // futex-wait instead of 50 per request.
+    //
+    // Also batch the rollback for the "watcher unavailable" / "watch
+    // failed" cases under a single `watched_dirs` lock acquisition,
+    // preserving the prior behaviour of removing the entry so a future
+    // call may retry.
+    let mut to_unmark: Vec<(NormalizedPath, NormalizedPath)> = Vec::new();
+    {
+        let mut watcher_guard = state.watcher.lock().await;
+        match *watcher_guard {
+            Some(ref mut w) => {
+                for (raw, dir) in &new_dirs {
+                    match w.watch(dir) {
+                        Ok(()) => {
+                            tracing::info!("watching directory: {}", dir.display());
+                        }
+                        Err(e) => {
+                            tracing::warn!("failed to watch {}: {e}", dir.display());
+                            to_unmark.push((raw.clone(), dir.clone()));
+                        }
+                    }
+                }
+            }
+            None => {
+                // No watcher available — roll back every reservation.
+                to_unmark.extend(new_dirs.iter().cloned());
+            }
+        }
+    }
+
+    if !to_unmark.is_empty() {
+        let mut watched = state.watched_dirs.lock().await;
+        // Invariant: a raw path stays marked in `watched_raw_dirs` iff its
+        // watch registration took. Rolling back both halves is what lets the
+        // next `watch_directories` call re-canonicalize and re-register a
+        // directory whose registration failed (#1906) — otherwise the
+        // raw-path pre-filter short-circuits forever and the directory is
+        // silently unwatched, which `try_fast_hit` cannot see coming.
+        // Canonicalize *failures* are deliberately still marked; only
+        // registration failures roll back.
+        for (raw, canonical) in &to_unmark {
+            watched.remove(canonical);
+            state.watched_raw_dirs.remove(raw);
+        }
+    }
+}

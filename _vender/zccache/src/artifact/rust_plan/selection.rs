@@ -1,0 +1,432 @@
+//! Target artifact selection and classification for Rust plan save operations.
+
+use std::collections::BTreeSet;
+use std::ffi::OsStr;
+use std::path::{Component, Path};
+
+use crate::core::NormalizedPath;
+
+use super::schema::{
+    RustArtifactClass, RustArtifactPlanV1, RustPlanArtifactOwnerKind, RustPlanError, RustPlanMode,
+    RustPlanOwnershipMode, RustPlanPackages,
+};
+use super::summary::RustPlanSummary;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SelectedArtifact {
+    pub(super) source_path: NormalizedPath,
+    pub(super) relative_path: String,
+    pub(super) class: RustArtifactClass,
+    pub(super) owner: Option<RustPlanArtifactOwnerKind>,
+}
+
+pub(super) fn select_artifacts(
+    plan: &RustArtifactPlanV1,
+    candidates: Vec<NormalizedPath>,
+    summary: &mut RustPlanSummary,
+) -> Vec<SelectedArtifact> {
+    let allowed = plan.effective_allowed_classes();
+    let dropped: BTreeSet<RustArtifactClass> =
+        plan.dropped_artifact_classes.iter().copied().collect();
+    let excluded_names = excluded_package_names(&plan.packages);
+    let thin_v2 = plan.cache_profile.as_deref() == Some("thin-v2");
+    let hydrated = thin_v2 && plan.cargo_artifacts_complete;
+    let mut selected = Vec::new();
+
+    for path in candidates {
+        let rel_path = match path.strip_prefix(plan.target_dir.as_path()) {
+            Ok(rel) => rel,
+            Err(_) => {
+                summary.skip(path.display().to_string(), "outside_target_dir");
+                continue;
+            }
+        };
+        let rel = relative_path_string(rel_path);
+
+        if has_component(rel_path, "incremental") {
+            // Always-transient; reported as `transient_state` for back-compat
+            // with existing summary consumers regardless of whether thin-v2
+            // also listed `Incremental` in `dropped_artifact_classes`.
+            summary.skip(rel, "transient_state");
+            continue;
+        }
+
+        let class = classify_artifact(rel_path, plan.mode, thin_v2);
+
+        if plan.mode == RustPlanMode::Thin {
+            let Some(class) = class else {
+                summary.skip(rel, "artifact_class_disallowed_by_plan");
+                continue;
+            };
+            // soldr#461: honor the drop list before consulting the allow list.
+            // A file matching any dropped class is skipped even if its class is
+            // also listed under `allowed_artifact_classes`. This is the
+            // load-bearing change that lets thin-v2 actually prune the bundle.
+            if !hydrated && dropped.contains(&class) {
+                summary.skip(rel, "artifact_class_disallowed_by_plan");
+                continue;
+            }
+            if !allowed.contains(&class) {
+                summary.skip(rel, "artifact_class_disallowed_by_plan");
+                continue;
+            }
+            if !durable_export_allows(plan, &rel, &excluded_names, summary) {
+                continue;
+            }
+            let owner = durable_export_owner(plan, &rel);
+            selected.push(SelectedArtifact {
+                source_path: path,
+                relative_path: rel,
+                class,
+                owner,
+            });
+            continue;
+        }
+
+        let owner = durable_export_owner(plan, &rel);
+        selected.push(SelectedArtifact {
+            source_path: path,
+            relative_path: rel,
+            class: class.unwrap_or(RustArtifactClass::FullTarget),
+            owner,
+        });
+    }
+
+    selected.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    selected
+}
+
+fn durable_export_owner(
+    plan: &RustArtifactPlanV1,
+    relative_path: &str,
+) -> Option<RustPlanArtifactOwnerKind> {
+    match plan.packages.ownership_mode {
+        None => None,
+        Some(RustPlanOwnershipMode::ZccacheAllV1) => Some(RustPlanArtifactOwnerKind::Zccache),
+        Some(RustPlanOwnershipMode::CookPartitionedV1) => plan
+            .packages
+            .artifact_owners
+            .iter()
+            .find(|record| record.relative_path == relative_path)
+            .map(|record| record.owner),
+    }
+}
+
+/// Apply the ownership policy only to durable thin-v3 exports. Runtime cache
+/// lookup is intentionally outside this selector and may serve every compile.
+fn durable_export_allows(
+    plan: &RustArtifactPlanV1,
+    relative_path: &str,
+    excluded_names: &BTreeSet<String>,
+    summary: &mut RustPlanSummary,
+) -> bool {
+    match plan.packages.ownership_mode {
+        None => {
+            if artifact_matches_excluded_package(Path::new(relative_path), excluded_names) {
+                summary.skip(
+                    relative_path,
+                    "workspace_or_path_dependency_excluded_by_plan",
+                );
+                false
+            } else {
+                true
+            }
+        }
+        Some(RustPlanOwnershipMode::ZccacheAllV1) => true,
+        Some(RustPlanOwnershipMode::CookPartitionedV1) => match plan
+            .packages
+            .artifact_owners
+            .iter()
+            .find(|record| record.relative_path == relative_path)
+            .map(|record| record.owner)
+        {
+            Some(RustPlanArtifactOwnerKind::Zccache) => true,
+            Some(RustPlanArtifactOwnerKind::Cook) => {
+                summary.skip(
+                    relative_path,
+                    "cook_owned_artifact_excluded_from_durable_export",
+                );
+                false
+            }
+            Some(_) => {
+                summary.skip(relative_path, "artifact_owner_not_durable_in_zccache");
+                false
+            }
+            None => {
+                summary.skip(relative_path, "ownership_unknown");
+                false
+            }
+        },
+    }
+}
+
+pub(super) fn classify_artifact(
+    rel: &Path,
+    mode: RustPlanMode,
+    thin_v2: bool,
+) -> Option<RustArtifactClass> {
+    // .dSYM/ is a directory bundle on macOS; every file *inside* an enclosing
+    // `*.dSYM` ancestor component is dsym. Check first so we don't try to
+    // classify `Contents/Info.plist` etc. by extension.
+    if path_has_dsym_ancestor(rel) {
+        return Some(RustArtifactClass::Dsym);
+    }
+
+    if has_component(rel, ".fingerprint") {
+        // thin-v2 splits the legacy umbrella into Meta (kept) vs Outputs
+        // (dropped). Older plans keep the legacy single-class behavior so
+        // existing thin-v1 callers see no semantic change.
+        if thin_v2 {
+            if is_fingerprint_meta_file(rel) {
+                return Some(RustArtifactClass::CargoFingerprintMeta);
+            }
+            return Some(RustArtifactClass::CargoFingerprintOutputs);
+        }
+        return Some(RustArtifactClass::CargoFingerprint);
+    }
+    if has_component(rel, "build") {
+        if has_component(rel, "out") {
+            return Some(RustArtifactClass::BuildScriptOutput);
+        }
+        if let Some(name) = rel.file_name().and_then(OsStr::to_str) {
+            if matches!(name, "output" | "invoked.timestamp" | "root-output") {
+                return Some(RustArtifactClass::BuildScriptMetadata);
+            }
+            // soldr#461: name the compiled build-script binaries so the
+            // drop list can reach them. Cargo emits them as
+            // `target/<profile>/build/<crate>-<hash>/build-script-build`
+            // (possibly with a `.exe` suffix on Windows).
+            if is_build_script_build_file(name) {
+                return Some(RustArtifactClass::BuildScriptBuild);
+            }
+        }
+    }
+
+    match rel.extension().and_then(OsStr::to_str) {
+        Some("rlib") => Some(RustArtifactClass::Rlib),
+        Some("rmeta") => Some(RustArtifactClass::Rmeta),
+        Some("d") => Some(RustArtifactClass::DepInfo),
+        Some("dwo") if has_component(rel, "deps") => Some(RustArtifactClass::Dwo),
+        Some("pdb") if has_component(rel, "deps") => Some(RustArtifactClass::Pdb),
+        Some("so" | "dylib" | "dll") if is_likely_proc_macro_dylib(rel) => {
+            Some(RustArtifactClass::ProcMacro)
+        }
+        Some("so" | "dylib" | "dll") => Some(RustArtifactClass::SharedLib),
+        _ if mode == RustPlanMode::Full => Some(RustArtifactClass::FullTarget),
+        _ => None,
+    }
+}
+
+/// True when `rel` has any ancestor path component ending in `.dSYM`. The
+/// match is case-insensitive on the suffix to tolerate filesystems that
+/// preserve the historical mixed case but mount case-folded.
+fn path_has_dsym_ancestor(rel: &Path) -> bool {
+    rel.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .map(|name| {
+                let lower = name.to_ascii_lowercase();
+                lower.ends_with(".dsym")
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// True for files cargo writes inside `.fingerprint/<crate>-<hash>/` that
+/// feed its freshness decision. soldr's `docs/THIN_TARGET_CACHE_PRUNING.md`
+/// Section 4.3 enumerates these prefixes.
+///
+/// soldr#1564: Cargo's `Fingerprint::load` reads the per-unit `<stem>.json`
+/// record (e.g. `lib-foo.json`, `bin-foo.json`,
+/// `build-script-build-foo.json`, `run-build-script-build-foo.json`)
+/// *in addition to* the opaque hash file with the same stem — the JSON is
+/// NOT a human-readable diagnostic, it's the serialized `Fingerprint`
+/// Cargo needs to even attempt a freshness comparison. Dropping it makes
+/// `cargo::core::compiler::fingerprint::load` fail with
+/// `failed to read .fingerprint/<unit>/<stem>.json`, forcing every unit
+/// Dirty regardless of whether the hash file and primary outputs survived
+/// the restore. So the `.json` suffix is stripped before matching
+/// prefixes, and a `<stem>.json` classifies identically to `<stem>`.
+/// Files whose stem does not match any load-bearing prefix (e.g. a
+/// `<pkg>-<hash>.json` file matching the fingerprint directory's own name)
+/// remain diagnostic-class output.
+fn is_fingerprint_meta_file(rel: &Path) -> bool {
+    let Some(name) = rel.file_name().and_then(OsStr::to_str) else {
+        return false;
+    };
+    if name == "invoked.timestamp" {
+        return true;
+    }
+    let stem = name.strip_suffix(".json").unwrap_or(name);
+    // Cargo stores the load-bearing fingerprints for build-script compile
+    // and execution units under these two prefixes. They are opaque hash
+    // records just like dep-/lib-/bin-*, and their `.json` companions are
+    // load-bearing too (see doc comment above).
+    if stem.starts_with("build-script-") || stem.starts_with("run-build-script-") {
+        return true;
+    }
+    matches!(
+        stem.split('-').next(),
+        Some("dep" | "output" | "lib" | "bin")
+    ) && stem.contains('-')
+}
+
+/// True for Cargo's compiled build-script binaries. Cargo creates both a
+/// dash-named alias (`build-script-build`) and an underscore-and-hash binary
+/// (`build_script_build-<hash>`) that its fingerprint records reference.
+/// The `.exe` suffix appears on Windows targets.
+fn is_build_script_build_file(name: &str) -> bool {
+    let stem = name.strip_suffix(".exe").unwrap_or(name);
+    stem == "build-script-build"
+        || stem.starts_with("build-script-build-")
+        || stem == "build_script_build"
+        || stem.starts_with("build_script_build-")
+}
+
+fn is_likely_proc_macro_dylib(rel: &Path) -> bool {
+    if !has_component(rel, "deps") {
+        return false;
+    }
+
+    rel.file_stem()
+        .and_then(OsStr::to_str)
+        .map(|stem| {
+            let stem = stem.to_ascii_lowercase();
+            stem.contains("proc_macro") || stem.contains("proc-macro")
+        })
+        .unwrap_or(false)
+}
+
+pub(super) fn collect_files(
+    root: &Path,
+    files: &mut Vec<NormalizedPath>,
+) -> Result<(), RustPlanError> {
+    if !root.exists() {
+        return Ok(());
+    }
+
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(root)? {
+        entries.push(entry?);
+    }
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let path = NormalizedPath::new(entry.path());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_files(path.as_path(), files)?;
+        } else if file_type.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Use Cargo's post-build artifact closure when it is complete and safe.
+/// Any malformed or stale entry conservatively falls back to the recursive
+/// target walk so an incomplete message stream cannot under-save a target.
+pub(super) fn resolve_cargo_artifacts(
+    plan: &RustArtifactPlanV1,
+) -> Result<Vec<NormalizedPath>, RustPlanError> {
+    if !plan.cargo_artifacts_complete {
+        let mut files = Vec::new();
+        collect_files(plan.target_dir.as_path(), &mut files)?;
+        return Ok(files);
+    }
+
+    let mut files = Vec::with_capacity(plan.cargo_artifact_paths.len());
+    for relative in &plan.cargo_artifact_paths {
+        let path = Path::new(relative);
+        if path.is_absolute()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            let mut fallback = Vec::new();
+            collect_files(plan.target_dir.as_path(), &mut fallback)?;
+            return Ok(fallback);
+        }
+        let full = plan.target_dir.join(path);
+        if !full.is_file() {
+            let mut fallback = Vec::new();
+            collect_files(plan.target_dir.as_path(), &mut fallback)?;
+            return Ok(fallback);
+        }
+        files.push(NormalizedPath::new(full));
+    }
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+fn relative_path_string(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            Component::CurDir => None,
+            _ => Some(component.as_os_str().to_string_lossy().into_owned()),
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn has_component(path: &Path, needle: &str) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == OsStr::new(needle))
+}
+
+fn excluded_package_names(packages: &RustPlanPackages) -> BTreeSet<String> {
+    packages
+        .workspace_package_ids
+        .iter()
+        .chain(packages.excluded_path_package_ids.iter())
+        .filter_map(|id| package_name_from_id(id))
+        .collect()
+}
+
+pub(super) fn package_name_from_id(id: &str) -> Option<String> {
+    let candidate = if let Some(after_hash) = id.rsplit_once('#').map(|(_, right)| right) {
+        after_hash.split('@').next().unwrap_or(after_hash)
+    } else if let Some((left, _)) = id.split_once(' ') {
+        left
+    } else {
+        id
+    };
+    let candidate = candidate
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .replace('-', "_");
+    if candidate.is_empty()
+        || candidate.contains('/')
+        || candidate.contains('\\')
+        || candidate.contains(':')
+    {
+        None
+    } else {
+        Some(candidate)
+    }
+}
+
+pub(super) fn artifact_matches_excluded_package(
+    rel: &Path,
+    excluded_names: &BTreeSet<String>,
+) -> bool {
+    if excluded_names.is_empty() {
+        return false;
+    }
+    rel.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy();
+        excluded_names.iter().any(|package| {
+            let without_lib = name.strip_prefix("lib").unwrap_or(&name);
+            without_lib == package
+                || without_lib.starts_with(&format!("{package}-"))
+                || without_lib.starts_with(&format!("{package}."))
+        })
+    })
+}

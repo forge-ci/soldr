@@ -1,0 +1,36 @@
+# Server
+
+IPC server entry point and request handlers for the daemon. `mod.rs` is a thin
+glue file: it defines `DaemonServer`, declares every submodule, and re-exports
+their items so every sibling can `use super::*;` to see the same vocabulary.
+
+Topic-focused submodules:
+
+- `lifecycle.rs` — `DaemonServer::{bind, bind_with_cache_dir}`, `new_shared_state`, accessors, test seams
+- `embedded.rs` — `EmbeddedDaemon` (in-process host integration): construction, background cache loads, compile entrypoint, flush/shutdown
+- `embedded_bringup.rs` — timed embedded bring-up phases, the `embedded_bringup` lifecycle record, and the post-readiness depgraph load (#1652)
+- `loaders.rs` — deferred cache-load handles (`DepGraphSetter`, the four `*Loader`s) + the `DaemonServer` factory methods that hand them out (bind-first / load-in-background, #640/#784)
+- `index_reconcile.rs` — startup rebuild of an unreadable `index.bin` from surviving staged-v2 payloads, under a wall-clock budget (#1157); emits `index_reconciled`
+- `run.rs` — `DaemonServer::run` main loop + watcher pipeline initializer
+- `state.rs` — `SharedState`, the daemon's central state object
+- `cached_artifact.rs` — `CachedArtifact`, `CachedPayload`, payload materialization, legacy `.meta` migration
+- `compiler_hash.rs` — compiler-binary hash memoization keyed by `(mtime, size)`
+- `test_harness_admission.rs` — request-scoped rustc `--test` harness admission (#1550): resolves the policy per request, size-bounds admitted harnesses, and records the admission observation for the embedded API
+- `request_cache.rs` — request-level fast-path records (`RequestCacheEntry`, `CachedRequestPath`, etc.)
+- `rsp_cache.rs` — response-file (`@file`) expansion + caching
+- `cache_trim.rs` — time-based + size-capped trimmers for the ephemeral caches
+- `in_flight.rs` — RAII guard for `state.in_flight_bytes`
+- `keyed_locks.rs` — `KeyedLocks`, per-key async locks that single-flight the
+  system-include and compiler-identity probes (FastLED/fbuild#1466)
+- `pch.rs` — PCH source-header resolution
+- `client_env.rs` — replay client env into compiler children
+- `session.rs` — `Request::SessionStart` handler + session log writer
+- `handle_clear.rs` — `Request::Clear` handler
+- `handle_compile_ephemeral.rs` — single-roundtrip ephemeral compile + direct (uncached) compiler invocation
+- `directory_link.rs` — transactional publication and delivery for directory-producing link tools
+- `watch.rs` — `watch_directory` / `watch_directories` helpers
+- `util.rs` — `persist_workers_default`, `hash_file`, `context_files_fresh`, `lookup_artifact_with_disk_fallback`
+
+Pre-existing splits: `connection/` (see `connection/README.md`), `handle_compile.rs`,
+`handle_compile_multi.rs`, `handle_link.rs`, `keys.rs`, `link_helpers.rs`, `persist.rs`,
+`rustc.rs`, `wal.rs`, plus the `tests/` directory.

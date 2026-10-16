@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package zccache.rust_plan.v1;
+
+message RustArtifactPlanV1 {
+  uint32 schema_version = 1;
+  uint32 mode = 2;
+  string workspace_root = 3;
+  string target_dir = 4;
+  RustToolchainIdentity toolchain = 5;
+  string target_triple = 6;
+  string profile = 7;
+  RustPlanInputs inputs = 8;
+  RustPlanPackages packages = 9;
+  repeated uint32 allowed_artifact_classes = 10;
+  uint32 cache_schema_version = 11;
+  string journal_log_path = 12;
+  string cache_profile = 13;
+  repeated uint32 dropped_artifact_classes = 14;
+  repeated string cargo_artifact_paths = 15;
+  bool cargo_artifacts_complete = 16;
+}
+
+message RustToolchainIdentity {
+  string rustc = 1;
+  string cargo = 2;
+  string channel = 3;
+  string host = 4;
+}
+
+message RustPlanInputs {
+  string features_hash = 1;
+  string rustflags_hash = 2;
+  string env_hash = 3;
+  string lockfile_hash = 4;
+  string cargo_config_hash = 5;
+  repeated string manifest_hashes = 6;
+}
+
+message RustPlanPackages {
+  repeated string selected_package_ids = 1;
+  repeated string workspace_package_ids = 2;
+  repeated string excluded_path_package_ids = 3;
+  string ownership_policy = 4;
+  uint32 ownership_mode = 5;
+  repeated RustPlanArtifactOwner artifact_owners = 6;
+  bool ownership_complete = 7;
+}
+
+message RustPlanArtifactOwner {
+  string relative_path = 1;
+  string package_id = 2;
+  uint32 owner = 3;
+}
+
+message RustArtifactBundleManifest {
+  uint32 manifest_schema_version = 1;
+  uint32 plan_schema_version = 2;
+  uint32 cache_schema_version = 3;
+  uint32 mode = 4;
+  string cache_key = 5;
+  uint64 created_at_secs = 6;
+  string plan_identity_hash = 7;
+  repeated RustBundledArtifact artifacts = 8;
+  uint32 layer_kind = 9;
+  string base_cache_key = 10;
+  repeated string deleted_paths = 11;
+}
+
+message RustBundledArtifact {
+  string relative_path = 1;
+  uint32 class = 2;
+  uint64 size = 3;
+  string content_hash = 4;
+  uint64 mtime_unix_nanos = 5;
+  uint32 owner = 6;
+}

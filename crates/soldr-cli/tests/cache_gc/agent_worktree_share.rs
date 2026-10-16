@@ -23,13 +23,13 @@ use std::time::{Duration, Instant};
 /// plain temporary-directory guard is insufficient: on Windows the live
 /// daemon pins its relocated image and cache root. Stop that exact isolated
 /// daemon before removing the root, even when an assertion unwinds.
-struct FixtureGuard {
+pub(crate) struct FixtureGuard {
     workdir: PathBuf,
     cache_dir: PathBuf,
 }
 
 impl FixtureGuard {
-    fn new(workdir: PathBuf, cache_dir: PathBuf) -> Self {
+    pub(crate) fn new(workdir: PathBuf, cache_dir: PathBuf) -> Self {
         Self { workdir, cache_dir }
     }
 
@@ -56,7 +56,7 @@ impl FixtureGuard {
         !pid_is_alive(pid)
     }
 
-    fn stop_and_assert_exited(&self) {
+    pub(crate) fn stop_and_assert_exited(&self) {
         let pid = self.daemon_pid().expect("daemon PID publication");
         let output = self.stop_daemon();
         assert!(
@@ -319,7 +319,7 @@ fn main() {
     .expect("write src/main.rs");
 }
 
-fn git(args: &[&str], cwd: &Path) {
+pub(crate) fn git(args: &[&str], cwd: &Path) {
     let output = Command::new("git")
         .args(args)
         .current_dir(cwd)

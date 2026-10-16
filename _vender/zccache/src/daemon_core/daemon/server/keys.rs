@@ -1,0 +1,848 @@
+//! Request-key normalization, fingerprinting, worktree-root resolution, request cache lookups.
+
+use super::*;
+
+pub(super) fn client_env_value<'a>(
+    client_env: Option<&'a [(String, String)]>,
+    name: &str,
+) -> Option<&'a str> {
+    client_env?
+        .iter()
+        .find_map(|(key, value)| (key == name).then_some(value.as_str()))
+        .filter(|value| !value.is_empty())
+}
+
+/// Resolve the value rustc recorded as an environment dependency.
+///
+/// A nested Dylint driver exposes `DYLINT_LIBS` to rustc as checkout-local
+/// absolute paths.  [`crate::daemon_core::compiler::prepare_dylint_cache_env`] has already
+/// replaced those paths with a synthetic hash covering the driver, inner
+/// rustc, lint-library names and contents, and output-affecting environment.
+/// Folding rustc's `DYLINT_LIBS` dep through that hash keeps artifact identity
+/// content-addressed across equivalent sibling worktrees.
+pub(super) fn rustc_env_dep_value<'a>(
+    client_env: Option<&'a [(String, String)]>,
+    name: &str,
+) -> Option<&'a str> {
+    let env = client_env?;
+    if name == crate::daemon_core::compiler::DYLINT_LIBS_ENV {
+        if let Some((_, value)) = env
+            .iter()
+            .find(|(key, _)| key == crate::daemon_core::compiler::DYLINT_CACHE_INPUT_HASH_ENV)
+        {
+            return Some(value);
+        }
+    }
+    env.iter()
+        .find_map(|(key, value)| (key == name).then_some(value.as_str()))
+}
+
+pub(super) fn path_remap_auto_enabled(client_env: Option<&[(String, String)]>) -> bool {
+    client_env_value(client_env, PATH_REMAP_ENV)
+        .is_some_and(|value| value.eq_ignore_ascii_case("auto"))
+}
+
+/// Stringly tag of path-remap state for the depgraph-check diag line.
+/// Issue #353: exposes the silent fallback case where `ZCCACHE_PATH_REMAP=auto`
+/// was requested but `find_git_root` returned None — distinguishing it from
+/// "remap disabled" (off) and "remap firing" (auto) lets cross-runner bisection
+/// catch the case where two runners disagree on whether remap is active.
+pub(super) fn diag_path_remap_state(
+    client_env: Option<&[(String, String)]>,
+    worktree_root_resolved: bool,
+) -> &'static str {
+    if path_remap_auto_enabled(client_env) {
+        if worktree_root_resolved {
+            "auto"
+        } else {
+            "auto_no_git"
+        }
+    } else {
+        "off"
+    }
+}
+
+pub(super) fn resolve_worktree_root(
+    cwd: &Path,
+    client_env: Option<&[(String, String)]>,
+) -> Option<NormalizedPath> {
+    if let Some(value) = client_env_value(client_env, WORKTREE_ROOT_ENV) {
+        let configured = Path::new(value);
+        let root = if configured.is_absolute() {
+            configured.to_path_buf()
+        } else {
+            cwd.join(configured)
+        };
+        if root.is_dir() {
+            return Some(root.into());
+        }
+    }
+
+    find_git_root(cwd)
+}
+
+pub(super) fn find_git_root(cwd: &Path) -> Option<NormalizedPath> {
+    for candidate in cwd.ancestors() {
+        let dot_git = candidate.join(".git");
+        if dot_git.is_dir() || dot_git.is_file() {
+            return Some(candidate.into());
+        }
+    }
+    None
+}
+
+pub(super) fn compile_worktree_root(
+    state: &SharedState,
+    sid: &SessionId,
+    cwd: &Path,
+    client_env: Option<&[(String, String)]>,
+) -> Option<NormalizedPath> {
+    if client_env_value(client_env, WORKTREE_ROOT_ENV).is_some() {
+        return resolve_worktree_root(cwd, client_env);
+    }
+
+    let cwd_normalized: NormalizedPath = cwd.into();
+    if let Some(cached) = state.session_worktree_roots.get(sid) {
+        if let Some(root) = cached.root.as_ref() {
+            if cwd_normalized.starts_with(root.as_path()) {
+                return Some(root.clone());
+            }
+        } else if cwd_normalized.starts_with(cached.working_dir.as_path())
+            && !path_remap_auto_enabled(client_env)
+        {
+            // Cached "no worktree" applies only when PATH_REMAP isn't requested.
+            // Issue #353: when the user explicitly opts into auto-remap, prefer
+            // the cwd fallback (below) over the sticky None so the compiler
+            // still gets a `--remap-path-prefix=<cwd>=.` flag and embedded
+            // paths in debug info / macros become path-independent.
+            return None;
+        }
+    }
+
+    if let Some(root) = resolve_worktree_root(cwd, client_env) {
+        return Some(root);
+    }
+
+    // Issue #353: `ZCCACHE_PATH_REMAP=auto` was requested but no `.git/`
+    // ancestor was found. Previously this silently fell through, so the
+    // compiler ran with absolute paths in its output even though the user
+    // asked for path normalization. Two GHA runners with byte-identical
+    // checkouts but no `.git/` (e.g., shallow / git-archive workflows) would
+    // produce divergent .rlib bytes and miss every cache lookup.
+    //
+    // Fall back to using the cwd itself as the worktree root: the remap flag
+    // gets added (`--remap-path-prefix=<cwd>=.`) and the depgraph context_key
+    // normalizes paths relative to a deterministic root. Behavior when the env
+    // var isn't set is unchanged.
+    if path_remap_auto_enabled(client_env) {
+        return Some(cwd_normalized);
+    }
+
+    None
+}
+
+pub(super) fn normalize_path_for_request_key(path: &Path, key_root: Option<&Path>) -> String {
+    if let Some(root) = key_root {
+        if let Ok(relative) = path.strip_prefix(root) {
+            let relative = crate::daemon_core::core::path::normalize_for_key(relative);
+            if relative.is_empty() {
+                return REQUEST_ROOT_MARKER.to_string();
+            }
+            return format!("{REQUEST_ROOT_MARKER}/{relative}");
+        }
+    }
+    crate::daemon_core::core::path::normalize_for_key(path)
+}
+
+pub(super) fn normalize_request_path_value(value: &str, key_root: Option<&Path>) -> Option<String> {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        return Some(normalize_path_for_request_key(path, key_root));
+    }
+    None
+}
+
+pub(super) fn normalize_rust_remap_path_prefix_value_for_key(
+    value: &str,
+    key_root: Option<&Path>,
+) -> Option<String> {
+    let (old, new) = value.split_once('=')?;
+    normalize_request_path_value(old, key_root)
+        .map(|normalized_old| format!("{normalized_old}={new}"))
+}
+
+pub(super) const CC_PREFIX_MAP_FLAGS: &[&str] = &[
+    "-ffile-prefix-map",
+    "-fmacro-prefix-map",
+    "-fdebug-prefix-map",
+    "-fcoverage-prefix-map",
+    "-fprofile-prefix-map",
+];
+
+pub(super) fn split_cc_prefix_map_arg(arg: &str) -> Option<(&'static str, &str, &str)> {
+    for flag in CC_PREFIX_MAP_FLAGS {
+        if let Some(rest) = arg
+            .strip_prefix(*flag)
+            .and_then(|rest| rest.strip_prefix('='))
+        {
+            if let Some((old, new)) = rest.split_once('=') {
+                return Some((*flag, old, new));
+            }
+        }
+    }
+    None
+}
+
+pub(super) fn normalize_cc_prefix_map_arg_for_key(
+    arg: &str,
+    key_root: Option<&Path>,
+) -> Option<String> {
+    let (flag, old, new) = split_cc_prefix_map_arg(arg)?;
+    normalize_request_path_value(old, key_root)
+        .map(|normalized_old| format!("{flag}={normalized_old}={new}"))
+}
+
+pub(super) fn same_key_path(left: &Path, right: &Path) -> bool {
+    crate::daemon_core::core::path::normalize_for_key(left) == crate::daemon_core::core::path::normalize_for_key(right)
+}
+
+/// Does `args` contain a `<target_flag>=<old>=...` mapping (case- and
+/// path-normalisation aware on the `old` side)? Used by the auto-injection
+/// branch in [`effective_compile_args`] to skip adding redundant
+/// `-ffile-prefix-map` / `-fmacro-prefix-map` / `-fdebug-prefix-map` flags
+/// when the caller already passed one for the same `old` root (issue #474).
+pub(super) fn has_cc_prefix_map_for_old(args: &[String], target_flag: &str, old: &Path) -> bool {
+    args.iter().any(|arg| {
+        let Some((flag, existing_old, _)) = split_cc_prefix_map_arg(arg) else {
+            return false;
+        };
+        flag == target_flag && same_key_path(Path::new(existing_old), old)
+    })
+}
+
+pub(super) fn compiler_supports_ffile_prefix_map(compiler_path: &Path) -> bool {
+    matches!(
+        crate::daemon_core::compiler::detect_family(&compiler_path.to_string_lossy()),
+        crate::daemon_core::compiler::CompilerFamily::Clang | crate::daemon_core::compiler::CompilerFamily::Gcc
+    )
+}
+
+/// Does this (family, source_mode) pair require the worktree-root to be
+/// folded into the artifact cache key?
+///
+/// Returns `true` for compile invocations whose ARTIFACTS the compiler
+/// embeds absolute paths inside, in a form the `-ffile-prefix-map` family
+/// of flags can't scrub:
+///
+/// * **PCH builds** (`SourceMode::Header` with clang or gcc) — the `.pch` /
+///   `.gch` binary serialises the AST's header-path table; even with
+///   `-ffile-prefix-map` and friends, restoring a fastled9-built PCH into
+///   fastled10 leaves fastled9 paths inside the AST (issue #474).
+/// * **MSVC** (`CompilerFamily::Msvc`) — cl.exe has no `-fmacro-prefix-map`
+///   equivalent. Object files emit absolute paths in debug info and the
+///   `$$PDB` reference, with no compiler-side scrub available.
+///
+/// When this returns `true`, the cache key for the artifact must include
+/// the `worktree_root` (or another stable per-worktree salt) so the cache
+/// entry stays scoped to the worktree that built it. The trade-off is one
+/// cold compile per worktree for the affected unit; everything else
+/// continues to share across worktrees (issue #474 plan, Piece B).
+#[must_use]
+pub fn requires_worktree_in_key(
+    family: crate::daemon_core::compiler::CompilerFamily,
+    source_mode: crate::daemon_core::compiler::SourceMode,
+) -> bool {
+    use crate::daemon_core::compiler::{CompilerFamily, SourceMode};
+    matches!(family, CompilerFamily::Msvc) || matches!(source_mode, SourceMode::Header)
+}
+
+/// Returns whether the effective C/C++ command line remaps every path-bearing
+/// output channel from `root`.
+///
+/// `-ffile-prefix-map` covers source and file paths on current compilers, but
+/// it is not sufficient by itself for portable cache sharing: older clang and
+/// some GCC releases require the explicit macro and debug variants too. A
+/// partial user map therefore remains worktree-bound rather than allowing an
+/// artifact with an absolute checkout path to cross a checkout boundary.
+pub(super) fn cc_prefix_maps_cover_root(args: &[String], root: &Path) -> bool {
+    [
+        "-ffile-prefix-map",
+        "-fmacro-prefix-map",
+        "-fdebug-prefix-map",
+    ]
+    .iter()
+    .all(|flag| has_cc_prefix_map_for_old(args, flag, root))
+}
+
+/// Returns whether a C/C++ context needs a stable checkout-specific salt.
+///
+/// Artifacts that cannot be scrubbed are always worktree-bound (PCH/GCH and
+/// MSVC). For ordinary clang/GCC compilations, sharing is permitted only
+/// after the effective argv proves that file, macro, and debug path remapping
+/// all cover the checkout root. Without that proof, retaining the root in the
+/// context key is the safe outcome: identical sources in two clones get
+/// distinct keys instead of replaying absolute paths from the first clone.
+pub(super) fn cc_requires_worktree_salt(
+    family: crate::daemon_core::compiler::CompilerFamily,
+    source_mode: crate::daemon_core::compiler::SourceMode,
+    args: &[String],
+    root: &Path,
+) -> bool {
+    use crate::daemon_core::compiler::CompilerFamily;
+
+    requires_worktree_in_key(family, source_mode)
+        || matches!(family, CompilerFamily::Gcc | CompilerFamily::Clang)
+            && !cc_prefix_maps_cover_root(args, root)
+}
+
+pub(super) fn request_key_root(
+    compiler_path: &Path,
+    args: &[String],
+    worktree_root: Option<&NormalizedPath>,
+) -> Option<NormalizedPath> {
+    if compiler_is_rustc_like(compiler_path) {
+        rustc_request_key_root(args, worktree_root)
+    } else {
+        worktree_root.cloned()
+    }
+}
+
+pub(super) fn effective_compile_args(
+    mut expanded_args: Vec<String>,
+    compiler_path: &Path,
+    cwd: &Path,
+    worktree_root: Option<&NormalizedPath>,
+    client_env: Option<&[(String, String)]>,
+) -> Vec<String> {
+    if !path_remap_auto_enabled(client_env) {
+        return expanded_args;
+    }
+
+    let Some(root) = worktree_root else {
+        return expanded_args;
+    };
+
+    let root_path = root.as_path();
+    if compiler_is_rustc_like(compiler_path) {
+        if rust_args_have_remap_for_old(&expanded_args, root_path) {
+            return expanded_args;
+        }
+
+        let mut effective = Vec::with_capacity(expanded_args.len() + 2);
+        if crate::daemon_core::compiler::is_dylint_driver(&compiler_path.to_string_lossy()) {
+            if expanded_args.is_empty() {
+                return expanded_args;
+            };
+            effective.push(expanded_args.remove(0));
+            effective.push("--remap-path-prefix".to_string());
+            effective.push(format!("{}=.", root_path.to_string_lossy()));
+            effective.append(&mut expanded_args);
+            return effective;
+        }
+        effective.push("--remap-path-prefix".to_string());
+        effective.push(format!("{}=.", root_path.to_string_lossy()));
+        effective.append(&mut expanded_args);
+        return effective;
+    }
+
+    if !compiler_supports_ffile_prefix_map(compiler_path) {
+        return expanded_args;
+    }
+
+    // Inject the three siblings together. Modern clang treats
+    // `-ffile-prefix-map` as the umbrella, but older clang (< 10) and
+    // some gcc versions need `-fmacro-prefix-map` and `-fdebug-prefix-map`
+    // explicitly. Issue #474: without the explicit macro form, `__FILE__`
+    // strings in `.rodata` leak the original-clone path into artifacts
+    // restored to a sibling worktree.
+    const AUTO_PREFIX_MAP_FLAGS: &[&str] = &[
+        "-ffile-prefix-map",
+        "-fmacro-prefix-map",
+        "-fdebug-prefix-map",
+    ];
+
+    let mut auto_args = Vec::with_capacity(AUTO_PREFIX_MAP_FLAGS.len() * 2);
+    for flag in AUTO_PREFIX_MAP_FLAGS {
+        if !has_cc_prefix_map_for_old(&expanded_args, flag, root_path) {
+            auto_args.push(format!("{}={}=.", flag, root_path.to_string_lossy()));
+        }
+    }
+
+    if !same_key_path(root_path, cwd) {
+        for flag in AUTO_PREFIX_MAP_FLAGS {
+            if !has_cc_prefix_map_for_old(&expanded_args, flag, cwd) {
+                auto_args.push(format!("{}={}=.", flag, cwd.to_string_lossy()));
+            }
+        }
+    }
+
+    if auto_args.is_empty() {
+        return expanded_args;
+    }
+
+    auto_args.reserve(expanded_args.len());
+    auto_args.append(&mut expanded_args);
+    auto_args
+}
+
+pub(super) fn normalize_request_arg(arg: &str, key_root: Option<&Path>) -> String {
+    let Some(root) = key_root else {
+        return arg.to_string();
+    };
+
+    if let Some(normalized) = normalize_cc_prefix_map_arg_for_key(arg, Some(root)) {
+        return normalized;
+    }
+
+    if let Some(value) = arg.strip_prefix("--remap-path-prefix=") {
+        if let Some(normalized) = normalize_rust_remap_path_prefix_value_for_key(value, Some(root))
+        {
+            return format!("--remap-path-prefix={normalized}");
+        }
+        return arg.to_string();
+    }
+
+    if let Some(normalized) = normalize_request_path_value(arg, Some(root)) {
+        return normalized;
+    }
+
+    if let Some(rest) = arg.strip_prefix("-I").filter(|rest| !rest.is_empty()) {
+        if let Some(normalized) = normalize_request_path_value(rest, Some(root)) {
+            return format!("-I{normalized}");
+        }
+    }
+
+    if let Some(rest) = arg.strip_prefix("-L").filter(|rest| !rest.is_empty()) {
+        if let Some(normalized) = normalize_request_path_value(rest, Some(root)) {
+            return format!("-L{normalized}");
+        }
+    }
+
+    if let Some((left, right)) = arg.split_once('=') {
+        if let Some(normalized_left) = normalize_request_path_value(left, Some(root)) {
+            return format!("{normalized_left}={right}");
+        }
+        if let Some(normalized_right) = normalize_request_path_value(right, Some(root)) {
+            return format!("{left}={normalized_right}");
+        }
+    }
+
+    arg.to_string()
+}
+
+pub(super) fn request_env_fingerprint_vars<'a>(
+    client_env: Option<&'a [(String, String)]>,
+    compiler: &str,
+    args: &[String],
+) -> Vec<(&'a str, &'a str)> {
+    let env = client_env.unwrap_or_default();
+    // `env!()`/`option_env!()` reads are validated per context through the
+    // recorded dep-info env-deps (`context_files_and_env_fresh`), so
+    // `CARGO_*` only needs to split the request when a proc-macro dylib could
+    // read it invisibly. This must stay at least as fine as the rustc context
+    // key (`RustcCompileContext::from_parsed_args`). `key_env` owns every
+    // list (#1806).
+    // C/C++ compilers never read `CARGO_*`; rustc reads it untracked only via
+    // proc-macros a non-plain driver (clippy, Dylint, wrappers), or an argv that emits no
+    // dep-info (nothing then reports the crate's `env!` reads).
+    let cargo = crate::daemon_core::compiler::detect_family(compiler) == crate::daemon_core::compiler::CompilerFamily::Rustc
+        && (!crate::core::key_env::is_plain_rustc(compiler)
+            || !crate::core::key_env::argv_emits_dep_info(args)
+            || crate::core::key_env::argv_may_load_proc_macro(args));
+    let mut vars: Vec<(&str, &str)> = env
+        .iter()
+        .filter_map(|(key, value)| {
+            let key = key.as_str();
+            let include = (cargo && crate::core::key_env::is_conservatively_keyed_cargo_env(key))
+                || crate::core::key_env::REQUEST_CONTROL_ENV_KEYED.contains(&key);
+            include.then_some((key, value.as_str()))
+        })
+        .collect();
+    // C/C++ output-affecting variables (CL/_CL_/INCLUDE match
+    // case-insensitively; the policy returns canonical names and last-wins
+    // values), the superset of what rustc keys, and the raw locale vars.
+    vars.extend(crate::core::key_env::keyed_cc_env(
+        env,
+        crate::core::key_env::CcEnvScope::Any,
+    ));
+    vars.extend(crate::core::key_env::keyed_rustc_env_superset(env));
+    vars.extend(crate::core::key_env::keyed_locale_env(env));
+    vars.sort_unstable();
+    vars.dedup();
+    vars
+}
+
+/// Return cache-key flags for the C/C++ variables that change compiler output
+/// or the include set (`key_env` allowlist, #1806).
+///
+/// `cl.exe` reads `CL` and `_CL_` in addition to argv; gcc/clang read
+/// `CPATH`, `SOURCE_DATE_EPOCH`, `SDKROOT` and friends. Raw values are
+/// preserved: the compiler remains the authority for its own semantics, while
+/// distinct environments cannot share a cached artifact.
+pub(super) fn cc_env_key_flags(
+    family: crate::daemon_core::compiler::CompilerFamily,
+    client_env: &[(String, String)],
+) -> Vec<String> {
+    use crate::core::key_env::{keyed_cc_env, CcEnvScope};
+    let scope = match family {
+        crate::daemon_core::compiler::CompilerFamily::Msvc => CcEnvScope::Msvc,
+        crate::daemon_core::compiler::CompilerFamily::Gcc | crate::daemon_core::compiler::CompilerFamily::Clang => {
+            CcEnvScope::Gnu
+        }
+        _ => return Vec::new(),
+    };
+    let mut flags: Vec<String> = keyed_cc_env(client_env, scope)
+        .into_iter()
+        .map(|(name, value)| format!("zccache:env:{name}={value}"))
+        .collect();
+    // gcc localizes diagnostics and a hit replays the stored stderr verbatim
+    // (clang does not localize; cl's language rides in `VSLANG`, keyed above).
+    if family == crate::daemon_core::compiler::CompilerFamily::Gcc {
+        if let Some(locale) = crate::core::key_env::gcc_message_locale(client_env) {
+            flags.push(format!("zccache:env:MESSAGE_LOCALE={locale}"));
+        }
+    }
+    flags
+}
+
+/// Key flag separating MSVC compiles by who asked for `/showIncludes`.
+///
+/// Issue #1530: `parse_msvc_args` consumes `/showIncludes` without recording it
+/// in `flags`, so `cl /c a.c` and `cl /showIncludes /c a.c` hash to the same
+/// `ContextKey`. Their stored stdout is not interchangeable: when the daemon
+/// injects the flag it strips the `Note: including file:` lines, and when the
+/// caller passes it they are kept. Replaying a stripped entry to a CMake +
+/// Ninja caller would hand it an empty depfile and silently under-rebuild;
+/// replaying the other direction would spam notes into a plain caller's stdout.
+///
+/// Salting the key keeps the two populations in separate entries. Within a
+/// single build every compile is spelled the same way, so this costs no hits.
+pub(super) fn msvc_show_includes_key_flags(
+    family: crate::daemon_core::compiler::CompilerFamily,
+    args: &[String],
+) -> Option<String> {
+    use crate::daemon_core::depgraph::msvc_args::ShowIncludesMode;
+    if family != crate::daemon_core::compiler::CompilerFamily::Msvc {
+        return None;
+    }
+    let mode = match crate::daemon_core::depgraph::msvc_args::msvc_show_includes_mode(args)? {
+        ShowIncludesMode::All => "all",
+        ShowIncludesMode::UserOnly => "user",
+    };
+    Some(format!("zccache:msvc-showincludes:{mode}"))
+}
+
+/// Compute a fast fingerprint of a compile request for the request-level cache.
+///
+/// Streams bytes directly into blake3 without intermediate buffer allocation.
+/// Path normalization and environment selection remain native caller policy.
+/// Callers should pass the fully expanded argv so response-file content
+/// changes also invalidate the request-level fast path.
+pub(super) fn request_fingerprint(
+    compiler: &Path,
+    args: &[String],
+    cwd: &Path,
+    key_root: Option<&Path>,
+    client_env: Option<&[(String, String)]>,
+) -> ContentHash {
+    let mut h = crate::daemon_core::hash::StreamHasher::new();
+    let compiler = crate::daemon_core::core::path::normalize_for_key(compiler);
+    let mut remap_value = false;
+    let normalized_args = args.iter().map(|arg| {
+        if remap_value {
+            remap_value = false;
+            std::borrow::Cow::Owned(
+                normalize_rust_remap_path_prefix_value_for_key(arg, key_root)
+                    .unwrap_or_else(|| arg.clone()),
+            )
+        } else if arg == "--remap-path-prefix" {
+            remap_value = true;
+            std::borrow::Cow::Borrowed(arg.as_str())
+        } else {
+            std::borrow::Cow::Owned(normalize_request_arg(arg, key_root))
+        }
+    });
+    let cwd = normalize_path_for_request_key(cwd, key_root);
+    let env = request_env_fingerprint_vars(client_env, &compiler, args);
+    if let Err(never) = crate::daemon_core::hash::request_fingerprint::emit_request_fingerprint(
+        &compiler,
+        normalized_args,
+        args,
+        &cwd,
+        &env,
+        |bytes| {
+            h.update(bytes);
+            Ok::<(), std::convert::Infallible>(())
+        },
+    ) {
+        match never {}
+    }
+    h.finalize()
+}
+
+pub(super) fn request_cache_input_paths(
+    state: &SharedState,
+    context_key: &ContextKey,
+    source_path: &NormalizedPath,
+    ctx: &CompileContext,
+) -> Vec<NormalizedPath> {
+    let mut paths = Vec::new();
+    paths.push(source_path.clone());
+    if let Some(includes) = state.dep_graph.load().get_includes(context_key) {
+        paths.extend(includes.iter().cloned());
+    }
+    if let Some(externs) = state.dep_graph.load().get_rustc_externs(context_key) {
+        paths.extend(externs.into_iter().map(|(_, path)| path));
+    }
+    paths.extend(ctx.force_includes.iter().cloned());
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// Build a request-cache entry.
+///
+/// `worktree_bound` must be `true` for any artifact whose bytes embed
+/// absolute paths that no remap pass scrubs — PCH/GCH (`-include`-baked
+/// header AST) and MSVC compiles (PDB/`/Fp`/`/Fd` paths). Setting it forces
+/// `cross_root_shareable = false`, so the entry only matches lookups from
+/// its originating worktree even when every captured path is technically
+/// root-relative. See [`requires_worktree_in_key`] for the truth table and
+/// issue #489 for the diagnostic / DLL-load failure that motivated this.
+pub(super) fn request_cache_entry(
+    context_key: ContextKey,
+    source_path: &NormalizedPath,
+    output_path: &NormalizedPath,
+    depfile_path: Option<&NormalizedPath>,
+    input_paths: Vec<NormalizedPath>,
+    key_root: Option<&NormalizedPath>,
+    worktree_bound: bool,
+) -> RequestCacheEntry {
+    let root = key_root.cloned();
+    let root_path = key_root.map(|root| root.as_path());
+    let source_path = CachedRequestPath::capture(source_path, root_path);
+    let output_path = CachedRequestPath::capture(output_path, root_path);
+    let depfile_path = depfile_path.map(|path| CachedRequestPath::capture(path, root_path));
+    let input_paths: Vec<CachedRequestPath> = input_paths
+        .iter()
+        .map(|path| CachedRequestPath::capture(path, root_path))
+        .collect();
+    // Issue #643: the depfile destination, when present, must also be
+    // root-relative for the cross-worktree fast path to share entries
+    // safely — otherwise a hit in worktree B would write the depfile
+    // back to worktree A's absolute path. When the user supplied an
+    // absolute path that isn't under the key root, fall back to
+    // worktree-bound semantics (`cross_root_shareable = false`).
+    let cross_root_shareable = !worktree_bound
+        && root.is_some()
+        && source_path.is_root_relative()
+        && output_path.is_root_relative()
+        && depfile_path
+            .as_ref()
+            .is_none_or(CachedRequestPath::is_root_relative)
+        && input_paths.iter().all(CachedRequestPath::is_root_relative);
+
+    RequestCacheEntry {
+        context_key,
+        root,
+        source_path,
+        output_path,
+        depfile_path,
+        input_paths,
+        cross_root_shareable,
+        test_harness: false,
+        cached_at: std::time::Instant::now(),
+    }
+}
+
+pub(super) fn request_cache_entry_matches_root(
+    entry: &RequestCacheEntry,
+    key_root: Option<&NormalizedPath>,
+) -> bool {
+    if entry.root.as_ref() == key_root {
+        return true;
+    }
+    entry.cross_root_shareable && entry.root.is_some() && key_root.is_some()
+}
+
+pub(super) fn request_validation_key(
+    request_fp: ContentHash,
+    root: &NormalizedPath,
+) -> RequestValidationKey {
+    RequestValidationKey {
+        request_fp,
+        root: root.clone(),
+    }
+}
+
+pub(super) fn request_cache_resolved_inputs(
+    entry: &RequestCacheEntry,
+    root: &NormalizedPath,
+) -> Option<Vec<NormalizedPath>> {
+    if !entry.cross_root_shareable {
+        return None;
+    }
+    let mut paths = Vec::with_capacity(entry.input_paths.len());
+    for cached_path in &entry.input_paths {
+        if !cached_path.is_root_relative() {
+            return None;
+        }
+        paths.push(cached_path.resolve(Some(root)));
+    }
+    Some(paths)
+}
+
+pub(super) fn request_cache_inputs_fresh_since(
+    journal: &crate::daemon_core::fscache::ChangeJournal,
+    paths: &[NormalizedPath],
+    since: Clock,
+) -> bool {
+    paths
+        .iter()
+        .all(|path| journal_proves_fresh(journal, path, since))
+}
+
+pub(super) fn request_cache_artifact_matches(
+    state: &SharedState,
+    entry: &RequestCacheEntry,
+    request_fp: ContentHash,
+    key_root: Option<&NormalizedPath>,
+    expected_artifact_key_hex: &str,
+    now: Instant,
+    clock: Clock,
+) -> bool {
+    let Some(root) = key_root else {
+        return false;
+    };
+
+    let Some(paths) = request_cache_resolved_inputs(entry, root) else {
+        return false;
+    };
+    let validation_key = request_validation_key(request_fp, root);
+    if let Some(validation) = state.request_validation_cache.get(&validation_key) {
+        if validation.artifact_key_hex == expected_artifact_key_hex
+            && cache_entry_fresh_at(now, validation.cached_at, EPHEMERAL_CACHE_MAX_AGE)
+            && request_cache_inputs_fresh_since(
+                state.cache_system.journal(),
+                &paths,
+                validation.clock,
+            )
+        {
+            return true;
+        }
+    }
+
+    state.cache_system.register_tracked(&paths);
+    let validation_clock = state.cache_system.current_clock();
+
+    let mut file_hashes = Vec::with_capacity(paths.len());
+    for path in paths {
+        let Ok(hash) = hash_file(&state.cache_system, &path, clock) else {
+            return false;
+        };
+        file_hashes.push((path, hash));
+    }
+
+    let Some(logical_context_key) = state
+        .dep_graph
+        .load()
+        .logical_context_key(&entry.context_key)
+    else {
+        return false;
+    };
+    let artifact_key = crate::daemon_core::depgraph::compute_artifact_key(
+        &logical_context_key,
+        &mut file_hashes,
+        Some(root.as_path()),
+    );
+    let matches = artifact_key.hash().to_hex() == expected_artifact_key_hex;
+    if matches {
+        state.request_validation_cache.insert(
+            validation_key,
+            RequestValidationEntry {
+                artifact_key_hex: expected_artifact_key_hex.to_string(),
+                clock: validation_clock,
+                cached_at: std::time::Instant::now(),
+            },
+        );
+    }
+    matches
+}
+
+pub(super) fn strict_paths_mode_from_client_env(
+    client_env: Option<&[(String, String)]>,
+) -> Result<crate::daemon_core::compiler::strict_paths::StrictPathsMode, String> {
+    let Some(env) = client_env else {
+        return Ok(crate::daemon_core::compiler::strict_paths::StrictPathsMode::Off);
+    };
+    crate::daemon_core::compiler::strict_paths::StrictPathsMode::from_env_vars(
+        env.iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    )
+    .map_err(|err| err.to_string())
+}
+
+#[cfg(test)]
+mod show_includes_key_tests {
+    use super::msvc_show_includes_key_flags;
+    use crate::daemon_core::compiler::CompilerFamily;
+
+    fn args(s: &[&str]) -> Vec<String> {
+        s.iter().map(|x| (*x).to_string()).collect()
+    }
+
+    #[test]
+    fn injected_and_caller_passed_compiles_key_differently() {
+        // Issue #1530: the parser drops `/showIncludes`, so without this salt
+        // both spellings hash to one ContextKey while storing different
+        // stdout — and a stripped entry replayed to a CMake + Ninja caller
+        // hands it an empty depfile.
+        let plain = msvc_show_includes_key_flags(CompilerFamily::Msvc, &args(&["/c", "a.c"]));
+        let caller = msvc_show_includes_key_flags(
+            CompilerFamily::Msvc,
+            &args(&["/c", "/showIncludes", "a.c"]),
+        );
+        let user_only = msvc_show_includes_key_flags(
+            CompilerFamily::Msvc,
+            &args(&["/c", "/showIncludes:user", "a.c"]),
+        );
+        assert_eq!(plain, None);
+        assert_eq!(
+            caller,
+            Some("zccache:msvc-showincludes:all".to_string()),
+            "caller-passed /showIncludes must salt the key"
+        );
+        assert_ne!(
+            caller, user_only,
+            "the full and user-only traces produce different stdout"
+        );
+    }
+
+    #[test]
+    fn spelling_variants_share_one_salt() {
+        // `-showincludes` and `/showIncludes` are the same flag, so they must
+        // not fragment the cache.
+        assert_eq!(
+            msvc_show_includes_key_flags(CompilerFamily::Msvc, &args(&["-showincludes", "a.c"])),
+            msvc_show_includes_key_flags(CompilerFamily::Msvc, &args(&["/showIncludes", "a.c"]))
+        );
+    }
+
+    #[test]
+    fn non_msvc_families_are_never_salted() {
+        for family in [
+            CompilerFamily::Gcc,
+            CompilerFamily::Clang,
+            CompilerFamily::Rustc,
+        ] {
+            assert_eq!(
+                msvc_show_includes_key_flags(family, &args(&["/showIncludes", "a.c"])),
+                None
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "keys_env_tests.rs"]
+mod keys_env_tests;

@@ -1,0 +1,837 @@
+//! IPC transport layer for zccache.
+//!
+//! Provides platform-abstracted IPC between CLI/compiler wrapper
+//! and the daemon, using Unix domain sockets on Unix and named
+//! pipes on Windows.
+
+#![allow(clippy::missing_errors_doc)]
+
+pub(crate) mod platform;
+
+pub mod broker;
+pub mod error;
+mod full_family;
+pub mod manifest;
+mod ownership;
+pub mod probe;
+pub mod transport;
+
+pub use broker::{
+    connect_daemon, connect_daemon_with_route, to_running_process_endpoint, BrokerRefusal,
+    DaemonConnectRoute,
+};
+pub use error::IpcError;
+pub use full_family::{
+    full_family_roundtrip, full_family_roundtrip_classified, FullFamilyFailurePhase,
+    FullFamilyRoundtripFailure,
+};
+pub use manifest::{publish_manifest, publish_manifest_in, publish_service_definition};
+pub use ownership::{
+    backend_identity_path, backend_identity_path_for, daemon_identity_matches,
+    daemon_identity_matches_for, force_kill_verified_daemon, force_kill_verified_daemon_for,
+    probe_backend_handle, read_backend_identity, read_backend_identity_for, verify_daemon_pid,
+    verify_daemon_pid_for, write_backend_identity, write_backend_identity_for,
+};
+pub use transport::IpcClientConnection;
+pub use transport::{
+    connect, unique_test_endpoint, IpcConnection, IpcListener, DEFAULT_CLIENT_RECV_TIMEOUT,
+};
+
+use crate::core::NormalizedPath;
+use crate::protocol::{self as protocol, wire_prost, Response};
+
+type ClientConnection = IpcConnection;
+
+/// Daemon control requests that may opt into the v16 prost migration slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonControlRequest {
+    /// Health check.
+    Ping,
+    /// Request daemon status/statistics.
+    Status,
+    /// Request daemon shutdown.
+    Shutdown,
+    /// Clear all caches.
+    Clear,
+}
+
+impl DaemonControlRequest {
+    #[must_use]
+    fn to_protocol_request(self) -> protocol::Request {
+        match self {
+            Self::Ping => protocol::Request::Ping,
+            Self::Status => protocol::Request::Status,
+            Self::Shutdown => protocol::Request::Shutdown,
+            Self::Clear => protocol::Request::Clear,
+        }
+    }
+}
+
+/// Send a `ReleaseWorktreeHandles` request to the daemon and receive its
+/// response. Wraps the wire dispatch the same way [`daemon_control_roundtrip`]
+/// does for the four parameterless control requests, but plumbs the
+/// path-carrying request directly since it cannot be a `Copy` enum variant.
+///
+/// This is the `zccache release-handles --path X` plumbing (#694 Phase 2 — the
+/// standalone CLI surface that ships value to direct-zccache consumers
+/// independently of the router architecture).
+///
+/// # Errors
+///
+/// Returns the IPC error from wire selection or the selected send/receive
+/// path. Invalid `ZCCACHE_DAEMON_WIRE` values are rejected.
+pub async fn daemon_release_worktree_handles_roundtrip(
+    endpoint: &str,
+    path: std::path::PathBuf,
+    recv_timeout: Option<std::time::Duration>,
+) -> Result<Option<Response>, IpcError> {
+    let selection = wire_prost::client_wire_selection_from_env().map_err(IpcError::Endpoint)?;
+    let request = protocol::Request::ReleaseWorktreeHandles {
+        path: crate::core::NormalizedPath::new(path),
+    };
+
+    if broker::broker_lane_active() {
+        let (mut conn, route) = connect_control_client_with_route(endpoint).await?;
+        if matches!(route, DaemonConnectRoute::Broker { .. }) {
+            let request = wire_prost::supported_control_request_to_prost(&request)
+                .map_err(IpcError::Endpoint)?;
+            conn.send_frame_v1_request(&request).await?;
+            return recv_control_wire_response(&mut conn, recv_timeout).await;
+        }
+        drop(conn);
+    }
+
+    // Mirror the `daemon_control_roundtrip_with_selection` dispatch pattern,
+    // inlined here because `Request::ReleaseWorktreeHandles` carries a path
+    // (and so cannot route through the `Copy` `DaemonControlRequest` enum).
+    match selection.preferred_format() {
+        wire_prost::WireFormat::FrameV1 => send_frame(endpoint, &request, recv_timeout).await,
+        wire_prost::WireFormat::ProstV16 => send_prost(endpoint, &request, recv_timeout).await,
+    }
+}
+
+async fn send_prost(
+    endpoint: &str,
+    request: &protocol::Request,
+    recv_timeout: Option<std::time::Duration>,
+) -> Result<Option<Response>, IpcError> {
+    let mut conn = connect_control_client(endpoint).await?;
+    let prost_req =
+        wire_prost::supported_control_request_to_prost(request).map_err(IpcError::Endpoint)?;
+    conn.send_prost(&prost_req).await?;
+    conn.recv_response_for_wire_with_timeout(
+        recv_timeout.unwrap_or(DEFAULT_CLIENT_RECV_TIMEOUT),
+        wire_prost::WireFormat::ProstV16,
+    )
+    .await
+}
+
+async fn send_frame(
+    endpoint: &str,
+    request: &protocol::Request,
+    recv_timeout: Option<std::time::Duration>,
+) -> Result<Option<Response>, IpcError> {
+    let mut conn = connect_control_client(endpoint).await?;
+    let prost_req =
+        wire_prost::supported_control_request_to_prost(request).map_err(IpcError::Endpoint)?;
+    conn.send_frame_v1_request(&prost_req).await?;
+    recv_control_wire_response(&mut conn, recv_timeout).await
+}
+
+/// Send a daemon control request and receive its response.
+///
+/// Only `Ping`, `Status`, `Shutdown`, and `Clear` are eligible for the v16
+/// prost client path. Unset/`auto` `ZCCACHE_DAEMON_WIRE` selects prost.
+///
+/// # Errors
+///
+/// Returns the IPC error from the selected send/receive path, or an endpoint
+/// error when `ZCCACHE_DAEMON_WIRE` is invalid.
+pub async fn daemon_control_roundtrip(
+    endpoint: &str,
+    request: DaemonControlRequest,
+    recv_timeout: Option<std::time::Duration>,
+) -> Result<Option<Response>, IpcError> {
+    let selection = wire_prost::client_wire_selection_from_env().map_err(IpcError::Endpoint)?;
+    daemon_control_roundtrip_with_selection(endpoint, request, recv_timeout, selection).await
+}
+
+async fn daemon_control_roundtrip_with_selection(
+    endpoint: &str,
+    request: DaemonControlRequest,
+    recv_timeout: Option<std::time::Duration>,
+    selection: wire_prost::ClientWireSelection,
+) -> Result<Option<Response>, IpcError> {
+    // Issue #720 Phase 1: when the broker lane carries the connection, the data
+    // wire itself must be the version-checked 0x7A63 FrameV1 envelope. Connect
+    // once through the broker route; if it was actually taken, send the control
+    // request over FrameV1 to the broker-resolved endpoint (the daemon serve
+    // loop already auto-detects it). A direct/fallback route keeps the existing
+    // env-selected behavior byte-for-byte.
+    if broker::broker_lane_active() {
+        let (mut conn, route) = connect_control_client_with_route(endpoint).await?;
+        if matches!(route, DaemonConnectRoute::Broker { .. }) {
+            let request = request.to_protocol_request();
+            let request = wire_prost::supported_control_request_to_prost(&request)
+                .map_err(IpcError::Endpoint)?;
+            conn.send_frame_v1_request(&request).await?;
+            return recv_control_wire_response(&mut conn, recv_timeout).await;
+        }
+        // Broker requested but silently fell back to direct: drop the probe
+        // connection and use the env-selected path below unchanged.
+        drop(conn);
+    }
+
+    match selection.preferred_format() {
+        wire_prost::WireFormat::FrameV1 => {
+            send_frame_control(endpoint, request, recv_timeout).await
+        }
+        wire_prost::WireFormat::ProstV16 => {
+            send_prost_control(endpoint, request, recv_timeout).await
+        }
+    }
+}
+
+async fn connect_control_client(endpoint: &str) -> Result<ClientConnection, IpcError> {
+    let mut conn = connect_daemon(endpoint).await?;
+    conn.set_recv_timeout(DEFAULT_CLIENT_RECV_TIMEOUT);
+    Ok(conn)
+}
+
+/// Like [`connect_control_client`] but reports the broker route taken, so the
+/// control roundtrip can pick the version-checked FrameV1 wire when the broker
+/// lane actually carries the connection (issue #720 Phase 1).
+async fn connect_control_client_with_route(
+    endpoint: &str,
+) -> Result<(ClientConnection, DaemonConnectRoute), IpcError> {
+    let (mut conn, route) = connect_daemon_with_route(endpoint).await?;
+    conn.set_recv_timeout(DEFAULT_CLIENT_RECV_TIMEOUT);
+    Ok((conn, route))
+}
+
+async fn send_prost_control(
+    endpoint: &str,
+    request: DaemonControlRequest,
+    recv_timeout: Option<std::time::Duration>,
+) -> Result<Option<Response>, IpcError> {
+    let mut conn = connect_control_client(endpoint).await?;
+    let request = request.to_protocol_request();
+    let request =
+        wire_prost::supported_control_request_to_prost(&request).map_err(IpcError::Endpoint)?;
+    conn.send_prost(&request).await?;
+    conn.recv_response_for_wire_with_timeout(
+        recv_timeout.unwrap_or(DEFAULT_CLIENT_RECV_TIMEOUT),
+        wire_prost::WireFormat::ProstV16,
+    )
+    .await
+}
+
+async fn send_frame_control(
+    endpoint: &str,
+    request: DaemonControlRequest,
+    recv_timeout: Option<std::time::Duration>,
+) -> Result<Option<Response>, IpcError> {
+    let mut conn = connect_control_client(endpoint).await?;
+    let request = request.to_protocol_request();
+    let request =
+        wire_prost::supported_control_request_to_prost(&request).map_err(IpcError::Endpoint)?;
+    conn.send_frame_v1_request(&request).await?;
+    recv_control_wire_response(&mut conn, recv_timeout).await
+}
+
+async fn recv_control_wire_response(
+    conn: &mut ClientConnection,
+    recv_timeout: Option<std::time::Duration>,
+) -> Result<Option<Response>, IpcError> {
+    let response: Option<protocol::DecodedWireMessage<wire_prost::zccache_v1::Response>> =
+        match recv_timeout {
+            Some(timeout) => conn.recv_wire_with_timeout(timeout).await?,
+            None => conn.recv_wire().await?,
+        };
+
+    match response {
+        Some(
+            protocol::DecodedWireMessage::ProstV16(response)
+            | protocol::DecodedWireMessage::FrameV1 {
+                message: response, ..
+            },
+        ) => wire_prost::supported_control_response_from_prost(response)
+            .map(Some)
+            .map_err(|message| {
+                IpcError::Protocol(protocol::ProtocolError::Deserialization(message))
+            }),
+        None => Ok(None),
+    }
+}
+
+/// Returns the platform-specific default IPC endpoint path.
+///
+/// - Linux: `$XDG_RUNTIME_DIR/zccache/sock` or `/tmp/zccache-$USER/sock`
+/// - macOS: `/tmp/zccache-$USER/sock`
+/// - Windows: `\\.\pipe\zccache-{username}`
+///
+/// If `ZCCACHE_CACHE_DIR` is set, the endpoint is derived from that cache root
+/// so independently managed cache roots get independent daemon instances.
+/// If `ZCCACHE_DAEMON_NAMESPACE` is also set, the sanitized namespace is folded
+/// into the endpoint while the unset/default namespace keeps the historical
+/// endpoint unchanged.
+#[must_use]
+pub fn default_endpoint() -> String {
+    let namespace = crate::core::config::daemon_namespace();
+    if let Some(cache_dir) = normalized_override_root() {
+        return endpoint_for_cache_dir(cache_dir.as_path(), namespace.as_deref());
+    }
+
+    let username =
+        crate::ipc::platform::ipc::current_user_name().unwrap_or_else(|| String::from("unknown"));
+    crate::ipc::platform::ipc::Endpoint::select(
+        default_file_endpoint(namespace.as_deref()),
+        pipe_name(&username, namespace.as_deref()),
+    )
+    .to_string()
+}
+
+pub fn endpoint_for_cache_dir(cache_dir: &std::path::Path, namespace: Option<&str>) -> String {
+    let direct = cache_dir.join(daemon_socket_name(namespace));
+    let direct = direct.to_string_lossy();
+    let file_path = if crate::ipc::platform::ipc::Endpoint::file_path_is_portable(&direct) {
+        direct.into_owned()
+    } else {
+        compact_cache_dir_endpoint(cache_dir, namespace)
+    };
+    let suffix = crate::core::stable_path_id(cache_dir);
+    crate::ipc::platform::ipc::Endpoint::select(file_path, pipe_name(&suffix, namespace)).to_string()
+}
+
+fn compact_cache_dir_endpoint(cache_dir: &std::path::Path, namespace: Option<&str>) -> String {
+    // Endpoint is a Unix socket path; return it as a `String` directly so
+    // we don't round-trip through `PathBuf` only to immediately convert
+    // back via `to_string_lossy`. The previous shape was the only
+    // `ban_std_pathbuf` lint hit in this file.
+    let cache_id = crate::core::stable_path_id(cache_dir);
+    format!("/tmp/zccache-{cache_id}-{}", daemon_socket_name(namespace))
+}
+
+/// Derive a platform IPC endpoint for a portable private daemon name.
+///
+/// When `cache_dir` is supplied the endpoint is rooted in that cache identity;
+/// otherwise it follows the default runtime/tmp/pipe location while folding
+/// the sanitized daemon name into the endpoint.
+#[must_use]
+pub fn endpoint_for_private_daemon_name(
+    cache_dir: Option<&std::path::Path>,
+    daemon_name: &str,
+) -> String {
+    let namespace = crate::core::config::sanitize_daemon_namespace(daemon_name)
+        .unwrap_or_else(|| crate::core::config::DEV_DAEMON_NAMESPACE.to_string());
+    if let Some(cache_dir) = cache_dir {
+        return endpoint_for_cache_dir(cache_dir, Some(&namespace));
+    }
+
+    let username =
+        crate::ipc::platform::ipc::current_user_name().unwrap_or_else(|| String::from("unknown"));
+    crate::ipc::platform::ipc::Endpoint::select(
+        default_file_endpoint(Some(&namespace)),
+        pipe_name(&username, Some(&namespace)),
+    )
+    .to_string()
+}
+
+/// Returns the path for the daemon lock file.
+#[must_use]
+pub fn lock_file_path() -> NormalizedPath {
+    lock_file_path_for(&default_endpoint())
+}
+
+/// Endpoint-scoped counterpart of [`lock_file_path`].
+///
+/// A daemon reachable on a non-default endpoint owns its OWN lock record
+/// (#1904): without the endpoint folded into the name, `zccache stop` on the
+/// default endpoint force-kills a daemon started with
+/// `ZCCACHE_ENDPOINT=/tmp/custom.sock`.
+#[must_use]
+pub fn lock_file_path_for(endpoint: &str) -> NormalizedPath {
+    let namespace = crate::core::config::daemon_namespace();
+    let name = lock_file_name_for(namespace.as_deref(), endpoint);
+    if let Some(cache_dir) = normalized_override_root() {
+        return cache_dir.join(&name);
+    }
+
+    let file_lock = {
+        // Endpoint paths always live inside a directory, but the denied
+        // `expect_used` lint fires when clippy compiles this cfg(unix)
+        // arm (it was landed from a host where clippy never saw it —
+        // caught during soldr#1286 docker-linux verification).
+        let dir = std::path::Path::new(endpoint)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("/tmp"));
+        dir.join(&name)
+    };
+    let windows_lock = { crate::core::config::default_cache_dir().join(&name) };
+    crate::ipc::platform::ipc::select_host_text(
+        file_lock.to_string_lossy().into_owned(),
+        windows_lock.to_string_lossy().into_owned(),
+    )
+    .into()
+}
+
+/// The `v<VERSION>` tag folded into every endpoint + lock name (#1004 / #694
+/// Phase 1). Without it, two installed zccache versions contend for one
+/// socket/pipe/lock and "resolve" the conflict by kill-and-replace ping-pong
+/// (the #755 lifecycle-log herds). With it, each version gets a distinct
+/// front door, so coexisting versions never fight — kill-and-replace becomes a
+/// same-version-only rare path.
+///
+/// Standalone-only: embedded hosts (soldr/fbuild) use synthetic `embedded:`
+/// endpoints and never bind IPC, so they are unaffected.
+fn version_tag() -> String {
+    crate::core::config::versioned_subdir()
+}
+
+fn socket_name(namespace: Option<&str>) -> String {
+    let v = version_tag();
+    match namespace {
+        Some(ns) => format!("sock-{ns}-{v}"),
+        None => format!("sock-{v}"),
+    }
+}
+
+fn daemon_socket_name(namespace: Option<&str>) -> String {
+    let v = version_tag();
+    match namespace {
+        Some(ns) => format!("daemon-{ns}-{v}.sock"),
+        None => format!("daemon-{v}.sock"),
+    }
+}
+
+fn pipe_name(base: &str, namespace: Option<&str>) -> String {
+    let base = crate::core::config::sanitize_ipc_component(base)
+        .unwrap_or_else(|| String::from("unknown"));
+    let v = version_tag();
+    match namespace {
+        Some(ns) => format!("zccache-{base}-{ns}-{v}"),
+        None => format!("zccache-{base}-{v}"),
+    }
+}
+
+fn default_file_endpoint(namespace: Option<&str>) -> String {
+    if let Some(runtime_dir) = crate::ipc::platform::host::runtime_dir() {
+        return format!("{runtime_dir}/zccache/{}", socket_name(namespace));
+    }
+    let user = crate::ipc::platform::host::current_user().unwrap_or_else(|| String::from("unknown"));
+    format!("/tmp/zccache-{user}/{}", socket_name(namespace))
+}
+
+/// #1904 — the endpoint scope segment folded into every ownership-record
+/// name. Mirrors the version/namespace folding in `lock_file_name` and the
+/// `stable_path_id` scoping in `pipe_name`: two endpoints can then never
+/// contend over one record, so no ownership check on write is needed.
+///
+/// The DEFAULT endpoint returns an empty tag so its historical filename stays
+/// byte-for-byte identical for already-installed builds.
+fn endpoint_scope_tag(endpoint: &str) -> String {
+    if endpoint == default_endpoint() {
+        return String::new();
+    }
+    format!(
+        "-{}",
+        crate::core::stable_path_id(std::path::Path::new(endpoint))
+    )
+}
+
+fn lock_file_name_for(namespace: Option<&str>, endpoint: &str) -> String {
+    let v = version_tag();
+    let scope = endpoint_scope_tag(endpoint);
+    match namespace {
+        Some(ns) => format!("daemon-{ns}-{v}{scope}.lock"),
+        None => format!("daemon-{v}{scope}.lock"),
+    }
+}
+
+/// Write the daemon PID to the lock file.
+///
+/// Creates parent directories if needed.
+pub fn write_lock_file(pid: u32) -> Result<(), std::io::Error> {
+    write_lock_file_for(&default_endpoint(), pid)
+}
+
+/// Endpoint-scoped counterpart of [`write_lock_file`] (#1904).
+pub fn write_lock_file_for(endpoint: &str, pid: u32) -> Result<(), std::io::Error> {
+    let path = lock_file_path_for(endpoint);
+    if let Some(parent) = path.parent() {
+        // #1171: same directory family as the socket endpoint.
+        crate::core::config::create_dir_all_private(parent)?;
+    }
+    std::fs::write(&path, pid.to_string())
+}
+
+/// Read the daemon PID from the lock file, if it exists and is valid.
+#[must_use]
+pub fn read_lock_file_pid() -> Option<u32> {
+    read_lock_file_pid_for(&default_endpoint())
+}
+
+/// Endpoint-scoped counterpart of [`read_lock_file_pid`] (#1904).
+#[must_use]
+pub fn read_lock_file_pid_for(endpoint: &str) -> Option<u32> {
+    std::fs::read_to_string(lock_file_path_for(endpoint))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+/// Remove the lock file.
+pub fn remove_lock_file() {
+    remove_lock_file_for(&default_endpoint());
+}
+
+/// Endpoint-scoped counterpart of [`remove_lock_file`] (#1904).
+pub fn remove_lock_file_for(endpoint: &str) {
+    let _ = std::fs::remove_file(lock_file_path_for(endpoint));
+}
+
+/// Retire a stale native endpoint without exposing its host representation.
+pub fn retire_endpoint(endpoint: &str) -> std::io::Result<()> {
+    crate::ipc::platform::ipc::Endpoint::from_native(endpoint).retire()
+}
+
+/// #1003 — the single normalized cache identity for daemon ownership.
+///
+/// When the user pins a cache dir, `--cache-dir /foo` and
+/// `--cache-dir /foo/v<version>` must resolve to the SAME daemon (same
+/// endpoint, lock, and backend identity), or a second client is rejected as a
+/// cache-dir mismatch (#770 / #771). Route the override through
+/// `effective_cache_root_from_top_level` (idempotent — it won't double-append
+/// the version) so both forms converge on one effective versioned root, and
+/// derive the endpoint, lock, and backend-identity from THAT. Returns `None`
+/// when no override is set (the default runtime/tmp/pipe location is used).
+fn normalized_override_root() -> Option<NormalizedPath> {
+    crate::core::config::cache_dir_override()
+        .map(|top| crate::core::config::effective_cache_root_from_top_level(&top))
+}
+
+/// Convert zccache's direct daemon endpoint to the application-owned
+/// endpoint recorded in the daemon identity.
+#[must_use]
+pub fn running_process_endpoint(endpoint: &str) -> kernal_api::daemon_identity::DaemonEndpoint {
+    kernal_api::daemon_identity::DaemonEndpoint::new(
+        crate::core::config::daemon_namespace_label(),
+        running_process_endpoint_path(endpoint),
+    )
+}
+
+fn running_process_endpoint_path(endpoint: &str) -> String {
+    crate::ipc::platform::ipc::Endpoint::from_native(endpoint).to_running_process()
+}
+
+/// Build the current process identity that a zccache daemon exposes to
+/// identity probes.
+///
+/// ISSUE-601 / #1511: the identity is keyed by endpoint and cached for the
+/// process lifetime. It is captured with
+/// [`DaemonIdentityHashPolicy::Blake3Only`](kernal_api::daemon_identity::DaemonIdentityHashPolicy::Blake3Only):
+/// zccache and current running-process brokers identify executables with
+/// BLAKE3, so the legacy SHA-256 wire slot stays zero-filled rather than
+/// paying for a second digest used only by pre-BLAKE3 brokers. First-call
+/// errors still bubble up; only successful values are inserted, so a
+/// transient failure retries on the next call.
+pub fn current_backend_identity(
+    endpoint: &str,
+) -> Result<
+    kernal_api::daemon_identity::DaemonIdentity,
+    kernal_api::daemon_identity::DaemonIdentityError,
+> {
+    use kernal_api::daemon_identity::{DaemonIdentity, DaemonIdentityHashPolicy};
+    use std::sync::LazyLock;
+    static IDENTITY_CACHE: LazyLock<dashmap::DashMap<String, std::sync::Arc<DaemonIdentity>>> =
+        LazyLock::new(dashmap::DashMap::new);
+
+    if let Some(cached) = IDENTITY_CACHE.get(endpoint) {
+        return Ok((**cached).clone());
+    }
+
+    let identity = DaemonIdentity::current_process_with_hash_policy(
+        running_process_endpoint(endpoint),
+        None,
+        DaemonIdentityHashPolicy::Blake3Only,
+    )?;
+    IDENTITY_CACHE.insert(endpoint.to_string(), std::sync::Arc::new(identity.clone()));
+    Ok(identity)
+}
+
+/// The probe responder a zccache daemon serves on its endpoint: it proves
+/// `identity` and hands zccache FrameV1 payloads back to the product wire.
+#[must_use]
+pub fn backend_probe_responder(
+    identity: kernal_api::daemon_identity::DaemonIdentity,
+) -> kernal_api::daemon_identity::ProbeResponder {
+    kernal_api::daemon_identity::ProbeResponder::new(
+        identity,
+        [crate::protocol::wire_frame::ZCCACHE_FRAME_PAYLOAD_PROTOCOL],
+    )
+}
+
+/// Broker escape hatch shared with the running-process rollout plan.
+pub const RUNNING_PROCESS_DISABLE_ENV: &str = kernal_api::broker_client::DISABLE_ENV;
+
+#[must_use]
+pub fn running_process_disabled() -> bool {
+    std::env::var(RUNNING_PROCESS_DISABLE_ENV).is_ok_and(|value| value == "1")
+}
+
+/// Why a daemon process could not be force-killed.
+#[derive(Debug, thiserror::Error)]
+pub enum ForceKillError {
+    /// No process currently owns the PID (it had already exited).
+    #[error("process not found: {pid}")]
+    NotFound {
+        /// Target process identifier.
+        pid: u32,
+    },
+    /// The PID could not be captured as a generation-safe identity.
+    #[error("cannot capture process {pid}: {reason}")]
+    Capture {
+        /// Target process identifier.
+        pid: u32,
+        /// Why the capture failed.
+        reason: String,
+    },
+    /// The host refused or failed the termination.
+    #[error("force-kill of process {pid} failed: {source}")]
+    Kill {
+        /// Target process identifier.
+        pid: u32,
+        /// Host failure.
+        source: kernal_api::platform::process::ProcessIdentityActionError,
+    },
+    /// The persisted daemon identity no longer verifies for control.
+    #[error(transparent)]
+    Verify(#[from] kernal_api::daemon_identity::DaemonVerifyError),
+}
+
+/// Forcefully terminate a process by PID.
+///
+/// This is intended as a last-resort escape hatch when the daemon is no longer
+/// reachable over IPC, so graceful shutdown is not possible. The PID is
+/// captured as a generation-safe identity first, so a reissued PID is never
+/// signaled; a process that already exited is [`ForceKillError::NotFound`].
+pub fn force_kill_process(pid: u32) -> Result<(), ForceKillError> {
+    use kernal_api::platform::process::{
+        capture_identity, force_kill, ProcessIdentityAction, ProcessIdentityCapture,
+    };
+    let identity = match capture_identity(pid) {
+        ProcessIdentityCapture::Found(identity) => identity,
+        ProcessIdentityCapture::Exited => return Err(ForceKillError::NotFound { pid }),
+        ProcessIdentityCapture::Unavailable(reason) => {
+            return Err(ForceKillError::Capture {
+                pid,
+                reason: format!("{reason:?}"),
+            })
+        }
+        ProcessIdentityCapture::Error(err) => {
+            return Err(ForceKillError::Capture {
+                pid,
+                reason: err.to_string(),
+            })
+        }
+    };
+    match force_kill(identity) {
+        Ok(ProcessIdentityAction::Performed) => Ok(()),
+        Ok(ProcessIdentityAction::AlreadyExited) => Err(ForceKillError::NotFound { pid }),
+        Err(source) => Err(ForceKillError::Kill { pid, source }),
+    }
+}
+
+/// Check if a process with the given PID is actually running.
+///
+/// On Windows this is stricter than "the kernel still has a process object for
+/// this PID": the function returns `false` for a terminated process whose
+/// process object is being kept alive by some other handle holder (Task
+/// Manager, Process Explorer, a sibling tool that called `OpenProcess` for
+/// monitoring, etc.); see issue #774 where this caused `taskkill /F` on
+/// `zccache-daemon` to leave the CLI looping against a dead PID until manual
+/// cleanup. The facade's `ProcessLiveness` asks the retained handle whether
+/// the process has been signaled rather than trusting `OpenProcess` success.
+#[must_use]
+pub fn is_process_alive(pid: u32) -> bool {
+    kernal_api::platform::process::ProcessLiveness::open(pid).is_ok_and(|handle| handle.is_alive())
+}
+
+/// Probe whether a daemon is **already serving** at `endpoint`. Returns
+/// `true` iff **all** of the following hold:
+///
+/// 1. The lock file records a PID.
+/// 2. That PID has a persisted canonical identity which verifies as the live
+///    `zccache-daemon` (defends against recycled PIDs — see
+///    [`verify_daemon_pid`]).
+/// 3. We can complete an IPC connect to `endpoint` within `timeout`.
+///
+/// **Why this exists** (issue #640): on Windows, parallel `ninja -jN`
+/// builds create a thundering-herd race where every newly-spawned
+/// daemon pays the 3+ s depgraph-load cost BEFORE attempting to bind
+/// the named pipe. Second-wave daemons (those spawned after a
+/// previous daemon has already won the bind and registered its lock
+/// file) can short-circuit here without paying the load cost — they
+/// see the live PID + working endpoint and exit 0 cleanly. First-wave
+/// daemons (the initial cohort racing for the bind before anyone has
+/// registered) still go through the existing bind error-discrimination
+/// path landed in #639.
+///
+/// The connection returned by `connect` is dropped immediately on a
+/// successful probe — we are only verifying that the other end is
+/// accepting, not exchanging any application-level message. Returning
+/// the connection would make this function harder to use (callers
+/// can't drop it without an explicit shutdown handshake) and the
+/// extra round-trip is wasted work for the common case where the
+/// caller is the daemon itself and is about to exit.
+///
+/// `timeout` caps the worst case. Pick a value that's small relative
+/// to the cost we're avoiding (3+ s depgraph load) but large enough
+/// to absorb normal connect latency under load (typically <50 ms on
+/// a local pipe).
+pub async fn probe_existing_daemon(endpoint: &str, timeout: std::time::Duration) -> bool {
+    // #1904: the PID this probe validates is the one recorded for `endpoint`.
+    // Reading the default endpoint's lock made a daemon probing its own custom
+    // endpoint short-circuit on an unrelated daemon's PID.
+    let Some(pid) = read_lock_file_pid_for(endpoint) else {
+        return false;
+    };
+    // Don't probe ourselves — the post-fork daemon's own PID could be
+    // recorded in the lock file by a sibling racing-init thread under
+    // pathological conditions; treating self as "another daemon" would
+    // be a deadlock.
+    if pid == std::process::id() {
+        return false;
+    }
+    if !verify_daemon_pid_for(endpoint, pid) {
+        return false;
+    }
+    // RUNNING_PROCESS_DISABLE=1 is the upstream broker rollout escape hatch:
+    // skip the BackendHandle probe but keep the existing direct IPC fallback.
+    if !running_process_disabled() && probe_backend_handle(endpoint).is_some() {
+        return true;
+    }
+    match tokio::time::timeout(timeout, crate::ipc::connect(endpoint)).await {
+        Ok(Ok(_conn)) => true,
+        // Connection refused, pipe not yet listening, or any other IPC error:
+        // treat as "no live daemon" and let the caller proceed with full init.
+        Ok(Err(_)) | Err(_) => false,
+    }
+}
+
+/// Generic version of `verify_daemon_pid`: confirms `pid` is alive and its
+/// executable filename (without `.exe`) matches `expected_stem`. Used by
+/// callers that own a different daemon binary (e.g. the download daemon).
+#[must_use]
+pub fn verify_pid_exe_stem(pid: u32, expected_stem: &str) -> bool {
+    if !is_process_alive(pid) {
+        return false;
+    }
+    match crate::ipc::platform::process::inspect::executable_path(pid) {
+        // Got an exe path — only trust the PID if it points at our daemon.
+        Some(exe) => exe_stem_matches(&exe, expected_stem),
+        // Platform doesn't support reading the exe path. Fall back to the
+        // existing alive-only behavior so we don't regress on those platforms.
+        None => true,
+    }
+}
+
+fn exe_stem_matches(path: &std::path::Path, expected_stem: &str) -> bool {
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    let name = name.to_string_lossy();
+    let stem = name.strip_suffix(".exe").unwrap_or(&name);
+    stem == expected_stem
+}
+
+/// Check if a daemon is already running. Returns the PID if alive.
+#[must_use]
+pub fn check_running_daemon() -> Option<u32> {
+    check_running_daemon_for(&default_endpoint())
+}
+
+/// Endpoint-scoped counterpart of [`check_running_daemon`] (#1904).
+///
+/// Both the lock record consulted and the endpoint retired on a confirmed-dead
+/// PID belong to `endpoint` — retiring the default endpoint from a client that
+/// is managing a custom endpoint wedges a live daemon out of reach of every
+/// client.
+#[must_use]
+pub fn check_running_daemon_for(endpoint: &str) -> Option<u32> {
+    let pid = read_lock_file_pid_for(endpoint)?;
+    // A missing or unverifiable backend identity is not proof that a live
+    // daemon is stale: RUNNING_PROCESS_DISABLE and legacy direct IPC both
+    // intentionally retain that compatibility path. Only a confirmed-dead
+    // PID may retire the endpoint or remove its lock; otherwise the caller
+    // still gets a chance to probe/directly shut down the serving daemon.
+    if is_process_alive(pid) {
+        Some(pid)
+    } else {
+        // Confirmed-dead lock file — clean up without disturbing a live but
+        // unverified legacy/direct daemon. #1904: this must retire `endpoint`,
+        // not the default endpoint.
+        remove_lock_file_for(endpoint);
+        let endpoint = crate::ipc::platform::ipc::Endpoint::from_native(endpoint.to_string());
+        let _ = endpoint.retire();
+        None
+    }
+}
+
+/// Shared test-only environment-variable coordination for the `ipc` module
+/// tree. Every test that mutates process env vars must hold [`ENV_LOCK`]
+/// (directly or through a guard) so unit tests in sibling modules cannot
+/// race each other's env mutations.
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard};
+
+    pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Guard that sets/unsets a batch of env vars under the shared lock and
+    /// restores the previous values on drop.
+    pub(crate) struct EnvVarGuard {
+        _lock: MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvVarGuard {
+        pub(crate) fn set_all(vars: &[(&'static str, Option<String>)]) -> Self {
+            let lock = ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let saved = vars
+                .iter()
+                .map(|(key, _)| (*key, std::env::var_os(key)))
+                .collect();
+            for (key, value) in vars {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { _lock: lock, saved }
+        }
+
+        pub(crate) fn unset_all(keys: &[&'static str]) -> Self {
+            let vars: Vec<(&'static str, Option<String>)> =
+                keys.iter().map(|key| (*key, None)).collect();
+            Self::set_all(&vars)
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;

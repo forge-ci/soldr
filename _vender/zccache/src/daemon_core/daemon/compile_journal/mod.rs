@@ -1,0 +1,596 @@
+//! JSONL compile journal for build replay.
+//!
+//! Records every compile/link command for diagnostics and partial replay. One
+//! JSON object per line, written to `{cache_dir}/logs/compile_journal.jsonl`.
+//! Exact replay requires an independently captured trusted environment because
+//! durable journal environment values are secret-filtered.
+//!
+//! Architecture: a lock-free channel feeding a background `std::thread`.
+//! Serialization happens on the caller's async task; the background thread
+//! does file I/O only. Zero contention on the hot path.
+//!
+//! Module layout (originally a single 2K-LOC file; split per `README.md`):
+//! - this `mod.rs` — public types and the [`CompileJournal`] handle
+//! - `derive` — pure rustc-argv -> schema-string helpers
+//! - `outcome` — `Response` -> journal-tuple translator
+//! - `journal_thread` — background writer thread, rotation, GC
+//! - `tests/` — all `#[cfg(test)]` tests, grouped per subject
+
+use std::cell::Cell;
+use std::fs;
+use std::future::Future;
+use std::path::Path;
+use std::sync::{mpsc, Mutex};
+use std::time::SystemTime;
+
+use crate::daemon_core::core::NormalizedPath;
+use serde::{Deserialize, Serialize};
+
+use log_io::{format_timestamp, open_append};
+
+mod derive;
+mod env;
+mod journal_thread;
+mod log_io;
+mod outcome;
+
+#[cfg(test)]
+mod tests;
+
+pub use derive::{derive_crate_name, derive_crate_type, derive_output_ext};
+pub use env::{sanitize_journal_env, SanitizedJournalEnv};
+pub use outcome::{extract_outcome, termination_signal};
+
+use journal_thread::{journal_thread, JournalMessage};
+
+/// Closed enum of `miss_reason` values written to the compile journal.
+///
+/// Per issue #322 the set is finite so consumers can build histograms over
+/// it. The constants are `&'static str` rather than a real enum because the
+/// JSON serialization is a flat string — modeling them as an enum would add
+/// a `to_str()` shim with no extra type safety in the daemon. The `ALL`
+/// slice is the canonical iteration order; new variants must be appended.
+///
+/// Mapping (the *why* of each bucket):
+/// - `context_not_found` — daemon has no dep-graph context for this compile
+///   unit (cold cache, first time the daemon has seen this crate).
+/// - `input_fingerprint_mismatch` — source files, headers, or flags changed
+///   between the cached entry and the current invocation.
+/// - `no_artifact_for_key` — cache key was computed and a context existed,
+///   but the on-disk artifact is gone (e.g. GC'd, never persisted).
+/// - `version_skew` — compiler/toolchain or zccache schema version differs
+///   from the cached entry.
+/// - `uncacheable_input` — invocation parsed but is intrinsically
+///   uncacheable (rustc emits PGO profile, `-C link-arg=…` host-specific,
+///   etc.).
+/// - `unknown` — fallback; emitted whenever the daemon detected a miss but
+///   has not (yet) attributed a precise reason. Follow-up work narrows
+///   `unknown` into the concrete buckets above. Consumers should still
+///   treat the field as present so dashboards don't crash.
+pub mod miss_reason {
+    pub const CONTEXT_NOT_FOUND: &str = "context_not_found";
+    pub const INPUT_FINGERPRINT_MISMATCH: &str = "input_fingerprint_mismatch";
+    pub const NO_ARTIFACT_FOR_KEY: &str = "no_artifact_for_key";
+    pub const VERSION_SKEW: &str = "version_skew";
+    pub const UNCACHEABLE_INPUT: &str = "uncacheable_input";
+    pub const DESTINATION_WRITE_FAILED: &str = "destination_write_failed";
+    pub const UNKNOWN: &str = "unknown";
+
+    /// Closed iteration over all documented buckets. Append-only.
+    pub const ALL: &[&str] = &[
+        CONTEXT_NOT_FOUND,
+        INPUT_FINGERPRINT_MISMATCH,
+        NO_ARTIFACT_FOR_KEY,
+        VERSION_SKEW,
+        UNCACHEABLE_INPUT,
+        DESTINATION_WRITE_FAILED,
+        UNKNOWN,
+    ];
+}
+
+kernal_api::task_local! {
+    static ACTIVE_MISS_REASON: Cell<Option<&'static str>> = ACTIVE_MISS_REASON_TLS;
+}
+
+kernal_api::task_local! {
+    static ACTIVE_CONTEXT_KEY: std::cell::RefCell<Option<String>> = ACTIVE_CONTEXT_KEY_TLS;
+}
+
+kernal_api::task_local! {
+    static ACTIVE_CHILD_MEMORY: Cell<ChildMemory> = ACTIVE_CHILD_MEMORY_TLS;
+}
+
+/// Run one request with an isolated miss-attribution slot.
+///
+/// The caller heap-pins the request future before entering this wrapper.
+/// Compile futures are large in debug builds, and keeping one inline in the
+/// task-local scope can exhaust a worker stack on Windows.
+pub async fn capture_miss_reason<F>(
+    future: std::pin::Pin<Box<F>>,
+) -> (F::Output, Option<&'static str>, Option<String>, ChildMemory)
+where
+    F: Future + ?Sized,
+{
+    ACTIVE_CHILD_MEMORY
+        .scope(Cell::new(ChildMemory::default()), async move {
+            ACTIVE_CONTEXT_KEY
+                .scope(std::cell::RefCell::new(None), async move {
+                    ACTIVE_MISS_REASON
+                        .scope(Cell::new(None), async move {
+                            let output = future.await;
+                            let reason = ACTIVE_MISS_REASON.with(Cell::get);
+                            let context_key = ACTIVE_CONTEXT_KEY.with(|slot| slot.borrow().clone());
+                            let child_memory = ACTIVE_CHILD_MEMORY.with(Cell::get);
+                            (output, reason, context_key, child_memory)
+                        })
+                        .await
+                })
+                .await
+        })
+        .await
+}
+
+/// Memory measured for the compiler/tool children one request spawned.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChildMemory {
+    /// Largest resident high-water mark of a child process itself (soldr#3152).
+    pub peak_rss_bytes: Option<u64>,
+    /// Largest sampled resident total of a child plus its live descendants
+    /// (zccache#1588): the figure that includes a linker grandchild.
+    pub tree_peak_rss_bytes: Option<u64>,
+}
+
+impl ChildMemory {
+    /// Field-wise maximum; an unmeasured field never hides a measured one.
+    #[must_use]
+    pub fn merge(self, other: Self) -> Self {
+        fn max(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+            match (a, b) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            }
+        }
+        Self {
+            peak_rss_bytes: max(self.peak_rss_bytes, other.peak_rss_bytes),
+            tree_peak_rss_bytes: max(self.tree_peak_rss_bytes, other.tree_peak_rss_bytes),
+        }
+    }
+}
+
+/// Record memory measured for one compiler/tool child into the active
+/// compile's journal row. A request may spawn several children; each field
+/// keeps its own largest value. No-op outside a compile scope.
+pub fn record_child_memory(memory: ChildMemory) {
+    let _ = ACTIVE_CHILD_MEMORY.try_with(|slot| slot.set(slot.get().merge(memory)));
+}
+
+/// Record a child's own resident high-water mark only (soldr#3152).
+pub fn record_child_peak_rss(bytes: u64) {
+    record_child_memory(ChildMemory {
+        peak_rss_bytes: Some(bytes),
+        tree_peak_rss_bytes: None,
+    });
+}
+
+/// Record the most specific reason known by the active compile pipeline.
+pub fn record_miss_reason(reason: &'static str) {
+    let _ = ACTIVE_MISS_REASON.try_with(|slot| {
+        let replace = slot
+            .get()
+            .is_none_or(|current| miss_reason_priority(reason) < miss_reason_priority(current));
+        if replace {
+            slot.set(Some(reason));
+        }
+    });
+}
+
+/// Attach the normalized dependency-graph context key to the active compile's
+/// durable journal entry. This makes cross-worktree miss investigations
+/// possible even when the command uses an ephemeral session whose text log is
+/// removed before an external collector can copy it.
+pub fn record_context_key(key: &crate::daemon_core::depgraph::ContextKey) {
+    let value = key.hash().to_hex().to_string();
+    let _ = ACTIVE_CONTEXT_KEY.try_with(|slot| {
+        *slot.borrow_mut() = Some(value);
+    });
+}
+
+fn miss_reason_priority(reason: &str) -> u8 {
+    match reason.as_bytes() {
+        b"destination_write_failed" => 0,
+        b"no_artifact_for_key" => 1,
+        b"version_skew" => 2,
+        b"input_fingerprint_mismatch" => 3,
+        b"context_not_found" => 4,
+        b"uncacheable_input" => 5,
+        _ => 6,
+    }
+}
+
+/// zackees/soldr#2436 D4: the identity stamped into every journal row.
+///
+/// First-set wins: the embedded host (soldr-daemon) calls
+/// [`set_daemon_generation`] with its route-generation identity before the
+/// first compile; a standalone daemon that never does mints a per-process
+/// UUID lazily so rows are still attributable across restarts.
+static DAEMON_GENERATION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Set the generation identity journal rows carry. No-op after first use.
+pub fn set_daemon_generation(value: String) {
+    let _ = DAEMON_GENERATION.set(value);
+}
+
+fn daemon_generation() -> &'static str {
+    DAEMON_GENERATION.get_or_init(|| uuid::Uuid::new_v4().to_string())
+}
+
+/// A single journal entry serialized as one JSON line.
+///
+/// The fields below the legacy block are populated only when `--profile`
+/// mode is wired up (see issue #256, Wave 2). All extended fields skip
+/// serialization when absent so legacy journal lines remain unchanged.
+#[derive(Debug, Serialize)]
+pub struct JournalEntry {
+    /// ISO 8601 UTC timestamp.
+    pub ts: String,
+    /// Outcome: "hit", "miss", "error", "cached_error", "link_hit", "link_miss".
+    pub outcome: &'static str,
+    /// Full path to compiler/tool.
+    pub compiler: String,
+    /// Full argument list (for replay).
+    pub args: Vec<String>,
+    /// Working directory.
+    pub cwd: String,
+    /// Sanitized build-diagnostic environment variables as `[key, value]`
+    /// pairs. Secret-bearing and non-allowlisted variables are omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<SanitizedJournalEnv>,
+    /// Process exit code. Unix signal `N` is encoded as `-(128 + N)`; `-1`
+    /// remains the legacy/daemon-error sentinel.
+    pub exit_code: i32,
+    /// Unix signal that terminated the compiler, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub termination_signal: Option<i32>,
+    /// Session UUID or null for ephemeral.
+    pub session_id: Option<String>,
+    /// zackees/soldr#2436 D4: which daemon process generation served this
+    /// compile. Restart-warmth analysis needs to attribute journal rows to
+    /// generations — a `context_not_found` in generation N+1 for a context
+    /// generation N registered is the restart-loss signature. Set by the
+    /// embedded host via [`set_daemon_generation`]; standalone daemons mint
+    /// a per-process UUID on first use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_generation: Option<String>,
+    /// Wall-clock nanoseconds.
+    pub latency_ns: u128,
+    /// Root-normalized dependency-graph context identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_key: Option<String>,
+    /// soldr#3152: largest resident-memory high-water mark, in bytes, sampled
+    /// from the compiler/tool children this request spawned. Omitted when no
+    /// child ran (a cache hit) or the platform could not measure it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_peak_rss_bytes: Option<u64>,
+    /// zccache#1588: largest sampled resident total of a child plus its live
+    /// descendants, in bytes. Unlike `child_peak_rss_bytes` it includes a
+    /// linker grandchild. Omitted when no child ran or nothing was sampled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tree_peak_rss_bytes: Option<u64>,
+    /// How `tree_peak_rss_bytes` was obtained. `"sampled"`: the maximum of
+    /// periodic current-RSS sums, so a spike between samples can be missed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tree_peak_rss_source: Option<&'static str>,
+
+    // ─── Extended profile-mode fields (issue #256). ─────────────────────
+    // All optional; emission is gated behind `--profile` in a follow-up PR.
+    /// Crate name parsed from `--crate-name`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crate_name: Option<String>,
+    /// Canonical crate kind: one of
+    /// `"lib"`, `"bin"`, `"proc-macro"`, `"build-script"`, `"test"`,
+    /// `"bench"`, `"example"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crate_type: Option<String>,
+    /// Canonical output extension: one of
+    /// `"rlib"`, `"rmeta"`, `"so"`, `"dylib"`, `"exe"`, `"a"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_ext: Option<String>,
+    /// Categorical reason for `outcome: miss` (issue #322). Always populated
+    /// on misses; always omitted on hits/errors. Allowed values are the
+    /// finite set documented in the [`miss_reason`] module (see also
+    /// `docs/journal-schema.md`). `String` (not `&'static str`) so the
+    /// derive(Deserialize) round-trip used in analyzer tooling works.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub miss_reason: Option<String>,
+    /// Evidence bucket — only the dimension that flipped is populated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub miss_diff: Option<MissDiff>,
+    /// Subdivided self-profile timings in nanoseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub self_profile_ns: Option<SelfProfileNs>,
+}
+
+/// Evidence for a cache miss: only the dimension that actually changed
+/// is populated. Empty vectors are omitted from the JSON entirely
+/// (so an empty `MissDiff` serializes as `{}`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MissDiff {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_flags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_deps: Vec<String>,
+}
+
+/// Per-compile self-profile spans, in nanoseconds (matching the
+/// `_ns` convention used throughout zccache).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelfProfileNs {
+    pub hash_inputs: u128,
+    pub lookup: u128,
+    pub decompress: u128,
+    pub store: u128,
+}
+
+/// Pre-captured request metadata for journal logging.
+pub struct JournalContext {
+    pub compiler: String,
+    pub args: Vec<String>,
+    pub cwd: String,
+    pub env: Option<SanitizedJournalEnv>,
+    pub session_id: Option<String>,
+}
+
+impl JournalContext {
+    /// Capture request metadata for durable journal logging.
+    ///
+    /// The compiler request retains its original environment. Only this
+    /// diagnostic copy is filtered, before it can be retained in memory or
+    /// serialized by the global/per-session journal writers.
+    pub fn new(
+        compiler: String,
+        args: Vec<String>,
+        cwd: String,
+        env: Option<Vec<(String, String)>>,
+        session_id: Option<String>,
+    ) -> Self {
+        Self {
+            compiler,
+            args,
+            cwd,
+            env: sanitize_journal_env(env),
+            session_id,
+        }
+    }
+}
+
+impl JournalEntry {
+    /// Create a new journal entry with the current UTC timestamp.
+    ///
+    /// `miss_reason` must be `Some(_)` when `outcome == "miss" | "link_miss"`
+    /// and `None` otherwise. The canonical caller threads the value from
+    /// [`extract_outcome`], which enforces this invariant. The string must
+    /// be one of the constants in the [`miss_reason`] module.
+    pub fn new(
+        ctx: JournalContext,
+        outcome: &'static str,
+        exit_code: i32,
+        latency_ns: u128,
+        miss_reason: Option<&'static str>,
+    ) -> Self {
+        Self {
+            ts: format_timestamp(SystemTime::now()),
+            outcome,
+            compiler: ctx.compiler,
+            args: ctx.args,
+            cwd: ctx.cwd,
+            env: ctx.env,
+            exit_code,
+            termination_signal: None,
+            session_id: ctx.session_id,
+            daemon_generation: Some(daemon_generation().to_string()),
+            latency_ns,
+            context_key: None,
+            child_peak_rss_bytes: None,
+            tree_peak_rss_bytes: None,
+            tree_peak_rss_source: None,
+            crate_name: None,
+            crate_type: None,
+            output_ext: None,
+            miss_reason: miss_reason.map(str::to_string),
+            miss_diff: None,
+            self_profile_ns: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_context_key(mut self, context_key: Option<String>) -> Self {
+        self.context_key = context_key;
+        self
+    }
+
+    /// Both child-memory fields; `tree_peak_rss_source` is set only when a
+    /// tree peak was measured.
+    #[must_use]
+    pub fn with_child_memory(mut self, memory: ChildMemory) -> Self {
+        self.child_peak_rss_bytes = memory.peak_rss_bytes;
+        self.tree_peak_rss_bytes = memory.tree_peak_rss_bytes;
+        self.tree_peak_rss_source = memory.tree_peak_rss_bytes.map(|_| "sampled");
+        self
+    }
+
+    #[must_use]
+    pub fn with_child_peak_rss_bytes(mut self, child_peak_rss_bytes: Option<u64>) -> Self {
+        self.child_peak_rss_bytes = child_peak_rss_bytes;
+        self
+    }
+
+    #[must_use]
+    pub fn with_termination_signal(mut self, termination_signal: Option<i32>) -> Self {
+        self.termination_signal = termination_signal;
+        self
+    }
+
+    /// Issue #256: populate the extended profile-mode fields on an entry.
+    ///
+    /// Called only when the owning session opted in via
+    /// `session-start --profile`. Pure transformation - no I/O.
+    /// `spans` is owned by the compile handler; passing `None`
+    /// emits a record without `self_profile_ns`.
+    ///
+    /// Issue #340: emits an empty `MissDiff` for every miss outcome under
+    /// `--profile` so consumers see the field consistently. Populating the
+    /// `changed_files` / `changed_flags` / `changed_deps` arrays requires a
+    /// `(crate_name, crate_type) -> prior_context` index that doesn't exist
+    /// in the depgraph today — tracked as a follow-up. The presence of an
+    /// empty `MissDiff` is the distinguishing signal from
+    /// `--profile`-off entries (where the field is omitted entirely).
+    #[must_use]
+    pub fn with_profile_fields(mut self, spans: Option<SelfProfileSpans>) -> Self {
+        let derived_name = derive_crate_name(&self.args);
+        let derived_type = derive_crate_type(&self.args);
+        self.output_ext = derive_output_ext(derived_type).map(str::to_string);
+        self.crate_type = derived_type.map(str::to_string);
+        self.crate_name = derived_name;
+        self.self_profile_ns = spans.map(SelfProfileSpans::finish);
+        if matches!(self.outcome, "miss" | "link_miss") {
+            self.miss_diff = Some(MissDiff::default());
+        }
+        self
+    }
+}
+
+/// Issue #256: accumulator for the four `self_profile_ns` span buckets.
+///
+/// Use `handle_compile` to time the hashing, lookup, decompress,
+/// and store phases and call the matching `add_*_ns` method.
+/// Buckets that never receive a sample serialize as `0`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SelfProfileSpans {
+    pub hash_inputs_ns: u128,
+    pub lookup_ns: u128,
+    pub decompress_ns: u128,
+    pub store_ns: u128,
+}
+
+impl SelfProfileSpans {
+    /// Freeze the accumulated counters into the wire shape.
+    #[must_use]
+    pub fn finish(self) -> SelfProfileNs {
+        SelfProfileNs {
+            hash_inputs: self.hash_inputs_ns,
+            lookup: self.lookup_ns,
+            decompress: self.decompress_ns,
+            store: self.store_ns,
+        }
+    }
+
+    /// Add to the `hash_inputs` bucket.
+    pub fn add_hash_inputs_ns(&mut self, ns: u128) {
+        self.hash_inputs_ns = self.hash_inputs_ns.saturating_add(ns);
+    }
+    /// Add to the `lookup` bucket.
+    pub fn add_lookup_ns(&mut self, ns: u128) {
+        self.lookup_ns = self.lookup_ns.saturating_add(ns);
+    }
+    /// Add to the `decompress` bucket.
+    pub fn add_decompress_ns(&mut self, ns: u128) {
+        self.decompress_ns = self.decompress_ns.saturating_add(ns);
+    }
+    /// Add to the `store` bucket.
+    pub fn add_store_ns(&mut self, ns: u128) {
+        self.store_ns = self.store_ns.saturating_add(ns);
+    }
+}
+
+/// JSONL compile journal backed by a sync channel and background writer thread.
+///
+/// The channel is `std::sync::mpsc` (not an async bounded channel) because the
+/// consumer is a plain OS thread doing blocking file I/O — using a runtime
+/// blocking receive here forced the writer through the runtime parking chain
+/// for every message, costing one context switch per entry (ISSUE-101).
+///
+/// The sender is wrapped in `Mutex` so the `CompileJournal` handle remains
+/// `Sync` (callers share it as `Arc<CompileJournal>` across async tasks and
+/// real threads — see `tests::test_concurrent_logging` and the daemon's
+/// `ServerState`). `std::sync::mpsc::Sender` is `Send` but not `Sync`, so a
+/// raw field would break those call sites. The lock is uncontended in
+/// practice (sends are O(1) push onto a lock-free internal queue), so the
+/// overhead is a single uncontended futex acquire — still far cheaper than
+/// the tokio runtime detour we replaced.
+pub struct CompileJournal {
+    sender: Option<Mutex<mpsc::Sender<JournalMessage>>>,
+}
+
+impl CompileJournal {
+    /// Create a new compile journal writing to `log_dir/compile_journal.jsonl`.
+    ///
+    /// Spawns a background thread for all I/O. Returns `noop()` on failure.
+    pub fn new(log_dir: NormalizedPath) -> Self {
+        match Self::try_new(log_dir) {
+            Ok(journal) => journal,
+            Err(e) => {
+                tracing::warn!("compile journal init failed: {e} — running without journal");
+                Self::noop()
+            }
+        }
+    }
+
+    fn try_new(log_dir: NormalizedPath) -> std::io::Result<Self> {
+        fs::create_dir_all(&log_dir)?;
+        let path = log_dir.join("compile_journal.jsonl");
+        let file = open_append(&path)?;
+
+        let (tx, rx) = mpsc::channel();
+
+        std::thread::Builder::new()
+            .name("zccache-journal".into())
+            .spawn(move || journal_thread(rx, path, file))
+            .map_err(std::io::Error::other)?;
+
+        Ok(Self {
+            sender: Some(Mutex::new(tx)),
+        })
+    }
+
+    /// Create a no-op journal that discards all entries.
+    #[must_use]
+    pub fn noop() -> Self {
+        Self { sender: None }
+    }
+
+    /// Log a journal entry. Serialization happens on the caller; file I/O
+    /// happens on the background thread. Never blocks.
+    ///
+    /// If `session_path` is provided, the entry is also written to that
+    /// per-session JSONL file.
+    pub fn log(&self, entry: &JournalEntry, session_path: Option<&Path>) {
+        if let Some(tx) = &self.sender {
+            // Serialize on the caller's thread (async task).
+            match serde_json::to_string(entry) {
+                Ok(line) => {
+                    if let Ok(tx) = tx.lock() {
+                        let _ = tx.send(JournalMessage::Entry {
+                            line,
+                            session_path: session_path.map(Into::into),
+                        });
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("journal serialize error: {e}");
+                }
+            }
+        }
+    }
+
+    /// Close a session journal file handle. Call this when a session ends
+    /// so the background thread can release the file.
+    pub fn close_session(&self, path: &Path) {
+        if let Some(tx) = &self.sender {
+            if let Ok(tx) = tx.lock() {
+                let _ = tx.send(JournalMessage::CloseSession { path: path.into() });
+            }
+        }
+    }
+}

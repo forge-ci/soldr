@@ -1,0 +1,430 @@
+//! Maintenance, stats, and accessor methods for [`DepGraph`].
+//!
+//! Carved out of `mod.rs` to keep each file under the 1k-LOC guard.
+
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
+
+use crate::core::NormalizedPath;
+use crate::hash::ContentHash;
+
+use super::super::context::{CompileContext, ContextKey};
+use super::super::scanner::IncludeDirective;
+use super::super::snapshot::now_unix_ms;
+use super::{ContextEntry, ContextState, DepGraph, DepGraphStats, FileEntry};
+
+impl DepGraph {
+    /// Whether a live context currently points at `artifact_key_hex`.
+    /// Used by disk maintenance to retain a newly-published staged
+    /// generation across daemon startup until its first lookup.
+    pub fn references_artifact_key(&self, artifact_key_hex: &str) -> bool {
+        self.contexts.iter().any(|entry| {
+            entry
+                .artifact_key
+                .as_ref()
+                .is_some_and(|key| key.hash().to_hex() == artifact_key_hex)
+        })
+    }
+
+    /// Clear `artifact_key` on every context whose currently-recorded
+    /// artifact key is in `evicted_hex`. Returns the number of contexts
+    /// whose key was cleared.
+    ///
+    /// **Issue #680 — eviction-divergence fix.** When the disk artifact
+    /// GC (`evict_disk_artifacts`) removes an artifact, the depgraph
+    /// contexts that point at the now-evicted key still report
+    /// `CacheVerdict::Hit { artifact_key }` on their next check, which
+    /// then surfaces in the daemon log as `artifact_not_found` and a
+    /// wasted recompile (the user observed a 15.7% real hit rate on a
+    /// soldr dogfood rebuild that should have been ~99%). Wiring the
+    /// disk GC to call this method after each eviction batch keeps the
+    /// two stores in agreement: the next check on an evicted context
+    /// returns `Cold` (forcing a clean miss + re-store) instead of a
+    /// stale `Hit`.
+    ///
+    /// Key comparison uses the hex form (`ArtifactKey::hash().to_hex()`)
+    /// so callers — which already have the evicted artifacts' string
+    /// keys from the disk eviction pass — do not have to round-trip
+    /// through `ArtifactKey` construction.
+    ///
+    /// `last_accessed_unix_ms` is intentionally NOT bumped — this is a passive
+    /// invalidation, and resetting access time would extend the
+    /// context's `trim()` lifetime past its disk-evicted artifact.
+    pub fn invalidate_artifact_keys(
+        &self,
+        evicted_hex: &std::collections::HashSet<String>,
+    ) -> usize {
+        if evicted_hex.is_empty() {
+            return 0;
+        }
+        // Two-phase to avoid holding DashMap shard locks across the
+        // `evicted_hex.contains(...)` allocation: read-only scan collects
+        // the context keys whose artifact_key needs clearing, then a
+        // bounded set of `get_mut` writes does the clear. Each `get_mut`
+        // takes only the matching shard's lock briefly. This pattern is
+        // what `trim()` and the existing artifact retention loops use to
+        // stay deadlock-free under concurrent compile traffic.
+        let mut to_clear: Vec<ContextKey> = Vec::new();
+        for entry in self.contexts.iter() {
+            if let Some(ref ak) = entry.value().artifact_key {
+                if evicted_hex.contains(ak.hash().to_hex().as_str()) {
+                    to_clear.push(*entry.key());
+                }
+            }
+        }
+        let mut cleared = 0;
+        for ctx_key in &to_clear {
+            if let Some(mut entry) = self.contexts.get_mut(ctx_key) {
+                if entry.artifact_key.is_some() {
+                    entry.artifact_key = None;
+                    cleared += 1;
+                }
+            }
+        }
+        if cleared > 0 {
+            self.mark_dirty();
+        }
+        cleared
+    }
+
+    /// Trim entries not accessed within the given duration.
+    /// Returns the number of entries removed.
+    pub fn trim(&self, max_age: Duration) -> usize {
+        self.trim_at(max_age, now_unix_ms())
+    }
+
+    /// Like [`Self::trim`], with an injected wall-clock `now` (Unix ms).
+    pub fn trim_at(&self, max_age: Duration, now_ms: u64) -> usize {
+        let max_age_ms = u64::try_from(max_age.as_millis()).unwrap_or(u64::MAX);
+
+        // Two-pass eviction avoids holding DashMap shard locks while removing
+        // entries. Under burst load `trim(Duration::ZERO)` can evict many
+        // contexts, so keep each shard lock hold to a short read/remove.
+        let expired: Vec<ContextKey> = self
+            .contexts
+            .iter()
+            .filter_map(|entry| {
+                // Saturating: a timestamp in the future (clock skew) is age 0.
+                // A zero TTL expires everything, even entries stamped this ms.
+                let age = now_ms.saturating_sub(entry.last_accessed_unix_ms);
+                if max_age.is_zero() || age > max_age_ms {
+                    Some(*entry.key())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        self.evict_contexts(&expired)
+    }
+
+    /// Remove the given contexts and prune every index that referenced them
+    /// (equivalence classes, rustc externs, check-metadata compat, and file
+    /// entries no longer referenced by any context). Returns the number of
+    /// contexts actually removed.
+    ///
+    /// Shared by [`Self::trim`] (age-based) and the snapshot size budget's
+    /// LRU eviction (zccache#1661).
+    pub fn evict_contexts(&self, keys: &[ContextKey]) -> usize {
+        let mut removed = 0;
+        for key in keys {
+            if self.contexts.remove(key).is_some() {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            self.mark_dirty();
+        }
+
+        self.indexes.equivalent_contexts.retain(|_, instances| {
+            instances.retain(|instance| self.contexts.contains_key(instance));
+            !instances.is_empty()
+        });
+
+        let live_contexts: std::collections::HashSet<ContextKey> =
+            self.contexts.iter().map(|entry| *entry.key()).collect();
+        let stale_externs: Vec<ContextKey> = self
+            .rustc_externs
+            .iter()
+            .filter_map(|entry| {
+                if live_contexts.contains(entry.key()) {
+                    None
+                } else {
+                    Some(*entry.key())
+                }
+            })
+            .collect();
+        for key in stale_externs {
+            self.rustc_externs.remove(&key);
+        }
+
+        let stale_compat: Vec<ContextKey> = self
+            .rustc_check_metadata_compat
+            .iter()
+            .filter_map(|entry| {
+                if live_contexts.contains(entry.value()) {
+                    None
+                } else {
+                    Some(*entry.key())
+                }
+            })
+            .collect();
+        for key in stale_compat {
+            self.rustc_check_metadata_compat.remove(&key);
+        }
+
+        // Also trim file entries not referenced by any context.
+        let referenced: std::collections::HashSet<NormalizedPath> = self.contexts.iter().fold(
+            std::collections::HashSet::new(),
+            |mut paths,
+             entry: dashmap::mapref::multiple::RefMulti<'_, ContextKey, ContextEntry>| {
+                let entry = entry.value();
+                paths.extend(entry.resolved_includes.iter().cloned());
+                paths.insert(entry.context.source_file.clone());
+                paths.extend(entry.context.force_includes.iter().cloned());
+                paths
+            },
+        );
+
+        let unreferenced_files: Vec<NormalizedPath> = self
+            .files
+            .iter()
+            .filter_map(|entry| {
+                if referenced.contains(entry.key()) {
+                    None
+                } else {
+                    Some(entry.key().clone())
+                }
+            })
+            .collect();
+        for path in unreferenced_files {
+            self.files.remove(&path);
+        }
+
+        removed
+    }
+
+    /// Clear all graph state: files, contexts, and stats counters.
+    pub fn clear(&self) {
+        self.files.clear();
+        self.contexts.clear();
+        self.indexes.equivalent_contexts.clear();
+        self.rustc_externs.clear();
+        self.rustc_check_metadata_compat.clear();
+        self.indexes.path_key_cache.clear();
+        self.checks.store(0, Ordering::Relaxed);
+        self.hits.store(0, Ordering::Relaxed);
+        self.misses.store(0, Ordering::Relaxed);
+        self.mark_dirty();
+    }
+
+    /// Get statistics about the graph.
+    #[must_use]
+    pub fn stats(&self) -> DepGraphStats {
+        DepGraphStats {
+            file_count: self.files.len(),
+            context_count: self.contexts.len(),
+            checks: self.checks.load(Ordering::Relaxed),
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Get the state of a context entry.
+    #[must_use]
+    pub fn get_state(&self, key: &ContextKey) -> Option<ContextState> {
+        self.resolve_instance_key(key)
+            .and_then(|key| self.contexts.get(&key).map(|e| e.state))
+    }
+
+    /// Return the root-normalized identity for an exact mutable instance.
+    /// Request-cache validation uses this to recompute the content-addressed
+    /// artifact key without accidentally folding the checkout discriminator
+    /// into cache identity.
+    #[must_use]
+    pub fn logical_context_key(&self, key: &ContextKey) -> Option<ContextKey> {
+        self.resolve_instance_key(key)
+            .and_then(|key| self.contexts.get(&key).map(|e| e.logical_key))
+    }
+
+    /// Count contexts by state. Returned as `(cold, warm, stale)`.
+    ///
+    /// Used by the daemon's depgraph save / load logging to diagnose
+    /// post-save / post-load state distribution — specifically to find
+    /// out whether contexts are getting persisted as Warm (so `is_cold`
+    /// returns `false` after restore, enabling the cache lookup path)
+    /// or as Cold (so every warm-side compile takes the `cold_skip`
+    /// branch and misses regardless of artifact-store state).
+    #[must_use]
+    pub fn state_breakdown(&self) -> (usize, usize, usize) {
+        let mut cold = 0usize;
+        let mut warm = 0usize;
+        let mut stale = 0usize;
+        for entry in self.contexts.iter() {
+            match entry.value().state {
+                ContextState::Cold => cold += 1,
+                ContextState::Warm => warm += 1,
+                ContextState::Stale => stale += 1,
+            }
+        }
+        (cold, warm, stale)
+    }
+
+    /// Number of contexts whose `artifact_key` is set. Combined with
+    /// `state_breakdown()` this distinguishes contexts that have a
+    /// computed key (a successful prior compile) from contexts that
+    /// were registered but never reached a Warm state.
+    #[must_use]
+    pub fn contexts_with_artifact_key(&self) -> usize {
+        self.contexts
+            .iter()
+            .filter(|e| e.value().artifact_key.is_some())
+            .count()
+    }
+
+    /// Get the resolved includes for a context.
+    #[must_use]
+    pub fn get_includes(&self, key: &ContextKey) -> Option<Vec<NormalizedPath>> {
+        self.resolve_instance_key(key)
+            .and_then(|key| self.contexts.get(&key).map(|e| e.resolved_includes.clone()))
+    }
+
+    /// Get the force-included inputs (`-include`, `-include-pch`, ...) for a
+    /// context. They are key inputs just like resolved includes.
+    #[must_use]
+    pub fn get_force_includes(&self, key: &ContextKey) -> Option<Vec<NormalizedPath>> {
+        self.resolve_instance_key(key).and_then(|key| {
+            self.contexts
+                .get(&key)
+                .map(|e| e.context.force_includes.clone())
+        })
+    }
+
+    /// Get rustc extern input paths for a context.
+    #[must_use]
+    pub fn get_rustc_externs(&self, key: &ContextKey) -> Option<Vec<(String, NormalizedPath)>> {
+        self.resolve_instance_key(key)
+            .and_then(|key| self.rustc_extern_inputs(&key))
+    }
+
+    /// Get the recorded rustc env-dep snapshot for a context
+    /// (zccache#1021): `(name, value_hash_at_last_compile)` pairs where
+    /// `None` = the variable was unset. Empty/absent for non-rustc
+    /// contexts and rustc crates that read no env.
+    #[must_use]
+    pub fn get_rustc_env_deps(
+        &self,
+        key: &ContextKey,
+    ) -> Option<Vec<(String, Option<ContentHash>)>> {
+        self.resolve_instance_key(key)
+            .and_then(|key| self.rustc_env_dep_inputs(&key))
+    }
+
+    /// Get the worktree root a context's key paths are normalized against.
+    /// `None` when the context is unknown or registered without a root.
+    #[must_use]
+    pub fn get_key_root(&self, key: &ContextKey) -> Option<NormalizedPath> {
+        self.resolve_instance_key(key)
+            .and_then(|key| self.contexts.get(&key).and_then(|e| e.key_root.clone()))
+    }
+
+    /// Replace the recorded rustc env-dep snapshot for a context
+    /// (zccache#1021).
+    pub fn set_rustc_env_deps(&self, key: ContextKey, deps: Vec<(String, Option<ContentHash>)>) {
+        let Some(key) = self.resolve_instance_key(&key) else {
+            return;
+        };
+        if let Some(mut entry) = self.contexts.get_mut(&key) {
+            entry.rustc_env_deps = deps;
+            self.mark_dirty();
+        }
+    }
+
+    /// Store scanned includes for a file (shared file node).
+    pub fn store_file_includes(&self, path: NormalizedPath, includes: Vec<IncludeDirective>) {
+        self.files.insert(
+            path,
+            FileEntry {
+                includes,
+                scanned_at: Instant::now(),
+            },
+        );
+        self.mark_dirty();
+    }
+
+    /// Get scanned includes for a file.
+    #[must_use]
+    pub fn get_file_includes(&self, path: &NormalizedPath) -> Option<Vec<IncludeDirective>> {
+        self.files.get(path).map(|e| e.includes.clone())
+    }
+
+    /// Iterate over all context entries.
+    pub(crate) fn contexts_iter(&self) -> dashmap::iter::Iter<'_, ContextKey, ContextEntry> {
+        self.contexts.iter()
+    }
+
+    /// Iterate over all file entries.
+    pub(crate) fn files_iter(&self) -> dashmap::iter::Iter<'_, NormalizedPath, FileEntry> {
+        self.files.iter()
+    }
+
+    /// Mark a context as stale, requiring rescan on next check.
+    /// Returns `true` if the context existed and was marked stale.
+    pub fn mark_stale(&self, key: &ContextKey) -> bool {
+        let Some(key) = self.resolve_instance_key(key) else {
+            return false;
+        };
+        if let Some(mut entry) = self.contexts.get_mut(&key) {
+            entry.state = ContextState::Stale;
+            self.mark_dirty();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Bulk-populate contexts from parsed compile commands.
+    ///
+    /// For each command, parses the arguments, builds a `CompileContext`
+    /// (merging in the provided system include paths), and registers it.
+    /// Returns the context keys for all successfully registered entries.
+    pub fn ingest_compile_commands(
+        &self,
+        commands: &[super::super::compile_commands::CompileCommand],
+        system_includes: &[NormalizedPath],
+    ) -> Vec<ContextKey> {
+        commands
+            .iter()
+            .map(|cmd| {
+                let parsed = cmd.parse();
+                // Issue #1166: compiler identity must be part of the
+                // context key. `compile_commands.json` ingestion is a
+                // bulk warm-priming path (not the live IPC hot path,
+                // which always recomputes via the daemon's
+                // probe-then-fallback `CompilerHashCache`), so a plain
+                // file-content hash is used here. If it doesn't bit-match
+                // the live probe-based hash for the same compiler, the
+                // primed entry simply won't be hit (cheap extra miss,
+                // never a wrong hit — the daemon's own compile-time hash
+                // is always the source of truth for real cache lookups).
+                let compiler_hash = parsed
+                    .compiler
+                    .as_ref()
+                    .and_then(|p| crate::hash::hash_file(p.as_path()).ok())
+                    .unwrap_or_else(|| crate::hash::hash_bytes(b"unknown-compiler"));
+                let mut ctx = CompileContext::from_parsed_args(parsed, compiler_hash);
+
+                // Merge system includes into the context's search paths.
+                // These go into the `system` field, appended after any
+                // explicit -isystem paths.
+                for path in system_includes {
+                    if !ctx.include_search.system.contains(path) {
+                        ctx.include_search.system.push(path.clone());
+                    }
+                }
+
+                self.register(ctx)
+            })
+            .collect()
+    }
+}

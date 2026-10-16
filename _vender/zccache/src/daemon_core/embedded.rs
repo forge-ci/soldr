@@ -1,0 +1,963 @@
+//! First-class in-process zccache service API.
+//!
+//! This module exposes the embedded service contract used by host daemons that
+//! already own an async runtime. The service reuses the daemon compile/session
+//! machinery directly and does not bind or listen on zccache IPC endpoints.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use kernal_api::async_engine::{CancellationSource, CancellationToken, Semaphore, SemaphorePermit};
+
+use crate::daemon_core::core::NormalizedPath;
+use crate::daemon_core::daemon::server::{
+    EmbeddedCompileRequest, EmbeddedDaemon, EmbeddedFlushReport,
+    MaintenanceKind as InternalMaintenanceKind, MaintenancePolicy,
+};
+
+pub use crate::daemon_core::audit::{AuditConfig, AuditContext, AuditEvent};
+pub use crate::daemon_core::core::config::{InvalidMaterializationMode, MaterializationMode};
+pub use crate::daemon_core::core::config::{TestHarnessAdmission, MAX_ADMITTED_TEST_HARNESS_BYTES};
+pub use crate::daemon_core::daemon::compile_journal::ChildMemory;
+pub use crate::daemon_core::daemon::server::compile_resource_gate::{
+    HostAdmissionClassifier, HostAdmissionError, HostAdmissionPermit, HostCompilerRequest,
+};
+pub use crate::daemon_core::daemon::server::{AdmissionDisposition, AdmissionReason};
+pub use control::EmbeddedEventSink;
+pub use observed::{CompileObservation, CompileOptions, ObservedCompileResponse};
+
+mod control;
+mod observed;
+mod reporting;
+mod termination;
+
+/// Result type used by the embedded service API.
+pub type Result<T> = std::result::Result<T, EmbeddedError>;
+
+/// Errors returned by the embedded service API.
+#[derive(Debug, thiserror::Error)]
+pub enum EmbeddedError {
+    #[error("failed to start embedded zccache service: {0}")]
+    Start(String),
+    #[error("embedded zccache compile failed: {0}")]
+    Compile(String),
+    #[error("embedded zccache service is already shut down")]
+    ShutDown,
+    /// The host-provided cancellation token fired, or forced shutdown
+    /// cancelled the operation. Subprocesses already in flight are reaped
+    /// when the suspended future drops; the host should treat this as a
+    /// terminal outcome and not retry the same compile.
+    #[error("embedded zccache operation cancelled")]
+    Cancelled,
+}
+
+/// Opaque in-process zccache service handle.
+#[derive(Clone)]
+pub struct ZccacheService {
+    daemon: Arc<EmbeddedDaemon>,
+    shutdown: Arc<AtomicBool>,
+    /// Snapshot of the host-supplied cancellation token captured at startup.
+    /// Compile calls race it; flush checks only whether it was already latched
+    /// before persistence begins, then keeps ownership until flush completes.
+    host_cancellation: Option<CancellationToken>,
+    /// Service-owned token fired by `shutdown(Force)`. Unlike the optional
+    /// host token, this is always present so forced shutdown can abort work
+    /// submitted through any cloned handle.
+    force_cancellation: CancellationSource,
+    /// Fired when any shutdown begins so admission waiters do not outlive the
+    /// service. This is intentionally separate from `force_cancellation`:
+    /// graceful shutdown rejects queued work without aborting work already in
+    /// the daemon engine.
+    admission_shutdown: CancellationSource,
+    /// Optional admission gate implementing `max_parallel_compiles`.
+    compile_permits: Option<Arc<Semaphore>>,
+    /// RAII handle for the optional host-in-flight counter registration
+    /// (zccache#924). Wrapped in `Arc` so the `Clone` impl on
+    /// `ZccacheService` does not double-register; the slot is cleared
+    /// only when the last clone drops.
+    _host_inflight_guard: Option<Arc<crate::daemon_core::daemon::process::HostInFlightGuard>>,
+    /// Durable audit JSONL writer (zccache#926). Present when the
+    /// `AuditConfig` passed to `start` had `mode > Off`. Held on the
+    /// service so its `Drop` keeps the writer task alive for the
+    /// service's lifetime; flush + shutdown are forwarded from the
+    /// matching `ZccacheService` methods.
+    audit_sink: Option<Arc<crate::daemon_core::audit_writer::AuditSink>>,
+    /// Optional host callback for the same redacted structured events sent to
+    /// the durable audit sink.
+    event_sink: Option<Arc<dyn EmbeddedEventSink>>,
+    /// The host's audit configuration, retained so emitted events can carry
+    /// the selected mode and honor the host's redaction policy. `Arc` keeps
+    /// `Clone` on the service cheap.
+    audit: Arc<AuditConfig>,
+}
+
+/// Configuration for [`ZccacheService::start`].
+#[derive(Debug, Clone)]
+pub struct ZccacheConfig {
+    pub host: HostIdentity,
+    pub cache_root: NormalizedPath,
+    pub audit: AuditConfig,
+    pub limits: ServiceLimits,
+    pub runtime: RuntimeHooks,
+    /// Optional cooperative cancellation token (zccache#923).
+    ///
+    /// Compile dispatch races the token via the canonical ordered race. If the token is
+    /// cancelled before a compile finishes, the operation returns
+    /// [`EmbeddedError::Cancelled`] and the suspended future is dropped —
+    /// which drops the canonical process session's lifecycle owner and
+    /// requests native child-tree termination and reaping. Cancellation is
+    /// not itself an acknowledgement that native cleanup has completed.
+    /// Flush checks for an
+    /// already-cancelled token before entering persistence, but an accepted
+    /// flush is owned to completion so cancellation cannot strand a partial
+    /// checkpoint.
+    ///
+    /// `None` opts out of host-token cancellation. Forced shutdown still
+    /// cancels compiles running through cloned service handles.
+    ///
+    /// Hosts that own a top-level shutdown signal (soldr's daemon
+    /// `Notify`, fbuild's coordinator runtime) should clone their token
+    /// here so a single ctrl-C / SIGINT collapses both the host and the
+    /// embedded service together.
+    pub cancellation: Option<CancellationToken>,
+}
+
+/// Host identity used to namespace and diagnose an embedded service instance.
+///
+/// Feeds the synthetic IPC endpoint string `embedded:<product>:<instance_id>:<workspace_id>`
+/// which in turn keys `current_backend_identity` (a process-wide
+/// `LazyLock<DashMap>` since PR #919). The keying decides which cached
+/// entries survive across daemon restarts within the same process — so
+/// stability of these three strings is a contract, not an aesthetic.
+///
+/// # Stability guidance (zccache#925)
+///
+/// | Field | What it controls | Recommended stability |
+/// |---|---|---|
+/// | `product` | Tags the daemon for diagnostics + the broker name | Constant per product (e.g. `"soldr"`, `"fbuild"`). Treat as a literal string. |
+/// | `instance_id` | Cache-continuity key. Two starts with the same `instance_id` share warm caches; two different `instance_id`s do not. | Stable across daemon restarts on the same host + install. The `HostIdentity::default_for_product` helper hashes `(current_exe, host_data_dir)` which gives you this for free. |
+/// | `workspace_id` | Today: same as `instance_id` (no-op key under the synthetic endpoint). Future: per-call value once it migrates to [`CompileRequest`]. | Until it moves, leave equal to `instance_id` — that's the no-op default. |
+///
+/// What breaks if you violate the contract:
+/// - Changing `instance_id` per daemon restart: the warm `current_backend_identity`
+///   cache for the previous run is unreachable; every restart pays the
+///   first-bind SHA-256 cost again (the 43% on-CPU plateau PR #919 fixed).
+/// - Sharing `instance_id` across two unrelated products in the same process:
+///   their cache entries collide in the DashMap shard.
+/// - Setting `workspace_id` to something other than `instance_id` today:
+///   silently namespaces the cache by workspace, which is rarely intended at
+///   start-time — wait for the per-compile migration.
+///
+/// See `HostIdentity::default_for_product` for the helper that satisfies
+/// these contracts automatically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostIdentity {
+    pub product: String,
+    pub instance_id: String,
+    pub workspace_id: String,
+}
+
+impl HostIdentity {
+    /// Build a `HostIdentity` whose `instance_id` is stable across daemon
+    /// restarts on the same machine + same install.
+    ///
+    /// The instance hash mixes `std::env::current_exe()` (so two soldrs
+    /// installed at different paths get different ids, and an upgrade in
+    /// place keeps the same id when the exe path is unchanged) with the
+    /// caller-supplied `product` string (so two products embedding zccache
+    /// in the same process get distinct ids even if they share an exe).
+    /// `workspace_id` is set equal to `instance_id` so the cache key is
+    /// the no-op single-namespace form until the planned per-compile
+    /// migration (see the type-level doc).
+    ///
+    /// If `std::env::current_exe()` fails the hash falls back to a fixed
+    /// value derived from the product string only — better than panicking
+    /// in a host daemon, but the resulting id is less unique. Callers that
+    /// want a stronger guarantee should construct `HostIdentity` directly.
+    pub fn default_for_product(product: impl Into<String>) -> Self {
+        use kernal_api::hash::Blake3Hasher;
+        let product = product.into();
+        let mut hasher = Blake3Hasher::new();
+        hasher.update(product.as_bytes());
+        hasher.update(b"\0zccache-host-identity-v1\0");
+        if let Ok(exe) = crate::daemon_core::platform::executable::current_image() {
+            hasher.update(exe.as_os_str().to_string_lossy().as_bytes());
+        }
+        let bytes = hasher.finalize();
+        let mut hex = String::with_capacity(32);
+        for byte in &bytes.as_bytes()[..16] {
+            use std::fmt::Write;
+            let _ = write!(hex, "{byte:02x}");
+        }
+        Self {
+            product,
+            instance_id: hex.clone(),
+            workspace_id: hex,
+        }
+    }
+}
+
+/// Runtime integration hooks for a host-owned canonical runtime.
+///
+/// `service_name` labels tasks for runtime diagnostics. When `handle` is set,
+/// every embedded background task is launched through it; otherwise launch
+/// resolves against the ambient runtime, preserving the historical behavior.
+/// The explicit handle lets a host keep all zccache work on its chosen runtime.
+///
+/// (zccache#922 — added in 1.12.12; backward compatible because `handle:
+/// None` exactly matches the prior implicit-runtime behaviour.)
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeHooks {
+    pub service_name: Option<String>,
+    /// The host's Tokio runtime handle. Kept as `tokio::runtime::Handle` so
+    /// hosts (soldr, fbuild) are unaffected by zccache's internal move to
+    /// kernal-api; it is bridged to the facade handle once, at start.
+    pub handle: Option<tokio::runtime::Handle>,
+}
+
+/// Optional service limits. `None` means zccache's existing daemon defaults.
+#[derive(Debug, Clone, Default)]
+pub struct ServiceLimits {
+    /// Maximum compile calls admitted to the daemon engine concurrently.
+    ///
+    /// Additional callers wait asynchronously and remain cancellable. `None`
+    /// preserves unconstrained admission; `Some(0)` is rejected at startup.
+    pub max_parallel_compiles: Option<usize>,
+    /// Optional host-supplied in-flight counter (zccache#924).
+    ///
+    /// When the embedded service runs inside a larger host daemon
+    /// (soldr, fbuild) the host typically owns its own spawn machinery
+    /// for *its* subprocess children — rustc invocations driven
+    /// directly by the host, build tools, etc. zccache's internal
+    /// in-flight counter does not see those spawns, so its `Auto`
+    /// priority decision underestimates the real subprocess pressure
+    /// on the machine: cache-miss compiles get scheduled at `Normal`
+    /// even when the host already has dozens of its own rustc children
+    /// hammering the CPU.
+    ///
+    /// Cloning the host's counter here lets `Auto` add
+    /// `host_in_flight.load(Acquire)` into its pre-increment count
+    /// before deciding `Normal` vs `Low`. The host owns the increment
+    /// / decrement protocol on its side; zccache only reads.
+    ///
+    /// Single-slot contract: only one embedded `ZccacheService` per
+    /// process can register a counter at a time. A second registration
+    /// overwrites the first and logs a `tracing::warn!` so the
+    /// double-register case is debuggable. `None` keeps today's
+    /// behavior — `Auto` consults only zccache's internal counter.
+    pub host_in_flight: Option<Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+/// Opaque RAII reservation for one unit of embedded host work.
+///
+/// Obtain this from [`ZccacheService::acquire_external_work_permit`] before
+/// starting host-owned compiler-adjacent work. It shares the exact admission
+/// capacity used by [`ZccacheService::compile`], and releases that capacity
+/// when dropped. When `ServiceLimits::max_parallel_compiles` is `None`, the
+/// guard is still usable but carries no semaphore reservation.
+#[must_use = "keep this permit alive while the admitted host work runs"]
+pub struct ExternalWorkPermit {
+    _permit: Option<SemaphorePermit>,
+}
+
+/// Optional artifact-store limits for [`ZccacheService::start_with_disk_limits`].
+#[derive(Debug, Clone, Default)]
+pub struct DiskCacheLimits {
+    /// Maximum physical bytes for cached artifacts in this exact service root.
+    ///
+    /// Mutually exclusive with [`Self::max_cache_percent`]. `None` uses the
+    /// dynamic default: 5% of filesystem capacity, clamped to 40-200 GiB and
+    /// reduced as needed to preserve the disk-recovery reserve (capped at half
+    /// the volume on small filesystems so the cache remains useful). Small
+    /// root-local state such as indexes, logs, and daemon metadata is outside
+    /// this artifact-store budget.
+    pub max_cache_bytes: Option<u64>,
+    /// Maximum percentage of filesystem capacity for cached artifacts in this
+    /// exact service root.
+    ///
+    /// Valid values are 1 through 100. Mutually exclusive with
+    /// [`Self::max_cache_bytes`].
+    pub max_cache_percent: Option<u8>,
+}
+
+/// One compile invocation submitted to the embedded service.
+#[derive(Debug, Clone)]
+pub struct CompileRequest {
+    pub audit: AuditContext,
+    pub compiler: NormalizedPath,
+    pub args: Vec<String>,
+    pub cwd: NormalizedPath,
+    pub env: Vec<(String, String)>,
+    pub stdin: Vec<u8>,
+}
+
+/// Compile response returned by the embedded service.
+#[derive(Debug, Clone)]
+pub struct CompileResponse {
+    pub exit_code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub cached: bool,
+    pub cache_outcome: CacheOutcome,
+    pub compile_id: String,
+    /// Memory measured for the compiler/tool children this compile spawned:
+    /// the child's own resident high-water mark and the sampled peak of its
+    /// whole live process tree (zccache#1588). Both fields are `None` for a
+    /// cache hit. The same values are journaled; hosts that schedule by
+    /// measured memory read them here instead of parsing the journal.
+    pub child_memory: ChildMemory,
+}
+
+/// Conservative cache outcome exposed by the MVP embedded API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheOutcome {
+    Hit,
+    Miss,
+    Error,
+}
+
+/// Streaming compile event (issue #937). Yielded by
+/// [`ZccacheService::compile_streaming`] as the compiler produces output —
+/// `Stdout` and `Stderr` chunks arrive incrementally; the terminal
+/// `Done` event carries the exit code and cache outcome.
+///
+/// Live chunks use a bounded channel and retained output is capped with an
+/// explicit truncation marker. Cache hits replay through the same event shape.
+#[derive(Debug, Clone)]
+pub enum CompileChunk {
+    /// A chunk of compiler stdout bytes.
+    Stdout(Vec<u8>),
+    /// A chunk of compiler stderr bytes.
+    Stderr(Vec<u8>),
+    /// Terminal event with the compile's outcome metadata. Unix signal
+    /// termination uses the same reserved negative `exit_code` representation
+    /// as [`CompileResponse`].
+    Done {
+        exit_code: i32,
+        cached: bool,
+        cache_outcome: CacheOutcome,
+        compile_id: String,
+        /// See [`CompileResponse::child_memory`].
+        child_memory: ChildMemory,
+    },
+}
+
+/// Shutdown behavior requested by the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownMode {
+    Graceful,
+    Force,
+}
+
+/// Report returned by [`ZccacheService::shutdown`].
+#[derive(Debug, Clone)]
+pub struct ShutdownReport {
+    pub mode: ShutdownMode,
+    pub flushed: FlushReport,
+}
+
+/// Report returned by [`ZccacheService::flush`].
+#[derive(Debug, Clone)]
+pub struct FlushReport {
+    pub pending_writes_drained: bool,
+    pub artifact_entries: u64,
+    pub metadata_entries: u64,
+}
+
+/// Detailed report returned by [`ZccacheService::flush_detailed`].
+///
+/// This separate additive type preserves the source-compatible shape of the
+/// original public [`FlushReport`] for downstream 1.x users that construct or
+/// exhaustively destructure it.
+#[derive(Debug, Clone)]
+pub struct DetailedFlushReport {
+    pub pending_writes_drained: bool,
+    pub index_writer_drained: bool,
+    pub steps: Vec<FlushStepReport>,
+    pub artifact_entries: u64,
+    pub metadata_entries: u64,
+}
+
+impl DetailedFlushReport {
+    /// `true` only when every queued write, index update, and persistence step
+    /// completed successfully. Regular flushes bound acquisition of the
+    /// publication barrier; once persistence starts its workers are awaited
+    /// to completion.
+    pub fn is_complete(&self) -> bool {
+        self.pending_writes_drained
+            && self.index_writer_drained
+            && self
+                .steps
+                .iter()
+                .all(|step| matches!(step.outcome, FlushStepOutcome::Completed))
+    }
+}
+
+/// Detailed report returned by [`ZccacheService::shutdown_detailed`].
+#[derive(Debug, Clone)]
+pub struct DetailedShutdownReport {
+    pub mode: ShutdownMode,
+    pub flushed: DetailedFlushReport,
+}
+
+/// Outcome of one cache-persistence step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlushStepOutcome {
+    Completed,
+    Failed(String),
+    TimedOut,
+}
+
+/// Named result for one cache-persistence step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlushStepReport {
+    pub step: String,
+    pub outcome: FlushStepOutcome,
+}
+
+/// Scope of a host-requested disk-maintenance pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskMaintenanceKind {
+    /// Apply disk-pressure thresholds only.
+    Pressure,
+    /// Also expire entries older than 30 days.
+    Full,
+}
+
+/// Selects who schedules periodic disk-maintenance passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaintenanceOwnership {
+    /// The embedded service runs its own pressure and daily full passes.
+    Embedded,
+    /// The embedding host calls [`ZccacheService::maintain_disk`] from its
+    /// existing lifecycle scheduler.
+    Host,
+}
+
+/// Additive startup options for embedded hosts that need non-default storage
+/// or maintenance ownership without expanding [`ZccacheConfig`].
+#[derive(Debug, Clone)]
+pub struct ZccacheStartOptions {
+    pub disk_limits: DiskCacheLimits,
+    pub maintenance_ownership: MaintenanceOwnership,
+    /// Optional base for private compiler outputs.
+    ///
+    /// The service creates and cleans only its own `zccache-staging` child
+    /// beneath this directory. `None` keeps staging under the cache root.
+    pub staging_root: Option<NormalizedPath>,
+}
+
+impl Default for ZccacheStartOptions {
+    fn default() -> Self {
+        Self {
+            disk_limits: DiskCacheLimits::default(),
+            maintenance_ownership: MaintenanceOwnership::Embedded,
+            staging_root: None,
+        }
+    }
+}
+
+/// Pressure tier observed during a disk-maintenance pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskMaintenancePressure {
+    None,
+    Soft,
+    Hard,
+}
+
+/// Report returned by [`ZccacheService::maintain_disk`].
+#[derive(Debug, Clone)]
+pub struct DiskMaintenanceReport {
+    pub kind: DiskMaintenanceKind,
+    pub pressure: DiskMaintenancePressure,
+    /// Resolved artifact-store budget for this pass.
+    pub budget_bytes: u64,
+    /// Allocated artifact bytes plus in-flight writes before maintenance.
+    pub usage_before_bytes: u64,
+    /// Allocated artifact bytes plus in-flight writes after maintenance.
+    pub usage_after_bytes: u64,
+    /// Difference between `usage_before_bytes` and `usage_after_bytes`.
+    pub bytes_reclaimed: u64,
+    pub artifacts_removed: usize,
+    pub expired_artifacts_removed: usize,
+    /// In-flight artifact bytes included in both usage measurements.
+    pub pending_write_bytes: u64,
+}
+
+/// Current service statistics.
+#[derive(Debug, Clone)]
+pub struct ServiceStats {
+    pub cache_root: NormalizedPath,
+    pub uptime_secs: u64,
+    pub total_compilations: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub non_cacheable: u64,
+    pub compile_errors: u64,
+    pub compile_errors_cached: u64,
+    pub time_saved_ms: u64,
+    pub artifact_count: u64,
+    pub cache_size_bytes: u64,
+    pub metadata_entries: u64,
+    pub dep_graph_contexts: u64,
+    pub dep_graph_files: u64,
+    pub sessions_total: u64,
+    pub sessions_active: u64,
+    pub phase_profile: crate::daemon_core::protocol::PhaseProfileSummary,
+}
+
+impl ZccacheService {
+    /// Start an in-process zccache service on the caller's canonical runtime.
+    ///
+    /// When `config.runtime.handle` is `Some`, persistent background tasks
+    /// owned by the embedded daemon (the artifact-index writer plus memory
+    /// and disk maintenance loops) spawn via the supplied
+    /// [`kernal_api::async_engine::RuntimeHandle`]. When `None`, they spawn on the ambient
+    /// runtime — which works because this function is `async` and therefore
+    /// runs inside one. The explicit form is the zccache#922 contract for
+    /// host daemons that want to assert all embedded work shares their
+    /// runtime (for runtime diagnostics, graceful-shutdown signalling,
+    /// and related diagnostics).
+    pub async fn start(config: ZccacheConfig) -> Result<Self> {
+        Self::start_with_options(config, ZccacheStartOptions::default()).await
+    }
+
+    /// Start an embedded service with an explicit artifact-store budget.
+    ///
+    /// This separate constructor keeps existing `ServiceLimits` struct
+    /// literals source-compatible while allowing hosts to own independent
+    /// cache budgets for each exact product root.
+    pub async fn start_with_disk_limits(
+        config: ZccacheConfig,
+        disk_limits: DiskCacheLimits,
+    ) -> Result<Self> {
+        Self::start_with_options(
+            config,
+            ZccacheStartOptions {
+                disk_limits,
+                ..ZccacheStartOptions::default()
+            },
+        )
+        .await
+    }
+
+    /// Start an embedded service whose periodic maintenance owner is explicit.
+    pub async fn start_with_disk_limits_and_maintenance(
+        config: ZccacheConfig,
+        disk_limits: DiskCacheLimits,
+        maintenance_ownership: MaintenanceOwnership,
+    ) -> Result<Self> {
+        Self::start_with_options(
+            config,
+            ZccacheStartOptions {
+                disk_limits,
+                maintenance_ownership,
+                ..ZccacheStartOptions::default()
+            },
+        )
+        .await
+    }
+
+    /// Start an embedded service with additive storage and ownership options.
+    ///
+    /// Existing constructors preserve their source-compatible defaults;
+    /// hosts that need a short private compiler-output root use this method.
+    pub async fn start_with_options(
+        config: ZccacheConfig,
+        options: ZccacheStartOptions,
+    ) -> Result<Self> {
+        Self::start_internal(config, options, None, None).await
+    }
+
+    /// Start with an opt-in host compiler-admission policy.
+    ///
+    /// The policy is evaluated only after cache-hit classification and before
+    /// zccache acquires its canonical compiler admission. This additive
+    /// constructor keeps existing [`ZccacheConfig`] and
+    /// [`ZccacheStartOptions`] struct literals source-compatible.
+    pub async fn start_with_host_admission_classifier(
+        config: ZccacheConfig,
+        classifier: Arc<dyn HostAdmissionClassifier>,
+    ) -> Result<Self> {
+        Self::start_internal(
+            config,
+            ZccacheStartOptions::default(),
+            None,
+            Some(classifier),
+        )
+        .await
+    }
+
+    /// Start with explicit service options and a host compiler-admission policy.
+    pub async fn start_with_options_and_host_admission_classifier(
+        config: ZccacheConfig,
+        options: ZccacheStartOptions,
+        classifier: Arc<dyn HostAdmissionClassifier>,
+    ) -> Result<Self> {
+        Self::start_internal(config, options, None, Some(classifier)).await
+    }
+
+    /// Emit one durable audit event, if the host enabled audit.
+    ///
+    /// #905: the sink was started, flushed and shut down but nothing ever
+    /// called `emit`, so a host that configured `audit.jsonl` got a file that
+    /// was created, rotated and always empty. This is the seam that feeds it.
+    ///
+    /// Costs one `Option` check when audit is off (`AuditMode::Off` makes
+    /// `AuditSink::start` return `None`), so the default path is unaffected.
+    ///
+    /// A failed emit is dropped, never propagated: losing an audit record must
+    /// not fail a compile that otherwise succeeded. `AuditSink` already owns
+    /// the backpressure policy and its own lost-event counter, so a caller
+    /// here has nothing useful to add.
+    fn emit_audit(
+        &self,
+        context: &AuditContext,
+        category: &'static str,
+        event: &'static str,
+        level: crate::daemon_core::audit::AuditLevel,
+        duration_ns: Option<u64>,
+        fields: &[(&'static str, serde_json::Value)],
+    ) {
+        if self.audit_sink.is_none() && self.event_sink.is_none() {
+            return;
+        }
+        let (Ok(event_id), Ok(span_id), Ok(category), Ok(event)) = (
+            crate::daemon_core::audit::AuditId::new(uuid::Uuid::new_v4().to_string()),
+            crate::daemon_core::audit::AuditId::new(uuid::Uuid::new_v4().to_string()),
+            crate::daemon_core::audit::AuditCategory::new(category),
+            crate::daemon_core::audit::AuditEventName::new(event),
+        ) else {
+            // Every argument is a compile-time constant or a fresh UUID, so
+            // this is unreachable in practice; returning beats unwrapping in
+            // a path that must never take down a compile.
+            return;
+        };
+        let mut record = crate::daemon_core::audit::AuditEvent::new(
+            event_id,
+            context.clone(),
+            span_id,
+            category,
+            event,
+            // No date-time dependency in this crate, and the repo convention
+            // is nanoseconds everywhere internally (see CLAUDE.md), so the
+            // timestamp is epoch nanos as a decimal string. It sorts
+            // lexically within a fixed width and needs no formatter.
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos())
+                .to_string(),
+        );
+        record.level = level;
+        record.mode = self.audit.mode;
+        record.duration_ns = duration_ns;
+        for (key, value) in fields {
+            record = record.with_field(*key, value.clone());
+        }
+        let record = record.apply_redaction(&self.audit.redaction);
+        if let Some(sink) = &self.event_sink {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink.emit(&record)))
+                .is_err()
+            {
+                tracing::warn!("embedded host event sink panicked; event dropped");
+            }
+        }
+        if let Some(sink) = &self.audit_sink {
+            let _ = sink.emit(record);
+        }
+    }
+
+    /// Compile using the embedded daemon engine.
+    ///
+    /// Honors [`ZccacheConfig::cancellation`] and forced shutdown: if either
+    /// cancellation source fires before the compile finishes, the call returns
+    /// [`EmbeddedError::Cancelled`] and drops the in-flight compile future.
+    /// Canonical process sessions use kill-on-drop ownership, requesting
+    /// native termination and reaping when that future is dropped. The
+    /// cancellation result does not wait for a cleanup acknowledgement; hosts should
+    /// treat `Cancelled` as terminal (no retry inside the same shutdown).
+    pub async fn compile(&self, request: CompileRequest) -> Result<CompileResponse> {
+        self.compile_with_options(request, CompileOptions::default())
+            .await
+            .map(|observed| observed.response)
+    }
+
+    async fn compile_inner(
+        &self,
+        request: CompileRequest,
+        options: CompileOptions,
+    ) -> Result<ObservedCompileResponse> {
+        let _compile_permit = self.acquire_compile_permit().await?;
+        let compile_id = request
+            .audit
+            .compile_id
+            .clone()
+            .or_else(|| request.audit.command_id.clone())
+            .map(String::from)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(EmbeddedError::ShutDown);
+        }
+        // Fast-path: token already fired before we did anything else.
+        // Avoids spawning the compile only to immediately cancel it.
+        if let Some(token) = &self.host_cancellation {
+            if token.is_cancelled() {
+                return Err(EmbeddedError::Cancelled);
+            }
+        }
+        if self.force_cancellation.is_cancelled() {
+            return Err(EmbeddedError::Cancelled);
+        }
+        // Carry the resolved `compile_id` on every event for this compile, so
+        // the host's own records correlate by id rather than by timestamp.
+        let audit = {
+            let mut audit = request.audit.clone();
+            audit.compile_id = crate::daemon_core::audit::AuditId::new(compile_id.clone()).ok();
+            audit
+        };
+        let started = std::time::Instant::now();
+        self.emit_audit(
+            &audit,
+            crate::daemon_core::audit::AuditCategory::ZCCACHE_COMPILE,
+            crate::daemon_core::audit::AuditEventName::COMPILE_STARTED,
+            crate::daemon_core::audit::AuditLevel::Info,
+            None,
+            &[(
+                "compiler",
+                serde_json::Value::from(request.compiler.as_path().display().to_string()),
+            )],
+        );
+        let compile_future = self.daemon.compile(EmbeddedCompileRequest {
+            compiler: request.compiler.into_path_buf(),
+            args: request.args,
+            cwd: request.cwd.into_path_buf(),
+            env: Some(request.env),
+            stdin: request.stdin,
+            test_harness_admission: options.test_harness_admission,
+        });
+        let outcome = self.await_compile(compile_future).await;
+        // Every `compile.started` must get a `compile.finished`, including on
+        // the cancel and spawn-failure paths. An audit log with dangling
+        // starts cannot be used to measure anything, and those are exactly
+        // the compiles an operator most wants to find.
+        let response = match outcome {
+            Ok(response) => response,
+            Err(error) => {
+                self.emit_audit(
+                    &audit,
+                    crate::daemon_core::audit::AuditCategory::ZCCACHE_COMPILE,
+                    crate::daemon_core::audit::AuditEventName::COMPILE_FINISHED,
+                    crate::daemon_core::audit::AuditLevel::Error,
+                    Some(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)),
+                    &[("error", serde_json::Value::from(error.to_string()))],
+                );
+                return Err(error);
+            }
+        };
+        let cache_outcome = if response.exit_code != 0 {
+            CacheOutcome::Error
+        } else if response.cached {
+            CacheOutcome::Hit
+        } else {
+            CacheOutcome::Miss
+        };
+        let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        // No `cache_key` field: the key is derived inside the engine and is
+        // not visible at this boundary. Emitting `cache.lookup` with the key
+        // needs plumbing through `EmbeddedCompileRequest` — deliberately left
+        // to a follow-up rather than guessed at here.
+        match cache_outcome {
+            CacheOutcome::Hit => self.emit_audit(
+                &audit,
+                crate::daemon_core::audit::AuditCategory::ZCCACHE_CACHE_LOOKUP,
+                crate::daemon_core::audit::AuditEventName::CACHE_HIT,
+                crate::daemon_core::audit::AuditLevel::Info,
+                Some(elapsed_ns),
+                &[],
+            ),
+            CacheOutcome::Miss => self.emit_audit(
+                &audit,
+                crate::daemon_core::audit::AuditCategory::ZCCACHE_CACHE_LOOKUP,
+                crate::daemon_core::audit::AuditEventName::CACHE_MISS,
+                crate::daemon_core::audit::AuditLevel::Info,
+                Some(elapsed_ns),
+                &[],
+            ),
+            // A failed compile is not a cache outcome; `compile.finished`
+            // below carries the exit code.
+            CacheOutcome::Error => {}
+        }
+        termination::emit_compile_finished(self, &audit, &response, elapsed_ns);
+        let (admission, reason) = response.admission;
+        Ok(ObservedCompileResponse {
+            observation: CompileObservation {
+                cache_outcome,
+                admission,
+                reason,
+                logical_artifact_bytes: response.logical_artifact_bytes,
+            },
+            response: CompileResponse {
+                exit_code: response.exit_code,
+                stdout: response.stdout.as_ref().clone(),
+                stderr: response.stderr.as_ref().clone(),
+                cached: response.cached,
+                cache_outcome,
+                compile_id,
+                child_memory: response.child_memory,
+            },
+        })
+    }
+
+    /// Streaming compile (issue #937). Invokes `on_chunk` as compiler output
+    /// arrives, then once with the terminal `Done` event. Per-stream ordering
+    /// is preserved; ordering between stdout and stderr follows the pipe drain.
+    ///
+    /// The callback runs inline and applies backpressure to the bounded drain.
+    /// Retained output is capped at 1 MiB per stream by default; set
+    /// `ZCCACHE_STREAM_CAPTURE_LIMIT_BYTES` to a positive byte count to change
+    /// it. Truncation is explicit and the same marker is cached and replayed.
+    pub async fn compile_streaming<F>(&self, request: CompileRequest, on_chunk: F) -> Result<()>
+    where
+        F: FnMut(CompileChunk),
+    {
+        self.compile_streaming_with_options(request, CompileOptions::default(), on_chunk)
+            .await
+            .map(|_observation| ())
+    }
+
+    /// Return a daemon-compatible stats snapshot.
+    pub async fn stats(&self) -> Result<ServiceStats> {
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(EmbeddedError::ShutDown);
+        }
+        Ok(ServiceStats::from_snapshot(self.daemon.stats().await))
+    }
+
+    /// Run disk maintenance against this service's exact configured cache root.
+    ///
+    /// [`MaintenanceOwnership::Embedded`] also runs pressure checks every five
+    /// minutes and a persisted full-age pass every 24 hours.
+    /// [`MaintenanceOwnership::Host`] suppresses that scheduler so the host
+    /// calls this method from its own lifecycle loop. Neither form scans
+    /// sibling product roots.
+    pub async fn maintain_disk(
+        &self,
+        kind: DiskMaintenanceKind,
+    ) -> std::io::Result<DiskMaintenanceReport> {
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "embedded zccache service is already shut down",
+            ));
+        }
+        let kind = match kind {
+            DiskMaintenanceKind::Pressure => InternalMaintenanceKind::Pressure,
+            DiskMaintenanceKind::Full => InternalMaintenanceKind::Full,
+        };
+        self.daemon
+            .maintain_disk(kind)
+            .await
+            .map(DiskMaintenanceReport::from_report)
+    }
+
+    /// Flush pending embedded service state to disk.
+    ///
+    /// A token cancelled before the flush starts returns
+    /// [`EmbeddedError::Cancelled`]. Once persistence begins it remains owned
+    /// until completion: dropping an awaited `spawn_blocking` join does not
+    /// cancel the disk write and could let an older checkpoint race a later
+    /// archive.
+    async fn flush_internal(&self) -> Result<EmbeddedFlushReport> {
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(EmbeddedError::ShutDown);
+        }
+        if let Some(token) = &self.host_cancellation {
+            if token.is_cancelled() {
+                return Err(EmbeddedError::Cancelled);
+            }
+        }
+        let report = self.daemon.flush().await;
+        // zccache#926: drain pending audit events to disk along with
+        // the cache state. Best-effort — a failure to flush the audit
+        // sink does not block the embedded service flush from
+        // succeeding; it only means the host saw a possibly-empty
+        // tail in the JSONL.
+        if let Some(sink) = &self.audit_sink {
+            let _ = sink.flush().await;
+        }
+        Ok(report)
+    }
+
+    pub async fn flush(&self) -> Result<FlushReport> {
+        self.flush_internal().await.map(FlushReport::from_report)
+    }
+
+    /// Flush pending embedded state and report every durability phase.
+    ///
+    /// Persistence workers remain owned until they complete. A non-shutdown
+    /// flush can still return an incomplete report if its publication barrier
+    /// cannot be acquired before the safety deadline.
+    pub async fn flush_detailed(&self) -> Result<DetailedFlushReport> {
+        self.flush_internal()
+            .await
+            .map(DetailedFlushReport::from_report)
+    }
+
+    /// Shut down the service and flush relevant persisted state.
+    ///
+    /// `ShutdownMode::Graceful` waits for the durable audit sink to drain.
+    /// `ShutdownMode::Force` first cancels in-flight and queued compiles
+    /// through every cloned service handle, then skips the audit drain.
+    async fn shutdown_internal(self, mode: ShutdownMode) -> Result<EmbeddedFlushReport> {
+        if self.shutdown.swap(true, Ordering::AcqRel) {
+            return Err(EmbeddedError::ShutDown);
+        }
+        self.admission_shutdown.cancel();
+        if matches!(mode, ShutdownMode::Force) {
+            self.force_cancellation.cancel();
+        }
+        let report = self.daemon.shutdown().await;
+        // zccache#926: shut the audit sink down when going Graceful.
+        // Force skips this so the host can exit quickly under SIGINT
+        // even if the disk is slow.
+        if matches!(mode, ShutdownMode::Graceful) {
+            if let Some(sink) = &self.audit_sink {
+                let _ = sink.shutdown().await;
+            }
+        }
+        Ok(report)
+    }
+
+    pub async fn shutdown(self, mode: ShutdownMode) -> Result<ShutdownReport> {
+        let report = self.shutdown_internal(mode).await?;
+        Ok(ShutdownReport {
+            mode,
+            flushed: FlushReport::from_report(report),
+        })
+    }
+
+    /// Shut down the service and report every durability phase.
+    pub async fn shutdown_detailed(self, mode: ShutdownMode) -> Result<DetailedShutdownReport> {
+        let report = self.shutdown_internal(mode).await?;
+        Ok(DetailedShutdownReport {
+            mode,
+            flushed: DetailedFlushReport::from_report(report),
+        })
+    }
+}
+
+#[cfg(test)]
+#[path = "embedded/contract_tests.rs"]
+mod contract_tests;
+
+#[cfg(test)]
+#[path = "embedded/tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "embedded/admission_tests.rs"]
+mod admission_tests;
+
+#[cfg(test)]
+#[path = "embedded/metadata_persist_tests.rs"]
+mod metadata_persist_tests;

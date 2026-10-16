@@ -21,7 +21,9 @@ members = [
 # dependencies now (`zccache = { version = "=1.15.4" }` in
 # `[workspace.dependencies]`, the single pin every member inherits;
 # `running-process = { version = "=4.10.16" }`), so there is no nested
-# workspace left to exclude and no `[patch]` pointing at either.
+# workspace left to exclude. zccache#1955 patches zccache back to
+# `_vender/zccache`, but as the published single-crate amalgamation, which has
+# no `[workspace]` of its own; running-process has no `[patch]` at all.
 #
 # `tests/test_externalized_dependency_sources.py` fails if a path dep, a
 # `[patch]` redirect, or a gitlink puts them back: the only other symptom
@@ -155,6 +157,13 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Also takes notify-types 2.x, which drops the unmaintained `instant`
 # (RUSTSEC-2024-0384).
 notify = { path = "_vender/notify" }
+# The published amalgamated zccache crate, vendored so soldr's own tests run
+# against the exact compiler-cache code that ships inside soldr, and so a
+# cache-key defect can be reproduced and fixed here before the upstream
+# release (zccache#1955 cross-worktree OUT_DIR misses). One package, not the
+# old 22-package submodule; `tests/test_externalized_dependency_sources.py`
+# pins that shape.
+zccache = { path = "_vender/zccache" }
 # soldr#2406: bump filetime_creation's windows-sys (0.52→0.61) to converge.
 filetime_creation = { path = "_vender/patches/filetime_creation" }
 # soldr#2406: relax windows-sys caps across the cap-std ecosystem so the

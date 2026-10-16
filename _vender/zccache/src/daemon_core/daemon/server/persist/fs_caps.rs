@@ -1,0 +1,248 @@
+//! Capability probing and per-volume-pair materialization policy (#1039).
+
+use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+pub(in crate::daemon_core::daemon::server) const COW_READONLY_ENV: &str = "ZCCACHE_COW_READONLY";
+const CAPS_CACHE_LIMIT: usize = 4096;
+/// zccache's conservative cache-materialization policy. This is not a claim
+/// about every filesystem's native maximum: at this threshold zccache copies
+/// rather than risking a cache payload link count that a target rejects.
+/// Windows hosts cap at 1023; Unix hosts at 65,000.
+const ZCCACHE_HARDLINK_LIMIT: u64 = if kernal_api::platform::host::target_is_windows() {
+    WINDOWS_HARDLINK_LIMIT
+} else {
+    UNIX_HARDLINK_LIMIT
+};
+const WINDOWS_HARDLINK_LIMIT: u64 = 1023;
+const UNIX_HARDLINK_LIMIT: u64 = 65_000;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(in crate::daemon_core::daemon::server) enum FileIdWidth {
+    Bits64,
+    Bits128,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::daemon_core::daemon::server) struct VolumeCaps {
+    pub(in crate::daemon_core::daemon::server) reflink: bool,
+    pub(in crate::daemon_core::daemon::server) hardlink: bool,
+    pub(in crate::daemon_core::daemon::server) readonly_enforced: bool,
+    pub(in crate::daemon_core::daemon::server) file_id: FileIdWidth,
+    pub(in crate::daemon_core::daemon::server) hardlink_limit: u64,
+}
+
+impl VolumeCaps {
+    pub(in crate::daemon_core::daemon::server) fn copy_only() -> Self {
+        Self {
+            reflink: false,
+            hardlink: false,
+            readonly_enforced: false,
+            file_id: if crate::daemon_core::platform::fs::volume::file_id_width() > 64 {
+                FileIdWidth::Bits128
+            } else {
+                FileIdWidth::Bits64
+            },
+            hardlink_limit: 0,
+        }
+    }
+}
+
+// The path ancestor is part of the key, not just the raw volume id.
+// Ephemeral disk-image / loop-mount volumes (macOS hdiutil, Linux
+// losetup) reliably recycle their device id after unmount — a later,
+// unrelated filesystem can attach at the SAME `st_dev`. A cache keyed
+// on volume id alone would then hand out a stale capability probed
+// against the *previous* filesystem at that id (e.g. HFS+'s
+// hardlink=true reused for a freshly-mounted exFAT volume, which has
+// no hardlink support at all — `std::fs::hard_link` then fails with
+// ENOTSUP despite the cached capability). The probe ancestor path is
+// stable for repeat calls into the *same* real mount (so legitimate
+// caching across many blobs in one cache directory is preserved) but
+// differs across distinct mounts, including ones that reuse a device
+// id, because mount points are never reused verbatim.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct VolumePair(u128, u128, NormalizedPath);
+
+static CAPS: OnceLock<dashmap::DashMap<VolumePair, VolumeCaps>> = OnceLock::new();
+static CAPS_INSERT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static PROBE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+fn cache() -> &'static dashmap::DashMap<VolumePair, VolumeCaps> {
+    CAPS.get_or_init(dashmap::DashMap::new)
+}
+
+pub(in crate::daemon_core::daemon::server) fn readonly_enabled() -> bool {
+    env_flag(COW_READONLY_ENV, true)
+}
+
+pub(in crate::daemon_core::daemon::server) fn hardlink_below_limit(caps: VolumeCaps, link_count: u64) -> bool {
+    caps.hardlink && link_count < caps.hardlink_limit
+}
+
+fn env_flag(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "" | "0" | "false" | "off" | "no"
+            )
+        })
+        .unwrap_or(default)
+}
+
+/// Probed capabilities for a volume pair, before `ZCCACHE_MODE` narrows
+/// them. One probe per pair, cached.
+pub(in crate::daemon_core::daemon::server) fn fs_caps_raw(src: &Path, dst: &Path) -> VolumeCaps {
+    let Some(src_volume) = crate::daemon_core::platform::fs::volume::volume_identity_u128(src) else {
+        return VolumeCaps::copy_only();
+    };
+    let Some(dst_probe) = existing_path(dst.parent().unwrap_or(dst)) else {
+        return VolumeCaps::copy_only();
+    };
+    let Some(dst_volume) = crate::daemon_core::platform::fs::volume::volume_identity_u128(&dst_probe) else {
+        return VolumeCaps::copy_only();
+    };
+    if src_volume != dst_volume {
+        return VolumeCaps::copy_only();
+    }
+    let key = VolumePair(src_volume, dst_volume, dst_probe);
+    if let Some(caps) = cache().get(&key) {
+        return *caps;
+    }
+    let caps = probe_caps(src, dst);
+    #[cfg(test)]
+    record_probe(&key);
+    let _insert_guard = CAPS_INSERT_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache().len() >= CAPS_CACHE_LIMIT {
+        // Coarse bound on unbounded growth (issue #1042): the cache key
+        // includes a normalized destination parent so distinct build-output
+        // directories never collide, but a daemon servicing many thousands
+        // of distinct directories over its lifetime would otherwise grow
+        // this map without limit. A full clear is simpler than LRU
+        // bookkeeping and self-corrects — the next fs_caps() call just
+        // re-probes and re-populates, which is cheap (one create_dir_all
+        // + two tiny reflink/hardlink probe files).
+        cache().clear();
+    }
+    cache().insert(key, caps);
+    caps
+}
+
+/// Per-volume-pair probe tally, for tests only.
+///
+/// A process-wide total cannot answer "was this pair re-probed?" while ~770
+/// other tests run in parallel and probe their own directories -- measured at
+/// 102 unrelated probes during one suite run. Counting per key isolates the
+/// question from that noise.
+#[cfg(test)]
+static PROBES_BY_KEY: OnceLock<dashmap::DashMap<VolumePair, u64>> = OnceLock::new();
+
+#[cfg(test)]
+fn record_probe(key: &VolumePair) {
+    *PROBES_BY_KEY
+        .get_or_init(dashmap::DashMap::new)
+        .entry(key.clone())
+        .or_insert(0) += 1;
+}
+
+/// The highest number of probes any single volume pair has incurred.
+///
+/// The cache promises one probe per pair, so this stays at 1 no matter how many
+/// deliveries or concurrent tests run. A regression that re-probes per delivery
+/// pushes exactly one key up to the delivery count, which is visible here
+/// without needing to know which key belongs to which test.
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) fn max_probes_for_any_volume_pair() -> u64 {
+    PROBES_BY_KEY
+        .get_or_init(dashmap::DashMap::new)
+        .iter()
+        .map(|entry| *entry.value())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Probes recorded for volume pairs whose destination probe path lies under
+/// `root`, for tests that must prove a mode never probed their own tree.
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) fn probes_under(root: &Path) -> u64 {
+    let root = NormalizedPath::from(root);
+    PROBES_BY_KEY
+        .get_or_init(dashmap::DashMap::new)
+        .iter()
+        .filter(|entry| entry.key().2.starts_with(&root))
+        .map(|entry| *entry.value())
+        .sum()
+}
+
+fn probe_caps(src: &Path, dst: &Path) -> VolumeCaps {
+    PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
+    let Some(parent) = dst.parent() else {
+        return VolumeCaps::copy_only();
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return VolumeCaps::copy_only();
+    }
+    let nonce = format!(
+        "{}-{}",
+        std::process::id(),
+        PROBE_COUNT.load(Ordering::Relaxed)
+    );
+    let reflink_probe = parent.join(format!(".zccache-reflink-probe-{nonce}"));
+    let hardlink_probe = parent.join(format!(".zccache-hardlink-probe-{nonce}"));
+    let reflink = kernal_api::platform::fs::reflink_file(src, &reflink_probe).is_ok();
+    let _ = std::fs::remove_file(&reflink_probe);
+    let hardlink = std::fs::hard_link(src, &hardlink_probe).is_ok();
+    let _ = std::fs::remove_file(&hardlink_probe);
+    VolumeCaps {
+        reflink,
+        hardlink,
+        readonly_enforced: hardlink,
+        file_id: if crate::daemon_core::platform::fs::volume::file_id_width() > 64 {
+            FileIdWidth::Bits128
+        } else {
+            FileIdWidth::Bits64
+        },
+        hardlink_limit: ZCCACHE_HARDLINK_LIMIT,
+    }
+}
+
+fn existing_path(path: &Path) -> Option<NormalizedPath> {
+    let mut candidate = path;
+    loop {
+        if candidate.exists() {
+            return Some(candidate.into());
+        }
+        candidate = candidate.parent()?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hardlink_ceiling_is_zccache_product_policy() {
+        assert_eq!(WINDOWS_HARDLINK_LIMIT, 1023);
+        assert_eq!(UNIX_HARDLINK_LIMIT, 65_000);
+        let expected = if kernal_api::platform::host::target_is_windows() {
+            WINDOWS_HARDLINK_LIMIT
+        } else {
+            UNIX_HARDLINK_LIMIT
+        };
+        assert_eq!(ZCCACHE_HARDLINK_LIMIT, expected);
+    }
+
+    #[test]
+    fn volume_pair_normalizes_equivalent_probe_paths() {
+        let canonical = VolumePair(1, 1, NormalizedPath::new("probe/out"));
+        let equivalent = VolumePair(1, 1, NormalizedPath::new("probe/./out"));
+
+        assert_eq!(canonical, equivalent);
+    }
+}

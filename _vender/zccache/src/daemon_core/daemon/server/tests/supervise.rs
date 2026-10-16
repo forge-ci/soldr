@@ -1,0 +1,308 @@
+//! Supervision tests for issue #1177.
+//!
+//! These drive the supervisor directly rather than through a live daemon: the
+//! property under test is "a dead loop comes back, loudly", and inducing a real
+//! panic in the real eviction loop would make the test about the loop instead.
+//!
+//! The shutdown signal is injected as a predicate for the same reason it is
+//! injected in production — the supervisor should not need a whole
+//! `SharedState` to answer one question, and a test should not have to build
+//! one to ask it.
+
+use super::*;
+
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
+
+fn never_shutting_down() -> impl Fn() -> bool + Send + 'static {
+    || false
+}
+
+struct DropFlag(Arc<AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// A panicking loop is restarted. This is the failure #1177 is about: before
+/// supervision the panic was silent, the task vanished, and the only symptom
+/// was that eviction quietly stopped happening.
+///
+/// Runs on tokio's virtual clock (`start_paused`). The supervisor sleeps
+/// `RESTART_INITIAL_BACKOFF` (1s) before the first restart, and the old
+/// real-time version allowed 10s for that — a 10x margin that still failed
+/// intermittently on CI. Not because a restart takes 10 seconds, but because
+/// `cargo test` runs this alongside ~770 other tests: a current-thread runtime
+/// on an oversubscribed 2-core Windows runner can simply be starved that long.
+/// With the clock paused, tokio advances time only when the runtime is idle,
+/// so the backoff costs nothing and the test measures the supervisor rather
+/// than the runner's load.
+#[tokio::test(start_paused = true)]
+async fn a_panicking_idempotent_task_is_restarted() {
+    let attempts = Arc::new(AtomicU32::new(0));
+    let counter = Arc::clone(&attempts);
+
+    let handle = spawn_supervised(
+        "test-panicker",
+        never_shutting_down(),
+        Restart::Idempotent,
+        None,
+        move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::AcqRel);
+                panic!("induced");
+            }
+        },
+    );
+
+    // Wait for the first restart only. The backoff ladder is asserted
+    // separately by its constants; sitting through 1+2+4+8+16 s here would
+    // make this a slow test for no extra confidence.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while attempts.load(Ordering::Acquire) < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("a panicking task must be restarted, not silently dropped");
+
+    handle.cancel();
+}
+
+/// Restarts are bounded. A loop that has panicked this many times is failing
+/// deterministically, and a visibly dead task is more honest than an endless
+/// restart cycle hiding a permanent fault.
+#[test]
+fn restarts_are_bounded() {
+    // Bound through a local so this reads as a value comparison rather than
+    // an assertion on a constant expression.
+    let bound = MAX_RESTARTS;
+    assert!(bound > 0, "a transient panic must be survivable");
+    assert!(
+        bound < 100,
+        "a deterministically failing loop must end up visibly dead"
+    );
+}
+
+/// A task that owns a unique resource must NOT be restarted: a replacement
+/// would look healthy while delivering nothing, which is worse than being
+/// visibly gone. This is the shape the watcher consumer needs (#1276).
+#[tokio::test]
+async fn a_non_restartable_task_is_not_brought_back() {
+    let attempts = Arc::new(AtomicU32::new(0));
+    let counter = Arc::clone(&attempts);
+
+    let handle = spawn_supervised(
+        "test-unique",
+        never_shutting_down(),
+        Restart::Never,
+        None,
+        move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::AcqRel);
+            }
+        },
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+        .await
+        .expect("the supervisor must return rather than loop")
+        .expect("the supervisor task itself must not panic");
+
+    assert_eq!(
+        attempts.load(Ordering::Acquire),
+        1,
+        "a Restart::Never task runs exactly once"
+    );
+}
+
+/// A task ending because the daemon is shutting down is the expected path and
+/// must be silent. Without this check every clean shutdown would log a
+/// spurious "task died" and write a durable event for it.
+#[tokio::test]
+async fn a_task_ending_during_shutdown_is_not_treated_as_a_fault() {
+    let shutdown = Arc::new(AtomicBool::new(true));
+    let flag = Arc::clone(&shutdown);
+    let attempts = Arc::new(AtomicU32::new(0));
+    let counter = Arc::clone(&attempts);
+
+    let handle = spawn_supervised(
+        "test-shutdown",
+        move || flag.load(Ordering::Acquire),
+        Restart::Idempotent,
+        None,
+        move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::AcqRel);
+            }
+        },
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+        .await
+        .expect("the supervisor must return promptly on shutdown")
+        .expect("the supervisor task itself must not panic");
+
+    assert_eq!(
+        attempts.load(Ordering::Acquire),
+        1,
+        "an idempotent task must not be restarted once shutdown was requested"
+    );
+}
+
+/// #1684: both shutdown paths join the supervised depgraph loop, so a
+/// supervisor sleeping out its restart backoff must notice shutdown and
+/// return instead of stalling shutdown for the rest of the backoff.
+#[tokio::test(start_paused = true)]
+async fn shutdown_during_restart_backoff_ends_the_supervisor_promptly() {
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&shutdown);
+    let attempts = Arc::new(AtomicU32::new(0));
+    let counter = Arc::clone(&attempts);
+
+    let handle = spawn_supervised(
+        "test-backoff-shutdown",
+        move || flag.load(Ordering::Acquire),
+        Restart::Idempotent,
+        None,
+        move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::AcqRel);
+                panic!("induced");
+            }
+        },
+    );
+
+    while attempts.load(Ordering::Acquire) == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    // Let the supervisor observe the death and enter its backoff sleep.
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    shutdown.store(true, Ordering::Release);
+
+    tokio::time::timeout(RESTART_INITIAL_BACKOFF / 2, handle)
+        .await
+        .expect("shutdown must cut the restart backoff short")
+        .expect("the supervisor task itself must not panic");
+    assert_eq!(
+        attempts.load(Ordering::Acquire),
+        1,
+        "no restart may start once shutdown was requested"
+    );
+}
+
+/// A supervisor owns the loop it is awaiting. Cancelling the supervisor must
+/// therefore cancel that loop as well: leaving the child detached would let a
+/// supposedly stopped daemon keep running maintenance after its owner left.
+#[tokio::test]
+async fn cancelling_supervisor_cancels_its_active_child_without_restart() {
+    let started = Arc::new(AtomicBool::new(false));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let attempts = Arc::new(AtomicU32::new(0));
+    let started_factory = Arc::clone(&started);
+    let dropped_factory = Arc::clone(&dropped);
+    let attempts_factory = Arc::clone(&attempts);
+
+    let handle = spawn_supervised(
+        "test-cancel-owned-child",
+        never_shutting_down(),
+        Restart::Idempotent,
+        None,
+        move || {
+            let started = Arc::clone(&started_factory);
+            let dropped = Arc::clone(&dropped_factory);
+            let attempts = Arc::clone(&attempts_factory);
+            async move {
+                let _owned_by_supervisor = DropFlag(dropped);
+                attempts.fetch_add(1, Ordering::AcqRel);
+                started.store(true, Ordering::Release);
+                std::future::pending::<()>().await;
+            }
+        },
+    );
+
+    for _ in 0..8 {
+        if started.load(Ordering::Acquire) {
+            break;
+        }
+        kernal_api::async_engine::yield_now().await;
+    }
+    assert!(started.load(Ordering::Acquire), "child must have started");
+
+    handle.cancel();
+    let error = handle
+        .await
+        .expect_err("cancelled supervisor must not succeed");
+    assert!(error.is_cancelled(), "supervisor must report cancellation");
+    assert!(
+        dropped.load(Ordering::Acquire),
+        "cancelling the supervisor must drop its owned child"
+    );
+    assert_eq!(
+        attempts.load(Ordering::Acquire),
+        1,
+        "cancellation must not schedule a replacement child"
+    );
+}
+
+/// The backoff has to grow and then stop growing: unbounded growth would stop
+/// recovering a transiently broken loop, and no growth would make a
+/// fast-failing loop cost more than the work it replaced.
+#[test]
+fn the_restart_backoff_doubles_and_saturates() {
+    let mut backoff = RESTART_INITIAL_BACKOFF;
+    for _ in 0..20 {
+        backoff = (backoff * 2).min(RESTART_MAX_BACKOFF);
+    }
+    assert_eq!(backoff, RESTART_MAX_BACKOFF);
+    assert!(RESTART_INITIAL_BACKOFF < RESTART_MAX_BACKOFF);
+}
+
+/// zccache#1661 (F): a panicking task's payload must reach the death log. The
+/// log line and lifecycle event both carry `panic_message`, so asserting on it
+/// directly covers what an operator sees.
+#[tokio::test]
+async fn a_panicking_task_reports_its_panic_payload() {
+    let err = kernal_api::async_engine::launch(async {
+        panic!("boom");
+    })
+    .await
+    .expect_err("the task panicked");
+    assert_eq!(panic_message(&err).as_deref(), Some("boom"));
+
+    let formatted = kernal_api::async_engine::launch(async {
+        panic!("save failed: {}", "disk full");
+    })
+    .await
+    .expect_err("the task panicked");
+    assert_eq!(
+        panic_message(&formatted).as_deref(),
+        Some("save failed: disk full"),
+        "a String payload must be reported too, not only a &'static str"
+    );
+
+    let opaque = kernal_api::async_engine::launch(async {
+        std::panic::panic_any(42u32);
+    })
+    .await
+    .expect_err("the task panicked");
+    assert_eq!(
+        panic_message(&opaque).as_deref(),
+        Some("<non-string panic>")
+    );
+}
+
+/// A cancelled task is not a panic and carries no payload.
+#[tokio::test]
+async fn a_cancelled_task_has_no_panic_message() {
+    let task = kernal_api::async_engine::launch(std::future::pending::<()>());
+    task.cancel();
+    let err = task.await.expect_err("cancelled");
+    assert_eq!(panic_message(&err), None);
+}

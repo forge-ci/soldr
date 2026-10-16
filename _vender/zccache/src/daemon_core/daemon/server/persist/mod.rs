@@ -1,0 +1,88 @@
+//! Artifact pack format, atomic writes, hardlinking, cached output materialization.
+//!
+//! Originally a single 1K-LOC `persist.rs`; split per domain so each file
+//! stays well under the 1,000 LOC cap. Submodules:
+//!
+//! - [`artifact_io`] — Atomic writes (`persist_artifact_output`,
+//!   `persist_artifact_file`, `replace_artifact_cache_file`),
+//!   `PersistArtifactFileStats`, error enrichment, and the Windows
+//!   AV-scanner retry helper.
+//! - [`pack`] — Experimental `.pack` artifact format (env-gated via
+//!   `ZCCACHE_PACK_ARTIFACTS`): magic header, builder, parser, and
+//!   per-payload extractor.
+//! - [`write_cached`] — Materialize cached output to its target path
+//!   (`write_cached_output`, `write_cached_file`, `write_cached_payload`,
+//!   and the parallel batch entry points).
+//! - [`hardlink`] — Cross-platform hardlink helpers
+//!   (`break_output_hardlink_before_compile`, `hard_link_count`,
+//!   `same_file`, Windows `get_file_id`).
+//! - [`mtime`] — Daemon seam over the #1771 mtime contract (policy lives in
+//!   `zccache-core::mtime`; sealed-blob raise stays here).
+//!
+//! All `pub(super)` items are re-exported here so the parent `use
+//! persist::*;` glob still sees the original surface.
+
+use super::*;
+
+mod artifact_io;
+mod delivery_mode;
+mod directory_bundle;
+mod fs_caps;
+mod hardlink;
+mod layout;
+mod link_registry;
+mod mtime;
+mod object_store;
+mod pack;
+mod staged_link_args;
+mod staged_multi;
+mod staged_paths;
+mod staged_plan;
+mod staged_plan_observed;
+mod staged_store;
+mod write_cached;
+
+pub(in crate::daemon_core::daemon::server) use artifact_io::*;
+pub(in crate::daemon_core::daemon::server) use delivery_mode::*;
+pub(in crate::daemon_core::daemon::server) use directory_bundle::*;
+pub(in crate::daemon_core::daemon::server) use fs_caps::*;
+pub(in crate::daemon_core::daemon::server) use hardlink::*;
+pub(in crate::daemon_core::daemon::server) use layout::*;
+pub(in crate::daemon_core::daemon::server) use link_registry::*;
+pub(in crate::daemon_core::daemon::server) use mtime::*;
+pub(in crate::daemon_core::daemon::server) use object_store::*;
+pub(in crate::daemon_core::daemon::server) use pack::*;
+pub(in crate::daemon_core::daemon::server) use staged_multi::*;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use staged_paths::quote_make_depfile_path;
+pub(in crate::daemon_core::daemon::server) use staged_paths::*;
+pub(in crate::daemon_core::daemon::server) use staged_plan::*;
+pub(in crate::daemon_core::daemon::server) use staged_store::*;
+pub(in crate::daemon_core::daemon::server) use write_cached::*;
+
+pub(crate) type V2DiskArtifact = staged_store::StagedDiskArtifact;
+
+pub(crate) fn scan_v2_disk_artifacts(artifact_dir: &Path) -> std::io::Result<Vec<V2DiskArtifact>> {
+    staged_store::scan_staged_disk_artifacts(artifact_dir)
+}
+
+#[cfg(test)]
+pub(crate) fn evict_v2_artifact_keys(
+    artifact_dir: &Path,
+    keys: &std::collections::HashSet<String>,
+) -> std::io::Result<u64> {
+    staged_store::evict_staged_artifact_keys(artifact_dir, keys)
+}
+
+pub(crate) fn evict_v2_artifact_keys_if_unchanged(
+    artifact_dir: &Path,
+    expected: &std::collections::HashMap<String, Option<String>>,
+) -> std::io::Result<std::collections::HashSet<String>> {
+    staged_store::evict_staged_artifact_keys_if_unchanged(artifact_dir, expected)
+}
+
+#[cfg(test)]
+mod mtime_contract_tests;
+#[cfg(test)]
+mod tests;

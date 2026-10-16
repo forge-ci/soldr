@@ -1,0 +1,554 @@
+//! Session-start, session-end, session-stats subcommands and their JSON helpers.
+
+use crate::cli_core::core::NormalizedPath;
+use std::ffi::OsString;
+use std::io::IsTerminal;
+use std::path::Path;
+use std::process::ExitCode;
+
+use super::super::session_end_idempotent;
+use super::util::{format_duration_ms, print_json_value, resolve_endpoint, LOST_CONNECTION_MSG};
+use crate::cli_core::cli::runtime::ensure_daemon;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SessionStartPrivateOptions {
+    pub(crate) cache_dir: Option<NormalizedPath>,
+    pub(crate) private_daemon: bool,
+    pub(crate) daemon_name: Option<String>,
+    pub(crate) owner_pids: Vec<u32>,
+    pub(crate) private_env: Vec<(String, String)>,
+}
+
+impl SessionStartPrivateOptions {
+    fn enabled(&self) -> bool {
+        self.private_daemon
+            || self.daemon_name.is_some()
+            || !self.owner_pids.is_empty()
+            || !self.private_env.is_empty()
+    }
+
+    pub(crate) fn ensure_private_identity(&mut self, explicit_endpoint: Option<&str>) {
+        if !self.enabled() || self.daemon_name.is_some() {
+            return;
+        }
+
+        let raw_name = explicit_endpoint
+            .map(|endpoint| format!("endpoint-{endpoint}"))
+            .unwrap_or_else(|| format!("private-{}", std::process::id()));
+        self.daemon_name = crate::cli_core::core::config::sanitize_daemon_namespace(&raw_name)
+            .or_else(|| Some(format!("private-{}", std::process::id())));
+    }
+}
+
+struct ScopedDaemonEnv {
+    cache_dir: Option<OsString>,
+    daemon_namespace: Option<OsString>,
+}
+
+impl ScopedDaemonEnv {
+    fn apply(options: &SessionStartPrivateOptions) -> Self {
+        let previous = Self {
+            cache_dir: std::env::var_os(crate::cli_core::core::config::CACHE_DIR_ENV),
+            daemon_namespace: std::env::var_os(crate::cli_core::core::config::DAEMON_NAMESPACE_ENV),
+        };
+        if let Some(cache_dir) = options.cache_dir.as_ref() {
+            std::env::set_var(crate::cli_core::core::config::CACHE_DIR_ENV, cache_dir.as_os_str());
+        }
+        if let Some(name) = options.daemon_name.as_deref() {
+            if let Some(namespace) = crate::cli_core::core::config::sanitize_daemon_namespace(name) {
+                std::env::set_var(crate::cli_core::core::config::DAEMON_NAMESPACE_ENV, namespace);
+            }
+        }
+        previous
+    }
+}
+
+impl Drop for ScopedDaemonEnv {
+    fn drop(&mut self) {
+        match &self.cache_dir {
+            Some(value) => std::env::set_var(crate::cli_core::core::config::CACHE_DIR_ENV, value),
+            None => std::env::remove_var(crate::cli_core::core::config::CACHE_DIR_ENV),
+        }
+        match &self.daemon_namespace {
+            Some(value) => std::env::set_var(crate::cli_core::core::config::DAEMON_NAMESPACE_ENV, value),
+            None => std::env::remove_var(crate::cli_core::core::config::DAEMON_NAMESPACE_ENV),
+        }
+    }
+}
+
+pub(crate) fn resolve_session_start_endpoint(
+    explicit: Option<&str>,
+    options: &SessionStartPrivateOptions,
+) -> String {
+    if let Some(endpoint) = explicit {
+        return endpoint.to_string();
+    }
+    if let Some(name) = options.daemon_name.as_deref() {
+        return crate::cli_core::ipc::endpoint_for_private_daemon_name(
+            options.cache_dir.as_ref().map(|p| p.as_path()),
+            name,
+        );
+    }
+    if let Some(cache_dir) = options.cache_dir.as_ref() {
+        return crate::cli_core::ipc::endpoint_for_cache_dir(cache_dir.as_path(), None);
+    }
+    resolve_endpoint(None)
+}
+
+pub(crate) fn parse_private_env_assignments(
+    raw: &[String],
+) -> Result<Vec<(String, String)>, String> {
+    let mut parsed = Vec::with_capacity(raw.len());
+    for assignment in raw {
+        let Some((key, value)) = assignment.split_once('=') else {
+            return Err(format!(
+                "--private-env must be KEY=VALUE, got `{assignment}`"
+            ));
+        };
+        if key.is_empty() {
+            return Err("--private-env key must not be empty".to_string());
+        }
+        if key.contains('\0') || value.contains('\0') {
+            return Err("--private-env must not contain NUL bytes".to_string());
+        }
+        parsed.push((key.to_string(), value.to_string()));
+    }
+    Ok(parsed)
+}
+
+pub(crate) async fn cmd_session_start(
+    endpoint: &str,
+    cwd: &Path,
+    log: Option<&Path>,
+    track_stats: bool,
+    journal: Option<NormalizedPath>,
+    profile: bool,
+    private_options: SessionStartPrivateOptions,
+) -> ExitCode {
+    let _daemon_env = ScopedDaemonEnv::apply(&private_options);
+    if let Err(e) = ensure_daemon(endpoint).await {
+        eprintln!("zccache[err][D]: cannot start daemon at {endpoint}: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    let request = crate::cli_core::protocol::Request::SessionStart {
+        client_pid: std::process::id(),
+        working_dir: cwd.into(),
+        log_file: log.map(NormalizedPath::from),
+        track_stats,
+        journal_path: journal,
+        profile,
+        private_daemon: private_options.enabled().then(|| {
+            crate::cli_core::protocol::PrivateDaemonSessionOptions {
+                daemon_name: private_options
+                    .daemon_name
+                    .as_deref()
+                    .and_then(crate::cli_core::core::config::sanitize_daemon_namespace),
+                endpoint: Some(endpoint.to_string()),
+                cache_dir: private_options.cache_dir.clone(),
+                owner_pids: private_options.owner_pids.clone(),
+                env: private_options.private_env.clone(),
+            }
+        }),
+    };
+    let recv_result = match crate::cli_core::ipc::full_family_roundtrip(endpoint, &request, None).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("zccache[err][R]: daemon roundtrip failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match recv_result {
+        Some(crate::cli_core::protocol::Response::SessionStarted {
+            session_id,
+            journal_path,
+        }) => {
+            // One-line JSON so scripts can parse both the session ID and start time:
+            //   result=$(zccache session-start)
+            let started_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if let Some(ref jp) = journal_path {
+                // Escape backslashes for valid JSON (Windows paths contain `\`)
+                let jp_escaped = jp.display().to_string().replace('\\', "\\\\");
+                println!(
+                    r#"{{"session_id":"{}","started_at":{},"journal_path":"{}"}}"#,
+                    session_id, started_at, jp_escaped
+                );
+            } else {
+                println!(
+                    r#"{{"session_id":"{}","started_at":{}}}"#,
+                    session_id, started_at
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Some(crate::cli_core::protocol::Response::Error { message }) => {
+            eprintln!("session-start failed: {message}");
+            ExitCode::FAILURE
+        }
+        None => {
+            eprintln!("{LOST_CONNECTION_MSG}");
+            ExitCode::FAILURE
+        }
+        Some(other) => {
+            eprintln!("zccache[err][U]: unexpected response from daemon: {other:?}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+pub(crate) fn cmd_session_end(endpoint: &str, session_id: String, json: bool) -> ExitCode {
+    // Thin wrapper around the shared library entry point. All daemon
+    // callers (CLI, soldr, future tools) must agree on what "the daemon
+    // is gone" means — see `session_end_idempotent` for the contract
+    // and issue #159 for why this lives in the library.
+    match session_end_idempotent(endpoint, &session_id) {
+        Ok(Some(s)) => {
+            if json {
+                print_session_stats_json(&session_id, &s);
+            } else {
+                print_session_stats_human(&session_id, &s, "complete");
+            }
+            ExitCode::SUCCESS
+        }
+        // `Ok(None)` covers both:
+        //   - daemon was unreachable (already logged by the library), and
+        //   - daemon was reached but had no stats for this session.
+        // Both are no-op successes.
+        Ok(None) => {
+            if json {
+                print_session_stats_unavailable_json(&session_id, "stats_unavailable");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            if json {
+                print_session_stats_error_json(&session_id, &e.to_string());
+            } else {
+                eprintln!("zccache: session-end failed: {e}");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+pub(crate) async fn cmd_session_stats(endpoint: &str, session_id: String, json: bool) -> ExitCode {
+    let request = crate::cli_core::protocol::Request::SessionStats {
+        session_id: session_id.clone(),
+    };
+    let recv_result = match crate::cli_core::ipc::full_family_roundtrip(endpoint, &request, None).await {
+        Ok(r) => r,
+        Err(e) => {
+            let message = format!("zccache: daemon roundtrip failed: {e}");
+            if json {
+                print_session_stats_error_json(&session_id, &message);
+            } else {
+                eprintln!("{message}");
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+    match recv_result {
+        Some(crate::cli_core::protocol::Response::SessionStatsResult { stats }) => {
+            if let Some(s) = stats {
+                if json {
+                    print_session_stats_json(&session_id, &s);
+                } else {
+                    print_session_stats_human(&session_id, &s, "active");
+                }
+            } else if json {
+                print_session_stats_unavailable_json(&session_id, "stats_not_enabled");
+            } else {
+                eprintln!("Session {session_id}: stats tracking not enabled");
+            }
+            ExitCode::SUCCESS
+        }
+        Some(crate::cli_core::protocol::Response::Error { message }) => {
+            if json {
+                print_session_stats_error_json(&session_id, &message);
+            } else {
+                eprintln!("session-stats failed: {message}");
+            }
+            ExitCode::FAILURE
+        }
+        None => {
+            let message = LOST_CONNECTION_MSG;
+            if json {
+                print_session_stats_error_json(&session_id, message);
+            } else {
+                eprintln!("{message}");
+            }
+            ExitCode::FAILURE
+        }
+        Some(other) => {
+            let message = format!("zccache: unexpected response from daemon: {other:?}");
+            if json {
+                print_session_stats_error_json(&session_id, &message);
+            } else {
+                eprintln!("{message}");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+pub(crate) fn print_session_stats_human(
+    session_id: &str,
+    stats: &crate::cli_core::protocol::SessionStats,
+    state: &str,
+) {
+    let total = stats.hits + stats.misses;
+    let hit_rate = if total > 0 {
+        format!("{:.1}%", stats.hits as f64 / total as f64 * 100.0)
+    } else {
+        "n/a".to_string()
+    };
+    let label = if state == "active" {
+        format!(
+            "Session {session_id} (active, {})",
+            format_duration_ms(stats.duration_ms)
+        )
+    } else {
+        format!(
+            "Session {session_id} {state} ({})",
+            format_duration_ms(stats.duration_ms)
+        )
+    };
+    eprintln!("{label}");
+    eprintln!(
+        "  {} compilations: {} hits, {} misses, {} non-cacheable, {} cached errors",
+        stats.compilations, stats.hits, stats.misses, stats.non_cacheable, stats.errors_cached
+    );
+    eprintln!("  Hit rate: {hit_rate}");
+    if stats.time_saved_ms > 0 {
+        eprintln!("  Time saved: ~{}", format_duration_ms(stats.time_saved_ms));
+    }
+    if !crate::cli_core::core::defender::is_quiet_env() {
+        let depgraph_exists = crate::cli_core::depgraph::depgraph_file_path().exists();
+        let verbose = summary_verbose_env();
+        for warning in session_summary_warnings(stats, depgraph_exists, verbose) {
+            eprintln!("  {}", warning.render(std::io::stderr().is_terminal()));
+        }
+    }
+}
+
+pub(crate) fn print_session_stats_json(session_id: &str, stats: &crate::cli_core::protocol::SessionStats) {
+    print_json_value(&session_stats_json(session_id, stats));
+}
+
+pub(crate) fn print_session_stats_unavailable_json(session_id: &str, reason: &str) {
+    print_json_value(&session_stats_unavailable_json(session_id, reason));
+}
+
+pub(crate) fn print_session_stats_error_json(session_id: &str, error: &str) {
+    print_json_value(&session_stats_error_json(session_id, error));
+}
+
+pub(crate) fn session_stats_unavailable_json(session_id: &str, reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "status": "unavailable",
+        "session_id": session_id,
+        "reason": reason,
+    })
+}
+
+pub(crate) fn session_stats_error_json(session_id: &str, error: &str) -> serde_json::Value {
+    serde_json::json!({
+        "status": "error",
+        "session_id": session_id,
+        "error": error,
+    })
+}
+
+pub(crate) fn session_stats_json(
+    session_id: &str,
+    stats: &crate::cli_core::protocol::SessionStats,
+) -> serde_json::Value {
+    let total = stats.hits + stats.misses;
+    let hit_rate = if total > 0 {
+        Some(stats.hits as f64 / total as f64)
+    } else {
+        None
+    };
+    // `phase_profile` reaches downstream consumers (soldr's
+    // `last-session-stats.json`, perf-harness `render_summary`) through
+    // this JSON. Emit the full struct when populated so each consumer
+    // can pick fields without a separate IPC roundtrip.
+    let phase_profile = stats
+        .phase_profile
+        .as_ref()
+        .map(phase_profile_summary_json)
+        .unwrap_or(serde_json::Value::Null);
+    serde_json::json!({
+        "status": "ok",
+        "session_id": session_id,
+        "duration_ms": stats.duration_ms,
+        "compilations": stats.compilations,
+        "hits": stats.hits,
+        "misses": stats.misses,
+        "non_cacheable": stats.non_cacheable,
+        "errors": stats.errors,
+        "errors_cached": stats.errors_cached,
+        "time_saved_ms": stats.time_saved_ms,
+        "unique_sources": stats.unique_sources,
+        "bytes_read": stats.bytes_read,
+        "bytes_written": stats.bytes_written,
+        "hit_rate": hit_rate,
+        "lookup_outcomes": &stats.lookup_outcomes,
+        "phase_profile": phase_profile,
+    })
+}
+
+const WASTED_DEPGRAPH_HIT_WARN_PCT: f64 = 10.0;
+const COLD_SKIP_WARN_PCT: f64 = 50.0;
+const CATASTROPHIC_HIT_RATE_WARN_PCT: f64 = 5.0;
+const CATASTROPHIC_MIN_COMPILATIONS: u64 = 50;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionSummaryWarning {
+    message: String,
+}
+
+impl SessionSummaryWarning {
+    fn new(message: String) -> Self {
+        Self { message }
+    }
+
+    pub(crate) fn render(&self, color: bool) -> String {
+        if color {
+            format!("\x1b[33mWARNING: {}\x1b[0m", self.message)
+        } else {
+            format!("WARNING: {}", self.message)
+        }
+    }
+}
+
+pub(crate) fn session_summary_warnings(
+    stats: &crate::cli_core::protocol::SessionStats,
+    depgraph_exists: bool,
+    verbose: bool,
+) -> Vec<SessionSummaryWarning> {
+    let outcomes = &stats.lookup_outcomes;
+    let total_lookups = outcomes
+        .depgraph_hit_artifact_hit
+        .saturating_add(outcomes.depgraph_hit_artifact_miss)
+        .saturating_add(outcomes.depgraph_cold_skip)
+        .saturating_add(outcomes.depgraph_other_miss.values().copied().sum::<u64>());
+    let mut warnings = Vec::new();
+
+    if let Some(pct) = percentage(outcomes.depgraph_hit_artifact_miss, total_lookups) {
+        if pct > WASTED_DEPGRAPH_HIT_WARN_PCT {
+            warnings.push(SessionSummaryWarning::new(format!(
+                "{pct:.1}% of depgraph hits did not produce an artifact fetch; \
+                 the cache is degraded (see #680 / #796 SI-3)"
+            )));
+        }
+    }
+
+    if depgraph_exists {
+        if let Some(pct) = percentage(outcomes.depgraph_cold_skip, total_lookups) {
+            if pct > COLD_SKIP_WARN_PCT {
+                warnings.push(SessionSummaryWarning::new(format!(
+                    "{pct:.1}% of lookups returned cold_skip despite a populated depgraph \
+                     on disk; the warm-cache classifier may be regressed (see #320 / #796 SI-2)"
+                )));
+            }
+        }
+
+        let cacheable = stats.hits.saturating_add(stats.misses);
+        if verbose && stats.compilations > CATASTROPHIC_MIN_COMPILATIONS && cacheable > 0 {
+            let hit_rate = stats.hits as f64 / cacheable as f64 * 100.0;
+            if hit_rate < CATASTROPHIC_HIT_RATE_WARN_PCT {
+                warnings.push(SessionSummaryWarning::new(format!(
+                    "catastrophic hit rate ({hit_rate:.1}%) over {} compilations; \
+                     cache may be silently dead; capture last-session.log and file a bug",
+                    stats.compilations
+                )));
+            }
+        }
+    }
+
+    warnings
+}
+
+fn percentage(part: u64, total: u64) -> Option<f64> {
+    (total > 0).then(|| part as f64 / total as f64 * 100.0)
+}
+
+fn summary_verbose_env() -> bool {
+    std::env::var("ZCCACHE_SUMMARY_VERBOSE")
+        .ok()
+        .as_deref()
+        .is_some_and(|value| {
+            let value = value.trim();
+            !value.is_empty()
+                && value != "0"
+                && !value.eq_ignore_ascii_case("false")
+                && !value.eq_ignore_ascii_case("no")
+        })
+}
+
+pub(crate) fn phase_profile_summary_json(
+    p: &crate::cli_core::protocol::PhaseProfileSummary,
+) -> serde_json::Value {
+    serde_json::json!({
+        "hit_count": p.hit_count,
+        "miss_count": p.miss_count,
+        "parse_args_ns": p.parse_args_ns,
+        "build_context_ns": p.build_context_ns,
+        "hash_source_ns": p.hash_source_ns,
+        "hash_headers_ns": p.hash_headers_ns,
+        "depgraph_check_ns": p.depgraph_check_ns,
+        "request_cache_lookup_ns": p.request_cache_lookup_ns,
+        "cross_root_validate_ns": p.cross_root_validate_ns,
+        "artifact_lookup_ns": p.artifact_lookup_ns,
+        "write_output_ns": p.write_output_ns,
+        "bookkeeping_ns": p.bookkeeping_ns,
+        "total_hit_ns": p.total_hit_ns,
+        "compiler_exec_ns": p.compiler_exec_ns,
+        "include_scan_ns": p.include_scan_ns,
+        "hash_all_ns": p.hash_all_ns,
+        "artifact_store_ns": p.artifact_store_ns,
+        "total_miss_ns": p.total_miss_ns,
+        "staged": &p.staged,
+    })
+}
+
+pub(crate) async fn query_session_stats_json(
+    endpoint: &str,
+    session_id: &str,
+) -> serde_json::Value {
+    match query_session_stats(endpoint, session_id).await {
+        Ok(Some(stats)) => session_stats_json(session_id, &stats),
+        Ok(None) => serde_json::json!({
+            "status": "not_tracked",
+            "session_id": session_id,
+            "message": "session exists but stats tracking is not enabled"
+        }),
+        Err(err) => serde_json::json!({
+            "status": "error",
+            "session_id": session_id,
+            "error": err
+        }),
+    }
+}
+
+pub(crate) async fn query_session_stats(
+    endpoint: &str,
+    session_id: &str,
+) -> Result<Option<crate::cli_core::protocol::SessionStats>, String> {
+    let request = crate::cli_core::protocol::Request::SessionStats {
+        session_id: session_id.to_string(),
+    };
+    let recv_result = crate::cli_core::ipc::full_family_roundtrip(endpoint, &request, None)
+        .await
+        .map_err(|err| format!("session stats daemon roundtrip failed: {err}"))?;
+    match recv_result {
+        Some(crate::cli_core::protocol::Response::SessionStatsResult { stats }) => Ok(stats),
+        Some(crate::cli_core::protocol::Response::Error { message }) => Err(message),
+        Some(other) => Err(format!("unexpected daemon response: {other:?}")),
+        None => Err(LOST_CONNECTION_MSG.to_string()),
+    }
+}

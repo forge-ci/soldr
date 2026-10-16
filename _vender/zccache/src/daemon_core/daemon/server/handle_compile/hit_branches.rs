@@ -1,0 +1,628 @@
+//! Cached-hit branch controllers for the compile pipeline.
+
+use super::super::*;
+use super::cached_hit::{
+    materialize_cached_compile_hit_offloaded, rustc_compat_payload_index_for, CachedHitFailure,
+    CachedHitPhases, OwnedCachedHitMaterializeRequest,
+};
+use crate::daemon_core::depgraph::depfile::user_depfile_destination;
+use crate::daemon_core::depgraph::UserDepFlags;
+
+const DYLINT_CACHE_INPUT_HASH_ENV: &str = "ZCCACHE_DYLINT_CACHE_INPUT_HASH";
+
+pub(super) fn artifact_ready_for_request(
+    state: &SharedState,
+    key_hex: &str,
+    verdict_key_hex: Option<&str>,
+    requested_outputs: Option<&[NormalizedPath]>,
+) -> bool {
+    let Some(cached) = state.artifacts.get(key_hex) else {
+        return false;
+    };
+    if let Some(verdict_key) = verdict_key_hex {
+        let Some(verdict) = cached.meta.rustc_verdicts.get(verdict_key) else {
+            return false;
+        };
+        if verdict.exit_code != 0 {
+            return true;
+        }
+    }
+    if let Some(outputs) = requested_outputs {
+        outputs.iter().all(|output| {
+            rustc_compat_payload_index_for(&cached.meta.output_names, output)
+                .is_some_and(|index| cached.materialization_payload_ready(index))
+        })
+    } else {
+        (0..cached.meta.output_names.len()).all(|index| cached.materialization_payload_ready(index))
+    }
+}
+
+pub(super) async fn await_artifact_publication_if_needed(
+    state: &SharedState,
+    key_hex: &str,
+    verdict_key_hex: Option<&str>,
+    requested_outputs: Option<&[NormalizedPath]>,
+) {
+    let deadline = tokio::time::Instant::now() + pending_writes::PENDING_PAYLOAD_WAIT_TIMEOUT;
+    while state.pending_cache_writes.contains_key(key_hex)
+        && !artifact_ready_for_request(state, key_hex, verdict_key_hex, requested_outputs)
+    {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero()
+            || !pending_writes::await_pending_payload(
+                &state.pending_cache_writes,
+                key_hex,
+                remaining,
+            )
+            .await
+        {
+            break;
+        }
+    }
+}
+
+fn rustc_verdict_key_hex(
+    is_rustc: bool,
+    artifact_key_hex: &str,
+    client_env: Option<&[(String, String)]>,
+) -> Option<String> {
+    is_rustc.then(|| {
+        let dylint_hash = client_env.and_then(|env| {
+            env.iter()
+                .find_map(|(name, value)| (name == DYLINT_CACHE_INPUT_HASH_ENV).then_some(value))
+                .map(String::as_str)
+        });
+        crate::daemon_core::depgraph::compute_rustc_verdict_key(artifact_key_hex, dylint_hash)
+            .hash()
+            .to_hex()
+    })
+}
+
+pub(super) struct RequestCacheHitProbe<'a> {
+    pub(super) state: &'a Arc<SharedState>,
+    pub(super) sid: &'a SessionId,
+    pub(super) compiler_path: &'a Path,
+    pub(super) effective_args: &'a [String],
+    pub(super) cwd: &'a Path,
+    pub(super) request_cache_key_root: &'a Option<NormalizedPath>,
+    pub(super) client_env: Option<&'a [(String, String)]>,
+    pub(super) compile_start: Instant,
+    pub(super) snap_clock: Clock,
+}
+
+pub(super) async fn try_request_cache_hit(probe: RequestCacheHitProbe<'_>) -> Option<Response> {
+    let RequestCacheHitProbe {
+        state,
+        sid,
+        compiler_path,
+        effective_args,
+        cwd,
+        request_cache_key_root,
+        client_env,
+        compile_start,
+        snap_clock,
+    } = probe;
+
+    if !state.watcher_active.load(Ordering::Acquire) {
+        return None;
+    }
+
+    let t_request_cache_lookup = Instant::now();
+    let request_fp = request_fingerprint(
+        compiler_path,
+        effective_args,
+        cwd,
+        request_cache_key_root.as_deref(),
+        client_env,
+    );
+    let req_entry = state.request_cache.get(&request_fp)?;
+    if req_entry.test_harness
+        && !test_harness_admission::for_request(client_env).admits_test_harness()
+    {
+        return None;
+    }
+    let request_cache_lookup_ns = t_request_cache_lookup.elapsed().as_nanos() as u64;
+    if !request_cache_entry_matches_root(&req_entry, request_cache_key_root.as_ref()) {
+        return None;
+    }
+    let fh_entry = state.fast_hit_cache.get(&req_entry.context_key)?;
+    let artifact_key_hex = &fh_entry.artifact_key_hex;
+    let source_path = req_entry
+        .source_path
+        .resolve(request_cache_key_root.as_deref());
+    let output_path = req_entry
+        .output_path
+        .resolve(request_cache_key_root.as_deref());
+    // Issue #643: rebase the cached depfile destination to the current
+    // request's key root. For cross-worktree (`HIT_WORKTREE_REQUEST`)
+    // hits, this routes the depfile to worktree B's path even though the
+    // entry was created from worktree A — same semantics as
+    // `source_path` / `output_path`.
+    let is_rustc = crate::daemon_core::compiler::detect_family(&compiler_path.to_string_lossy())
+        == crate::daemon_core::compiler::CompilerFamily::Rustc;
+    let rustc_args = effective_rustc_args(compiler_path, effective_args);
+    let current_depfile_dest: Option<NormalizedPath> = if is_rustc {
+        rustc_requested_depfile(rustc_args, cwd)
+    } else {
+        None
+    }
+    .or_else(|| {
+        req_entry
+            .depfile_path
+            .as_ref()
+            .map(|path| path.resolve(request_cache_key_root.as_deref()))
+    });
+    let mtime_floor_paths: Vec<NormalizedPath> = req_entry
+        .input_paths
+        .iter()
+        .map(|path| path.resolve(request_cache_key_root.as_deref()))
+        .collect();
+    let same_root = req_entry.root.as_ref() == request_cache_key_root.as_ref();
+    let t_cross_root_validate = Instant::now();
+    let inputs_match = if same_root {
+        context_files_and_env_fresh(
+            state,
+            &req_entry.context_key,
+            &source_path,
+            fh_entry.clock,
+            client_env,
+        )
+    } else {
+        request_cache_artifact_matches(
+            state,
+            &req_entry,
+            request_fp,
+            request_cache_key_root.as_ref(),
+            artifact_key_hex,
+            compile_start,
+            snap_clock,
+        )
+    };
+    let cross_root_validate_ns = if same_root {
+        0
+    } else {
+        t_cross_root_validate.elapsed().as_nanos() as u64
+    };
+    if !cache_entry_fresh_at(compile_start, fh_entry.cached_at, FAST_HIT_MAX_AGE)
+        || !cache_entry_fresh_at(compile_start, req_entry.cached_at, EPHEMERAL_CACHE_MAX_AGE)
+        || !inputs_match
+    {
+        return None;
+    }
+
+    // A cold miss may have installed a provisional in-memory payload while
+    // its durable write is pending. Wait only when the artifact, requested
+    // verdict, or requested output mapping is not ready for this hit.
+    let hit_label = if same_root {
+        "HIT_REQUEST"
+    } else {
+        "HIT_WORKTREE_REQUEST"
+    };
+    let rustc_requested_outputs =
+        rustc_requested_outputs(rustc_args, &output_path, cwd, client_env);
+    let rustc_archive_hardlink_eligible =
+        is_rustc.then(|| crate::daemon_core::compiler::rustc_archive_hardlink_eligible(rustc_args));
+    let verdict_key_hex = rustc_verdict_key_hex(is_rustc, artifact_key_hex, client_env);
+    await_artifact_publication_if_needed(
+        state,
+        artifact_key_hex,
+        verdict_key_hex.as_deref(),
+        rustc_requested_outputs.as_deref(),
+    )
+    .await;
+    let current_rustc_out_dir = if is_rustc {
+        certified_rustc_out_dir(state, &req_entry.context_key, client_env, &source_path)
+    } else {
+        None
+    };
+    materialize_cached_compile_hit_offloaded(OwnedCachedHitMaterializeRequest {
+        state: Arc::clone(state),
+        sid: *sid,
+        artifact_key_hex: artifact_key_hex.to_owned(),
+        verdict_key_hex,
+        source_path,
+        output_path: output_path.clone(),
+        secondary_output_dir: output_path.parent().unwrap_or(cwd).into(),
+        current_depfile_dest,
+        current_rustc_out_dir,
+        depfile_key_root: (!is_rustc)
+            .then(|| request_cache_key_root.clone().unwrap_or_else(|| cwd.into())),
+        compile_start,
+        hit_label,
+        cached_error_label: "CACHED_ERROR_REQUEST",
+        record_compilation: true,
+        downgrade_output_metadata: false,
+        mtime_floor_paths,
+        rustc_metadata_compat_outputs: rustc_requested_outputs,
+        rustc_archive_hardlink_eligible,
+        materialization_mode: state.materialization_mode(client_env),
+        phases: CachedHitPhases::request_cache(request_cache_lookup_ns, cross_root_validate_ns),
+    })
+    .await
+    .ok()
+}
+
+pub(super) struct FastHitProbe<'a> {
+    pub(super) state: &'a Arc<SharedState>,
+    pub(super) sid: &'a SessionId,
+    pub(super) context_key: ContextKey,
+    pub(super) source_path: &'a NormalizedPath,
+    pub(super) output_path: &'a NormalizedPath,
+    pub(super) cwd_path: &'a NormalizedPath,
+    pub(super) ctx: &'a CompileContext,
+    pub(super) compiler_path: &'a Path,
+    pub(super) effective_args: &'a [String],
+    pub(super) cwd: &'a Path,
+    pub(super) request_cache_key_root: &'a Option<NormalizedPath>,
+    pub(super) client_env: Option<&'a [(String, String)]>,
+    /// Issue #643: the user's parsed depfile flags. `None` for rustc (which
+    /// uses its own dep-info mechanism); for C/C++ it carries the user's
+    /// `-MD` / `-MF` so the hit can restore the depfile to the current
+    /// build's destination.
+    pub(super) dep_flags: Option<&'a UserDepFlags>,
+    pub(super) is_rustc: bool,
+    pub(super) worktree_equivalent_context: bool,
+    pub(super) worktree_bound: bool,
+    pub(super) compile_start: Instant,
+    pub(super) parse_args_ns: u64,
+    pub(super) build_context_ns: u64,
+}
+
+pub(super) async fn try_fast_hit(probe: FastHitProbe<'_>) -> Option<Response> {
+    let FastHitProbe {
+        state,
+        sid,
+        context_key,
+        source_path,
+        output_path,
+        cwd_path,
+        ctx,
+        compiler_path,
+        effective_args,
+        cwd,
+        request_cache_key_root,
+        client_env,
+        dep_flags,
+        is_rustc,
+        worktree_equivalent_context,
+        worktree_bound,
+        compile_start,
+        parse_args_ns,
+        build_context_ns,
+    } = probe;
+
+    if !state.watcher_active.load(Ordering::Acquire) {
+        return None;
+    }
+    if worktree_equivalent_context {
+        // Cross-worktree hits may be the first time this daemon has seen the
+        // current root's source paths. Until that root has gone through a
+        // miss path and installed directory watches, keep using the hashed
+        // depgraph path instead of the zero-hash fast-hit cache.
+        return None;
+    }
+    // Snap a clone of the fast-hit entry's fields BEFORE awaiting on the
+    // pending registry — DashMap's `get` returns a shard guard, and holding
+    // it across `.await` risks a cross-shard deadlock when concurrent
+    // tasks contend for the same shard.
+    let (entry_artifact_key_hex, entry_clock, entry_cached_at) = {
+        let entry = state.fast_hit_cache.get(&context_key)?;
+        (entry.artifact_key_hex.clone(), entry.clock, entry.cached_at)
+    };
+    if !cache_entry_fresh_at(compile_start, entry_cached_at, FAST_HIT_MAX_AGE)
+        || !context_files_and_env_fresh(state, &context_key, source_path, entry_clock, client_env)
+    {
+        return None;
+    }
+
+    // Issue #610, DD-025: if a cold miss is still publishing this artifact's
+    // request-specific verdict/output metadata, wait so materialization does
+    // not fall through to a recompile-on-race. Ready provisional payloads
+    // remain immediately usable while durable persistence is in flight.
+    let secondary_output_dir = if is_rustc {
+        output_path.parent().unwrap_or(cwd_path).into()
+    } else {
+        cwd_path.clone()
+    };
+    let hit_label = if worktree_equivalent_context {
+        "HIT_WORKTREE_FAST"
+    } else {
+        "HIT_FAST"
+    };
+    let rustc_args = effective_rustc_args(compiler_path, effective_args);
+    let input_paths = request_cache_input_paths(state, &context_key, source_path, ctx);
+    let current_depfile_dest: Option<NormalizedPath> = if is_rustc {
+        rustc_requested_depfile(rustc_args, cwd_path.as_path())
+    } else {
+        dep_flags.and_then(|flags| user_depfile_destination(flags, output_path.as_path()))
+    };
+    let rustc_requested_outputs = if is_rustc {
+        rustc_requested_outputs(rustc_args, output_path, cwd_path, client_env)
+    } else {
+        None
+    };
+    let verdict_key_hex = rustc_verdict_key_hex(is_rustc, &entry_artifact_key_hex, client_env);
+    await_artifact_publication_if_needed(
+        state,
+        &entry_artifact_key_hex,
+        verdict_key_hex.as_deref(),
+        rustc_requested_outputs.as_deref(),
+    )
+    .await;
+    let response = materialize_cached_compile_hit_offloaded(OwnedCachedHitMaterializeRequest {
+        state: Arc::clone(state),
+        sid: *sid,
+        artifact_key_hex: entry_artifact_key_hex,
+        verdict_key_hex,
+        source_path: source_path.clone(),
+        output_path: output_path.clone(),
+        secondary_output_dir,
+        current_depfile_dest: current_depfile_dest.clone(),
+        current_rustc_out_dir: is_rustc
+            .then(|| certified_rustc_out_dir(state, &context_key, client_env, source_path))
+            .flatten(),
+        depfile_key_root: (!is_rustc).then(|| {
+            request_cache_key_root
+                .clone()
+                .unwrap_or_else(|| cwd_path.clone())
+        }),
+        compile_start,
+        hit_label,
+        cached_error_label: "CACHED_ERROR_FAST",
+        record_compilation: false,
+        downgrade_output_metadata: true,
+        mtime_floor_paths: input_paths.clone(),
+        rustc_metadata_compat_outputs: rustc_requested_outputs,
+        rustc_archive_hardlink_eligible: is_rustc
+            .then(|| crate::daemon_core::compiler::rustc_archive_hardlink_eligible(rustc_args)),
+        materialization_mode: state.materialization_mode(client_env),
+        phases: CachedHitPhases {
+            parse_args_ns,
+            build_context_ns,
+            hash_source_ns: 0,
+            hash_headers_ns: 0,
+            depgraph_check_ns: 0,
+            request_cache_lookup_ns: 0,
+            cross_root_validate_ns: 0,
+        },
+    })
+    .await
+    .ok()?;
+
+    let rfp = request_fingerprint(
+        compiler_path,
+        effective_args,
+        cwd,
+        request_cache_key_root.as_deref(),
+        client_env,
+    );
+    state.request_cache.insert(
+        rfp,
+        request_cache_entry(
+            context_key,
+            source_path,
+            output_path,
+            current_depfile_dest.as_ref(),
+            input_paths,
+            request_cache_key_root.as_ref(),
+            worktree_bound,
+        )
+        .for_test_harness(
+            is_rustc
+                && test_harness_admission::is_test_harness_request(compiler_path, effective_args),
+        ),
+    );
+    Some(response)
+}
+
+pub(super) struct DepgraphHitProbe<'a> {
+    pub(super) state: &'a Arc<SharedState>,
+    pub(super) sid: &'a SessionId,
+    pub(super) context_key: ContextKey,
+    pub(super) artifact_key_hex: &'a str,
+    pub(super) source_path: &'a NormalizedPath,
+    pub(super) output_path: &'a NormalizedPath,
+    pub(super) cwd_path: &'a NormalizedPath,
+    pub(super) ctx: &'a CompileContext,
+    pub(super) compiler_path: &'a Path,
+    pub(super) effective_args: &'a [String],
+    pub(super) cwd: &'a Path,
+    pub(super) request_cache_key_root: &'a Option<NormalizedPath>,
+    pub(super) client_env: Option<&'a [(String, String)]>,
+    /// Issue #643: the user's parsed depfile flags. `None` for rustc.
+    /// Used to derive `current_depfile_dest` for the cache hit and to
+    /// stamp the request-cache entry so subsequent fast-path hits also
+    /// restore the depfile.
+    pub(super) dep_flags: Option<&'a UserDepFlags>,
+    pub(super) is_rustc: bool,
+    pub(super) worktree_equivalent_context: bool,
+    pub(super) worktree_bound: bool,
+    pub(super) compile_start: Instant,
+    pub(super) parse_args_ns: u64,
+    pub(super) build_context_ns: u64,
+    pub(super) hash_source_ns: u64,
+    pub(super) hash_headers_ns: u64,
+    pub(super) depgraph_check_ns: u64,
+}
+
+pub(super) async fn try_depgraph_cached_hit(
+    probe: DepgraphHitProbe<'_>,
+) -> Result<Response, CachedHitFailure> {
+    let DepgraphHitProbe {
+        state,
+        sid,
+        context_key,
+        artifact_key_hex,
+        source_path,
+        output_path,
+        cwd_path,
+        ctx,
+        compiler_path,
+        effective_args,
+        cwd,
+        request_cache_key_root,
+        client_env,
+        dep_flags,
+        is_rustc,
+        worktree_equivalent_context,
+        worktree_bound,
+        compile_start,
+        parse_args_ns,
+        build_context_ns,
+        hash_source_ns,
+        hash_headers_ns,
+        depgraph_check_ns,
+    } = probe;
+
+    let secondary_output_dir = if is_rustc {
+        output_path.parent().unwrap_or(cwd_path).into()
+    } else {
+        cwd_path.clone()
+    };
+    let hit_label = if worktree_equivalent_context {
+        "HIT_WORKTREE"
+    } else {
+        "HIT"
+    };
+    let rustc_args = effective_rustc_args(compiler_path, effective_args);
+    let input_paths = request_cache_input_paths(state, &context_key, source_path, ctx);
+    let current_depfile_dest: Option<NormalizedPath> = if is_rustc {
+        rustc_requested_depfile(rustc_args, cwd_path.as_path())
+    } else {
+        dep_flags.and_then(|flags| user_depfile_destination(flags, output_path.as_path()))
+    };
+    let rustc_requested_outputs = if is_rustc {
+        rustc_requested_outputs(rustc_args, output_path, cwd_path, client_env)
+    } else {
+        None
+    };
+
+    // Rustc miss storage publishes a pending in-memory artifact immediately,
+    // then hardlinks/copies the output payloads to the artifact directory on a
+    // background task. If the build removes its just-produced output before
+    // that task completes, a depgraph hit can otherwise fail to materialize
+    // and unnecessarily recompile. The fast-hit path has the same guard.
+    let verdict_key_hex = rustc_verdict_key_hex(is_rustc, artifact_key_hex, client_env);
+    await_artifact_publication_if_needed(
+        state,
+        artifact_key_hex,
+        verdict_key_hex.as_deref(),
+        rustc_requested_outputs.as_deref(),
+    )
+    .await;
+
+    let response = materialize_cached_compile_hit_offloaded(OwnedCachedHitMaterializeRequest {
+        state: Arc::clone(state),
+        sid: *sid,
+        artifact_key_hex: artifact_key_hex.to_owned(),
+        verdict_key_hex,
+        source_path: source_path.clone(),
+        output_path: output_path.clone(),
+        secondary_output_dir,
+        current_depfile_dest: current_depfile_dest.clone(),
+        current_rustc_out_dir: is_rustc
+            .then(|| certified_rustc_out_dir(state, &context_key, client_env, source_path))
+            .flatten(),
+        depfile_key_root: (!is_rustc).then(|| {
+            request_cache_key_root
+                .clone()
+                .unwrap_or_else(|| cwd_path.clone())
+        }),
+        compile_start,
+        hit_label,
+        cached_error_label: "CACHED_ERROR",
+        record_compilation: false,
+        downgrade_output_metadata: true,
+        mtime_floor_paths: input_paths.clone(),
+        rustc_metadata_compat_outputs: rustc_requested_outputs,
+        rustc_archive_hardlink_eligible: is_rustc
+            .then(|| crate::daemon_core::compiler::rustc_archive_hardlink_eligible(rustc_args)),
+        materialization_mode: state.materialization_mode(client_env),
+        phases: CachedHitPhases {
+            parse_args_ns,
+            build_context_ns,
+            hash_source_ns,
+            hash_headers_ns,
+            depgraph_check_ns,
+            request_cache_lookup_ns: 0,
+            cross_root_validate_ns: 0,
+        },
+    })
+    .await?;
+
+    if !worktree_equivalent_context {
+        state.cache_system.register_tracked(&input_paths);
+        let current_clock = state.cache_system.current_clock();
+        state.fast_hit_cache.insert(
+            context_key,
+            FastHitEntry {
+                clock: current_clock,
+                artifact_key_hex: artifact_key_hex.to_string(),
+                cached_at: Instant::now(),
+            },
+        );
+
+        let rfp = request_fingerprint(
+            compiler_path,
+            effective_args,
+            cwd,
+            request_cache_key_root.as_deref(),
+            client_env,
+        );
+        state.request_cache.insert(
+            rfp,
+            request_cache_entry(
+                context_key,
+                source_path,
+                output_path,
+                current_depfile_dest.as_ref(),
+                input_paths,
+                request_cache_key_root.as_ref(),
+                worktree_bound,
+            )
+            .for_test_harness(
+                is_rustc
+                    && test_harness_admission::is_test_harness_request(
+                        compiler_path,
+                        effective_args,
+                    ),
+            ),
+        );
+    }
+    Ok(response)
+}
+
+/// Explicit Rust `--emit=kind=path` destinations are part of the request
+/// shape, but the cache payload names are the producer's names.  Supply the
+/// current request's complete output map so a hit restores custom destinations
+/// instead of placing payloads beside the primary output by basename.
+fn rustc_requested_outputs(
+    effective_args: &[String],
+    output_path: &NormalizedPath,
+    cwd: &Path,
+    client_env: Option<&[(String, String)]>,
+) -> Option<Vec<NormalizedPath>> {
+    let parsed = crate::daemon_core::depgraph::parse_rustc_args(effective_args, cwd);
+    let outputs = crate::daemon_core::daemon::server::rustc_expected_output_paths(
+        &parsed,
+        output_path.as_path(),
+        cwd,
+        client_env,
+    );
+    if parsed.explicit_emit_paths.is_empty() && outputs.len() == 1 {
+        return None;
+    }
+    Some(outputs)
+}
+
+fn rustc_requested_depfile(effective_args: &[String], cwd: &Path) -> Option<NormalizedPath> {
+    let parsed = crate::daemon_core::depgraph::parse_rustc_args(effective_args, cwd);
+    crate::daemon_core::daemon::server::rustc_depfile_output_path(&parsed, cwd)
+}
+
+fn effective_rustc_args<'a>(compiler_path: &Path, effective_args: &'a [String]) -> &'a [String] {
+    crate::daemon_core::compiler::dylint_inner_rustc_args(&compiler_path.to_string_lossy(), effective_args)
+        .ok()
+        .flatten()
+        .map_or(effective_args, |(_, args)| args)
+}

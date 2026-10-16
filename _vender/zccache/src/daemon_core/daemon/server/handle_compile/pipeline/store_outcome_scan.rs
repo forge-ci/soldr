@@ -1,0 +1,304 @@
+//! Blocking dependency-scan collection for successful compile misses.
+
+use crate::daemon_core::core::NormalizedPath;
+use crate::daemon_core::daemon::server::dependency_policy::DependencyDiscoveryMode;
+use crate::daemon_core::daemon::server::rustc::scan_rustc_deps;
+use crate::daemon_core::depgraph::DepfileStrategy;
+
+pub(super) struct CompileScanRequest {
+    pub(super) is_rustc: bool,
+    pub(super) rustc_args: Option<crate::daemon_core::depgraph::RustcParsedArgs>,
+    pub(super) source_path: NormalizedPath,
+    pub(super) cwd_path: NormalizedPath,
+    pub(super) depfile_strategy: DepfileStrategy,
+    pub(super) compiler_dependency_scan: Option<crate::daemon_core::depgraph::ScanResult>,
+    pub(super) include_search: crate::daemon_core::depgraph::IncludeSearchPaths,
+    pub(super) dependency_mode: DependencyDiscoveryMode,
+    /// Daemon-wide include-scan memo (zccache#1669).
+    pub(super) scan_cache: std::sync::Arc<crate::daemon_core::depgraph::scanner::RecursiveScanCache>,
+}
+
+pub(super) struct CompileScanCollection {
+    pub(super) scan_result: crate::daemon_core::depgraph::ScanResult,
+    /// Env-dep names scanned from rustc dep-info (zccache#1021).
+    pub(super) rustc_env_dep_names: Vec<String>,
+    pub(super) user_depfile_capture: Option<(NormalizedPath, Vec<u8>)>,
+    pub(super) depfile_parse_warning: Option<String>,
+}
+
+pub(super) async fn collect_compile_scan_blocking(
+    req: CompileScanRequest,
+) -> CompileScanCollection {
+    kernal_api::async_engine::launch_blocking(move || collect_compile_scan(req))
+        .detach_on_drop()
+        .await
+        .unwrap_or_else(|e| CompileScanCollection {
+            rustc_env_dep_names: Vec::new(),
+            scan_result: crate::daemon_core::depgraph::ScanResult {
+                resolved: Vec::new(),
+                unresolved: vec![format!("compile dependency scan worker failed: {e}")],
+                has_computed: false,
+            },
+            user_depfile_capture: None,
+            depfile_parse_warning: None,
+        })
+}
+
+fn collect_compile_scan(req: CompileScanRequest) -> CompileScanCollection {
+    let CompileScanRequest {
+        is_rustc,
+        rustc_args,
+        source_path,
+        cwd_path,
+        depfile_strategy,
+        compiler_dependency_scan,
+        include_search,
+        dependency_mode,
+        scan_cache,
+    } = req;
+
+    if is_rustc {
+        let (scan_result, rustc_env_dep_names) = rustc_args.as_ref().map_or_else(
+            || {
+                (
+                    crate::daemon_core::depgraph::ScanResult {
+                        resolved: Vec::new(),
+                        unresolved: vec![
+                            "missing parsed rustc args for rustc dependency scan".into()
+                        ],
+                        has_computed: false,
+                    },
+                    Vec::new(),
+                )
+            },
+            |args| {
+                let dep_scan = scan_rustc_deps(args, &source_path, &cwd_path);
+                (dep_scan.scan, dep_scan.env_dep_names)
+            },
+        );
+        return CompileScanCollection {
+            scan_result,
+            rustc_env_dep_names,
+            user_depfile_capture: None,
+            depfile_parse_warning: None,
+        };
+    }
+
+    // Static scans canonicalize resolved headers. Resolve include roots once
+    // so fallback filtering uses the same path spelling on every platform.
+    let include_search = include_search.canonicalized();
+
+    let mut user_depfile_capture = None;
+    let mut depfile_parse_warning = None;
+    let mut used_static_fallback = false;
+    let mut scan_result = match &depfile_strategy {
+        DepfileStrategy::Injected { path }
+        | DepfileStrategy::UserSpecified { path, .. }
+        | DepfileStrategy::UserDefault { path, .. } => {
+            let want_capture = matches!(
+                depfile_strategy,
+                DepfileStrategy::UserSpecified { .. } | DepfileStrategy::UserDefault { .. }
+            );
+            match crate::daemon_core::depgraph::depfile::parse_depfile_path(path, &source_path, &cwd_path) {
+                Ok(result) => {
+                    if want_capture {
+                        if let Ok(bytes) = std::fs::read(path) {
+                            user_depfile_capture = Some((path.clone(), bytes));
+                        }
+                    }
+                    if matches!(depfile_strategy, DepfileStrategy::Injected { .. }) {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    // A parsed compiler depfile is authoritative: never rescan
+                    // includes here (zccache#1668). System headers omitted by
+                    // user `-MMD` are covered by the toolchain identity in the
+                    // cache key.
+                    if let Some(compiler_scan) = compiler_dependency_scan {
+                        crate::daemon_core::depgraph::depfile::merge_scan_results(result, compiler_scan)
+                    } else {
+                        result
+                    }
+                }
+                Err(e) => {
+                    used_static_fallback = true;
+                    depfile_parse_warning = Some(format!("path={} error={e}", path.display()));
+                    if matches!(depfile_strategy, DepfileStrategy::Injected { .. }) {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    crate::daemon_core::depgraph::scanner::scan_recursive_cached(
+                        &source_path,
+                        &include_search,
+                        &scan_cache,
+                    )
+                }
+            }
+        }
+        DepfileStrategy::InjectedMmd { path } => {
+            match crate::daemon_core::depgraph::depfile::parse_depfile_path(path, &source_path, &cwd_path) {
+                Ok(result) => {
+                    let _ = std::fs::remove_file(path);
+                    if let Some(compiler_scan) = compiler_dependency_scan {
+                        crate::daemon_core::depgraph::depfile::merge_scan_results(result, compiler_scan)
+                    } else {
+                        result
+                    }
+                }
+                Err(e) => {
+                    used_static_fallback = true;
+                    depfile_parse_warning = Some(format!("path={} error={e}", path.display()));
+                    let _ = std::fs::remove_file(path);
+                    let fallback = crate::daemon_core::depgraph::scanner::scan_recursive_cached(
+                        &source_path,
+                        &include_search,
+                        &scan_cache,
+                    );
+                    let mut result = if let Some(scan) = compiler_dependency_scan {
+                        crate::daemon_core::depgraph::depfile::merge_scan_results(scan, fallback)
+                    } else {
+                        fallback
+                    };
+                    // A malformed private depfile means one of the two exact
+                    // compiler manifests was incomplete. Retain every path we
+                    // did recover, but never permit a direct-mode hit from it.
+                    result.has_computed = true;
+                    result
+                }
+            }
+        }
+        DepfileStrategy::CompilerTrace | DepfileStrategy::ShowIncludes => compiler_dependency_scan
+            .unwrap_or_else(|| {
+                used_static_fallback = true;
+                crate::daemon_core::depgraph::scanner::scan_recursive_cached(
+                    &source_path,
+                    &include_search,
+                    &scan_cache,
+                )
+            }),
+        DepfileStrategy::Unsupported => {
+            used_static_fallback = true;
+            crate::daemon_core::depgraph::scanner::scan_recursive_cached(
+                &source_path,
+                &include_search,
+                &scan_cache,
+            )
+        }
+    };
+    apply_static_fallback_policy(
+        dependency_mode,
+        used_static_fallback,
+        &mut scan_result,
+        &include_search,
+    );
+
+    CompileScanCollection {
+        scan_result,
+        rustc_env_dep_names: Vec::new(),
+        user_depfile_capture,
+        depfile_parse_warning,
+    }
+}
+
+pub(super) fn apply_static_fallback_policy(
+    dependency_mode: DependencyDiscoveryMode,
+    used_static_fallback: bool,
+    result: &mut crate::daemon_core::depgraph::ScanResult,
+    include_search: &crate::daemon_core::depgraph::IncludeSearchPaths,
+) {
+    if used_static_fallback {
+        dependency_mode.apply_static_fallback(result, include_search);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_mmd_retains_compiler_trace_and_fails_closed() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let source = temp.path().join("main.c");
+        let header = temp.path().join("system.h");
+        let depfile = temp.path().join("main.d");
+        std::fs::write(&source, "#include <system.h>\n").unwrap();
+        std::fs::write(&header, "#define VALUE 1\n").unwrap();
+        std::fs::write(&depfile, [0xff, 0xfe]).unwrap();
+        let header: NormalizedPath = header.into();
+
+        let collection = collect_compile_scan(CompileScanRequest {
+            is_rustc: false,
+            rustc_args: None,
+            source_path: source.into(),
+            cwd_path: temp.path().into(),
+            depfile_strategy: DepfileStrategy::InjectedMmd {
+                path: depfile.into(),
+            },
+            compiler_dependency_scan: Some(crate::daemon_core::depgraph::ScanResult {
+                resolved: vec![header.clone()],
+                unresolved: Vec::new(),
+                has_computed: false,
+            }),
+            include_search: Default::default(),
+            dependency_mode: DependencyDiscoveryMode::AllHeaders,
+            scan_cache: Default::default(),
+        });
+
+        assert!(collection.scan_result.resolved.contains(&header));
+        assert!(collection.scan_result.has_computed);
+        assert!(collection.depfile_parse_warning.is_some());
+    }
+
+    /// zccache#1668: a parsed user `-MMD` depfile is authoritative; the
+    /// daemon must not rerun the recursive include scan on a cache miss.
+    #[test]
+    fn user_mmd_depfile_skips_recursive_include_scan() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let source = temp.path().join("main.c");
+        let a_header = temp.path().join("a.h");
+        // `unlisted.h` exists and is included, but is absent from the
+        // depfile. Only a recursive rescan could discover it, so its
+        // absence from the result proves the scan was skipped without
+        // relying on the process-wide scanner counter (other tests scan
+        // concurrently).
+        let unlisted = temp.path().join("unlisted.h");
+        let sys_header = temp.path().join("sys.h");
+        let depfile = temp.path().join("main.d");
+        std::fs::write(
+            &source,
+            "#include \"a.h\"\n#include \"unlisted.h\"\n#include <sys.h>\n",
+        )
+        .unwrap();
+        std::fs::write(&a_header, "#define A 1\n").unwrap();
+        std::fs::write(&unlisted, "#define U 1\n").unwrap();
+        std::fs::write(&sys_header, "#define SYS 1\n").unwrap();
+        std::fs::write(&depfile, "main.o: main.c a.h\n").unwrap();
+
+        let collection = collect_compile_scan(CompileScanRequest {
+            is_rustc: false,
+            rustc_args: None,
+            source_path: source.into(),
+            cwd_path: temp.path().into(),
+            depfile_strategy: DepfileStrategy::UserSpecified {
+                path: depfile.into(),
+                augment_system_headers: true,
+            },
+            compiler_dependency_scan: None,
+            include_search: Default::default(),
+            dependency_mode: DependencyDiscoveryMode::AllHeaders,
+            scan_cache: Default::default(),
+        });
+
+        let names: Vec<String> = collection
+            .scan_result
+            .resolved
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        assert!(names.iter().any(|n| n == "a.h"), "resolved: {names:?}");
+        assert!(
+            !names.iter().any(|n| n == "unlisted.h"),
+            "recursive include scan ran; resolved: {names:?}"
+        );
+        assert!(collection.depfile_parse_warning.is_none());
+        assert!(collection.user_depfile_capture.is_some());
+    }
+}

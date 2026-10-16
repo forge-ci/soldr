@@ -1,0 +1,1185 @@
+//! File metadata types and cache implementation.
+
+use dashmap::mapref::entry::Entry;
+use dashmap::DashMap;
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant, SystemTime};
+use crate::core::NormalizedPath;
+
+// ── mtime drift tolerance (issue #469) ──────────────────────────────────────
+
+/// Default tolerated mtime drift, in nanoseconds, when comparing a cached
+/// metadata entry against a fresh `stat()` (`get_cached_hash_if_stat_valid`).
+///
+/// Set to 1 full second so archive-extraction truncation (tar / zstd-tar /
+/// soldr-save-load all flatten sub-second nanos to 0) is absorbed. The
+/// tolerance applies only when either timestamp has a zero sub-second field,
+/// which is the signature of that truncation. Native fine-grained timestamps
+/// remain exact so a same-size edit cannot be mistaken for an archive restore.
+///
+/// Override at daemon startup via `ZCCACHE_MTIME_TOLERANCE_NS`:
+/// - `0` → strict byte-equal mtime match (pre-issue-#469 behavior).
+/// - any positive integer → tolerance window in nanoseconds.
+pub const DEFAULT_MTIME_TOLERANCE_NS: u64 = 1_000_000_000;
+
+/// Env var that overrides [`DEFAULT_MTIME_TOLERANCE_NS`]. Read once on first
+/// access; subsequent changes during daemon lifetime are ignored.
+pub const MTIME_TOLERANCE_ENV: &str = "ZCCACHE_MTIME_TOLERANCE_NS";
+
+/// Resolve the active tolerance, caching the result. The env probe is done
+/// exactly once per daemon process — no per-hit syscall overhead.
+fn mtime_tolerance_ns() -> u64 {
+    static CACHED: OnceLock<u64> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var(MTIME_TOLERANCE_ENV)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_MTIME_TOLERANCE_NS)
+    })
+}
+
+/// Compare two mtimes with the configured drift tolerance.
+///
+/// Match if:
+/// - The two values are byte-equal (no truncation happened), OR
+/// - `|a - b| < mtime_tolerance_ns()` and either timestamp has a zero
+///   sub-second field, the archive-truncation signature.
+///
+/// Setting the tolerance to `0` (via `ZCCACHE_MTIME_TOLERANCE_NS=0`)
+/// disables the second branch entirely and restores strict byte-equal
+/// semantics — useful for diagnosing watcher bugs.
+fn mtimes_match(a: SystemTime, b: SystemTime) -> bool {
+    if a == b {
+        return true;
+    }
+    let tolerance_ns = mtime_tolerance_ns();
+    if tolerance_ns == 0 {
+        return false;
+    }
+    let (a_secs, a_nanos) = mtime_components(a);
+    let (b_secs, b_nanos) = mtime_components(b);
+    if a_nanos != 0 && b_nanos != 0 {
+        return false;
+    }
+    let a_total = (a_secs as u128) * 1_000_000_000 + (a_nanos as u128);
+    let b_total = (b_secs as u128) * 1_000_000_000 + (b_nanos as u128);
+    a_total.abs_diff(b_total) < tolerance_ns as u128
+}
+
+fn mtime_components(t: SystemTime) -> (u64, u32) {
+    t.duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| (d.as_secs(), d.subsec_nanos()))
+        .unwrap_or((0, 0))
+}
+
+/// Confidence level for a cached metadata entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Confidence {
+    /// Entry has not been verified recently. Must stat before trusting.
+    Low,
+    /// Watcher indicates no changes since last verification.
+    Medium,
+    /// Recently stat-verified or content-hash verified.
+    High,
+}
+
+/// Cached metadata for a single file.
+///
+/// Change detection uses `(mtime, size)`. File replacement detection
+/// (same path, new inode) is handled by the file watcher (`notify`),
+/// not by platform-specific file identity checks.
+#[derive(Debug, Clone)]
+pub struct FileMetadata {
+    /// File modification time.
+    pub mtime: SystemTime,
+    /// File size in bytes.
+    pub size: u64,
+    /// Confidence level of this entry.
+    pub confidence: Confidence,
+    /// When this entry was last verified via stat.
+    pub last_verified: Instant,
+    /// Cached content hash (blake3, 32 bytes), if computed.
+    pub content_hash: Option<[u8; 32]>,
+}
+
+/// One entry selected by the read-only phase of metadata eviction.
+///
+/// The write phase must compare `last_verified` again while holding the
+/// entry's shard write lock. A lookup may refresh the entry between the two
+/// phases; in that case this candidate is stale and must not remove the newly
+/// refreshed value.
+#[derive(Debug, Clone)]
+pub struct EvictionCandidate {
+    path: NormalizedPath,
+    last_verified: Instant,
+}
+
+impl EvictionCandidate {
+    /// Path observed by the read-only candidate pass.
+    #[must_use]
+    pub fn path(&self) -> &NormalizedPath {
+        &self.path
+    }
+}
+
+/// Detailed result of conditionally deleting an eviction-candidate slice.
+#[derive(Debug, Default)]
+pub struct CandidateEvictionResult {
+    /// Candidates removed with the same timestamp observed by the read pass.
+    pub removed: usize,
+    /// Candidates whose shard could not be acquired without blocking.
+    pub busy: Vec<EvictionCandidate>,
+    /// Candidates whose verification timestamp changed after the read pass.
+    pub refreshed: Vec<EvictionCandidate>,
+}
+
+/// Concurrent file metadata cache.
+///
+/// Uses `DashMap` for sharded, concurrent access. Entries are keyed
+/// by normalized path.
+#[derive(Debug)]
+pub struct MetadataCache {
+    entries: DashMap<NormalizedPath, FileMetadata>,
+    /// Duration after which a High-confidence entry decays to Medium.
+    high_decay: Duration,
+    /// Duration after which a Medium-confidence entry decays to Low.
+    medium_decay: Duration,
+    /// Set by every mutating method; cleared by [`Self::take_dirty`]. Lets a
+    /// shutdown/periodic snapshot skip re-serializing and re-fsyncing
+    /// `metadata.bin` when nothing has changed since the last save
+    /// (zccache#1775). `merge_from` (background disk load) deliberately does
+    /// not set this — the merged content already matches disk.
+    dirty: AtomicBool,
+}
+
+impl MetadataCache {
+    /// Create a new metadata cache with default decay durations.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: DashMap::new(),
+            high_decay: Duration::from_secs(60),
+            medium_decay: Duration::from_secs(30),
+            dirty: AtomicBool::new(false),
+        }
+    }
+
+    /// Whether the cache has been mutated since the last [`Self::take_dirty`].
+    #[must_use]
+    pub fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Relaxed)
+    }
+
+    /// Clear the dirty flag, returning whether it was set. Callers check this
+    /// immediately before a snapshot save to decide whether the save (and its
+    /// serialize + fsync) is necessary at all.
+    pub fn take_dirty(&self) -> bool {
+        self.dirty.swap(false, Ordering::Relaxed)
+    }
+
+    fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Look up metadata for a path, applying confidence decay.
+    ///
+    /// Returns `None` if the path is not in the cache.
+    #[must_use]
+    pub fn get(&self, path: &NormalizedPath) -> Option<FileMetadata> {
+        self.entries.get(path).map(|entry| {
+            let mut meta = entry.clone();
+            meta.confidence = self.decayed_confidence(&meta);
+            meta
+        })
+    }
+
+    /// Insert or update metadata for a path.
+    pub fn insert(&self, path: NormalizedPath, metadata: FileMetadata) {
+        self.entries.insert(path, metadata);
+        self.mark_dirty();
+    }
+
+    /// Mark a path's entry as Low confidence (e.g., after watcher overflow).
+    pub fn downgrade(&self, path: &NormalizedPath) {
+        if let Some(mut entry) = self.entries.get_mut(path) {
+            entry.confidence = Confidence::Low;
+            self.mark_dirty();
+        }
+    }
+
+    /// Downgrade all entries to Low confidence.
+    pub fn downgrade_all(&self) {
+        let mut any = false;
+        for mut entry in self.entries.iter_mut() {
+            entry.confidence = Confidence::Low;
+            any = true;
+        }
+        if any {
+            self.mark_dirty();
+        }
+    }
+
+    /// Re-stat all Low-confidence entries and promote those whose
+    /// filesystem metadata `(mtime, size)` still matches.
+    ///
+    /// Designed for overflow recovery: after a watcher overflow downgrades
+    /// everything to Low, this method cheaply restores High confidence for
+    /// files that haven't actually changed — avoiding unnecessary re-hashing
+    /// on subsequent lookups.
+    ///
+    /// Returns the number of entries promoted back to High confidence.
+    pub fn rescan_all(&self) -> usize {
+        // Collect Low-confidence keys so we can stat them in parallel
+        // without holding DashMap shard locks during I/O.
+        let low_keys: Vec<NormalizedPath> = self
+            .entries
+            .iter()
+            .filter(|e| e.confidence == Confidence::Low)
+            .map(|e| e.key().clone())
+            .collect();
+
+        if low_keys.is_empty() {
+            return 0;
+        }
+
+        // Parallel stat: each file is independent.
+        let results: Vec<(NormalizedPath, SystemTime, u64)> = low_keys
+            .par_iter()
+            .filter_map(|path| {
+                Self::stat_file(path)
+                    .ok()
+                    .map(|fresh| (path.clone(), fresh.mtime, fresh.size))
+            })
+            .collect();
+
+        // Apply promotions back (fast, in-memory only).
+        let mut promoted = 0;
+        for (path, mtime, size) in results {
+            if let Some(mut entry) = self.entries.get_mut(&path) {
+                if entry.confidence == Confidence::Low && entry.mtime == mtime && entry.size == size
+                {
+                    entry.confidence = Confidence::High;
+                    entry.last_verified = Instant::now();
+                    promoted += 1;
+                }
+            }
+        }
+        if promoted > 0 {
+            self.mark_dirty();
+        }
+        promoted
+    }
+
+    /// Remove a path from the cache.
+    pub fn remove(&self, path: &NormalizedPath) {
+        if self.entries.remove(path).is_some() {
+            self.mark_dirty();
+        }
+    }
+
+    /// Returns the number of entries in the cache.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns whether the cache is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Remove all entries from the cache.
+    pub fn clear(&self) {
+        self.entries.clear();
+        self.mark_dirty();
+    }
+
+    /// Drain entries from a freshly loaded `MetadataCache` into `self`
+    /// using `DashMap::insert` (which is `&self`).
+    ///
+    /// Issue #784 phase 2b: lets a background `spawn_blocking` task load
+    /// the on-disk `metadata.bin` snapshot AFTER the daemon has written
+    /// its readiness lockfile, then populate the live cache without
+    /// holding up bind. Readers during the merge window either see no
+    /// entry (cold-path miss — safe; the next call to
+    /// `get_cached_hash_if_stat_valid` re-stats and re-hashes if needed)
+    /// or a loaded entry (the stat-verify safety net at the call site
+    /// rejects a stale `(mtime, size)` before trusting the hash, so a
+    /// partially-loaded snapshot cannot poison cache keys).
+    pub fn merge_from(&self, other: Self) {
+        for (k, v) in other.entries {
+            self.entries.insert(k, v);
+        }
+    }
+
+    /// Return a cached content hash if the entry has High or Medium confidence.
+    ///
+    /// This is the clock-aware fast path: the caller has journal-based
+    /// assurance that the file hasn't changed, so time-based decay is
+    /// not applied. Returns `None` if the entry is missing, Low confidence,
+    /// or has no cached hash.
+    #[must_use]
+    pub fn get_cached_hash(&self, path: &NormalizedPath) -> Option<crate::hash::ContentHash> {
+        self.entries
+            .get(path)
+            .and_then(|entry| match entry.confidence {
+                Confidence::High | Confidence::Medium => entry
+                    .content_hash
+                    .map(crate::hash::ContentHash::from_bytes),
+                Confidence::Low => None,
+            })
+    }
+
+    /// Return a cached content hash only if `(mtime, size)` still match the
+    /// filesystem — one `stat()` syscall, zero hashing.
+    ///
+    /// This is the safety net for the journal fast path: even when the journal
+    /// reports no changes (watcher latency), a single stat catches files that
+    /// were modified underneath us.
+    ///
+    /// Returns `None` if the entry is missing, Low confidence, has no cached
+    /// hash, or the stat check fails / shows a mismatch.
+    #[must_use]
+    pub fn get_cached_hash_if_stat_valid(
+        &self,
+        path: &NormalizedPath,
+    ) -> Option<crate::hash::ContentHash> {
+        // Copy the entry out under a short read guard so the stat below runs
+        // with no shard guard alive — same lock discipline as `rescan_all`
+        // and `fingerprint/verify.rs` (#1908, the #724 class).
+        let (recorded_mtime, recorded_size, hash) = {
+            let entry = self.entries.get(path)?;
+            match entry.confidence {
+                Confidence::High | Confidence::Medium => {}
+                Confidence::Low => return None,
+            }
+            let hash = entry
+                .content_hash
+                .map(crate::hash::ContentHash::from_bytes)?;
+            (entry.mtime, entry.size, hash)
+        };
+
+        // One stat syscall to verify mtime + size still match.
+        let fs_meta = std::fs::metadata(path).ok()?;
+        let mtime = fs_meta.modified().ok()?;
+        let size = fs_meta.len();
+        if mtimes_match(recorded_mtime, mtime) && recorded_size == size {
+            Some(hash)
+        } else {
+            None
+        }
+    }
+
+    /// Trim entries whose `last_verified` is older than `max_age`.
+    /// Returns the number of entries removed.
+    pub fn trim(&self, max_age: Duration) -> usize {
+        let now = Instant::now();
+        let mut removed = 0;
+        self.entries.retain(|_, entry| {
+            // Use saturating_duration_since to avoid panic if Instant is
+            // non-monotonic (documented edge case on some platforms/VMs).
+            if now.saturating_duration_since(entry.last_verified) > max_age {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        if removed > 0 {
+            self.mark_dirty();
+        }
+        removed
+    }
+
+    /// Evict the `count` oldest entries by `last_verified`.
+    /// Returns the number actually removed (may be less than `count`).
+    pub fn evict_oldest(&self, count: usize) -> usize {
+        let candidates = self.oldest_eviction_candidates(count);
+        self.evict_candidates(&candidates)
+    }
+
+    /// Collect the `count` oldest entries without taking any shard write lock.
+    ///
+    /// This is the read-only phase of two-pass eviction. The returned
+    /// candidates are observations, not deletion authority: callers must use
+    /// [`Self::evict_candidates`] or [`Self::try_evict_candidates`] so a
+    /// refresh between the two phases is preserved.
+    pub fn oldest_eviction_candidates(&self, count: usize) -> Vec<EvictionCandidate> {
+        if count == 0 {
+            return Vec::new();
+        }
+        // Collect (path, last_verified) then sort oldest first.
+        let mut entries: Vec<EvictionCandidate> = self
+            .entries
+            .iter()
+            .map(|entry| EvictionCandidate {
+                path: entry.key().clone(),
+                last_verified: entry.value().last_verified,
+            })
+            .collect();
+        entries.sort_by_key(|candidate| candidate.last_verified);
+        entries.truncate(count);
+        entries
+    }
+
+    /// Remove candidates whose verification timestamp still matches the
+    /// read-only selection pass.
+    ///
+    /// Each entry is revalidated while its shard write lock is held. Entries
+    /// refreshed, replaced, or removed since candidate collection are skipped.
+    pub fn evict_candidates(&self, candidates: &[EvictionCandidate]) -> usize {
+        self.evict_candidates_detailed(candidates).removed
+    }
+
+    /// Detailed blocking write phase, including timestamp-refreshed entries.
+    pub fn evict_candidates_detailed(
+        &self,
+        candidates: &[EvictionCandidate],
+    ) -> CandidateEvictionResult {
+        let mut result = CandidateEvictionResult::default();
+        for candidate in candidates {
+            if let Entry::Occupied(entry) = self.entries.entry(candidate.path.clone()) {
+                if entry.get().last_verified == candidate.last_verified {
+                    entry.remove();
+                    result.removed += 1;
+                } else {
+                    result.refreshed.push(candidate.clone());
+                }
+            }
+        }
+        if result.removed > 0 {
+            self.mark_dirty();
+        }
+        result
+    }
+
+    /// Nonblocking variant of [`Self::evict_candidates`].
+    ///
+    /// A candidate on a busy shard is skipped so active cache traffic wins.
+    /// A later GC pass may retry it. Timestamp revalidation has the same
+    /// semantics as the blocking variant.
+    pub fn try_evict_candidates(&self, candidates: &[EvictionCandidate]) -> usize {
+        self.try_evict_candidates_detailed(candidates).removed
+    }
+
+    /// Detailed nonblocking write phase, distinguishing lock contention from
+    /// timestamp refreshes so a later forced pass can retry only busy entries.
+    pub fn try_evict_candidates_detailed(
+        &self,
+        candidates: &[EvictionCandidate],
+    ) -> CandidateEvictionResult {
+        let mut result = CandidateEvictionResult::default();
+        for candidate in candidates {
+            let Some(entry) = self.entries.try_entry(candidate.path.clone()) else {
+                result.busy.push(candidate.clone());
+                continue;
+            };
+            if let Entry::Occupied(entry) = entry {
+                if entry.get().last_verified == candidate.last_verified {
+                    entry.remove();
+                    result.removed += 1;
+                } else {
+                    result.refreshed.push(candidate.clone());
+                }
+            }
+        }
+        if result.removed > 0 {
+            self.mark_dirty();
+        }
+        result
+    }
+
+    /// Iterate all cached paths.
+    pub fn paths(&self) -> Vec<NormalizedPath> {
+        self.entries.iter().map(|e| e.key().clone()).collect()
+    }
+
+    fn decayed_confidence(&self, meta: &FileMetadata) -> Confidence {
+        // Use saturating_duration_since to avoid panic if Instant is
+        // non-monotonic (documented edge case on some platforms/VMs).
+        let elapsed = Instant::now().saturating_duration_since(meta.last_verified);
+        match meta.confidence {
+            Confidence::High if elapsed > self.high_decay => Confidence::Medium,
+            Confidence::Medium if elapsed > self.medium_decay => Confidence::Low,
+            other => other,
+        }
+    }
+}
+
+impl Default for MetadataCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kernal_api::platform::fs::{set_file_mtime, FileTime};
+    use std::collections::HashSet;
+    use std::fs;
+
+    // ── mtime tolerance (issue #469) ─────────────────────────────────────
+
+    fn ts(secs: u64, nanos: u32) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::new(secs, nanos)
+    }
+
+    #[test]
+    fn default_mtime_tolerance_is_one_second() {
+        // Lock in the documented default. The constant is `pub` so consumers
+        // and tests both depend on this being 1_000_000_000 ns.
+        assert_eq!(DEFAULT_MTIME_TOLERANCE_NS, 1_000_000_000);
+    }
+
+    #[test]
+    fn mtimes_match_byte_equal() {
+        assert!(mtimes_match(ts(1_000, 0), ts(1_000, 0)));
+        assert!(mtimes_match(ts(1_000, 500_000), ts(1_000, 500_000)));
+    }
+
+    #[test]
+    fn mtimes_match_archive_truncation_one_side_zero() {
+        // Cached side has sub-second precision; archive-restored side lost
+        // it. Drift is ~141 ms, well within the 1 s default tolerance.
+        assert!(mtimes_match(ts(1_000, 141_490_982), ts(1_000, 0)));
+        // Symmetric — either side can be the truncated one.
+        assert!(mtimes_match(ts(1_000, 0), ts(1_000, 141_490_982)));
+    }
+
+    #[test]
+    fn mtimes_match_only_with_archive_truncation_signature() {
+        // A timestamp at a whole second can be an archive-restored version of
+        // the other timestamp, so the sub-second drift is tolerated.
+        assert!(mtimes_match(ts(1_000, 0), ts(1_000, 500_000_000)));
+        assert!(mtimes_match(ts(1_000, 0), ts(1_000, 999_999_999)));
+
+        // Fine-grained timestamps are exact, even when the difference is
+        // much smaller than the one-second archive tolerance.
+        assert!(!mtimes_match(
+            ts(1_000, 100_000_000),
+            ts(1_000, 500_000_000)
+        ));
+
+        // The tolerance is strictly less than one second.
+        assert!(!mtimes_match(ts(1_000, 0), ts(1_001, 0)));
+    }
+
+    #[test]
+    fn mtimes_dont_match_beyond_default_tolerance() {
+        // Drift = 1.1 s (100 ms past the 1 s boundary). Picked at 100 ms
+        // rather than 1 ns past the boundary because Windows `SystemTime`
+        // uses 100 ns FILETIME resolution — anything finer than 100 ns gets
+        // truncated and the test would compare equal across the boundary.
+        assert!(!mtimes_match(ts(1_000, 0), ts(1_001, 100_000_000)));
+        // Multi-second drift — clearly a real change on every platform.
+        assert!(!mtimes_match(ts(1_000, 0), ts(1_002, 0)));
+        assert!(!mtimes_match(ts(1_000, 500_000), ts(1_010, 0)));
+    }
+
+    #[test]
+    fn mtimes_match_pre_epoch_safe() {
+        // Pre-UNIX-EPOCH times resolve to (0, 0) via mtime_components — should
+        // not panic, should compare equal to other pre-epoch values.
+        let pre = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
+        assert!(mtimes_match(pre, pre));
+    }
+
+    #[test]
+    fn stat_fast_path_rejects_same_size_fine_grained_mtime_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("input.c");
+        fs::write(&file, b"old!").unwrap();
+
+        let cached_mtime = ts(1_000, 100_000_000);
+        let fresh_mtime = ts(1_000, 500_000_000);
+        set_file_mtime(&file, FileTime::from_system_time(fresh_mtime)).unwrap();
+
+        let path = NormalizedPath::from(file.as_path());
+        let cache = MetadataCache::new();
+        cache.insert(
+            path.clone(),
+            FileMetadata {
+                mtime: cached_mtime,
+                size: 4,
+                confidence: Confidence::High,
+                last_verified: Instant::now(),
+                content_hash: Some([42; 32]),
+            },
+        );
+
+        // A watcher event may not have arrived yet, but the stat safety net
+        // must not return the stale hash for a same-size native-resolution
+        // timestamp change within the former one-second blanket window.
+        assert!(cache.get_cached_hash_if_stat_valid(&path).is_none());
+    }
+
+    #[test]
+    fn stat_fast_path_accepts_archive_truncated_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("input.c");
+        fs::write(&file, b"same").unwrap();
+
+        let cached_mtime = ts(1_000, 141_490_982);
+        set_file_mtime(&file, FileTime::from_system_time(ts(1_000, 0))).unwrap();
+
+        let path = NormalizedPath::from(file.as_path());
+        let cache = MetadataCache::new();
+        cache.insert(
+            path.clone(),
+            FileMetadata {
+                mtime: cached_mtime,
+                size: 4,
+                confidence: Confidence::High,
+                last_verified: Instant::now(),
+                content_hash: Some([42; 32]),
+            },
+        );
+
+        assert!(cache.get_cached_hash_if_stat_valid(&path).is_some());
+    }
+
+    #[test]
+    fn insert_and_get() {
+        let cache = MetadataCache::new();
+        let path = NormalizedPath::from("/tmp/test.c");
+        let meta = FileMetadata {
+            mtime: SystemTime::now(),
+            size: 100,
+            confidence: Confidence::High,
+            last_verified: Instant::now(),
+            content_hash: None,
+        };
+        cache.insert(path.clone(), meta);
+        assert!(cache.get(&path).is_some());
+    }
+
+    #[test]
+    fn get_returns_none_for_missing_path() {
+        let cache = MetadataCache::new();
+        assert!(cache.get(&NormalizedPath::from("/no/such/path")).is_none());
+    }
+
+    #[test]
+    fn insert_overwrites_existing() {
+        let cache = MetadataCache::new();
+        let path = NormalizedPath::from("/tmp/overwrite.c");
+
+        let meta1 = FileMetadata {
+            mtime: SystemTime::now(),
+            size: 100,
+            confidence: Confidence::High,
+            last_verified: Instant::now(),
+            content_hash: None,
+        };
+        cache.insert(path.clone(), meta1);
+        assert_eq!(cache.get(&path).unwrap().size, 100);
+
+        let meta2 = FileMetadata {
+            mtime: SystemTime::now(),
+            size: 999,
+            confidence: Confidence::Medium,
+            last_verified: Instant::now(),
+            content_hash: None,
+        };
+        cache.insert(path.clone(), meta2);
+        assert_eq!(cache.get(&path).unwrap().size, 999);
+    }
+
+    #[test]
+    fn downgrade_single_path() {
+        let cache = MetadataCache::new();
+        let path_a = NormalizedPath::from("/tmp/a.c");
+        let path_b = NormalizedPath::from("/tmp/b.c");
+
+        for path in [&path_a, &path_b] {
+            cache.insert(
+                path.clone(),
+                FileMetadata {
+                    mtime: SystemTime::now(),
+                    size: 10,
+                    confidence: Confidence::High,
+                    last_verified: Instant::now(),
+                    content_hash: None,
+                },
+            );
+        }
+
+        cache.downgrade(&path_a);
+        assert_eq!(cache.get(&path_a).unwrap().confidence, Confidence::Low);
+        assert_eq!(cache.get(&path_b).unwrap().confidence, Confidence::High);
+    }
+
+    #[test]
+    fn downgrade_nonexistent_is_noop() {
+        let cache = MetadataCache::new();
+        cache.downgrade(&NormalizedPath::from("/no/such/path")); // should not panic
+    }
+
+    #[test]
+    fn remove_entry() {
+        let cache = MetadataCache::new();
+        let path = NormalizedPath::from("/tmp/removable.c");
+        cache.insert(
+            path.clone(),
+            FileMetadata {
+                mtime: SystemTime::now(),
+                size: 10,
+                confidence: Confidence::High,
+                last_verified: Instant::now(),
+                content_hash: None,
+            },
+        );
+        assert_eq!(cache.len(), 1);
+
+        cache.remove(&path);
+        assert!(cache.get(&path).is_none());
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn remove_nonexistent_is_noop() {
+        let cache = MetadataCache::new();
+        cache.remove(&NormalizedPath::from("/no/such/path")); // should not panic
+    }
+
+    #[test]
+    fn is_empty_and_len() {
+        let cache = MetadataCache::new();
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+
+        cache.insert(
+            NormalizedPath::from("/tmp/x.c"),
+            FileMetadata {
+                mtime: SystemTime::now(),
+                size: 1,
+                confidence: Confidence::High,
+                last_verified: Instant::now(),
+                content_hash: None,
+            },
+        );
+        assert!(!cache.is_empty());
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn get_cached_hash_high_confidence() {
+        let cache = MetadataCache::new();
+        let path = NormalizedPath::from("/tmp/hashed.c");
+        let hash_bytes = [42u8; 32];
+        cache.insert(
+            path.clone(),
+            FileMetadata {
+                mtime: SystemTime::now(),
+                size: 10,
+                confidence: Confidence::High,
+                last_verified: Instant::now(),
+                content_hash: Some(hash_bytes),
+            },
+        );
+
+        let result = cache.get_cached_hash(&path);
+        assert!(result.is_some());
+        assert_eq!(*result.unwrap().as_bytes(), hash_bytes);
+    }
+
+    #[test]
+    fn get_cached_hash_medium_confidence() {
+        let cache = MetadataCache::new();
+        let path = NormalizedPath::from("/tmp/med.c");
+        let hash_bytes = [7u8; 32];
+        cache.insert(
+            path.clone(),
+            FileMetadata {
+                mtime: SystemTime::now(),
+                size: 10,
+                confidence: Confidence::Medium,
+                last_verified: Instant::now(),
+                content_hash: Some(hash_bytes),
+            },
+        );
+
+        let result = cache.get_cached_hash(&path);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn get_cached_hash_low_confidence_returns_none() {
+        let cache = MetadataCache::new();
+        let path = NormalizedPath::from("/tmp/low.c");
+        cache.insert(
+            path.clone(),
+            FileMetadata {
+                mtime: SystemTime::now(),
+                size: 10,
+                confidence: Confidence::Low,
+                last_verified: Instant::now(),
+                content_hash: Some([1u8; 32]),
+            },
+        );
+
+        assert!(cache.get_cached_hash(&path).is_none());
+    }
+
+    #[test]
+    fn get_cached_hash_no_hash_returns_none() {
+        let cache = MetadataCache::new();
+        let path = NormalizedPath::from("/tmp/nohash.c");
+        cache.insert(
+            path.clone(),
+            FileMetadata {
+                mtime: SystemTime::now(),
+                size: 10,
+                confidence: Confidence::High,
+                last_verified: Instant::now(),
+                content_hash: None,
+            },
+        );
+
+        assert!(cache.get_cached_hash(&path).is_none());
+    }
+
+    #[test]
+    fn get_cached_hash_missing_path_returns_none() {
+        let cache = MetadataCache::new();
+        assert!(cache
+            .get_cached_hash(&NormalizedPath::from("/no/such"))
+            .is_none());
+    }
+
+    #[test]
+    fn clear_removes_all_entries() {
+        let cache = MetadataCache::new();
+        for i in 0..5 {
+            cache.insert(
+                NormalizedPath::from(format!("/tmp/clear{i}.c")),
+                FileMetadata {
+                    mtime: SystemTime::now(),
+                    size: i as u64,
+                    confidence: Confidence::High,
+                    last_verified: Instant::now(),
+                    content_hash: None,
+                },
+            );
+        }
+        assert_eq!(cache.len(), 5);
+        cache.clear();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn trim_removes_old_entries() {
+        let cache = MetadataCache::new();
+        let old = Instant::now() - Duration::from_secs(120);
+        cache.insert(
+            NormalizedPath::from("/tmp/old.c"),
+            FileMetadata {
+                mtime: SystemTime::now(),
+                size: 10,
+                confidence: Confidence::High,
+                last_verified: old,
+                content_hash: None,
+            },
+        );
+        cache.insert(
+            NormalizedPath::from("/tmp/new.c"),
+            FileMetadata {
+                mtime: SystemTime::now(),
+                size: 10,
+                confidence: Confidence::High,
+                last_verified: Instant::now(),
+                content_hash: None,
+            },
+        );
+        let removed = cache.trim(Duration::from_secs(60));
+        assert_eq!(removed, 1);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.get(&NormalizedPath::from("/tmp/old.c")).is_none());
+        assert!(cache.get(&NormalizedPath::from("/tmp/new.c")).is_some());
+    }
+
+    #[test]
+    fn trim_keeps_recent_entries() {
+        let cache = MetadataCache::new();
+        for i in 0..5 {
+            cache.insert(
+                NormalizedPath::from(format!("/tmp/recent{i}.c")),
+                FileMetadata {
+                    mtime: SystemTime::now(),
+                    size: 10,
+                    confidence: Confidence::High,
+                    last_verified: Instant::now(),
+                    content_hash: None,
+                },
+            );
+        }
+        let removed = cache.trim(Duration::from_secs(60));
+        assert_eq!(removed, 0);
+        assert_eq!(cache.len(), 5);
+    }
+
+    #[test]
+    fn evict_oldest_removes_n() {
+        let cache = MetadataCache::new();
+        let base = Instant::now() - Duration::from_secs(100);
+        for i in 0..5 {
+            cache.insert(
+                NormalizedPath::from(format!("/tmp/e{i}.c")),
+                FileMetadata {
+                    mtime: SystemTime::now(),
+                    size: 10,
+                    confidence: Confidence::High,
+                    last_verified: base + Duration::from_secs(i * 10),
+                    content_hash: None,
+                },
+            );
+        }
+        let removed = cache.evict_oldest(2);
+        assert_eq!(removed, 2);
+        assert_eq!(cache.len(), 3);
+    }
+
+    #[test]
+    fn eviction_candidate_preserves_entry_refreshed_after_read_pass() {
+        let cache = MetadataCache::new();
+        let path = NormalizedPath::from("/tmp/refreshed.c");
+        let selected_at = Instant::now() - Duration::from_secs(120);
+        cache.insert(
+            path.clone(),
+            FileMetadata {
+                mtime: SystemTime::now(),
+                size: 10,
+                confidence: Confidence::High,
+                last_verified: selected_at,
+                content_hash: None,
+            },
+        );
+
+        let candidates = cache.oldest_eviction_candidates(1);
+        assert_eq!(candidates.len(), 1);
+
+        let refreshed_at = selected_at + Duration::from_secs(60);
+        cache.insert(
+            path.clone(),
+            FileMetadata {
+                mtime: SystemTime::now(),
+                size: 10,
+                confidence: Confidence::High,
+                last_verified: refreshed_at,
+                content_hash: None,
+            },
+        );
+
+        assert_eq!(cache.evict_candidates(&candidates), 0);
+        assert_eq!(cache.get(&path).unwrap().last_verified, refreshed_at);
+    }
+
+    #[test]
+    fn nonblocking_eviction_revalidates_candidate_timestamp() {
+        let cache = MetadataCache::new();
+        let path = NormalizedPath::from("/tmp/refreshed-try.c");
+        let selected_at = Instant::now() - Duration::from_secs(120);
+        cache.insert(
+            path.clone(),
+            FileMetadata {
+                mtime: SystemTime::now(),
+                size: 10,
+                confidence: Confidence::High,
+                last_verified: selected_at,
+                content_hash: None,
+            },
+        );
+
+        let candidates = cache.oldest_eviction_candidates(1);
+        cache.insert(
+            path.clone(),
+            FileMetadata {
+                mtime: SystemTime::now(),
+                size: 10,
+                confidence: Confidence::High,
+                last_verified: selected_at + Duration::from_secs(1),
+                content_hash: None,
+            },
+        );
+
+        assert_eq!(cache.try_evict_candidates(&candidates), 0);
+        assert!(cache.get(&path).is_some());
+    }
+
+    #[test]
+    fn nonblocking_eviction_reports_busy_candidate_for_forced_retry() {
+        let cache = MetadataCache::new();
+        let path = NormalizedPath::from("/tmp/busy-try.c");
+        cache.insert(
+            path.clone(),
+            FileMetadata {
+                mtime: SystemTime::now(),
+                size: 10,
+                confidence: Confidence::High,
+                last_verified: Instant::now(),
+                content_hash: None,
+            },
+        );
+        let candidates = cache.oldest_eviction_candidates(1);
+        let shard_guard = cache.entries.get_mut(&path).unwrap();
+
+        let gentle = cache.try_evict_candidates_detailed(&candidates);
+        assert_eq!(gentle.removed, 0);
+        assert_eq!(gentle.busy.len(), 1);
+        assert!(gentle.refreshed.is_empty());
+        drop(shard_guard);
+
+        let forced = cache.evict_candidates_detailed(&gentle.busy);
+        assert_eq!(forced.removed, 1);
+        assert!(cache.get(&path).is_none());
+    }
+
+    #[test]
+    fn evict_oldest_zero_noop() {
+        let cache = MetadataCache::new();
+        cache.insert(
+            NormalizedPath::from("/tmp/z.c"),
+            FileMetadata {
+                mtime: SystemTime::now(),
+                size: 10,
+                confidence: Confidence::High,
+                last_verified: Instant::now(),
+                content_hash: None,
+            },
+        );
+        let removed = cache.evict_oldest(0);
+        assert_eq!(removed, 0);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn evict_oldest_exceeds_count() {
+        let cache = MetadataCache::new();
+        cache.insert(
+            NormalizedPath::from("/tmp/only.c"),
+            FileMetadata {
+                mtime: SystemTime::now(),
+                size: 10,
+                confidence: Confidence::High,
+                last_verified: Instant::now(),
+                content_hash: None,
+            },
+        );
+        let removed = cache.evict_oldest(100);
+        assert_eq!(removed, 1);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn paths_returns_all() {
+        let cache = MetadataCache::new();
+        let expected: HashSet<NormalizedPath> = (0..3)
+            .map(|i| NormalizedPath::from(format!("/tmp/p{i}.c")))
+            .collect();
+        for p in &expected {
+            cache.insert(
+                p.clone(),
+                FileMetadata {
+                    mtime: SystemTime::now(),
+                    size: 10,
+                    confidence: Confidence::High,
+                    last_verified: Instant::now(),
+                    content_hash: None,
+                },
+            );
+        }
+        let actual: HashSet<NormalizedPath> = cache.paths().into_iter().collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn confidence_ordering() {
+        assert!(Confidence::Low < Confidence::Medium);
+        assert!(Confidence::Medium < Confidence::High);
+        assert!(Confidence::Low < Confidence::High);
+    }
+
+    #[test]
+    fn default_creates_new_cache() {
+        let cache = MetadataCache::default();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn downgrade_all_works() {
+        let cache = MetadataCache::new();
+        for i in 0..10 {
+            let path = NormalizedPath::from(format!("/tmp/test{i}.c"));
+            let meta = FileMetadata {
+                mtime: SystemTime::now(),
+                size: 100,
+                confidence: Confidence::High,
+                last_verified: Instant::now(),
+                content_hash: None,
+            };
+            cache.insert(path, meta);
+        }
+        cache.downgrade_all();
+        // After downgrade, all entries should be Low confidence
+        for entry in cache.entries.iter() {
+            assert_eq!(entry.confidence, Confidence::Low);
+        }
+    }
+
+    // zccache#1775: dirty-flag tracking lets a shutdown/periodic snapshot
+    // skip metadata.bin when nothing has changed since the last save.
+    mod dirty_flag {
+        use super::*;
+
+        fn meta() -> FileMetadata {
+            FileMetadata {
+                mtime: SystemTime::now(),
+                size: 1,
+                confidence: Confidence::High,
+                last_verified: Instant::now(),
+                content_hash: Some([0x42; 32]),
+            }
+        }
+
+        #[test]
+        fn starts_clean() {
+            let cache = MetadataCache::new();
+            assert!(!cache.is_dirty());
+            assert!(!cache.take_dirty());
+        }
+
+        #[test]
+        fn insert_marks_dirty_until_taken() {
+            let cache = MetadataCache::new();
+            cache.insert(NormalizedPath::new("/a"), meta());
+            assert!(cache.is_dirty());
+            assert!(cache.take_dirty());
+            assert!(!cache.is_dirty());
+        }
+
+        #[test]
+        fn remove_of_missing_path_does_not_mark_dirty() {
+            let cache = MetadataCache::new();
+            cache.remove(&NormalizedPath::new("/missing"));
+            assert!(!cache.is_dirty());
+        }
+
+        #[test]
+        fn merge_from_does_not_mark_dirty() {
+            let loaded = MetadataCache::new();
+            loaded.insert(NormalizedPath::new("/a"), meta());
+
+            let live = MetadataCache::new();
+            live.merge_from(loaded);
+
+            assert!(
+                !live.is_dirty(),
+                "a background disk load must not require an immediate re-save"
+            );
+        }
+    }
+}

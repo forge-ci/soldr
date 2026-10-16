@@ -1,0 +1,195 @@
+//! Supervision for the daemon's long-lived background loops (issue #1177).
+//!
+//! Every periodic task in `run.rs` was a bare runtime task whose handle was
+//! dropped. A panic inside one of them is therefore **completely silent**:
+//! the task disappears, the daemon keeps serving, and the only symptom is that
+//! something stops happening — memory is never evicted, the depgraph is never
+//! saved, disk is never reclaimed. Those are exactly the failures that present
+//! days later as "the cache got slow" or "the disk filled up", with nothing in
+//! the log to attribute them to.
+//!
+//! `spawn_supervised` keeps the handle, awaits it, and — for loops that are
+//! safe to restart — brings them back under bounded exponential backoff. Every
+//! death and every restart is loud on both surfaces (a `tracing::warn!` and a
+//! durable lifecycle event), per the project's timeout-forensics rule.
+//!
+//! ## What is and is not restartable
+//!
+//! A loop is restartable when it owns no unique resource and its work is
+//! idempotent — re-running an eviction pass or a depgraph save is harmless.
+//! A task that owns the receiving half of a channel is **not**: restarting it
+//! produces a loop that looks healthy and silently delivers nothing, which is
+//! worse than a task that is visibly gone. `Restart::Never` covers that case
+//! and is why the watcher consumer (#1276) degrades rather than restarts.
+
+use std::time::Duration;
+
+/// First backoff after a supervised task dies.
+const RESTART_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+
+/// Ceiling for the doubling restart backoff. A task that keeps panicking must
+/// not become a busy loop that costs more than the work it was doing.
+const RESTART_MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+/// Restarts allowed before the supervisor gives up and leaves the task dead.
+///
+/// Bounded rather than infinite: a loop that has panicked this many times is
+/// failing deterministically, and the honest outcome is a daemon that is
+/// visibly degraded rather than one that hides a permanent fault behind an
+/// endless restart cycle.
+const MAX_RESTARTS: u32 = 5;
+
+/// How often a supervisor in restart backoff checks for shutdown. Both
+/// shutdown paths join the supervised depgraph loop (#1654), so an
+/// uninterruptible backoff would stall shutdown by up to the full backoff
+/// (#1684).
+const BACKOFF_SHUTDOWN_POLL: Duration = Duration::from_millis(100);
+
+/// Whether a dead task should be brought back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Restart {
+    /// Idempotent periodic work — safe to run again from scratch.
+    Idempotent,
+    /// Owns a unique resource (typically a channel receiver). A replacement
+    /// would look healthy while delivering nothing, so the task stays dead and
+    /// the daemon reports itself degraded instead.
+    Never,
+}
+
+/// Why a supervised task stopped.
+fn exit_reason(outcome: &Result<(), kernal_api::async_engine::TaskError>) -> &'static str {
+    match outcome {
+        Ok(()) => "exited",
+        Err(err) if err.is_panic() => "panicked",
+        Err(_) => "cancelled",
+    }
+}
+
+/// The panic payload of a task that panicked, for the death log line.
+///
+/// `TaskError` does not expose the payload itself, but its `Display` renders
+/// a string payload as `task N panicked with message "..."` (a `{:?}`-quoted
+/// string). Without this the log said only "panicked", and a save loop dying
+/// on a serializer panic left no clue which assertion fired (zccache#1661).
+/// Returns `None` when the task did not panic.
+pub(super) fn panic_message(err: &kernal_api::async_engine::TaskError) -> Option<String> {
+    if !err.is_panic() {
+        return None;
+    }
+    let rendered = err.to_string();
+    const MARKER: &str = " panicked with message ";
+    Some(match rendered.split_once(MARKER) {
+        Some((_, quoted)) => quoted
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .map(|inner| inner.replace("\\\"", "\"").replace("\\\\", "\\"))
+            .unwrap_or_else(|| quoted.to_string()),
+        None => "<non-string panic>".to_string(),
+    })
+}
+
+/// Sleep out `backoff`, returning `true` as soon as shutdown is requested.
+async fn backoff_or_shutdown(backoff: Duration, is_shutting_down: &impl Fn() -> bool) -> bool {
+    let deadline = kernal_api::async_engine::Deadline::after(backoff);
+    loop {
+        if is_shutting_down() {
+            return true;
+        }
+        let remaining = deadline.remaining();
+        if remaining.is_zero() {
+            return false;
+        }
+        kernal_api::async_engine::sleep(remaining.min(BACKOFF_SHUTDOWN_POLL)).await;
+    }
+}
+
+/// Spawn a long-lived background loop under supervision.
+///
+/// `factory` builds the task future; it is called again on each restart, so it
+/// must capture whatever the loop needs by clone rather than by move-once.
+///
+/// `runtime_handle` carries the embedded host's runtime (zccache#922). Both the
+/// supervisor and every task it starts must land on it — a bare ambient launch
+/// would put supervised work on whatever runtime happened to be current at the
+/// call, which is precisely the contract the handle exists to enforce. `None`
+/// means "use the ambient runtime", which is the standalone daemon's case.
+pub(super) fn spawn_supervised<S, F, Fut>(
+    name: &'static str,
+    is_shutting_down: S,
+    restart: Restart,
+    runtime_handle: Option<&kernal_api::async_engine::RuntimeHandle>,
+    factory: F,
+) -> kernal_api::async_engine::Task<()>
+where
+    S: Fn() -> bool + Send + Sync + 'static,
+    F: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let spawn_handle = runtime_handle.cloned();
+    let runtime_handle = runtime_handle.cloned();
+    let supervisor = async move {
+        let mut restarts = 0u32;
+        let mut backoff = RESTART_INITIAL_BACKOFF;
+        loop {
+            let task = factory();
+            let outcome = match &runtime_handle {
+                Some(handle) => handle.launch(task),
+                None => kernal_api::async_engine::launch(task),
+            }
+            .await;
+
+            // A task ending during shutdown is the expected path, not a fault.
+            if is_shutting_down() {
+                return;
+            }
+
+            let reason = exit_reason(&outcome);
+            let panic = outcome.as_ref().err().and_then(panic_message);
+            tracing::warn!(
+                task = name,
+                reason,
+                panic = panic.as_deref().unwrap_or(""),
+                restarts,
+                "supervised background task stopped unexpectedly"
+            );
+            crate::daemon_core::core::lifecycle::write_event(
+                crate::daemon_core::core::lifecycle::EVENT_BACKGROUND_TASK_DIED,
+                serde_json::json!({
+                    "task": name,
+                    "reason": reason,
+                    "panic": panic,
+                    "restarts": restarts,
+                    "restartable": restart == Restart::Idempotent,
+                }),
+            );
+
+            if restart == Restart::Never || restarts >= MAX_RESTARTS {
+                tracing::error!(
+                    task = name,
+                    restarts,
+                    "supervised background task will not be restarted; the daemon is degraded"
+                );
+                return;
+            }
+
+            if backoff_or_shutdown(backoff, &is_shutting_down).await {
+                return;
+            }
+            restarts += 1;
+            backoff = (backoff * 2).min(RESTART_MAX_BACKOFF);
+            tracing::info!(task = name, restarts, "restarting background task");
+            crate::daemon_core::core::lifecycle::write_event(
+                crate::daemon_core::core::lifecycle::EVENT_BACKGROUND_TASK_RESTARTED,
+                serde_json::json!({ "task": name, "restarts": restarts }),
+            );
+        }
+    };
+    match spawn_handle {
+        Some(handle) => handle.launch(supervisor),
+        None => kernal_api::async_engine::launch(supervisor),
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/supervise.rs"]
+mod tests;

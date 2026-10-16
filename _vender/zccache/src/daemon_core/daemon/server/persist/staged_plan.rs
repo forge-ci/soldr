@@ -1,0 +1,1006 @@
+//! Private compiler-output staging plans.
+//!
+//! Planning is deliberately separate from persistence: the compiler must be
+//! redirected before it starts, and unsupported output shapes must fall back
+//! before spawn rather than publishing a partial set afterwards.
+
+use super::staged_link_args::{
+    absolute, has_unmodeled_link_output_option, implicit_msvc_output_option, rewrite_emit_value,
+    rewrite_link_output_arg,
+};
+use super::staged_paths::{
+    canonicalize_logical_depfile, canonicalize_staged_output_bytes, rehydrate_logical_depfile,
+    rehydrate_staged_output_bytes, STAGED_OUTPUT_REMAP_ROOT,
+};
+#[cfg(test)]
+use super::staged_store::materialization_error_progress;
+#[cfg(test)]
+use super::staged_store::{inject_staged_fault, StagedFaultGuard, StagedFaultPoint};
+use super::staged_store::{materialization_error, staged_lane_enabled, StagedMaterializationStats};
+use crate::daemon_core::core::config::MaterializationMode;
+use crate::daemon_core::core::path::NormalizedPath;
+use crate::daemon_core::depgraph::DepfileStrategy;
+use std::io;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static PLAN_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Bounded planner decisions used for aggregate telemetry. These IDs are part
+/// of the observability contract: never derive them from argv, paths, or OS
+/// error text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::daemon_core::daemon::server) enum StagedPlanReason {
+    LaneDisabled,
+    OutputToStdout,
+    OutputNameCollision,
+    UnmodeledSideOutput,
+    UnsupportedOutputRole,
+    MissingRequiredOutputFlag,
+    MissingOptionValue,
+    OutputMissingFilename,
+    UnsupportedOutputPath,
+    AmbiguousOutputArgument,
+    OutputNotInArguments,
+    NoDeclaredOutputs,
+    StagingDirectoryCreate,
+}
+
+impl StagedPlanReason {
+    #[cfg(test)]
+    pub(in crate::daemon_core::daemon::server) const ALL: [Self; 13] = [
+        Self::LaneDisabled,
+        Self::OutputToStdout,
+        Self::OutputNameCollision,
+        Self::UnmodeledSideOutput,
+        Self::UnsupportedOutputRole,
+        Self::MissingRequiredOutputFlag,
+        Self::MissingOptionValue,
+        Self::OutputMissingFilename,
+        Self::UnsupportedOutputPath,
+        Self::AmbiguousOutputArgument,
+        Self::OutputNotInArguments,
+        Self::NoDeclaredOutputs,
+        Self::StagingDirectoryCreate,
+    ];
+
+    pub(in crate::daemon_core::daemon::server) const fn id(self) -> &'static str {
+        match self {
+            Self::LaneDisabled => "lane_disabled",
+            Self::OutputToStdout => "output_to_stdout",
+            Self::OutputNameCollision => "output_name_collision",
+            Self::UnmodeledSideOutput => "unmodeled_side_output",
+            Self::UnsupportedOutputRole => "unsupported_output_role",
+            Self::MissingRequiredOutputFlag => "missing_required_output_flag",
+            Self::MissingOptionValue => "missing_option_value",
+            Self::OutputMissingFilename => "output_missing_filename",
+            Self::UnsupportedOutputPath => "unsupported_output_path",
+            Self::AmbiguousOutputArgument => "ambiguous_output_argument",
+            Self::OutputNotInArguments => "output_not_in_arguments",
+            Self::NoDeclaredOutputs => "no_declared_outputs",
+            Self::StagingDirectoryCreate => "staging_directory_create",
+        }
+    }
+
+    pub(in crate::daemon_core::daemon::server) const fn failure(
+        self,
+    ) -> crate::daemon_core::daemon::staged_stats::StagedFailure {
+        use crate::daemon_core::daemon::staged_stats::StagedFailure;
+        match self {
+            Self::LaneDisabled => StagedFailure::PlanLaneDisabled,
+            Self::OutputToStdout => StagedFailure::PlanOutputToStdout,
+            Self::OutputNameCollision => StagedFailure::PlanOutputNameCollision,
+            Self::UnmodeledSideOutput => StagedFailure::PlanUnmodeledSideOutput,
+            Self::UnsupportedOutputRole => StagedFailure::PlanUnsupportedOutputRole,
+            Self::MissingRequiredOutputFlag => StagedFailure::PlanMissingRequiredOutputFlag,
+            Self::MissingOptionValue => StagedFailure::PlanMissingOptionValue,
+            Self::OutputMissingFilename => StagedFailure::PlanOutputMissingFilename,
+            Self::UnsupportedOutputPath => StagedFailure::PlanUnsupportedOutputPath,
+            Self::AmbiguousOutputArgument => StagedFailure::PlanAmbiguousOutputArgument,
+            Self::OutputNotInArguments => StagedFailure::PlanOutputNotInArguments,
+            Self::NoDeclaredOutputs => StagedFailure::PlanNoDeclaredOutputs,
+            Self::StagingDirectoryCreate => StagedFailure::PlanStagingDirectoryCreate,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(in crate::daemon_core::daemon::server) struct StagedPlanError {
+    pub(in crate::daemon_core::daemon::server) reason: StagedPlanReason,
+    pub(in crate::daemon_core::daemon::server) source: io::Error,
+}
+
+#[derive(Debug)]
+pub(in crate::daemon_core::daemon::server) enum StagedPlanOutcome<T> {
+    Enabled(T),
+    Unsupported(StagedPlanReason),
+    Error(StagedPlanError),
+}
+
+fn planning_error(reason: StagedPlanReason, source: io::Error) -> StagedPlanError {
+    StagedPlanError { reason, source }
+}
+
+fn missing_filename(reason: StagedPlanReason) -> StagedPlanError {
+    planning_error(
+        reason,
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "planned output has no filename",
+        ),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::daemon_core::daemon::server) enum StagedOutputRole {
+    Regular,
+    Depfile,
+}
+
+impl StagedOutputRole {
+    fn from_kind(kind: &str) -> Self {
+        if kind == "dep-info" {
+            Self::Depfile
+        } else {
+            Self::Regular
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::daemon_core::daemon::server) struct StagedOutputPlan {
+    pub(in crate::daemon_core::daemon::server) requested: NormalizedPath,
+    pub(in crate::daemon_core::daemon::server) staged: NormalizedPath,
+    pub(in crate::daemon_core::daemon::server) role: StagedOutputRole,
+}
+
+#[derive(Debug)]
+pub(in crate::daemon_core::daemon::server) struct StagedCompilePlan {
+    pub(in crate::daemon_core::daemon::server) outputs: Vec<StagedOutputPlan>,
+    pub(in crate::daemon_core::daemon::server) rewritten_args: Vec<String>,
+    pub(super) root: NormalizedPath,
+}
+
+impl StagedCompilePlan {
+    #[cfg(test)]
+    pub(in crate::daemon_core::daemon::server) fn for_test(
+        root: impl Into<NormalizedPath>,
+        outputs: Vec<StagedOutputPlan>,
+    ) -> Self {
+        Self {
+            outputs,
+            rewritten_args: Vec::new(),
+            root: root.into(),
+        }
+    }
+
+    /// Build a plan for the narrow Phase 3 Rust lane.  A plan is absent for
+    /// unsupported invocations, preserving the proven legacy path.
+    pub(in crate::daemon_core::daemon::server) fn rustc(
+        staging_dir: &Path,
+        args: &[String],
+        primary_output: &NormalizedPath,
+        expected_outputs: &[NormalizedPath],
+        cwd: &Path,
+    ) -> StagedPlanOutcome<Self> {
+        if !staged_lane_enabled(crate::daemon_core::compiler::CompilerFamily::Rustc) {
+            return StagedPlanOutcome::Unsupported(StagedPlanReason::LaneDisabled);
+        }
+        if emit_to_stdout(args) {
+            return StagedPlanOutcome::Unsupported(StagedPlanReason::OutputToStdout);
+        }
+        if rustc_has_missing_option_value(args) {
+            return StagedPlanOutcome::Unsupported(StagedPlanReason::MissingOptionValue);
+        }
+        let root: NormalizedPath = staging_dir
+            .join(format!(
+                ".compile-{}-{}",
+                std::process::id(),
+                PLAN_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ))
+            .into();
+        if let Err(source) = std::fs::create_dir_all(&root) {
+            return StagedPlanOutcome::Error(planning_error(
+                StagedPlanReason::StagingDirectoryCreate,
+                source,
+            ));
+        }
+
+        let result = (|| -> Result<StagedPlanOutcome<Self>, StagedPlanError> {
+            let mut primary = absolute(primary_output, cwd);
+            let mut outputs = Vec::with_capacity(expected_outputs.len());
+            for requested in expected_outputs {
+                let requested = absolute(requested, cwd);
+                let file_name = requested
+                    .file_name()
+                    .ok_or_else(|| missing_filename(StagedPlanReason::OutputMissingFilename))?;
+                let staged = root.join(file_name);
+                if outputs
+                    .iter()
+                    .any(|output: &StagedOutputPlan| staged == output.staged.as_path())
+                {
+                    return Ok(StagedPlanOutcome::Unsupported(
+                        StagedPlanReason::OutputNameCollision,
+                    ));
+                }
+                outputs.push(StagedOutputPlan {
+                    requested: requested.clone(),
+                    staged,
+                    role: StagedOutputRole::from_kind(&output_kind(&requested)),
+                });
+            }
+            for (kind, path) in emit_specs(args) {
+                let requested = absolute(Path::new(&path), cwd);
+                let role = StagedOutputRole::from_kind(&kind);
+                if kind == "link" {
+                    primary = requested.clone();
+                }
+                let replacement = outputs.iter().position(|output| {
+                    output.requested == requested || output_kind(&output.requested) == kind
+                });
+                if let Some(index) = replacement {
+                    outputs[index].requested = requested;
+                    outputs[index].role = role;
+                } else {
+                    outputs.push(StagedOutputPlan {
+                        requested,
+                        staged: root.join(Path::new(&path).file_name().ok_or_else(|| {
+                            missing_filename(StagedPlanReason::OutputMissingFilename)
+                        })?),
+                        role,
+                    });
+                }
+            }
+            let mut names = std::collections::HashSet::new();
+            outputs.retain(|output| names.insert(output.requested.clone()));
+            for output in &mut outputs {
+                let file_name = output
+                    .requested
+                    .file_name()
+                    .ok_or_else(|| missing_filename(StagedPlanReason::OutputMissingFilename))?;
+                output.staged = root.join(file_name);
+            }
+            if outputs.iter().enumerate().any(|(index, output)| {
+                outputs[..index]
+                    .iter()
+                    .any(|previous| previous.staged == output.staged)
+            }) {
+                return Ok(StagedPlanOutcome::Unsupported(
+                    StagedPlanReason::OutputNameCollision,
+                ));
+            }
+            let staged_primary = outputs
+                .iter()
+                .find(|output| output.requested == primary)
+                .map(|output| output.staged.clone())
+                .ok_or_else(|| {
+                    planning_error(
+                        StagedPlanReason::MissingRequiredOutputFlag,
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "primary output missing from Rust plan",
+                        ),
+                    )
+                })?;
+
+            let mut rewritten_args = args.to_vec();
+            let mut replaced_output = false;
+            let mut replaced_out_dir = false;
+            let mut i = 0;
+            while i < rewritten_args.len() {
+                if rewritten_args[i] == "-o" {
+                    if i + 1 >= rewritten_args.len() {
+                        return Ok(StagedPlanOutcome::Unsupported(
+                            StagedPlanReason::MissingOptionValue,
+                        ));
+                    }
+                    rewritten_args[i + 1] = staged_primary.to_string_lossy().into_owned();
+                    replaced_output = true;
+                    i += 2;
+                    continue;
+                }
+                if rewritten_args[i] == "--out-dir" {
+                    if i + 1 >= rewritten_args.len() {
+                        return Ok(StagedPlanOutcome::Unsupported(
+                            StagedPlanReason::MissingOptionValue,
+                        ));
+                    }
+                    rewritten_args[i + 1] = root.to_string_lossy().into_owned();
+                    replaced_out_dir = true;
+                    i += 2;
+                    continue;
+                }
+                if rewritten_args[i].starts_with("--out-dir=") {
+                    rewritten_args[i] = format!("--out-dir={}", root.display());
+                    replaced_out_dir = true;
+                    i += 1;
+                    continue;
+                }
+                if rewritten_args[i] == "--emit" {
+                    if let Some(value) = rewritten_args.get_mut(i + 1) {
+                        rewrite_emit_value(value, &outputs, cwd);
+                    }
+                    i += 2;
+                    continue;
+                }
+                if rewritten_args[i].starts_with("--emit=") {
+                    let value = rewritten_args[i]["--emit=".len()..].to_string();
+                    let mut rewritten = value;
+                    rewrite_emit_value(&mut rewritten, &outputs, cwd);
+                    rewritten_args[i] = format!("--emit={rewritten}");
+                    i += 1;
+                    continue;
+                }
+                if let Some(value) = rewritten_args[i].strip_prefix("-o") {
+                    if !value.is_empty() {
+                        rewritten_args[i] = format!("-o{}", staged_primary.display());
+                        replaced_output = true;
+                    }
+                }
+                i += 1;
+            }
+            if !replaced_output && !replaced_out_dir && emit_specs(args).is_empty() {
+                rewritten_args.push("-o".to_string());
+                rewritten_args.push(staged_primary.to_string_lossy().into_owned());
+            }
+            if outputs.len() > 1 && !replaced_out_dir {
+                rewritten_args.push("--out-dir".to_string());
+                rewritten_args.push(root.to_string_lossy().into_owned());
+            }
+            let native_root = root.to_string_lossy().into_owned();
+            rewritten_args.push("--remap-path-prefix".to_string());
+            rewritten_args.push(format!("{native_root}={STAGED_OUTPUT_REMAP_ROOT}"));
+            let slash_root = native_root.replace('\\', "/");
+            if slash_root != native_root {
+                rewritten_args.push("--remap-path-prefix".to_string());
+                rewritten_args.push(format!("{slash_root}={STAGED_OUTPUT_REMAP_ROOT}"));
+            }
+
+            Ok(StagedPlanOutcome::Enabled(Self {
+                outputs,
+                rewritten_args,
+                root: root.clone(),
+            }))
+        })();
+        if !matches!(result, Ok(StagedPlanOutcome::Enabled(_))) {
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        result.unwrap_or_else(StagedPlanOutcome::Error)
+    }
+
+    pub(in crate::daemon_core::daemon::server) fn cc(
+        staging_dir: &Path,
+        family: crate::daemon_core::compiler::CompilerFamily,
+        args: &[String],
+        primary_output: &NormalizedPath,
+        cwd: &Path,
+        dep_flags: &crate::daemon_core::depgraph::UserDepFlags,
+    ) -> StagedPlanOutcome<Self> {
+        if !staged_lane_enabled(family) {
+            return StagedPlanOutcome::Unsupported(StagedPlanReason::LaneDisabled);
+        }
+        if cc_has_unsupported_side_outputs(args) {
+            return StagedPlanOutcome::Unsupported(StagedPlanReason::UnmodeledSideOutput);
+        }
+        let output_role = crate::daemon_core::compiler::OutputClassification::for_compiler(
+            family,
+            &primary_output.to_string_lossy(),
+        )
+        .role;
+        if !matches!(
+            output_role,
+            crate::daemon_core::compiler::OutputRole::Object
+                | crate::daemon_core::compiler::OutputRole::PrecompiledHeaderOrModule
+        ) {
+            return StagedPlanOutcome::Unsupported(StagedPlanReason::UnsupportedOutputRole);
+        }
+        if family == crate::daemon_core::compiler::CompilerFamily::Msvc
+            && !args.iter().any(|arg| {
+                arg.get(..3)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("/fo"))
+            })
+        {
+            return StagedPlanOutcome::Unsupported(StagedPlanReason::MissingRequiredOutputFlag);
+        }
+        let root: NormalizedPath = staging_dir
+            .join(format!(
+                ".compile-{}-{}",
+                std::process::id(),
+                PLAN_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ))
+            .into();
+        if let Err(source) = std::fs::create_dir_all(&root) {
+            return StagedPlanOutcome::Error(planning_error(
+                StagedPlanReason::StagingDirectoryCreate,
+                source,
+            ));
+        }
+        let result = (|| -> Result<StagedPlanOutcome<Self>, StagedPlanError> {
+            let requested = absolute(primary_output, cwd);
+            let file_name = requested
+                .file_name()
+                .ok_or_else(|| missing_filename(StagedPlanReason::OutputMissingFilename))?;
+            let staged: NormalizedPath = root.join(file_name);
+            let requested_depfile = dep_flags.mf_path.clone().or_else(|| {
+                dep_flags
+                    .has_md
+                    .then(|| requested.as_path().with_extension("d").into())
+            });
+            let mut rewritten_args = args.to_vec();
+            let mut replaced = false;
+            let mut i = 0;
+            while i < rewritten_args.len() {
+                if family == crate::daemon_core::compiler::CompilerFamily::Msvc
+                    && rewritten_args[i].eq_ignore_ascii_case("/fo")
+                {
+                    if i + 1 >= rewritten_args.len() {
+                        return Ok(StagedPlanOutcome::Unsupported(
+                            StagedPlanReason::MissingOptionValue,
+                        ));
+                    }
+                    rewritten_args[i + 1] = staged.to_string_lossy().into_owned();
+                    replaced = true;
+                    i += 2;
+                    continue;
+                }
+                if family == crate::daemon_core::compiler::CompilerFamily::Msvc
+                    && rewritten_args[i]
+                        .get(..3)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("/fo"))
+                {
+                    let prefix = rewritten_args[i].get(..3).unwrap_or("/Fo");
+                    rewritten_args[i] = format!("{prefix}{}", staged.display());
+                    replaced = true;
+                    i += 1;
+                    continue;
+                }
+                if rewritten_args[i] == "-o" {
+                    if i + 1 >= rewritten_args.len() {
+                        return Ok(StagedPlanOutcome::Unsupported(
+                            StagedPlanReason::MissingOptionValue,
+                        ));
+                    }
+                    rewritten_args[i + 1] = staged.to_string_lossy().into_owned();
+                    replaced = true;
+                    i += 2;
+                    continue;
+                }
+                if let Some(value) = rewritten_args[i].strip_prefix("-o") {
+                    if !value.is_empty() {
+                        rewritten_args[i] = format!("-o{}", staged.display());
+                        replaced = true;
+                    }
+                }
+                if let Some(requested_depfile) = requested_depfile.as_ref() {
+                    if rewritten_args[i] == "-MF" {
+                        if i + 1 >= rewritten_args.len() {
+                            return Ok(StagedPlanOutcome::Unsupported(
+                                StagedPlanReason::MissingOptionValue,
+                            ));
+                        }
+                        let staged_depfile =
+                            root.join(requested_depfile.file_name().ok_or_else(|| {
+                                missing_filename(StagedPlanReason::OutputMissingFilename)
+                            })?);
+                        rewritten_args[i + 1] = staged_depfile.to_string_lossy().into_owned();
+                        i += 2;
+                        continue;
+                    }
+                    if let Some(value) = rewritten_args[i].strip_prefix("-MF") {
+                        if !value.is_empty() {
+                            let staged_depfile =
+                                root.join(requested_depfile.file_name().ok_or_else(|| {
+                                    missing_filename(StagedPlanReason::OutputMissingFilename)
+                                })?);
+                            rewritten_args[i] = format!("-MF{}", staged_depfile.display());
+                            continue;
+                        }
+                    }
+                }
+                i += 1;
+            }
+            if dep_flags.mf_path.is_some()
+                && !args
+                    .iter()
+                    .any(|arg| arg == "-MF" || arg.starts_with("-MF"))
+            {
+                return Ok(StagedPlanOutcome::Unsupported(
+                    StagedPlanReason::MissingRequiredOutputFlag,
+                ));
+            }
+            if !replaced {
+                rewritten_args.push("-o".to_string());
+                rewritten_args.push(staged.to_string_lossy().into_owned());
+            }
+            let mut outputs = vec![StagedOutputPlan {
+                requested,
+                staged,
+                role: StagedOutputRole::Regular,
+            }];
+            if let Some(requested_depfile) = requested_depfile {
+                let staged_depfile =
+                    root.join(requested_depfile.file_name().ok_or_else(|| {
+                        missing_filename(StagedPlanReason::OutputMissingFilename)
+                    })?);
+                outputs.push(StagedOutputPlan {
+                    requested: requested_depfile,
+                    staged: staged_depfile,
+                    role: StagedOutputRole::Depfile,
+                });
+            }
+            Ok(StagedPlanOutcome::Enabled(Self {
+                outputs,
+                rewritten_args,
+                root: root.clone(),
+            }))
+        })();
+        if !matches!(result, Ok(StagedPlanOutcome::Enabled(_))) {
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        result.unwrap_or_else(StagedPlanOutcome::Error)
+    }
+
+    /// Stage a pure archive invocation. Linkers with secondary side outputs
+    /// use a separate planner because silently omitting a PDB/import library
+    /// would violate complete-set publication.
+    pub(in crate::daemon_core::daemon::server) fn archive(
+        staging_dir: &Path,
+        args: &[String],
+        primary_output: &NormalizedPath,
+        cwd: &Path,
+    ) -> StagedPlanOutcome<Self> {
+        if !super::staged_archive_lane_enabled() {
+            return StagedPlanOutcome::Unsupported(StagedPlanReason::LaneDisabled);
+        }
+        let root: NormalizedPath = staging_dir
+            .join(format!(
+                ".compile-{}-{}",
+                std::process::id(),
+                PLAN_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ))
+            .into();
+        if let Err(source) = std::fs::create_dir_all(&root) {
+            return StagedPlanOutcome::Error(planning_error(
+                StagedPlanReason::StagingDirectoryCreate,
+                source,
+            ));
+        }
+        let result = (|| -> Result<StagedPlanOutcome<Self>, StagedPlanError> {
+            let requested = absolute(primary_output, cwd);
+            let file_name = requested
+                .file_name()
+                .ok_or_else(|| missing_filename(StagedPlanReason::OutputMissingFilename))?;
+            let staged: NormalizedPath = root.join(file_name);
+            let requested_text = requested.to_string_lossy();
+            let mut rewritten_args = args.to_vec();
+            let mut replaced = false;
+            for arg in &mut rewritten_args {
+                if *arg == requested_text {
+                    *arg = staged.to_string_lossy().into_owned();
+                    replaced = true;
+                }
+            }
+            if !replaced {
+                let file_name = requested.file_name().unwrap_or_default().to_string_lossy();
+                for arg in &mut rewritten_args {
+                    if arg == file_name.as_ref() {
+                        *arg = staged.to_string_lossy().into_owned();
+                        replaced = true;
+                        break;
+                    }
+                }
+            }
+            if !replaced {
+                return Ok(StagedPlanOutcome::Unsupported(
+                    StagedPlanReason::OutputNotInArguments,
+                ));
+            }
+            Ok(StagedPlanOutcome::Enabled(Self {
+                outputs: vec![StagedOutputPlan {
+                    requested,
+                    staged,
+                    role: StagedOutputRole::Regular,
+                }],
+                rewritten_args,
+                root: root.clone(),
+            }))
+        })();
+        if !matches!(result, Ok(StagedPlanOutcome::Enabled(_))) {
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        result.unwrap_or_else(StagedPlanOutcome::Error)
+    }
+
+    /// Build a linker plan only when every declared output can be redirected
+    /// by exact path replacement. Undeclared linker side effects are checked
+    /// by the caller after the process exits; they invalidate publication.
+    pub(in crate::daemon_core::daemon::server) fn link(
+        staging_dir: &Path,
+        args: &[String],
+        primary_output: &NormalizedPath,
+        secondary_outputs: &[NormalizedPath],
+        cwd: &Path,
+    ) -> StagedPlanOutcome<Self> {
+        if !super::staged_link_lane_enabled() {
+            return StagedPlanOutcome::Unsupported(StagedPlanReason::LaneDisabled);
+        }
+        if has_unmodeled_link_output_option(args) {
+            return StagedPlanOutcome::Unsupported(StagedPlanReason::UnmodeledSideOutput);
+        }
+        let root: NormalizedPath = staging_dir
+            .join(format!(
+                ".link-{}-{}",
+                std::process::id(),
+                PLAN_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ))
+            .into();
+        if let Err(source) = std::fs::create_dir_all(&root) {
+            return StagedPlanOutcome::Error(planning_error(
+                StagedPlanReason::StagingDirectoryCreate,
+                source,
+            ));
+        }
+        let result = (|| -> Result<StagedPlanOutcome<Self>, StagedPlanError> {
+            let mut requested_outputs = Vec::with_capacity(1 + secondary_outputs.len());
+            requested_outputs.push(absolute(primary_output, cwd));
+            requested_outputs.extend(secondary_outputs.iter().map(|output| absolute(output, cwd)));
+            let mut outputs = Vec::with_capacity(requested_outputs.len());
+            let mut rewritten_args = args.to_vec();
+            for (output_index, requested) in requested_outputs.into_iter().enumerate() {
+                let requested_text = requested.to_string_lossy();
+                if requested_text.contains('%') || requested.as_path().is_dir() {
+                    return Ok(StagedPlanOutcome::Unsupported(
+                        StagedPlanReason::UnsupportedOutputPath,
+                    ));
+                }
+                let filename = requested
+                    .file_name()
+                    .ok_or_else(|| missing_filename(StagedPlanReason::OutputMissingFilename))?;
+                let staged: NormalizedPath = root.join(filename);
+                if outputs.iter().any(|output: &StagedOutputPlan| {
+                    output.requested == requested || output.staged == staged
+                }) {
+                    return Ok(StagedPlanOutcome::Unsupported(
+                        StagedPlanReason::OutputNameCollision,
+                    ));
+                }
+                let relative = requested
+                    .strip_prefix(cwd)
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned());
+                let mut replaced = false;
+                for arg in &mut rewritten_args {
+                    let candidates = [Some(requested_text.as_ref()), relative.as_deref()];
+                    match rewrite_link_output_arg(
+                        arg,
+                        candidates.into_iter().flatten(),
+                        staged.to_string_lossy().as_ref(),
+                    ) {
+                        Some(arg_replaced) => replaced |= arg_replaced,
+                        None => {
+                            return Ok(StagedPlanOutcome::Unsupported(
+                                StagedPlanReason::AmbiguousOutputArgument,
+                            ));
+                        }
+                    }
+                }
+                if !replaced && output_index > 0 {
+                    if let Some(option) = implicit_msvc_output_option(
+                        &rewritten_args,
+                        requested.as_path(),
+                        staged.as_path(),
+                    ) {
+                        rewritten_args.push(option);
+                        replaced = true;
+                    }
+                }
+                if !replaced {
+                    return Ok(StagedPlanOutcome::Unsupported(
+                        StagedPlanReason::OutputNotInArguments,
+                    ));
+                }
+                outputs.push(StagedOutputPlan {
+                    requested,
+                    staged,
+                    role: StagedOutputRole::Regular,
+                });
+            }
+            Ok(StagedPlanOutcome::Enabled(Self {
+                outputs,
+                rewritten_args,
+                root: root.clone(),
+            }))
+        })();
+        if !matches!(result, Ok(StagedPlanOutcome::Enabled(_))) {
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        result.unwrap_or_else(StagedPlanOutcome::Error)
+    }
+
+    pub(in crate::daemon_core::daemon::server) fn output_paths(&self) -> Vec<NormalizedPath> {
+        self.outputs
+            .iter()
+            .map(|output| output.staged.clone())
+            .collect()
+    }
+
+    pub(in crate::daemon_core::daemon::server) fn primary_staged(&self) -> &NormalizedPath {
+        &self.outputs[0].staged
+    }
+
+    pub(in crate::daemon_core::daemon::server) fn staged_for_requested(
+        &self,
+        requested: &Path,
+    ) -> Option<NormalizedPath> {
+        self.outputs
+            .iter()
+            .find(|output| output.requested.as_path() == requested)
+            .map(|output| output.staged.clone())
+    }
+
+    pub(in crate::daemon_core::daemon::server) fn unexpected_staged_entries(
+        &self,
+    ) -> io::Result<Vec<NormalizedPath>> {
+        let declared: std::collections::HashSet<NormalizedPath> = self
+            .outputs
+            .iter()
+            .map(|output| output.staged.clone())
+            .collect();
+        Ok(std::fs::read_dir(&self.root)?
+            .map(|entry| entry.map(|entry| entry.path().into()))
+            .collect::<io::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|path| !declared.contains(path))
+            .collect())
+    }
+
+    pub(in crate::daemon_core::daemon::server) fn rewrite_depfile_strategy(
+        &self,
+        strategy: DepfileStrategy,
+    ) -> DepfileStrategy {
+        use DepfileStrategy::*;
+        let path = match &strategy {
+            Injected { path }
+            | InjectedMmd { path }
+            | UserSpecified { path, .. }
+            | UserDefault { path, .. } => path,
+            CompilerTrace | ShowIncludes | Unsupported => return strategy,
+        };
+        let Some(staged) = self
+            .outputs
+            .iter()
+            .find(|output| output.requested == *path)
+            .map(|output| output.staged.clone())
+        else {
+            return strategy;
+        };
+        match strategy {
+            Injected { .. } => Injected { path: staged },
+            InjectedMmd { .. } => InjectedMmd { path: staged },
+            UserSpecified {
+                augment_system_headers,
+                ..
+            } => UserSpecified {
+                path: staged,
+                augment_system_headers,
+            },
+            UserDefault {
+                augment_system_headers,
+                ..
+            } => UserDefault {
+                path: staged,
+                augment_system_headers,
+            },
+            CompilerTrace | ShowIncludes | Unsupported => strategy,
+        }
+    }
+
+    pub(in crate::daemon_core::daemon::server) fn materialize(
+        &self,
+        mode: MaterializationMode,
+    ) -> io::Result<StagedMaterializationStats> {
+        let stats = self.materialize_without_cleanup(mode)?;
+        self.cleanup()
+            .map_err(|error| materialization_error(error, stats))?;
+        Ok(stats)
+    }
+
+    /// Materialize the requested outputs while retaining the private staging
+    /// root for a detached durable publisher. The caller must keep this plan
+    /// alive until publication has consumed every staged source.
+    pub(in crate::daemon_core::daemon::server) fn materialize_without_cleanup(
+        &self,
+        mode: MaterializationMode,
+    ) -> io::Result<StagedMaterializationStats> {
+        let mut stats = StagedMaterializationStats::default();
+        let requested_outputs = self
+            .outputs
+            .iter()
+            .map(|output| output.requested.clone())
+            .collect::<Vec<_>>();
+        for (fault_index, output) in self.outputs.iter().enumerate() {
+            #[cfg(not(test))]
+            let _ = fault_index;
+            #[cfg(test)]
+            {
+                inject_staged_fault(
+                    output.requested.as_path(),
+                    StagedFaultPoint::MaterializeOutput(fault_index),
+                )
+                .map_err(|error| materialization_error(error, stats))?;
+            }
+            if let Some(parent) = output.requested.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| materialization_error(error, stats))?;
+            }
+            let output_stats = crate::daemon_core::daemon::server::persist::materialize_independent_with_mode(
+                output.staged.as_path(),
+                output.requested.as_path(),
+                mode,
+            )
+            .map_err(|error| {
+                materialization_error(
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "{} -> {}: {error}",
+                            output.staged.display(),
+                            output.requested.display()
+                        ),
+                    ),
+                    stats,
+                )
+            })?;
+            stats.reflink_count = stats
+                .reflink_count
+                .saturating_add(output_stats.reflink_count);
+            stats.copy_count = stats.copy_count.saturating_add(output_stats.copy_count);
+            stats.copy_bytes = stats.copy_bytes.saturating_add(output_stats.copy_bytes);
+            if output.role == StagedOutputRole::Depfile {
+                rehydrate_logical_depfile(output.requested.as_path(), &requested_outputs)
+                    .map_err(|error| materialization_error(error, stats))?;
+            }
+        }
+        Ok(stats)
+    }
+
+    /// Dep-info is an output too. Translate the private staging prefix to one
+    /// stable cache marker before hashing and publication. Miss and hit
+    /// materialization rehydrate the marker to the current requested path.
+    pub(in crate::daemon_core::daemon::server) fn rewrite_logical_side_outputs(&self) -> io::Result<()> {
+        for (fault_index, output) in self.outputs.iter().enumerate() {
+            if output.role != StagedOutputRole::Depfile {
+                continue;
+            }
+            #[cfg(not(test))]
+            let _ = fault_index;
+            #[cfg(test)]
+            {
+                inject_staged_fault(
+                    output.staged.as_path(),
+                    StagedFaultPoint::LogicalDepfileRewrite(fault_index),
+                )?;
+            }
+            canonicalize_logical_depfile(
+                output.staged.as_path(),
+                self.root.as_path(),
+                &output.requested,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::daemon_core::daemon::server) fn canonicalize_output_bytes(&self, bytes: &[u8]) -> Vec<u8> {
+        canonicalize_staged_output_bytes(bytes, self.root.as_path())
+    }
+
+    pub(in crate::daemon_core::daemon::server) fn rehydrate_output_bytes(&self, bytes: &[u8]) -> Vec<u8> {
+        let requested_outputs = self
+            .outputs
+            .iter()
+            .map(|output| output.requested.clone())
+            .collect::<Vec<_>>();
+        rehydrate_staged_output_bytes(bytes, &requested_outputs)
+    }
+
+    pub(in crate::daemon_core::daemon::server) fn cleanup(&self) -> io::Result<()> {
+        std::fs::remove_dir_all(&self.root).or_else(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        })
+    }
+}
+
+impl Drop for StagedCompilePlan {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+fn cc_has_unsupported_side_outputs(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        let lower = arg.to_ascii_lowercase();
+        lower == "--serialize-diagnostics"
+            || lower == "-mj"
+            || lower.starts_with("-fmodule")
+            || lower.starts_with("-Winvalid-pch")
+            || lower.starts_with("/fd")
+            || lower.starts_with("/fp")
+            || lower.starts_with("/fa")
+            || lower.starts_with("/fi")
+    })
+}
+
+fn emit_specs(args: &[String]) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let value = if args[i] == "--emit" {
+            i += 1;
+            args.get(i).map(String::as_str)
+        } else {
+            args[i].strip_prefix("--emit=")
+        };
+        if let Some(value) = value {
+            for part in value.split(',') {
+                if let Some((kind, path)) = part.split_once('=') {
+                    if path == "-" || path.is_empty() {
+                        return Vec::new();
+                    }
+                    result.push((kind.to_string(), path.to_string()));
+                }
+            }
+        }
+        i += 1;
+    }
+    result
+}
+
+fn emit_to_stdout(args: &[String]) -> bool {
+    args.iter().enumerate().any(|(index, arg)| {
+        let value = arg.strip_prefix("--emit=").or_else(|| {
+            (arg == "--emit")
+                .then(|| args.get(index + 1).map(String::as_str))
+                .flatten()
+        });
+        value.is_some_and(|value| value.split(',').any(|part| part.ends_with("=-")))
+    })
+}
+
+fn rustc_has_missing_option_value(args: &[String]) -> bool {
+    args.iter().enumerate().any(|(index, arg)| {
+        if matches!(arg.as_str(), "-o" | "--out-dir" | "--emit") {
+            return args.get(index + 1).is_none_or(String::is_empty);
+        }
+        arg.strip_prefix("--out-dir=").is_some_and(str::is_empty)
+            || arg.strip_prefix("--emit=").is_some_and(|value| {
+                value.is_empty()
+                    || value.split(',').any(|part| {
+                        part.split_once('=')
+                            .is_some_and(|(_, path)| path.is_empty())
+                    })
+            })
+    })
+}
+
+fn output_kind(path: &Path) -> String {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("rmeta") => "metadata",
+        Some("d") => "dep-info",
+        Some("o") => "obj",
+        Some("s") => "asm",
+        Some("ll") => "llvm-ir",
+        Some("bc") => "llvm-bc",
+        Some("mir") => "mir",
+        Some("rlib" | "a" | "exe") | None => "link",
+        Some(other) => other,
+    }
+    .to_string()
+}
+
+#[cfg(test)]
+#[path = "staged_plan_tests.rs"]
+mod tests;

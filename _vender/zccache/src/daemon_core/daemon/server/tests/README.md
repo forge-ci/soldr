@@ -1,0 +1,42 @@
+# server/tests
+
+Unit tests for `server/` submodules, originally a single 2.3K-LOC `tests.rs`.
+Split per domain so each file stays well under 1,000 LOC; one module per
+sibling `server/` subject (pack/persist, cache trim, fingerprint, link cache,
+PCH resolution, write-cached-output, post-link hook, server IPC end-to-end).
+`fs_matrix.rs` runs the same materialization contract against every available
+filesystem fixture and always prints executed/skipped rows with reasons; its
+`ZCCACHE_MODE` column runs all four modes on every row (#1683).
+`write_cached_mode.rs` runs the cache-hit executor under each `ZCCACHE_MODE`
+(#1683): COPY/REFLINK share one independent-delivery contract, LINK shares the
+cache inode only for eligible outputs, and switching modes migrates outputs.
+`store_mode.rs` covers the store direction: COPY/REFLINK never hardlink the
+compiler output into the cache.
+`fingerprint_encoding.rs` checks the request encoder against literal legacy bytes.
+`rustc_link_key.rs` proves a rustc `bin`/`staticlib` context key — explicit or
+rustc's no-`--crate-type` default — varies with `-C linker=` / `-C link-arg(s)`
+while an rlib's does not (#1900).
+`watch_registration_rollback.rs` pins the watch-registration rollback contract (#1906):
+a failed registration clears both `watched_dirs` and `watched_raw_dirs` so the next
+call really re-watches, while a canonicalize failure deliberately stays marked.
+`env_precision_1806.rs` and `link_env_1806.rs` prove the env-keying contract with
+real rustc compiles and a fake linker (#1806): read env never shares an artifact,
+unread env always does, and the linker's env splits the link key.
+
+`mod.rs` declares the per-domain submodules and owns the crate-wide canonical
+test guard for process-global cache-dir mutations (`CacheDirEnvGuard`).
+
+`disk_maintenance_unit.rs` is wired in as a `#[path]` module from
+`server/disk_maintenance.rs` (not from this `mod.rs`), because it must see that
+module's private maintenance vocabulary. It is itself over the 1,000-LOC warn
+threshold, so its `#1659`/`#1673`/`#1687` retired-store and reflink-eviction
+cases live in `disk_maintenance_retired_stores.rs`, declared there with an
+explicit `#[path]` (this directory's modules are resolved from `tests/mod.rs`,
+so a plain `mod` would look in the wrong place).
+`staged_env.rs` lets C/C++ staged-lane tests opt into
+`ZCCACHE_STAGED_ARTIFACTS=c-cpp` under that same lock, settle deferred
+publication, and detect native change markers (multi-source publication
+fails closed without them, #1193).
+Per-domain helpers (fixture builders,
+`start_daemon`, jobserver-env constructors, `write_fake_linker`, etc.) live
+next to the tests that use them — no `common.rs` indirection.

@@ -1,0 +1,888 @@
+//! Shared crash dumper used by both `zccache-cli` and `zccache-daemon`.
+//!
+//! Layers of coverage, in order of how an incident is caught:
+//!
+//! 1. **Rust panic hook** — catches `panic!`, `unwrap` on `None`, `assert!`,
+//!    etc. Writes a text report into `<cache>/crashes/`. File suffix is
+//!    `-<bin-stem>-panic.txt`.
+//! 2. **Native signal / structured-exception capture** (via
+//!    `kernal_api::crash`) — catches SIGSEGV / SIGBUS / SIGILL / SIGFPE /
+//!    SIGABRT on Unix, structured exceptions on Windows. Ends up as the same
+//!    text report named `crash-<ts>-<bin-stem>-<sig>.txt`. We intentionally
+//!    avoid Breakpad-format minidumps for v1 — text dumps are readable
+//!    without external tooling and small enough to ship in bug reports.
+//!
+//! ## Why the signal dump arrives one start late
+//!
+//! `std::backtrace::Backtrace::force_capture()` allocates a `Vec` under the
+//! hood, which is async-signal-unsafe — calling it from a SIGSEGV handler on
+//! Linux can deadlock the malloc lock the crashing thread was holding,
+//! leaving zero on-disk evidence. This module used to dodge that by
+//! formatting a `String` and calling `std::fs::write` from the handler, which
+//! is not much better.
+//!
+//! kernal-api owns the fatal path now (kernal-api#72). It copies fixed-size
+//! platform fields into a preallocated record and emits it with one bounded
+//! write, and no client code runs in signal context at all. The cost is that
+//! nothing readable exists at the moment of the crash: the record is binary
+//! and lives in a `crash-spool/` directory beside `crashes/`.
+//!
+//! [`drain_native_crash_spool`] is the other half, and [`install`] calls it
+//! at every start. So a crash becomes an operator-visible dump on the *next*
+//! run of any zccache binary sharing that cache dir — which is the same
+//! moment [`note_previous_crashes`] would have surfaced it anyway. A dump
+//! that is never drained is still not lost; it is a `.rpcrash` record sitting
+//! in the spool.
+//!
+//! ## Auto-surfacing previous crashes
+//!
+//! [`install`] writes / refreshes `<cache>/last_run_<bin-stem>.txt` with
+//! the current unix timestamp every time it's called. The CLI uses
+//! [`note_previous_crashes`] to compare `mtime` on every file in
+//! `<cache>/crashes/` against that marker and emit ONE stderr line if
+//! anything newer is on disk. One readdir + N stats per CLI invocation —
+//! cheap enough to keep on the hot path.
+
+use super::NormalizedPath;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// How many crash dumps `<cache>/crashes/` keeps (#1165 finding 4).
+///
+/// Dumps were append-forever and only `zccache crashes --clear` removed them,
+/// so a crash *loop* — the case where dumps matter most — filled the disk with
+/// near-identical reports of the same fault. Newest-wins: the oldest dumps are
+/// the least useful ones to keep when the same crash is recurring.
+const CRASH_DUMP_KEEP: usize = 20;
+
+/// Directory the facade spools raw crash records into.
+///
+/// A sibling of `crashes/` rather than the facade's default owner-wide root,
+/// so records follow `ZCCACHE_CACHE_DIR` exactly as the dumps they become do.
+/// Two cache dirs on one host then never drain each other's crashes.
+fn native_spool_dir() -> PathBuf {
+    let dumps = super::config::crash_dump_dir();
+    match dumps.parent() {
+        Some(state) => state.join("crash-spool"),
+        None => dumps.as_path().join("crash-spool"),
+    }
+}
+
+/// Point the facade at [`native_spool_dir`] unless the operator chose one.
+///
+/// Must run before `install`, which resolves the directory when it arms.
+fn point_native_spool_at_this_cache_dir() {
+    if std::env::var_os(kernal_api::crash::spool::SPOOL_DIR_ENV).is_some() {
+        return;
+    }
+    let spool = native_spool_dir();
+    if super::config::create_dir_all_private(&spool).is_err() {
+        return;
+    }
+    // Safe here in practice: `install` is called once from `main` before this
+    // process starts any threads, which is the only ordering that makes a
+    // `set_var` race possible.
+    unsafe {
+        std::env::set_var(kernal_api::crash::spool::SPOOL_DIR_ENV, &spool);
+    }
+}
+
+/// Name a fault the way an operator reading a filename expects.
+///
+/// The facade records the fault in the faulting platform's own namespace and
+/// does not record which namespace that was, so this decodes per host.
+fn signal_label(fault_code: i64) -> String {
+    // Host selection goes through kernal-api's const target predicates, not a
+    // `cfg`, so the platform-boundary lint keeps it out of product code.
+    if super::host::is_windows() {
+        windows_exception_label(fault_code)
+    } else if super::host::is_macos() {
+        macos_fault_label(fault_code)
+    } else {
+        unix_signal_label(fault_code)
+    }
+}
+
+/// Linux/Android: the raw `siginfo_t.ssi_signo`.
+fn unix_signal_label(fault_code: i64) -> String {
+    match fault_code {
+        4 => "SIGILL".to_string(),
+        6 => "SIGABRT".to_string(),
+        7 => "SIGBUS".to_string(),
+        8 => "SIGFPE".to_string(),
+        11 => "SIGSEGV".to_string(),
+        5 => "SIGTRAP".to_string(),
+        other => format!("SIG{other}"),
+    }
+}
+
+/// The facade documents that this value is a Mach exception kind for a
+/// hardware fault but a raw Unix signal number for the SIGABRT predecessor
+/// chain, and that the two collide at 6. Naming one of them would be a guess,
+/// so the ambiguous code says so instead of picking.
+fn macos_fault_label(fault_code: i64) -> String {
+    match fault_code {
+        6 => "SIGABRT-or-EXC_BREAKPOINT".to_string(),
+        1 => "EXC_BAD_ACCESS".to_string(),
+        2 => "EXC_BAD_INSTRUCTION".to_string(),
+        3 => "EXC_ARITHMETIC".to_string(),
+        10 => "SIGBUS".to_string(),
+        11 => "SIGSEGV".to_string(),
+        other => format!("MACH{other}"),
+    }
+}
+
+/// NTSTATUS, sign-extended: `STATUS_ACCESS_VIOLATION` arrives as
+/// -1073741819, not 0xC0000005, so compare the reinterpreted bits.
+fn windows_exception_label(fault_code: i64) -> String {
+    match fault_code as i32 as u32 {
+        0xC000_0005 => "ACCESS_VIOLATION".to_string(),
+        0xC000_001D => "ILLEGAL_INSTRUCTION".to_string(),
+        0xC000_008E => "FLT_DIVIDE_BY_ZERO".to_string(),
+        0xC000_0094 => "INT_DIVIDE_BY_ZERO".to_string(),
+        0xC000_00FD => "STACK_OVERFLOW".to_string(),
+        0x8000_0003 => "BREAKPOINT".to_string(),
+        other => format!("EXCEPTION_{other:08X}"),
+    }
+}
+
+/// Convert every pending facade crash record into one of this crate's dumps.
+///
+/// Each record is removed once its dump is on disk, so a later start does not
+/// report the same crash twice. A record that cannot be parsed is left alone
+/// rather than deleted: it is the only evidence that something happened, and
+/// a future version may know how to read it.
+pub fn drain_native_crash_spool() {
+    let spool = native_spool_dir();
+    let crash_dir = super::config::crash_dump_dir();
+    let Ok(entries) = std::fs::read_dir(&spool) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let record = entry.path();
+        if record.extension().is_none_or(|ext| ext != "rpcrash") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&record) else {
+            continue;
+        };
+        let Ok(report) = kernal_api::crash::spool::parse(&bytes) else {
+            continue;
+        };
+        if super::config::create_dir_all_private(&crash_dir).is_err() {
+            return;
+        }
+        let label = signal_label(report.fault_code);
+        let path = unique_dump_path(crash_dir.as_path(), &label, "txt");
+        let body = format!(
+            "zccache {bin} crash report (signal-level)\n\
+             ==========================================\n\
+             Version: {version}\n\
+             Binary:  {bin}\n\
+             OS:      {os}\n\
+             Arch:    {arch}\n\
+             PID:     {pid}\n\
+             Signal:  {label}\n\
+             Time:    {ts}\n\
+             \n\
+             Detail:\n\
+             fault code {code} at address {address:#x}, faulting thread {tid}\n\
+             {truncated}\n\
+             \n\
+             Threads: {threads} sampled, {modules} module(s) referenced\n\
+             \n\
+             Backtrace: <captured as a bounded all-thread sample before the \
+             fault; see the spooled record for raw frames>\n",
+            bin = report.metadata.app_name,
+            version = report.metadata.app_version,
+            os = crate::core::host::os(),
+            arch = crate::core::host::arch(),
+            pid = report.pid,
+            code = report.fault_code,
+            address = report.fault_address,
+            tid = report.tid,
+            truncated = if report.truncated {
+                "some bounded fields were truncated"
+            } else {
+                "no fields were truncated"
+            },
+            threads = report.threads.len(),
+            modules = report.modules.len(),
+            ts = report.crash_unix_ms / 1_000,
+        );
+        if std::fs::write(&path, body).is_ok() {
+            let _ = std::fs::remove_file(&record);
+        }
+    }
+}
+
+/// Serialises crash-dump filename selection so two near-simultaneous
+/// crashes don't both pick the same `crash-<ts>.txt` and overwrite.
+static DUMP_NAME_LOCK: Mutex<()> = Mutex::new(());
+
+/// Binary stem captured at install time and reused by the panic and
+/// signal handlers. `OnceLock` rather than a re-derived value because
+/// `std::env::current_exe()` from a signal handler is async-signal-unsafe.
+static BIN_STEM: OnceLock<String> = OnceLock::new();
+
+/// Opaque handle returned by [`install`]. Drop = unregister the OS-level
+/// signal/exception handlers. Callers MUST bind this for the lifetime of
+/// the process (e.g. `let _guard = crate::core::crash::install(...);`
+/// at top of `main`). When the guard is dropped early, only the Rust
+/// panic hook remains.
+#[must_use = "drop unregisters the native signal/exception handlers — bind this for the whole process lifetime"]
+pub struct CrashGuard {
+    #[allow(dead_code)]
+    inner: Option<kernal_api::crash::CrashGuard>,
+}
+
+/// Install panic hook + native signal/exception handlers for this binary.
+///
+/// `bin_stem` is interpolated into every dump filename so a `~/.zccache/crashes/`
+/// listing tells you which process crashed — e.g. `crash-1730000000-zccache-panic.txt`
+/// vs `crash-1730000000-zccache-daemon-SIGSEGV.txt`.
+///
+/// Idempotent within a process: only the first call installs anything;
+/// subsequent calls return a no-op guard. (Two `install()` calls would
+/// otherwise stack panic hooks and re-register signal handlers — both
+/// safe but wasteful.)
+pub fn install(bin_stem: &'static str) -> CrashGuard {
+    install_with(bin_stem, true)
+}
+
+/// [`install`] without native signal capture, for hot-path processes (#1649).
+///
+/// kernal-api 0.1.23 bounds and backs off its native pre-crash sampler, but
+/// wrapper capture remains disabled until median passthrough latency is at
+/// most 250 ms. Before that fix, concurrent wrappers burned most of a core
+/// each: a cold workspace build took 131-146 s instead of 41 s, and a
+/// `rustc -vV` probe took 358 ms instead of 52 ms. Wrappers keep the panic
+/// hook, spool drain and last-run marker; the daemon keeps native capture.
+pub fn install_without_native_capture(bin_stem: &'static str) -> CrashGuard {
+    install_with(bin_stem, false)
+}
+
+fn install_with(bin_stem: &'static str, native: bool) -> CrashGuard {
+    // First call wins; subsequent calls observe the already-set stem
+    // and return an empty guard.
+    if BIN_STEM.set(bin_stem.to_string()).is_err() {
+        return CrashGuard { inner: None };
+    }
+
+    install_panic_hook();
+    point_native_spool_at_this_cache_dir();
+    let handler = if native {
+        install_signal_handler()
+    } else {
+        None
+    };
+    // The facade captures a fatal signal to a binary record and deliberately
+    // does not format anything from signal context. Turning those records
+    // into this crate's own dumps is the client's half of that bargain, and
+    // startup is where its module documentation says to do it. Drain before
+    // the prune below so a record recovered here is subject to the same cap.
+    drain_native_crash_spool();
+    // Refresh the per-binary last-run marker so future CLI invocations
+    // can compare crash mtimes against "the last time this binary
+    // started successfully". A crash that fires before we get here
+    // looks "newer than last run" — exactly what we want.
+    let _ = write_last_run_marker(bin_stem);
+    // #1165: bound `crashes/` here rather than inside `write_signal_dump`.
+    // That runs in a signal handler, where a directory scan plus a series of
+    // unlinks is exactly the kind of work this module already avoids (it
+    // skips backtraces there for the same async-signal-safety reason).
+    // Pruning at startup bounds the directory just as tightly for the case
+    // that motivates the cap: a crash *loop* restarts the process every
+    // iteration, so every new dump is preceded by a prune. The panic path
+    // prunes at write because it can run many times without a restart.
+    prune_crash_dumps(&super::config::crash_dump_dir(), CRASH_DUMP_KEEP);
+
+    CrashGuard { inner: handler }
+}
+
+/// Write `<cache>/last_run_<bin-stem>.txt` with the current unix
+/// timestamp. Best-effort: failure here is silent because the caller
+/// is mid-startup and an `eprintln!` would race with their own tracing
+/// init.
+fn write_last_run_marker(bin_stem: &str) -> std::io::Result<()> {
+    let cache_dir = super::config::daemon_state_dir();
+    // Private creation, not a bare `create_dir_all` (#1325). `install` runs as
+    // the first statement of the CLI's `run_main`, so this is what actually
+    // creates `<cache>/v<VERSION>` on a fresh root — before the lifecycle
+    // writer, before the spawn slot, and before the deploy. Creating it wide
+    // here silently defeated #1314: the deploy's own `create_dir_all_private`
+    // early-returns on an existing directory, so `ensure_dir_private` had to
+    // tighten after the fact and the #1172 window stayed open.
+    super::config::create_dir_all_private(&cache_dir)?;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    std::fs::write(last_run_marker_path(bin_stem), ts.to_string())
+}
+
+fn last_run_marker_path(bin_stem: &str) -> PathBuf {
+    let cache_dir = super::config::daemon_state_dir();
+    cache_dir
+        .join(format!("last_run_{bin_stem}.txt"))
+        .as_path()
+        .to_path_buf()
+}
+
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let panic_msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_string()
+        };
+
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let full_info = format!("panicked at '{panic_msg}', {location}");
+
+        if let Some(path) = write_panic_dump(&full_info, &backtrace.to_string()) {
+            eprintln!(
+                "[zccache] {bin} crashed — dump written to {path}",
+                bin = bin_stem(),
+                path = path.display()
+            );
+        } else {
+            eprintln!(
+                "[zccache] {bin} crashed — failed to write crash dump",
+                bin = bin_stem()
+            );
+            eprintln!("[zccache] {full_info}");
+        }
+    }));
+}
+
+/// Arm the facade's native crash capture (kernal-api#72).
+///
+/// The signal-level dump is no longer written here. kernal-api is the single
+/// native crash handler -- installing a second one is what its AGENTS.md
+/// forbids and what the previous version of this function did -- and it
+/// captures to its own bounded, owner-private spool from signal context.
+/// That is a strictly better place for it: this function used to format a
+/// `String` and call `std::fs::write` from a signal handler, which the
+/// module doc admitted was not async-signal-safe.
+///
+/// The Rust-level panic hook below is unaffected and still writes this
+/// crate's own dumps to `crash_dump_dir`.
+fn install_signal_handler() -> Option<kernal_api::crash::CrashGuard> {
+    let metadata = kernal_api::crash::CrashMetadata {
+        app_class: "build-cache".to_string(),
+        app_name: bin_stem().to_string(),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        instance_name: String::new(),
+        creation_time_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+            .unwrap_or(0),
+        cwd: std::env::current_dir()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_default(),
+    };
+    match kernal_api::crash::install(kernal_api::crash::CrashPolicy::On, metadata) {
+        Ok(guard) => Some(guard),
+        Err(error) => {
+            // Emit via stderr rather than tracing — tracing may not be
+            // initialised yet when we're called from `main`. The
+            // panic hook still covers Rust-level faults.
+            eprintln!(
+                "[zccache] {bin}: failed to install native crash handler: {error}",
+                bin = bin_stem()
+            );
+            None
+        }
+    }
+}
+
+/// Map the platform-specific crash context to its stable filename label.
+/// Render host-native crash details for the signal-level report body.
+/// Write a Rust-panic dump. Caller is the panic hook (not signal
+/// context), so allocation here is fine.
+fn write_panic_dump(panic_info: &str, backtrace: &str) -> Option<NormalizedPath> {
+    let crash_dir = super::config::crash_dump_dir();
+    super::config::create_dir_all_private(&crash_dir).ok()?;
+    let path = unique_dump_path(&crash_dir, "panic", "txt");
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let body = format!(
+        "zccache {bin} crash report (panic)\n\
+         ===================================\n\
+         Version: {version}\n\
+         Binary:  {bin}\n\
+         OS:      {os}\n\
+         Arch:    {arch}\n\
+         PID:     {pid}\n\
+         Time:    {ts}\n\
+         \n\
+         Panic:\n\
+         {panic_info}\n\
+         \n\
+         Backtrace:\n\
+         {backtrace}\n",
+        bin = bin_stem(),
+        version = env!("CARGO_PKG_VERSION"),
+        os = crate::core::host::os(),
+        arch = crate::core::host::arch(),
+        pid = std::process::id(),
+    );
+
+    std::fs::write(&path, body).ok()?;
+    prune_crash_dumps(&crash_dir, CRASH_DUMP_KEEP);
+    Some(NormalizedPath::from(path))
+}
+
+/// Pick a unique `crash-<unix_ts>-<bin>-<sig>(-<seq>)?.<ext>` under `crash_dir`.
+/// Two near-simultaneous crashes can share a second-resolution timestamp;
+/// the sequence suffix breaks ties so neither overwrites the other.
+fn unique_dump_path(crash_dir: &Path, kind: &str, ext: &str) -> PathBuf {
+    let _lock = DUMP_NAME_LOCK.lock();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let bin = bin_stem();
+    let base = crash_dir.join(format!("crash-{ts}-{bin}-{kind}.{ext}"));
+    if !base.exists() {
+        return base;
+    }
+    for seq in 1..=u32::MAX {
+        let p = crash_dir.join(format!("crash-{ts}-{bin}-{kind}-{seq}.{ext}"));
+        if !p.exists() {
+            return p;
+        }
+    }
+    base
+}
+
+fn bin_stem() -> &'static str {
+    BIN_STEM.get().map(String::as_str).unwrap_or("zccache")
+}
+
+/// Emit ONE stderr line if there are crash dumps newer than this
+/// binary's last-run marker. Cheap (one readdir + N stats). Idempotent
+/// in the sense that it updates the marker afterwards, so the same set
+/// of dumps won't be reported twice across two CLI invocations.
+///
+/// Intended to be called from `main` of `zccache-cli` immediately after
+/// [`install`] returns. The daemon doesn't need this because it logs
+/// previous crashes via [`check_previous_crashes`] with structured
+/// tracing instead.
+pub fn note_previous_crashes() {
+    let crash_dir = super::config::crash_dump_dir();
+    let marker = last_run_marker_path(bin_stem());
+    let marker_mtime = std::fs::metadata(&marker)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let entries = match std::fs::read_dir(&crash_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let mut newer = 0u32;
+    let mut latest: Option<PathBuf> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ext_ok = path.extension().is_some_and(|e| e == "txt" || e == "dmp");
+        if !ext_ok {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if modified > marker_mtime {
+            newer += 1;
+            latest = Some(path);
+        }
+    }
+
+    if newer > 0 {
+        let where_ = crash_dir.display();
+        match latest {
+            Some(p) => eprintln!(
+                "[zccache] {n} previous crash dump(s) in {dir} (most recent: {p}) — run `zccache crashes` to view",
+                n = newer,
+                dir = where_,
+                p = p.display(),
+            ),
+            None => eprintln!(
+                "[zccache] {n} previous crash dump(s) in {dir} — run `zccache crashes` to view",
+                n = newer,
+                dir = where_,
+            ),
+        }
+    }
+}
+
+/// Daemon-facing variant: scans `<cache>/crashes/`, emits a tracing
+/// warning per unreported dump, and drops a `.reported` marker beside
+/// each one to suppress repeats across daemon restarts. Kept for
+/// callers that already piped daemon output through `tracing`.
+pub fn check_previous_crashes() {
+    let crash_dir = super::config::crash_dump_dir();
+    let entries = match std::fs::read_dir(&crash_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_dump = path.extension().is_some_and(|e| e == "txt" || e == "dmp");
+        if !is_dump {
+            continue;
+        }
+        let reported = path.with_extension("reported");
+        if reported.exists() {
+            continue;
+        }
+
+        let summary = if path.extension().is_some_and(|e| e == "txt") {
+            read_crash_summary(&path)
+        } else {
+            "binary minidump (use minidump-stackwalk to inspect)".to_string()
+        };
+        tracing::warn!(
+            "crash from previous session: {}\n  {}",
+            path.display(),
+            summary
+        );
+        let _ = std::fs::write(&reported, "");
+    }
+}
+
+fn read_crash_summary(path: &Path) -> String {
+    match std::fs::read_to_string(path) {
+        Ok(content) => content
+            .lines()
+            .filter(|l| {
+                l.starts_with("Panic:") || l.starts_with("Signal:") || l.starts_with("Version:")
+            })
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(", "),
+        Err(_) => "unable to read crash dump".to_string(),
+    }
+}
+
+/// List all crash dump files (text + binary minidumps), sorted by name.
+#[must_use]
+pub fn list_crash_dumps() -> Vec<NormalizedPath> {
+    let crash_dir = super::config::crash_dump_dir();
+    let mut dumps: Vec<NormalizedPath> = match std::fs::read_dir(&crash_dir) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|e| NormalizedPath::from(e.path()))
+            .filter(|p: &NormalizedPath| p.extension().is_some_and(|e| e == "txt" || e == "dmp"))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    dumps.sort();
+    dumps
+}
+
+/// Drop the oldest dumps until at most `keep` remain (#1165 finding 4).
+///
+/// Enforced at write time rather than on a timer, so the bound holds for the
+/// CLI too — it crashes and exits without ever running maintenance, and a
+/// crash loop is exactly when this matters.
+///
+/// Ordering is by the timestamp embedded in the filename rather than by mtime:
+/// `unique_dump_path` already builds `crash-<unix_ts>-<bin>-<kind>(-<seq>)?`,
+/// and a lexical sort over that prefix is stable even when a restore or copy
+/// rewrites every mtime to the same instant. Files that do not parse sort
+/// first and are reclaimed first — they are debris, not reports.
+///
+/// Each dump's `.reported` marker is removed with it, so a later dump reusing
+/// that name can't inherit a stale "already reported" flag and be silently
+/// skipped by [`check_previous_crashes`].
+fn prune_crash_dumps(crash_dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(crash_dir) else {
+        return;
+    };
+
+    let mut dumps: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("txt") | Some("dmp")
+            )
+        })
+        .collect();
+    if dumps.len() <= keep {
+        return;
+    }
+
+    dumps.sort_by_key(|path| {
+        let stamp = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix("crash-"))
+            .and_then(|rest| rest.split('-').next())
+            .and_then(|ts| ts.parse::<u64>().ok())
+            .unwrap_or(0);
+        (stamp, path.clone())
+    });
+
+    for path in dumps.iter().take(dumps.len() - keep) {
+        if std::fs::remove_file(path).is_ok() {
+            let _ = std::fs::remove_file(path.with_extension("reported"));
+        }
+    }
+}
+
+/// Delete all crash dump files and their `.reported` markers. Returns
+/// the number of `.txt`/`.dmp` files deleted.
+pub fn clear_crash_dumps() -> usize {
+    let crash_dir = super::config::crash_dump_dir();
+    let entries = match std::fs::read_dir(&crash_dir) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+
+    let mut count = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str());
+        match ext {
+            Some("txt") | Some("dmp") if std::fs::remove_file(&path).is_ok() => {
+                count += 1;
+            }
+            Some("reported") => {
+                let _ = std::fs::remove_file(&path);
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write `count` dumps whose embedded timestamps ascend, oldest first.
+    fn seed_dumps(crash_dir: &Path, count: u64) {
+        std::fs::create_dir_all(crash_dir).unwrap();
+        for ts in 1..=count {
+            std::fs::write(crash_dir.join(format!("crash-{ts}-zccache-panic.txt")), "x").unwrap();
+        }
+    }
+
+    fn dump_names(crash_dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(crash_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// #1165 finding 4: dumps were append-forever, so a crash *loop* — the
+    /// case where they matter most — filled the disk with near-identical
+    /// reports of one fault.
+    #[test]
+    fn pruning_keeps_the_newest_dumps_and_drops_the_oldest() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_dumps(tmp.path(), 25);
+
+        prune_crash_dumps(tmp.path(), 20);
+
+        let names = dump_names(tmp.path());
+        assert_eq!(names.len(), 20, "the cap must be enforced");
+        assert!(
+            !names.contains(&"crash-1-zccache-panic.txt".to_string()),
+            "the oldest dump must be the first reclaimed"
+        );
+        assert!(
+            names.contains(&"crash-25-zccache-panic.txt".to_string()),
+            "the newest dump must survive — it is the one describing the current fault"
+        );
+    }
+
+    /// A dump's `.reported` marker must die with it. Leaving one behind lets a
+    /// later dump that reuses the name inherit a stale "already reported" flag
+    /// and be silently skipped by `check_previous_crashes`.
+    #[test]
+    fn pruning_removes_the_reported_marker_beside_each_dump() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_dumps(tmp.path(), 3);
+        for ts in 1..=3 {
+            std::fs::write(
+                tmp.path()
+                    .join(format!("crash-{ts}-zccache-panic.reported")),
+                "",
+            )
+            .unwrap();
+        }
+
+        prune_crash_dumps(tmp.path(), 1);
+
+        let names = dump_names(tmp.path());
+        assert_eq!(
+            names,
+            vec![
+                "crash-3-zccache-panic.reported".to_string(),
+                "crash-3-zccache-panic.txt".to_string(),
+            ],
+            "only the surviving dump and its own marker may remain"
+        );
+    }
+
+    /// Ordering comes from the filename timestamp, not mtime: a restore or a
+    /// copy can rewrite every mtime to the same instant, and the cap must
+    /// still reclaim the genuinely oldest reports.
+    #[test]
+    fn pruning_orders_by_embedded_timestamp_not_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Written newest-first, so creation order is the reverse of age.
+        for ts in [30u64, 20, 10] {
+            std::fs::write(
+                tmp.path().join(format!("crash-{ts}-zccache-panic.txt")),
+                "x",
+            )
+            .unwrap();
+        }
+
+        prune_crash_dumps(tmp.path(), 1);
+
+        assert_eq!(dump_names(tmp.path()), vec!["crash-30-zccache-panic.txt"]);
+    }
+
+    /// Under the cap, pruning must not touch anything.
+    #[test]
+    fn pruning_under_the_cap_is_a_no_op() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_dumps(tmp.path(), 3);
+
+        prune_crash_dumps(tmp.path(), 20);
+
+        assert_eq!(dump_names(tmp.path()).len(), 3);
+    }
+
+    /// `unique_dump_path` derives its components from globals
+    /// (`BIN_STEM`, the configured crash dir). We exercise the path
+    /// shape against a known temp dir + the default stem fallback.
+    #[test]
+    fn unique_dump_path_includes_bin_and_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = unique_dump_path(tmp.path(), "panic", "txt");
+        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("crash-"), "{name}");
+        assert!(name.contains("-panic."), "{name}");
+        assert!(name.ends_with(".txt"), "{name}");
+    }
+
+    #[test]
+    fn unique_dump_path_disambiguates_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = unique_dump_path(tmp.path(), "panic", "txt");
+        std::fs::write(&first, "").unwrap();
+        let second = unique_dump_path(tmp.path(), "panic", "txt");
+        assert_ne!(first, second);
+        assert!(second
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("-1.txt"));
+    }
+
+    #[test]
+    fn read_crash_summary_extracts_key_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("crash-1-zccache-panic.txt");
+        std::fs::write(
+            &path,
+            "zccache crash\nVersion: 1.2.3\nPanic:\nboom\nBacktrace:\n...\n",
+        )
+        .unwrap();
+        let s = read_crash_summary(&path);
+        assert!(s.contains("Version: 1.2.3"));
+        assert!(s.contains("Panic:"));
+    }
+
+    /// `list_crash_dumps`/`clear_crash_dumps` read from
+    /// `super::config::crash_dump_dir()` which consults
+    /// `ZCCACHE_CACHE_DIR`. The test runner shares process env across
+    /// threads, so manipulating that env var would race with any
+    /// concurrent test that also calls `default_cache_dir()`. We
+    /// therefore test the underlying readdir/sort/filter logic with
+    /// explicit paths via inline closures that mirror the production
+    /// code path.
+    #[test]
+    fn list_dumps_filters_and_sorts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crash_dir = tmp.path();
+        std::fs::write(crash_dir.join("crash-1-zccache-panic.txt"), "a").unwrap();
+        std::fs::write(crash_dir.join("crash-2-zccache-panic.txt"), "b").unwrap();
+        std::fs::write(crash_dir.join("crash-1-zccache-panic.reported"), "").unwrap();
+        std::fs::write(crash_dir.join("noise.log"), "").unwrap();
+
+        let mut dumps: Vec<PathBuf> = std::fs::read_dir(crash_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p: &PathBuf| p.extension().is_some_and(|e| e == "txt" || e == "dmp"))
+            .collect();
+        dumps.sort();
+        assert_eq!(dumps.len(), 2, "{dumps:?}");
+        assert!(dumps[0].ends_with("crash-1-zccache-panic.txt"));
+        assert!(dumps[1].ends_with("crash-2-zccache-panic.txt"));
+    }
+
+    #[test]
+    fn clear_dumps_drops_reported_markers_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crash_dir = tmp.path();
+        std::fs::write(crash_dir.join("crash-1-zccache-panic.txt"), "a").unwrap();
+        std::fs::write(crash_dir.join("crash-2-zccache-daemon-SIGSEGV.txt"), "b").unwrap();
+        std::fs::write(crash_dir.join("crash-1-zccache-panic.reported"), "").unwrap();
+
+        // Mirror clear_crash_dumps() against the explicit dir to avoid
+        // racing on the global env var; the production code path is
+        // exercised end-to-end by the daemon's `crash_minidump_test`
+        // and the CLI's `cli_crash_test`.
+        let mut count = 0u32;
+        for entry in std::fs::read_dir(crash_dir).unwrap().flatten() {
+            let path = entry.path();
+            let ext = path.extension().and_then(|e| e.to_str());
+            match ext {
+                Some("txt") | Some("dmp") if std::fs::remove_file(&path).is_ok() => {
+                    count += 1;
+                }
+                Some("reported") => {
+                    let _ = std::fs::remove_file(&path);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(count, 2);
+        let remaining: Vec<_> = std::fs::read_dir(crash_dir).unwrap().flatten().collect();
+        assert!(remaining.is_empty(), "{remaining:?}");
+    }
+}
