@@ -3,6 +3,7 @@
 # benchmarks and emits benchmark-output/comparison.json.
 
 set -euo pipefail
+export RUSTFLAGS="-Clink-self-contained=-linker"  # EXPERIMENT: force the managed-LLVM linker path (soldr#3801)
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${HERE}/.." && pwd)"
