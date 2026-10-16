@@ -371,6 +371,7 @@ fn status_response_round_trips_with_cook_stats() {
         compile_backend: "embedded".to_string(),
         compile_jobs: 12,
         compile_jobs_source: "SOLDR_JOBS".to_string(),
+        in_flight_compiles: 5,
     };
     let resp = Response::Status(info.clone());
     let bytes = encode_response(&resp);

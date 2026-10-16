@@ -222,6 +222,7 @@ pub(crate) mod broker_daemon_disk;
 /// production-source ceiling.
 pub(crate) mod broker_deadlines;
 pub(crate) mod broker_debug;
+pub(crate) mod broker_endpoint_owner;
 /// soldr#2388: container-safe broker/session socket identity (graceful fallback
 /// when the OS provides no `/etc/machine-id`).
 pub mod broker_identity;

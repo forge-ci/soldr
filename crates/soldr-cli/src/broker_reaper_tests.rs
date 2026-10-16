@@ -410,3 +410,74 @@ fn the_real_broker_directory_has_no_dead_routes_left_after_a_sweep() {
     );
     println!("swept {} dead route(s) from {}", first.len(), dir.display());
 }
+
+fn reap_candidate_table() -> (Mutex<RouteOwnership>, Instant) {
+    let start = Instant::now();
+    let mut ownership = RouteOwnership::new();
+    ownership.record_request("soldr-daemon-a", identified(1, 1), start);
+    (Mutex::new(ownership), start)
+}
+
+/// soldr#3815: the starter exited, but another session still has compiles in
+/// flight. The route must survive, and its grace window must restart.
+#[test]
+fn requesters_gone_but_daemon_busy_is_not_reaped() {
+    let (table, start) = reap_candidate_table();
+    let later = start + DEFAULT_GRACE * 2;
+    let candidates: Vec<String> = table
+        .lock()
+        .unwrap()
+        .sweep(later, DEFAULT_GRACE, |_| false)
+        .into_iter()
+        .filter_map(|(n, v)| (v == RouteVerdict::Reap).then_some(n))
+        .collect();
+    assert_eq!(candidates, vec!["soldr-daemon-a".to_string()]);
+
+    let reapable = defer_busy_candidates(&table, candidates, later, |_| DaemonLoad::Busy);
+    assert!(reapable.is_empty());
+
+    // The window restarted at `later`: still draining just after, reapable
+    // only once a full idle window has passed.
+    let soon = table
+        .lock()
+        .unwrap()
+        .sweep(later + Duration::from_secs(1), DEFAULT_GRACE, |_| false);
+    assert_eq!(soon[0].1, RouteVerdict::Draining);
+    let idle_window = table
+        .lock()
+        .unwrap()
+        .sweep(later + DEFAULT_GRACE, DEFAULT_GRACE, |_| false);
+    assert_eq!(idle_window[0].1, RouteVerdict::Reap);
+}
+
+/// Acceptance criterion 3: an idle daemon is still reaped after the grace.
+#[test]
+fn requesters_gone_daemon_idle_grace_elapsed_is_reaped() {
+    let (table, start) = reap_candidate_table();
+    let verdict = table
+        .lock()
+        .unwrap()
+        .sweep(start + DEFAULT_GRACE, DEFAULT_GRACE, |_| false);
+    assert_eq!(verdict[0].1, RouteVerdict::Reap);
+    let reapable = defer_busy_candidates(
+        &table,
+        vec!["soldr-daemon-a".to_string()],
+        start + DEFAULT_GRACE,
+        |_| DaemonLoad::Idle,
+    );
+    assert_eq!(reapable, vec!["soldr-daemon-a".to_string()]);
+}
+
+/// A daemon that cannot be asked is not shown idle, so it is not reaped, and
+/// its window is left alone so the next sweep asks again.
+#[test]
+fn busy_query_failure_is_not_reaped_and_is_retried_next_sweep() {
+    let (table, start) = reap_candidate_table();
+    let at = start + DEFAULT_GRACE;
+    let reapable = defer_busy_candidates(&table, vec!["soldr-daemon-a".to_string()], at, |_| {
+        DaemonLoad::Unknown
+    });
+    assert!(reapable.is_empty());
+    let again = table.lock().unwrap().sweep(at, DEFAULT_GRACE, |_| false);
+    assert_eq!(again[0].1, RouteVerdict::Reap);
+}
