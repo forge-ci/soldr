@@ -109,7 +109,7 @@ jobs:
 - The action rehydrates `SOLDR_CACHE_DIR`, `CARGO_HOME`, and `RUSTUP_HOME` under the selected cache root.
 - The action restores the Soldr-owned zccache cache root by default so child branches can reuse parent-branch build state.
 - Released archives are validated against the versioned zccache runtime contract before setup-soldr exports bundled-tool paths.
-- The target cache was removed in soldr#2996; `target-cache` and `target-cache-mode` are accepted but ignored. `soldr cook` plus zccache own compiler caching, and linked test products are never cached (soldr#2931).
+- The target cache was removed in soldr#2996; `target-cache` and `target-cache-mode` are accepted but ignored. `soldr cook` plus zccache own compiler caching, including `--test` harness compiles.
 - The action exports `ZCCACHE_CACHE_DIR` to keep managed zccache artifact storage under `SOLDR_CACHE_DIR`.
 - Native C/C++ compiler caching is on by default. Build-script work (bundled SQLite, ring, etc.) runs through zccache without any extra wiring. Set `native-cache: false` to opt out of just the native wrapping while keeping Rust caching intact, or use `soldr --no-cache cargo ...` at command time to disable both layers.
 - `tool-shims: cargo` prepends a Cargo shim for existing workflows that cannot rewrite every `cargo ...` command to `soldr cargo ...`.

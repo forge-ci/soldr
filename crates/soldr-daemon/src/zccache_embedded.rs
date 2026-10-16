@@ -53,9 +53,10 @@ use running_process::broker::backend_handle::DaemonProcess;
 use zccache::audit::AuditMode;
 use zccache::core::NormalizedPath;
 use zccache::embedded::{
-    AuditConfig, AuditContext, CacheOutcome, CompileRequest as ZccacheCompileRequest,
-    DiskCacheLimits, DiskMaintenanceKind, DiskMaintenancePressure, FlushStepOutcome, HostIdentity,
-    RuntimeHooks, ServiceLimits, ShutdownMode, ZccacheConfig, ZccacheService,
+    AuditConfig, AuditContext, CacheOutcome, CompileOptions,
+    CompileRequest as ZccacheCompileRequest, DiskCacheLimits, DiskMaintenanceKind,
+    DiskMaintenancePressure, FlushStepOutcome, HostIdentity, RuntimeHooks, ServiceLimits,
+    ShutdownMode, TestHarnessAdmission, ZccacheConfig, ZccacheService,
 };
 use zccache::hash::StreamHasher;
 
@@ -188,6 +189,21 @@ pub enum EmbeddedServiceError {
         root: PathBuf,
         candidates: Vec<PathBuf>,
     },
+}
+
+/// Per-request zccache options for every compile Soldr forwards.
+///
+/// `--test` harnesses are admitted (zccache#1550 `TestHarnessAdmission::All`)
+/// rather than refused: Soldr caches every compile it can. Long-lived and
+/// large end-state artifacts are partitioned by `soldr cook`, and the
+/// consolidated test targets (soldr#2934) keep harness size and count small,
+/// so the original "volatile and huge" reason for zccache#1525's refusal no
+/// longer holds. The explicit option outranks `ZCCACHE_CACHE_TEST_BINS` in
+/// either environment, so no caller can reintroduce the refusal by accident.
+/// zccache still skips storing a single harness above
+/// `MAX_ADMITTED_TEST_HARNESS_BYTES` (512 MiB).
+fn soldr_compile_options() -> CompileOptions {
+    CompileOptions::new().with_test_harness_admission(TestHarnessAdmission::All)
 }
 
 impl SoldrZccacheService {
@@ -424,9 +440,15 @@ impl SoldrZccacheService {
         // carrying that state inline makes this adapter's callers inherit the
         // full stack footprint even when they only use the buffered API.
         crate::daemon::compile_profile::mark_compile_start();
-        let zresult = Box::pin(self.inner.compile(zreq)).await;
+        let zresult = Box::pin(
+            self.inner
+                .compile_with_options(zreq, soldr_compile_options()),
+        )
+        .await;
         crate::daemon::compile_profile::mark_compile_end();
-        let zresp = zresult.map_err(|e| EmbeddedServiceError::Compile(e.to_string()))?;
+        let zresp = zresult
+            .map_err(|e| EmbeddedServiceError::Compile(e.to_string()))?
+            .response;
         // soldr#3152 step 4: remember this unit's measured memory (zccache
         // 1.13.24 reports it per compile). A cache hit spawned no compiler and
         // reports nothing, which the history ignores.
@@ -932,6 +954,10 @@ mod zccache_embedded_process_tests;
 #[cfg(test)]
 #[path = "zccache_embedded_private_root_tests.rs"]
 mod private_root_tests;
+
+#[cfg(test)]
+#[path = "zccache_embedded_test_harness_tests.rs"]
+mod test_harness_tests;
 
 #[cfg(test)]
 #[path = "zccache_embedded_retired_store_tests.rs"]

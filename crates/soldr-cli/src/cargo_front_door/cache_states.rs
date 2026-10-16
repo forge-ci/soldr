@@ -251,8 +251,8 @@ enum Outcome {
     Hit,
     Miss,
     /// A miss zccache refused to cache by design. zccache journals these as
-    /// a plain `miss` (zackees/zccache#1865: test-harness links, PGO inputs,
-    /// and other passthroughs all land there), distinguished only by
+    /// a plain `miss` (zackees/zccache#1865: PGO inputs and other
+    /// passthroughs land there), distinguished only by
     /// `miss_reason: "uncacheable_input"` — counting them as `[MISS]` reads
     /// as a failing cache when it is working exactly as intended.
     NotCacheable,
@@ -769,7 +769,7 @@ mod tests {
     }
 
     /// soldr#3540 part 2: zccache journals the compiles it refuses by design
-    /// (test-harness links, PGO inputs, ...) as a plain `miss` whose
+    /// (PGO inputs, ...) as a plain `miss` whose
     /// `miss_reason` is `uncacheable_input` — zackees/zccache#1865. Printing
     /// those yellow `[MISS]` claimed the cache was failing on the 17 units of
     /// a `cargo test --no-run` when it was working as intended.

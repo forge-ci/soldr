@@ -43,25 +43,27 @@ invalidates on every edit. The gradient, from most to least cacheable:
 | Toolchain / SDK / catalogue downloads | pinned version bumps (rare, explicit) | setup-state cache (content-pinned + sha256) |
 | External dependency compilation | `Cargo.lock` / recipe changes | **soldr cook** (Tier 1) |
 | Per-compilation-unit compiler outputs | that unit's input hash changes | **zccache store** (Tier 2, content-addressed) |
-| Workspace linked products — final binaries and especially **test executables** | **any** workspace source edit | **nothing** (Tier 3 — never cached) |
+| Workspace linked products — final binaries and **test executables** (`--test` harnesses) | any edit to a crate they link | **zccache store** (Tier 2; harnesses admitted explicitly, see below) |
 
-**Linked test products are never cacheable** — test binaries, benches,
-examples built for tests, doctest products, test debug sidecars, and
-test-specific incremental state. They are the most volatile artifacts a
-workspace produces (every source edit re-links them) and the largest (each
-integration-test file is its own executable statically linking the full
-dependency graph). Classification is by contents, not by whether GitHub calls
-the store a "cache" or an "artifact". A same-run transport bundle used to
-execute cross-built tests on their target is not a cache, but it must stay
-compact, single-extraction, and budgeted.
+**Test harnesses are cached.** Soldr admits every rustc `--test` compile —
+the harness link and the metadata-only Clippy/Dylint check of a test target —
+to the zccache store with zccache's `TestHarnessAdmission::All`
+(`soldr_compile_options` in `crates/soldr-daemon/src/zccache_embedded.rs`).
+zccache refuses them by default (zccache#1525) because a harness re-links on
+every edit to anything it links and can be large; Soldr overrides that on
+purpose. `soldr cook` already partitions the long-lived dependency cache
+(Tier 1) from large end-state products, and consolidating test targets keeps
+harnesses few and small. zccache still skips storing any single harness above
+512 MiB (`MAX_ADMITTED_TEST_HARNESS_BYTES`).
 
-Lesson learned (soldr#2931): this repo's suite reached ~110 linked test
-binaries and a 3.3 GB compressed nextest archive that exhausted a hosted
-runner's disk, while a guard *required* that archive to be warm-cacheable at
-zero misses. Every individual decision on the way there was locally
-reasonable; the missing piece was this ownership table to check against. When
-adding a cache layer, name its tier first — if the payload contains linked
-test products, the answer is no.
+What stays costly is **test-target fan-out**. Lesson learned (soldr#2931): this
+repo's suite reached ~110 linked test binaries and a 3.3 GB compressed nextest
+archive that exhausted a hosted runner's disk, while a guard *required* that
+archive to be warm-cacheable at zero misses. The fix was fewer test targets
+(soldr#2934 consolidated the soldr-cli integration tests into eight), not a
+refusal. A same-run transport bundle used to execute cross-built tests on
+their target must still stay compact, single-extraction, and budgeted. When
+adding a cache layer, name its tier first.
 
 ## How GitHub Actions Cache Scoping Actually Works
 
