@@ -525,6 +525,10 @@ pub(crate) fn spawn_route_prewarm(
 }
 
 fn prewarm_if_enabled(service_name: &str) {
+    // PROBE soldr#3823: pre-warm disabled to test the route-claim race theory.
+    if std::env::var(BROKER_PREWARM_ENV_VAR).ok().as_deref() != Some("force") {
+        return;
+    }
     let optout = std::env::var(BROKER_PREWARM_ENV_VAR).ok();
     if should_prewarm(PrewarmPlanKind::Managed, optout.as_deref()) {
         drop(spawn_route_prewarm(service_name, ensure_route_hook));
