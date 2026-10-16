@@ -1373,12 +1373,12 @@ def _maturin_pep517(
 
 
 def _selected_soldr_root(environment: "Mapping[str, str]") -> Path:
-    """Ask the selected soldr binary for its provenance-aware root.
+    """Ask the selected soldr binary for its root.
 
-    Official wheels default to ``~/.soldr`` while locally-built binaries use
-    ``~/.soldr-dev``. Querying the executable on PATH keeps the Python backend
-    aligned with the exact binary it will invoke without duplicating Rust's
-    build-provenance policy.
+    Every build defaults to ``~/.soldr`` (daemon generations are isolated by
+    image hash); querying the executable on PATH keeps the Python backend
+    aligned with the exact binary it will invoke, including any
+    ``SOLDR_CACHE_DIR`` it honours, without duplicating Rust's root policy.
     """
     explicit = environment.get("SOLDR_CACHE_DIR", "").strip()
     if explicit:

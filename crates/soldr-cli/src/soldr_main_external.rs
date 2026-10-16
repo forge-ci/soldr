@@ -242,10 +242,8 @@ async fn prepare_maturin_child(
     // a wrong-host cargo emits the right-target wheel.
     let paths = SoldrPaths::new()?;
     // The Python PEP 517 backend must select the same effective
-    // product root as this binary.  In particular, a development
-    // soldr defaults to `.soldr-dev`; allowing the child to fall
-    // back to its package-level `.soldr` default would mix
-    // PEP517 target ownership across prod/dev daemons (#1763).
+    // product root as this binary (#1763): an explicit SOLDR_CACHE_DIR
+    // here must not be dropped by the child's own default.
     command.env(crate::core::SOLDR_CACHE_DIR_ENV_VAR, &paths.root);
     let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let maturin_build = crate::pyo3_detect::maturin_args_are_build(tool_args);
