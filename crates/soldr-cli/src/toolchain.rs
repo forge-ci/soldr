@@ -459,9 +459,20 @@ pub(crate) fn run_toolchain_prepare() -> Result<i32, SoldrError> {
     // Walk ancestors like rustup/cargo (soldr#3633).
     let manifest = crate::core::read_rust_toolchain_manifest_from_ancestors(&workspace_root)?;
     let Some(channel) = manifest.channel.as_deref() else {
+        // soldr#3802: without a pin there is no rustup work, but the build
+        // tools are still provisionable when the caller accepted an unpinned
+        // build (`--allow-unpinned` / `RUSTUP_TOOLCHAIN`).
+        if crate::toolchain_prepare::unpinned_provisioning_allowed() {
+            eprintln!("soldr: no rust-toolchain.toml channel found; skipping rustup steps.");
+            crate::toolchain_prepare::report_build_tools(
+                &crate::toolchain_prepare::provision_build_tools()?,
+            );
+            return Ok(0);
+        }
         eprintln!(
             "soldr: no rust-toolchain.toml channel found; nothing to prepare. \
-             Create rust-toolchain.toml with a `[toolchain] channel = \"<version>\"` entry."
+             Create rust-toolchain.toml with a `[toolchain] channel = \"<version>\"` entry, \
+             or pass --allow-unpinned to provision build tools without one."
         );
         return Ok(0);
     };

@@ -89,6 +89,10 @@ class ComparisonResult:
     tool: str
     wall_ms: int | float | None
     cache_bytes: int | float | None
+    # soldr#3802: one-time tool provisioning, timed outside ``wall_ms``. None
+    # for bare cargo / sccache, and for result rows written before the field.
+    provision_ms: int | float | None = None
+    provision_bytes: int | float | None = None
 
     @classmethod
     def from_json(cls, value: Any) -> ComparisonResult:
@@ -99,6 +103,8 @@ class ComparisonResult:
             tool=text_field(row.get("tool")),
             wall_ms=number_field(row.get("wall_ms")),
             cache_bytes=number_field(row.get("cache_bytes")),
+            provision_ms=number_field(row.get("provision_ms")),
+            provision_bytes=number_field(row.get("provision_bytes")),
         )
 
 
