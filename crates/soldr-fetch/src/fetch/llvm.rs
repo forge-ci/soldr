@@ -167,36 +167,68 @@ fn host_triple_for_llvm() -> Option<&'static str> {
     }
 }
 
+/// Does this host have a managed LLVM asset?
+pub(super) fn host_has_managed_llvm() -> bool {
+    host_llvm_asset().is_some()
+}
+
+pub(super) fn unsupported_host_error() -> SoldrError {
+    SoldrError::UnsupportedPlatform(format!(
+        "managed LLVM toolchain not available for host arch={} os={} (set {LLVM_DIR_ENV_VAR} to an existing LLVM bin dir, or extend LLVM_ASSETS)",
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+    ))
+}
+
 async fn fetch_managed_llvm(paths: &SoldrPaths) -> Result<PathBuf, SoldrError> {
     let Some(asset) = host_llvm_asset() else {
-        return Err(SoldrError::UnsupportedPlatform(format!(
-            "managed LLVM toolchain not available for host arch={} os={} (set {LLVM_DIR_ENV_VAR} to an existing LLVM bin dir, or extend LLVM_ASSETS)",
-            std::env::consts::ARCH,
-            std::env::consts::OS,
-        )));
+        return Err(unsupported_host_error());
     };
 
     paths.ensure_dirs()?;
-    let install_dir = paths.bin.join(format!("llvm-{MANAGED_LLVM_VERSION}"));
-    let bin_dir = install_dir.join("hardlinked").join("bin");
+    let install_dir = super::llvm_background::managed_llvm_install_dir(paths);
+    let bin_dir = super::llvm_background::managed_llvm_bin_dir(paths);
     let stamp = install_dir.join(".complete");
 
+    // Lock-free fast path: a fully stamped install needs no repair.
+    if stamp.is_file() && bin_dir.is_dir() {
+        let stamped = std::fs::read_to_string(&stamp).unwrap_or_default();
+        if stamped.contains(STAMP_EXEC_MARKER) && stamped.contains(STAMP_HOST_LIBS_MARKER) {
+            return Ok(bin_dir);
+        }
+    }
+
+    // soldr#3801: one process at a time may repair, download, extract and
+    // stamp. A concurrent caller (the front door's background fetch, a
+    // linking wrapper, another build) blocks here, then finds `.complete`.
+    let _lock = super::llvm_background::lock_install(&install_dir).await?;
+    install_locked(paths, asset, &install_dir, &bin_dir, &stamp).await
+}
+
+/// The body of [`fetch_managed_llvm`] that must run under the install lock.
+async fn install_locked(
+    paths: &SoldrPaths,
+    asset: &LlvmAsset,
+    install_dir: &Path,
+    bin_dir: &Path,
+    stamp: &Path,
+) -> Result<PathBuf, SoldrError> {
     if stamp.is_file() && bin_dir.is_dir() {
         // An install stamped before exec bits were restored (linux-arm64
         // archive, soldr#3505) is repaired in place instead of re-fetched.
-        let stamped = std::fs::read_to_string(&stamp).unwrap_or_default();
+        let stamped = std::fs::read_to_string(stamp).unwrap_or_default();
         let has_exec = stamped.contains(STAMP_EXEC_MARKER);
         let has_libs = stamped.contains(STAMP_HOST_LIBS_MARKER);
         if !has_exec {
-            restore_bin_exec_bits(&bin_dir)?;
+            restore_bin_exec_bits(bin_dir)?;
         }
         // soldr#3774: an install from before the host-libs overlay is
         // completed in place, too.
-        let libs_done = has_libs || complete_host_libs(paths, &bin_dir).await?;
+        let libs_done = has_libs || complete_host_libs(paths, bin_dir).await?;
         if !has_exec || libs_done != has_libs {
-            std::fs::write(&stamp, stamp_contents(libs_done))?;
+            std::fs::write(stamp, stamp_contents(libs_done))?;
         }
-        return Ok(bin_dir);
+        return Ok(bin_dir.to_path_buf());
     }
 
     let entry = catalogue_entry_for_asset(asset).await?;
@@ -227,10 +259,10 @@ async fn fetch_managed_llvm(paths: &SoldrPaths) -> Result<PathBuf, SoldrError> {
     );
 
     if install_dir.exists() {
-        std::fs::remove_dir_all(&install_dir)?;
+        std::fs::remove_dir_all(install_dir)?;
     }
-    std::fs::create_dir_all(&install_dir)?;
-    extract_tar_zst_tree(std::fs::File::open(downloaded.path())?, &install_dir)?;
+    std::fs::create_dir_all(install_dir)?;
+    extract_tar_zst_tree(std::fs::File::open(downloaded.path())?, install_dir)?;
 
     if !bin_dir.is_dir() {
         return Err(SoldrError::Archive(format!(
@@ -239,11 +271,11 @@ async fn fetch_managed_llvm(paths: &SoldrPaths) -> Result<PathBuf, SoldrError> {
         )));
     }
 
-    restore_bin_exec_bits(&bin_dir)?;
-    let libs_done = complete_host_libs(paths, &bin_dir).await?;
-    std::fs::write(&stamp, stamp_contents(libs_done))?;
+    restore_bin_exec_bits(bin_dir)?;
+    let libs_done = complete_host_libs(paths, bin_dir).await?;
+    std::fs::write(stamp, stamp_contents(libs_done))?;
     eprintln!("soldr: extracted LLVM to {}", install_dir.display());
-    Ok(bin_dir)
+    Ok(bin_dir.to_path_buf())
 }
 
 async fn catalogue_entry_for_asset(asset: &LlvmAsset) -> Result<ManifestEntry, SoldrError> {

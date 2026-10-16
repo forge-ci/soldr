@@ -178,13 +178,16 @@ pub async fn materialize_linker_driver_shim_resolving(
     target: &str,
     injection: &mut LinkerInjection,
     rustc_supplies_lld: bool,
-) -> Result<(), SoldrError> {
+    mode: FetchMode,
+) -> Result<Option<PathBuf>, SoldrError> {
     let Some(driver_arg) = shim_driver_arg(target, injection) else {
-        return materialize_linker_driver_shim(paths, target, injection, None);
+        materialize_linker_driver_shim(paths, target, injection, None)?;
+        return Ok(None);
     };
-    let clang = resolve_driver_clang(
+    let resolved = resolve_driver_clang(
         paths,
         LldNeed::new(driver_arg_needs_lld(driver_arg), rustc_supplies_lld),
+        mode,
     )
     .await?;
     let search = std::env::var_os("PATH");
@@ -197,13 +200,38 @@ pub async fn materialize_linker_driver_shim_resolving(
         target,
         crate::platform::host::facts::triple(),
         linux_host(),
-        &clang,
+        &resolved.clang,
         on_path("clang").as_deref(),
         on_path("cc"),
+        host_runtime_in_standard_dirs(),
     ) {
-        return materialize_host_cc_shim(paths, injection, &cc);
+        materialize_host_cc_shim(paths, injection, &cc)?;
+        return Ok(None);
     }
-    materialize_linker_driver_shim(paths, target, injection, Some(&clang))
+    materialize_linker_driver_shim(paths, target, injection, Some(&resolved.clang))?;
+    if !resolved.needs_fetch || mode == FetchMode::Await {
+        return Ok(None);
+    }
+    // soldr#3801: the shim above already names the deterministic managed
+    // clang path, so its content (and digest) is the same whether the fetch
+    // is pending or done. Start the download now, in the background, and
+    // return the install dir for the caller to export; only a *linking*
+    // wrapper waits on it.
+    match crate::fetch::start_background_llvm_fetch(paths) {
+        Ok(install_dir) => {
+            Ok((!crate::fetch::llvm_install_complete(&install_dir)).then_some(install_dir))
+        }
+        Err(error) => Err(missing_clang_error(&error.to_string())),
+    }
+}
+
+/// Export the pending-fetch marker on the cargo child so linking wrappers
+/// know to wait on `install_dir`.
+pub(crate) fn export_pending_fetch(command: &mut std::process::Command, install_dir: &Path) {
+    command.env(
+        crate::cache_lib::SOLDR_LLVM_FETCH_PENDING_ENV_VAR,
+        install_dir,
+    );
 }
 
 /// The host `cc` that should drive a native Linux link instead of `clang`,
@@ -220,8 +248,10 @@ pub async fn materialize_linker_driver_shim_resolving(
 ///
 /// Only when every condition holds: a Linux host, a native (host-triple)
 /// target -- a cross target never links through the host compiler -- a
-/// clang that is not the system clang, that ran and could not find the
-/// runtime, and a host `cc` that ran and could. An FHS host (Debian,
+/// clang that is not the system clang, no `Scrt1.o` in the standard FHS
+/// library directories (so an unwrapped clang cannot find the runtime; this
+/// is a file check, never a run of the possibly not-yet-fetched managed
+/// clang, soldr#3801), and a host `cc` that ran and could. An FHS host (Debian,
 /// Ubuntu, Fedora) keeps the clang. A system clang chosen by
 /// [`prefer_host_wrapper_clang`] is never demoted: the NixOS clang-wrapper
 /// answers `-print-file-name=libgcc_s.so` with the bare name (it adds that
@@ -233,15 +263,33 @@ fn host_cc_fallback(
     clang: &Path,
     system_clang: Option<&Path>,
     host_cc: Option<PathBuf>,
+    fhs_runtime_present: bool,
 ) -> Option<PathBuf> {
-    if !linux_host || target != host_triple || system_clang == Some(clang) {
+    if !linux_host || target != host_triple || system_clang == Some(clang) || fhs_runtime_present {
         return None;
     }
     let cc = host_cc?;
-    if probe_host_runtime(clang) != Some(false) {
-        return None;
-    }
     (probe_host_runtime(&cc) == Some(true)).then_some(cc)
+}
+
+/// Is the host C runtime (`Scrt1.o`) in the standard FHS library
+/// directories an unwrapped clang searches? Needs no fetched clang
+/// (soldr#3801): the decision stays fixed while the managed LLVM downloads.
+fn host_runtime_in_standard_dirs() -> bool {
+    const DIRS: [&str; 7] = [
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib/aarch64-linux-gnu",
+        "/usr/lib64",
+        "/usr/lib",
+        "/lib/x86_64-linux-gnu",
+        "/lib64",
+        "/lib",
+    ];
+    runtime_in_dirs(DIRS.iter().map(Path::new))
+}
+
+fn runtime_in_dirs<'a>(dirs: impl IntoIterator<Item = &'a Path>) -> bool {
+    dirs.into_iter().any(|dir| dir.join("Scrt1.o").is_file())
 }
 
 /// A content-addressed shim that execs the host `cc` with the link argv
@@ -262,6 +310,37 @@ fn materialize_host_cc_shim(
     injection.linker = Some(path.to_string_lossy().into_owned());
     injection.rustflags = None;
     Ok(())
+}
+
+/// The install dir a pending-fetch marker on `command` names, if any.
+fn pending_fetch_dir(command: &std::process::Command) -> Option<PathBuf> {
+    command
+        .get_envs()
+        .find(|(key, _)| {
+            *key == std::ffi::OsStr::new(crate::cache_lib::SOLDR_LLVM_FETCH_PENDING_ENV_VAR)
+        })
+        .and_then(|(_, value)| value.map(PathBuf::from))
+}
+
+/// Block until a background managed-LLVM fetch marked on `command` is done.
+/// For builds with no soldr wrapper to wait at link time (cache disabled, an
+/// explicit external `RUSTC_WRAPPER`, Dylint): the front door itself waits
+/// before spawning cargo, i.e. the pre-#3801 behavior. A no-op when nothing
+/// is pending.
+pub(crate) async fn await_pending_fetch(
+    command: &std::process::Command,
+    paths: &crate::core::SoldrPaths,
+) -> Result<(), SoldrError> {
+    let Some(install_dir) = pending_fetch_dir(command) else {
+        return Ok(());
+    };
+    crate::fetch::wait_for_managed_llvm(
+        paths,
+        &install_dir,
+        crate::fetch::llvm_fetch_wait_from_env(),
+    )
+    .await
+    .map_err(|error| missing_clang_error(&error.to_string()))
 }
 
 fn windows_host() -> bool {
@@ -323,10 +402,41 @@ fn usable_system_clang(
         .cloned()
 }
 
+/// How a missing managed LLVM is provisioned while resolving the driver
+/// clang (soldr#3801).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FetchMode {
+    /// Await the download here, as before: nothing downstream will wait for
+    /// it (`soldr toolchain prepare`, the PEP 517 backend).
+    Await,
+    /// Name the deterministic managed clang path in the shim and fetch on a
+    /// background thread; a linking wrapper (or the front door, when no
+    /// soldr wrapper is in the loop) waits for it.
+    Background,
+}
+
+/// A resolved driver clang, and whether it is a managed LLVM that must still
+/// be fetched (soldr#3801). Resolution never fetches: an absent managed clang
+/// is named by its deterministic install path.
+struct ResolvedClang {
+    clang: PathBuf,
+    needs_fetch: bool,
+}
+
+impl ResolvedClang {
+    fn ready(clang: PathBuf) -> Self {
+        Self {
+            clang,
+            needs_fetch: false,
+        }
+    }
+}
+
 async fn resolve_driver_clang(
     paths: &crate::core::SoldrPaths,
     need: LldNeed,
-) -> Result<PathBuf, SoldrError> {
+    mode: FetchMode,
+) -> Result<ResolvedClang, SoldrError> {
     let managed_complete = paths
         .bin
         .join(format!("llvm-{}", crate::fetch::MANAGED_LLVM_VERSION))
@@ -339,34 +449,56 @@ async fn resolve_driver_clang(
     if managed_complete.is_file() || std::env::var_os(LLVM_DIR_ENV_VAR).is_some() {
         if let Ok(bin) = crate::fetch::ensure_llvm_toolchain(paths).await {
             if let Some(clang) = clang_in(&bin) {
-                return Ok(prefer_host_wrapper_clang(
+                return Ok(ResolvedClang::ready(prefer_host_wrapper_clang(
                     clang,
                     usable_system_clang,
                     linux_host(),
                     managed_clang_finds_host_runtime,
-                ));
+                )));
             }
         }
     }
     if let Some(clang) = usable_system_clang {
-        return Ok(clang);
+        return Ok(ResolvedClang::ready(clang));
     }
-    let managed = crate::fetch::ensure_llvm_toolchain(paths)
-        .await
-        .map_err(|error| error.to_string())
-        .and_then(|bin| {
-            clang_in(&bin)
-                .ok_or_else(|| format!("no clang in the fetched LLVM at {}", bin.display()))
-        });
-    match pick_after_managed(system_clang, managed) {
-        Ok((clang, warning)) => {
-            if let Some(warning) = warning {
-                eprintln!("{warning}");
+    if mode == FetchMode::Await {
+        let managed = crate::fetch::ensure_llvm_toolchain(paths)
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|bin| {
+                clang_in(&bin)
+                    .ok_or_else(|| format!("no clang in the fetched LLVM at {}", bin.display()))
+            });
+        return match pick_after_managed(system_clang, managed) {
+            Ok((clang, warning)) => {
+                if let Some(warning) = warning {
+                    eprintln!("{warning}");
+                }
+                Ok(ResolvedClang::ready(clang))
             }
-            Ok(clang)
-        }
-        Err(cause) => Err(missing_clang_error(&cause)),
+            Err(cause) => Err(missing_clang_error(&cause)),
+        };
     }
+    // The managed LLVM is wanted but not installed. Do not await the
+    // download here (soldr#3801): the caller starts it in the background and
+    // the shim names the path it will land at. Only a host with no managed
+    // LLVM at all is decided now.
+    if let Err(error) = crate::fetch::check_managed_llvm_host() {
+        return match pick_after_managed(system_clang, Err(error.to_string())) {
+            Ok((clang, warning)) => {
+                if let Some(warning) = warning {
+                    eprintln!("{warning}");
+                }
+                Ok(ResolvedClang::ready(clang))
+            }
+            Err(cause) => Err(missing_clang_error(&cause)),
+        };
+    }
+    Ok(ResolvedClang {
+        clang: crate::fetch::managed_llvm_bin_dir(paths)
+            .join(format!("clang{}", std::env::consts::EXE_SUFFIX)),
+        needs_fetch: true,
+    })
 }
 
 fn linux_host() -> bool {
@@ -552,8 +684,19 @@ pub(crate) async fn resolve_driver_clang_for_tests(
     paths: &crate::core::SoldrPaths,
     needs_lld: bool,
     rustc_supplies_lld: bool,
-) -> Result<PathBuf, SoldrError> {
-    resolve_driver_clang(paths, LldNeed::new(needs_lld, rustc_supplies_lld)).await
+) -> Result<(PathBuf, bool), SoldrError> {
+    resolve_driver_clang(
+        paths,
+        LldNeed::new(needs_lld, rustc_supplies_lld),
+        FetchMode::Background,
+    )
+    .await
+    .map(|resolved| (resolved.clang, resolved.needs_fetch))
+}
+
+#[cfg(test)]
+pub(crate) fn runtime_in_dirs_for_tests(dirs: &[&Path]) -> bool {
+    runtime_in_dirs(dirs.iter().copied())
 }
 
 #[cfg(test)]
