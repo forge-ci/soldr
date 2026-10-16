@@ -212,3 +212,88 @@ fn the_host_cc_shim_execs_cc_without_a_fast_linker_argument() {
     );
     assert!(!body.contains("fuse-ld"), "{body}");
 }
+
+// -- soldr#3797: rustc's bundled lld makes a system clang sufficient --------
+
+fn fake_system_clang_without_lld(dir: &Path) -> PathBuf {
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let clang = bin.join("clang");
+    std::fs::write(&clang, "#!/bin/sh\nexit 0\n").unwrap();
+    crate::platform::fs::permissions::make_executable(&clang).unwrap();
+    clang
+}
+
+#[test]
+fn a_system_clang_without_lld_is_usable_only_when_rustc_supplies_one() {
+    let clang = PathBuf::from("/nonexistent/soldr-3797/clang");
+    let usable = |needs, rustc, system: Option<&PathBuf>| {
+        super::usable_system_clang_for_tests(system, needs, rustc, None)
+    };
+    // The #3430 path is unchanged when rustc supplies nothing.
+    assert_eq!(usable(true, false, Some(&clang)), None);
+    // rustc's lld lifts the requirement.
+    assert_eq!(usable(true, true, Some(&clang)), Some(clang.clone()));
+    // No lld needed: always usable, as before.
+    assert_eq!(usable(false, false, Some(&clang)), Some(clang.clone()));
+    // No system clang at all keeps today's fetch path.
+    assert_eq!(usable(true, true, None), None);
+}
+
+#[test]
+fn no_llvm_fetch_when_rustc_supplies_lld_and_a_system_clang_exists() {
+    if crate::platform::host::facts::os() == crate::platform::host::facts::HostOs::Windows {
+        return;
+    }
+    let _lock = crate::TEST_PROCESS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let clang = fake_system_clang_without_lld(temp.path());
+    let _path = crate::EnvVarGuard::set("PATH", clang.parent().unwrap());
+    let _llvm_dir = crate::EnvVarGuard::remove("SOLDR_LLVM_DIR");
+    let paths = crate::core::SoldrPaths::with_root(temp.path().join("root"));
+    let resolved = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(super::resolve_driver_clang_for_tests(&paths, true, true))
+        .expect("the system clang drives the link");
+    assert_eq!(resolved, clang);
+    assert!(
+        !paths.bin.exists(),
+        "nothing may be fetched or materialized under the cache root"
+    );
+}
+
+#[test]
+fn the_shim_digest_is_stable_for_a_fixed_clang_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = crate::core::SoldrPaths::with_root(temp.path().to_path_buf());
+    let clang = PathBuf::from("/usr/bin/clang");
+    let link = |paths: &crate::core::SoldrPaths| {
+        let mut injection = crate::linker::LinkerInjection {
+            linker: Some("clang".to_string()),
+            rustflags: Some("-C link-arg=-fuse-ld=lld".to_string()),
+        };
+        super::materialize_linker_driver_shim(
+            paths,
+            "x86_64-unknown-linux-gnu",
+            &mut injection,
+            Some(&clang),
+        )
+        .unwrap();
+        injection.linker.unwrap()
+    };
+    let first = link(&paths);
+    assert_eq!(first, link(&paths));
+    // The body names the clang and the driver argument only: no sysroot, no -B.
+    let body = std::fs::read_to_string(&first).unwrap();
+    assert!(!body.contains(" -B"), "{body}");
+    assert!(body.contains("/usr/bin/clang") && body.contains("-fuse-ld=lld"));
+    let other = temp.path().join("other");
+    let moved = link(&crate::core::SoldrPaths::with_root(other));
+    assert_eq!(
+        Path::new(&first).file_name(),
+        Path::new(&moved).file_name(),
+        "the digest depends on the body, not the cache root"
+    );
+}
