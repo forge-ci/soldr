@@ -140,21 +140,20 @@ pub fn session_hot_path(rustc_argv: &[String]) -> SessionHotPathOutcome {
     }
 }
 
-/// Liveness deadline for reaching a working daemon connection (soldr#3815):
-/// connect, and re-connect after a dropped connection. It bounds connection
-/// liveness only; a live, connected daemon may compile for as long as it likes
-/// (that wait is `SOLDR_COMPILE_REPLY_TIMEOUT_SECS`).
-pub(crate) const CONNECTION_LIVENESS_DEADLINE: Duration = Duration::from_secs(30);
-
-/// Env override for [`CONNECTION_LIVENESS_DEADLINE`], in seconds.
+/// Optional tighter bound on SESSION setup, in seconds. Setup includes the
+/// broker launching the daemon on a cold route, so by default it gets the route
+/// ceiling (#3821's 30 s cap failed slow target-run cold starts, soldr#3815).
 pub(crate) const CONNECTION_LIVENESS_DEADLINE_ENV: &str = "SOLDR_CONNECT_DEADLINE_SECS";
 
-fn connection_liveness_deadline() -> Duration {
-    std::env::var(CONNECTION_LIVENESS_DEADLINE_ENV)
-        .ok()
+/// The SESSION setup budget: the route ceiling, tightened only by an explicit
+/// positive `SOLDR_CONNECT_DEADLINE_SECS`.
+pub(crate) fn session_setup_timeout(route_ceiling: Duration, explicit: Option<&str>) -> Duration {
+    explicit
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|s| *s > 0)
-        .map_or(CONNECTION_LIVENESS_DEADLINE, Duration::from_secs)
+        .map_or(route_ceiling, |secs| {
+            route_ceiling.min(Duration::from_secs(secs))
+        })
 }
 
 /// Is this failure about reaching or keeping the daemon connection, as
@@ -396,9 +395,12 @@ async fn run_session_compile_async(
     cwd: String,
     env: Vec<SessionEnvVar>,
 ) -> Result<SessionCompileOutcome, SessionError> {
-    let setup_timeout = crate::broker_deadlines::BrokerDeadlines::from_env()
-        .route_ceiling
-        .min(connection_liveness_deadline());
+    let setup_timeout = session_setup_timeout(
+        crate::broker_deadlines::BrokerDeadlines::from_env().route_ceiling,
+        std::env::var(CONNECTION_LIVENESS_DEADLINE_ENV)
+            .ok()
+            .as_deref(),
+    );
     let mut stream = match tokio::time::timeout(
         setup_timeout,
         establish_session(service_name, rustc_argv, cwd, env),

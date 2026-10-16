@@ -370,3 +370,21 @@ fn reply_timeout_is_not_a_connection_failure() {
     };
     assert!(!is_connection_failure(&err));
 }
+
+/// soldr#3815 follow-up: SESSION setup includes the broker launching the
+/// daemon, so by default it gets the whole route ceiling -- a cold start on a
+/// slow target-run host took longer than #3821's 30 s cap and failed. Only an
+/// explicit positive SOLDR_CONNECT_DEADLINE_SECS tightens it.
+#[test]
+fn session_setup_defaults_to_the_route_ceiling() {
+    let ceiling = Duration::from_secs(120);
+    assert_eq!(session_setup_timeout(ceiling, None), ceiling);
+    assert_eq!(session_setup_timeout(ceiling, Some("")), ceiling);
+    assert_eq!(session_setup_timeout(ceiling, Some("0")), ceiling);
+    assert_eq!(session_setup_timeout(ceiling, Some("nope")), ceiling);
+    assert_eq!(
+        session_setup_timeout(ceiling, Some("30")),
+        Duration::from_secs(30)
+    );
+    assert_eq!(session_setup_timeout(ceiling, Some("600")), ceiling);
+}
