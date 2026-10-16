@@ -18,7 +18,10 @@ pub(crate) async fn run_cargo_front_door(
     // starts. Emit the breakdown here so the total excludes Cargo itself.
     profile.finish_labeled("cargo front door", "pre_spawn_tail");
     crate::startup_trace::phase(crate::startup_trace::phase::CARGO_FRONT_DOOR_PRE_SPAWN);
+    // soldr#3794: bracket the child so pre-cargo and post-cargo time can be split.
+    let child_profile = crate::startup_profile::WrapperProfile::new();
     let cargo_run_result = run_child_cargo(&mut prepared, &setup);
+    child_profile.finish_labeled("cargo child", "cargo_exit");
     // soldr#2302: cargo exited — drain + stop the per-unit tail before the tail
     // summary prints, on both the success and error paths.
     cache_states::stop_tail(session.cache_state_tail.take());

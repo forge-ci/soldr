@@ -553,10 +553,22 @@ async fn apply_child_path_and_target(
     if pyo3_build {
         let workspace_root =
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        // soldr#3794: an up-to-date lockfile without `pyo3` makes the
+        // `cargo metadata` probe pointless; the resolved cargo is the one
+        // for the effective channel, not the ambient default.
+        let hints = crate::pyo3_detect::CargoProbeHints {
+            cargo: Some(spec.cargo),
+            lock_proves_no_pyo3: lockfile_proof::lockfile_lacks_package(
+                args,
+                &workspace_root,
+                "pyo3",
+            ),
+        };
         let mut pyo3_plan = crate::pyo3_detect::resolve_for_cargo_invocation(
             &workspace_root,
             args,
             known_cargo_target.as_deref(),
+            hints,
         );
         pyo3_plan.materialize_compatibility(spec.paths).await?;
         pyo3_plan.emit_diagnostic();
