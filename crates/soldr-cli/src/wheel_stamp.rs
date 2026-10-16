@@ -22,7 +22,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
-use zip::write::FileOptions;
+use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 /// Whether a maturin argv (as seen by soldr's dispatcher, argv\[0\] onward
@@ -98,15 +98,15 @@ pub fn stamp_wheel_generator(wheel: &Path, soldr_version: &str) -> std::io::Resu
 
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index).map_err(zip_to_io)?;
-            let name = entry.name().to_string();
+            let name = String::from_utf8_lossy(entry.name_raw()).into_owned();
             if name == record_entry_name {
                 continue; // rewritten below, once every other row is known
             }
             let is_dir = entry.is_dir();
             // Keep every entry's original compression method, including the
             // WHEEL text we're about to replace.
-            let mut options: FileOptions<()> =
-                FileOptions::default().compression_method(entry.compression());
+            let mut options: SimpleFileOptions =
+                SimpleFileOptions::default().compression_method(entry.compression());
             if let Some(mode) = entry.unix_mode() {
                 options = options.unix_permissions(mode);
             }
@@ -130,8 +130,8 @@ pub fn stamp_wheel_generator(wheel: &Path, soldr_version: &str) -> std::io::Resu
 
         record_rows.push((record_entry_name.clone(), String::new(), String::new()));
         let record_text = render_record(&record_rows);
-        let options: FileOptions<()> =
-            FileOptions::default().compression_method(CompressionMethod::Deflated);
+        let options: SimpleFileOptions =
+            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
         writer
             .start_file(&record_entry_name, options)
             .map_err(zip_to_io)?;
@@ -162,6 +162,7 @@ fn find_dist_info_dir<R: Read + std::io::Seek>(archive: &ZipArchive<R>) -> std::
     let mut candidates: Vec<String> = archive
         .file_names()
         .filter_map(|name| {
+            let name = name.ok()?;
             let (dir, rest) = name.split_once('/')?;
             if rest == "RECORD" && dir.ends_with(".dist-info") {
                 Some(dir.to_string())
@@ -283,8 +284,8 @@ mod tests {
         {
             let cursor = Cursor::new(&mut buf);
             let mut zip = ZipWriter::new(cursor);
-            let opts: FileOptions<'_, ()> =
-                FileOptions::default().compression_method(CompressionMethod::Deflated);
+            let opts: SimpleFileOptions =
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
             for (name, data) in entries {
                 zip.start_file(*name, opts).unwrap();
                 zip.write_all(data).unwrap();

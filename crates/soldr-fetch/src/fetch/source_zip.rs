@@ -104,7 +104,7 @@ fn extract_zip_tree<R: std::io::Read + std::io::Seek>(
         let Some(relative) = entry.enclosed_name() else {
             return Err(SoldrError::Archive(format!(
                 "source zip entry has an unsafe path: {}",
-                entry.name()
+                String::from_utf8_lossy(entry.name_raw())
             )));
         };
         let out_path = dest_dir.join(&relative);
@@ -157,7 +157,7 @@ mod tests {
         {
             let cursor = std::io::Cursor::new(&mut buf);
             let mut zip = zip::ZipWriter::new(cursor);
-            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            let opts = zip::write::SimpleFileOptions::default();
             for (name, data) in entries {
                 zip.start_file(*name, opts).unwrap();
                 zip.write_all(data).unwrap();

@@ -100,7 +100,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tempfile = "3"
 # soldr#1356 A4 — default-features=false + deflate only. Drops bzip2-sys
 # (C build) + aes + sha1 + lzma + deflate64 + zopfli + zip's own zstd copy.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 # soldr#1356 A3 — rust_backend replaces zlib-ng. Drops libz-ng-sys
 # (C build) + the `cmake` build-dependency needed to compile it.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

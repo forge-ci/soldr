@@ -23,7 +23,7 @@ fn fixture_zip() -> Vec<u8> {
     let mut cursor = std::io::Cursor::new(Vec::new());
     {
         let mut zip = zip::ZipWriter::new(&mut cursor);
-        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        let opts = zip::write::SimpleFileOptions::default();
         zip.start_file(format!("foo-{TRIPLE}/foo"), opts).unwrap();
         zip.write_all(BINARY_BODY).unwrap();
         zip.finish().unwrap();

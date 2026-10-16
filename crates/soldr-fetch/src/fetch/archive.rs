@@ -427,7 +427,9 @@ fn extract_zip<R: std::io::Read + std::io::Seek>(
             continue;
         }
 
-        let file_name = Path::new(file.name())
+        // `name()` is fallible in zip 9; raw bytes keep the old lossy behaviour.
+        let entry_name = String::from_utf8_lossy(file.name_raw()).into_owned();
+        let file_name = Path::new(&entry_name)
             .file_name()
             .and_then(|f| f.to_str())
             .unwrap_or("");
