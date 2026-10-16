@@ -1,109 +1,21 @@
 //! Decides whether native compiles need the managed cmake/ninja (soldr#3783).
 //!
 //! Provisioning is skipped only when cmake is provably unneeded: an
-//! up-to-date `Cargo.lock` with no package named exactly `cmake`. Any
-//! uncertainty provisions, which is the pre-#3783 behaviour.
+//! up-to-date `Cargo.lock` with no package named exactly `cmake` (the proof
+//! lives in [`super::lockfile_proof`]). Any uncertainty provisions, which is
+//! the pre-#3783 behaviour.
 
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::path::Path;
 
 /// `true` when the managed cmake/ninja must be provisioned.
 pub(super) fn managed_cmake_needed(args: &[String], cwd: &Path) -> bool {
-    let cwd = cargo_dash_c_dir(args, cwd);
-    let start = super::profile_debug::cargo_profile_lookup_start_dir_from(args, &cwd);
-    decide(super::subcommand::first_cargo_subcommand(args), &start)
-}
-
-fn decide(subcommand: Option<&str>, manifest_dir: &Path) -> bool {
-    // `install` resolves a remote lockfile we cannot see.
-    if subcommand == Some("install") {
-        return true;
-    }
-    let Some(lock_dir) = manifest_dir
-        .ancestors()
-        .find(|dir| dir.join("Cargo.lock").is_file())
-    else {
-        return true;
-    };
-    let lock = lock_dir.join("Cargo.lock");
-    let Ok(text) = std::fs::read_to_string(&lock) else {
-        return true;
-    };
-    let Some(lock_mtime) = mtime(&lock) else {
-        return true;
-    };
-    // A manifest edited after the last resolve (clud#500: a just-added
-    // `whisper-rs-sys`) makes the lock untrustworthy.
-    let Some(manifests) = manifests_to_check(manifest_dir, lock_dir) else {
-        return true;
-    };
-    if manifests
-        .iter()
-        .any(|manifest| mtime(manifest).is_none_or(|time| time > lock_mtime))
-    {
-        return true;
-    }
-    lock_has_cmake_package(&text)
-}
-
-/// The manifest dir's and lock dir's `Cargo.toml`, plus every workspace
-/// member's. A member pattern ending in a single `/*` component is expanded
-/// by listing that directory; any other glob shape returns `None`, which
-/// provisions rather than guess.
-fn manifests_to_check(manifest_dir: &Path, lock_dir: &Path) -> Option<Vec<PathBuf>> {
-    let mut out = vec![manifest_dir.join("Cargo.toml"), lock_dir.join("Cargo.toml")];
-    let members = std::fs::read_to_string(lock_dir.join("Cargo.toml"))
-        .ok()
-        .and_then(|text| text.parse::<toml::Value>().ok())
-        .and_then(|value| value.get("workspace")?.get("members")?.as_array().cloned())
-        .unwrap_or_default();
-    for member in members.iter().filter_map(toml::Value::as_str) {
-        if !member.contains(['*', '?', '[']) {
-            out.push(lock_dir.join(member).join("Cargo.toml"));
-            continue;
-        }
-        let parent = member.strip_suffix("/*")?;
-        if parent.contains(['*', '?', '[']) {
-            return None;
-        }
-        for entry in std::fs::read_dir(lock_dir.join(parent)).ok()?.flatten() {
-            out.push(entry.path().join("Cargo.toml"));
-        }
-    }
-    out.sort();
-    out.dedup();
-    out.retain(|path| path.is_file());
-    Some(out)
-}
-
-fn lock_has_cmake_package(text: &str) -> bool {
-    text.lines().any(|line| line.trim() == "name = \"cmake\"")
-}
-
-fn mtime(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).ok()?.modified().ok()
-}
-
-/// Honour cargo's `-C <dir>` global arg (before the subcommand).
-fn cargo_dash_c_dir(args: &[String], cwd: &Path) -> PathBuf {
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        if arg == "--" {
-            break;
-        }
-        if arg == "-C" {
-            if let Some(dir) = iter.next() {
-                return cwd.join(dir);
-            }
-        }
-    }
-    cwd.to_path_buf()
+    !super::lockfile_proof::lockfile_lacks_package(args, cwd, "cmake")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()

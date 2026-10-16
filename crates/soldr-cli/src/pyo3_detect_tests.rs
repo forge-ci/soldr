@@ -290,7 +290,7 @@ fn cargo_metadata_probe_captures_child_stdout() {
         .expect("chmod fake cargo");
     let _cargo_guard = EnvVarGuard::set(crate::TEST_CARGO_BIN_ENV_VAR, &cargo);
 
-    let detected = detect_workspace_pyo3(workspace.path(), &[], host_triple())
+    let detected = detect_workspace_pyo3(workspace.path(), &[], host_triple(), None)
         .expect("metadata probe should capture and parse cargo stdout")
         .expect("PyO3 should be detected");
 
@@ -376,7 +376,12 @@ fn known_native_cargo_resolution_does_not_require_workspace_metadata() {
     let missing_workspace = temp.path().join("does-not-exist");
     let host = host_triple();
 
-    let plan = resolve_for_cargo_invocation(&missing_workspace, &[], Some(host));
+    let plan = resolve_for_cargo_invocation(
+        &missing_workspace,
+        &[],
+        Some(host),
+        CargoProbeHints::default(),
+    );
 
     assert_eq!(plan.mode, PlanMode::Native);
     assert!(plan.env.is_empty());
@@ -388,7 +393,8 @@ fn unknown_cargo_target_does_not_assume_native() {
     let temp = tempfile::tempdir().expect("tempdir");
     let missing_workspace = temp.path().join("does-not-exist");
 
-    let plan = resolve_for_cargo_invocation(&missing_workspace, &[], None);
+    let plan =
+        resolve_for_cargo_invocation(&missing_workspace, &[], None, CargoProbeHints::default());
 
     assert_eq!(plan.mode, PlanMode::Unresolved);
     assert!(plan
@@ -407,7 +413,12 @@ fn cargo_config_target_keeps_conservative_metadata_path() {
         "build.target=\"aarch64-unknown-linux-gnu\"".to_string(),
     ];
 
-    let plan = resolve_for_cargo_invocation(&missing_workspace, &args, Some(host_triple()));
+    let plan = resolve_for_cargo_invocation(
+        &missing_workspace,
+        &args,
+        Some(host_triple()),
+        CargoProbeHints::default(),
+    );
 
     assert_eq!(plan.mode, PlanMode::Unresolved);
 }
@@ -427,7 +438,12 @@ fn explicit_cross_target_beats_weaker_known_native_target() {
         cross_target.to_string(),
     ];
 
-    let plan = resolve_for_cargo_invocation(&missing_workspace, &args, Some(host_triple()));
+    let plan = resolve_for_cargo_invocation(
+        &missing_workspace,
+        &args,
+        Some(host_triple()),
+        CargoProbeHints::default(),
+    );
 
     assert_eq!(plan.mode, PlanMode::Unresolved);
     assert_eq!(plan.target, cross_target);
@@ -449,7 +465,12 @@ fn target_after_separator_cannot_override_known_cargo_target() {
         host_triple().to_string(),
     ];
 
-    let plan = resolve_for_cargo_invocation(&missing_workspace, &args, Some(cross_target));
+    let plan = resolve_for_cargo_invocation(
+        &missing_workspace,
+        &args,
+        Some(cross_target),
+        CargoProbeHints::default(),
+    );
 
     assert_eq!(plan.mode, PlanMode::Unresolved);
     assert_eq!(plan.target, cross_target);
@@ -463,4 +484,84 @@ fn public_native_plan_keeps_metadata_reporting_semantics() {
     let plan = resolve_for_invocation(&missing_workspace, &[], Some(host_triple()));
 
     assert_eq!(plan.mode, PlanMode::Unresolved);
+}
+
+fn proven_hints() -> CargoProbeHints<'static> {
+    CargoProbeHints {
+        cargo: None,
+        lock_proves_no_pyo3: true,
+    }
+}
+
+#[test]
+fn lock_proof_skips_probe_and_yields_no_pyo3_plan() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    // The workspace does not exist, so a probe would be Unresolved.
+    let missing_workspace = temp.path().join("does-not-exist");
+
+    let plan = resolve_for_cargo_invocation(&missing_workspace, &[], None, proven_hints());
+
+    assert_eq!(plan.mode, PlanMode::Native);
+    assert!(plan.pyo3_versions.is_empty());
+    assert!(plan.env.is_empty());
+    assert!(plan.diagnostic.is_none());
+}
+
+#[test]
+fn lock_proof_does_not_skip_probe_for_target_config_or_dash_c() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let missing_workspace = temp.path().join("does-not-exist");
+    let cross = if host_triple().contains("windows") {
+        "aarch64-apple-darwin"
+    } else {
+        "x86_64-pc-windows-msvc"
+    };
+    for extra in [
+        vec!["--target", cross],
+        vec!["--config", "build.rustflags=[]"],
+        vec!["-C", "."],
+    ] {
+        let mut args = vec!["build".to_string()];
+        args.extend(extra.iter().map(|value| (*value).to_string()));
+        let plan = resolve_for_cargo_invocation(&missing_workspace, &args, None, proven_hints());
+        assert_eq!(plan.mode, PlanMode::Unresolved, "{args:?}");
+    }
+}
+
+#[test]
+fn unproven_lock_still_runs_probe() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let missing_workspace = temp.path().join("does-not-exist");
+    // No proof: the probe runs (and fails on the missing workspace).
+    let plan =
+        resolve_for_cargo_invocation(&missing_workspace, &[], None, CargoProbeHints::default());
+    assert_eq!(plan.mode, PlanMode::Unresolved);
+}
+
+#[cfg(unix)]
+#[test]
+fn probe_runs_the_cargo_the_front_door_passed() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let marker = temp.path().join("ran");
+    let cargo = temp.path().join("fake-cargo");
+    std::fs::write(
+        &cargo,
+        format!("#!/bin/sh\necho \"$@\" > '{}'\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let hints = CargoProbeHints {
+        cargo: Some(&cargo),
+        lock_proves_no_pyo3: false,
+    };
+    let plan = resolve_for_cargo_invocation(temp.path(), &[], None, hints);
+
+    assert_eq!(plan.mode, PlanMode::Unresolved);
+    let recorded = std::fs::read_to_string(&marker).expect("fake cargo was run");
+    assert!(
+        recorded.starts_with("metadata --format-version 1"),
+        "{recorded}"
+    );
 }

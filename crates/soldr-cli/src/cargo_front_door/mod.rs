@@ -52,6 +52,7 @@ mod host_tooling;
 mod inputs;
 mod job_budget;
 mod line_endings;
+mod lockfile_proof;
 mod log_summary;
 mod nested_cargo;
 /// soldr#2924 — direct nested-Cargo self-lock guard.

@@ -238,7 +238,45 @@ pub fn resolve_for_invocation(
         .map(normalize_target)
         .unwrap_or_else(|| resolve_build_target(args, workspace_root));
     let host = host_triple().to_string();
-    resolve_for_target(workspace_root, args, host, target)
+    resolve_for_target(
+        workspace_root,
+        args,
+        host,
+        target,
+        CargoProbeHints::default(),
+    )
+}
+
+/// What the cargo front door already knows when it asks for a PyO3 plan
+/// (soldr#3794).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CargoProbeHints<'a> {
+    /// The cargo the front door resolved for the effective channel. The
+    /// metadata probe runs it instead of re-resolving the ambient cargo,
+    /// which can be a different toolchain.
+    pub(crate) cargo: Option<&'a Path>,
+    /// An up-to-date `Cargo.lock` has no package named exactly `pyo3`.
+    pub(crate) lock_proves_no_pyo3: bool,
+}
+
+impl CargoProbeHints<'_> {
+    /// The probe may be skipped only on lockfile proof, and only when no
+    /// argument can redirect which graph Cargo resolves: `--target` and
+    /// `--config` (which may carry `build.target`) keep the probe, and so
+    /// does `-C`, which the probe does not honour.
+    fn may_skip_probe(&self, args: &[String]) -> bool {
+        self.lock_proves_no_pyo3 && !args_override_probe_graph(args)
+    }
+}
+
+fn args_override_probe_graph(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| {
+            matches!(arg.as_str(), "--target" | "--config" | "-C")
+                || arg.starts_with("--target=")
+                || arg.starts_with("--config=")
+        })
 }
 
 /// Cargo-front-door variant that can skip metadata only when soldr has
@@ -249,6 +287,7 @@ pub(crate) fn resolve_for_cargo_invocation(
     workspace_root: &Path,
     args: &[String],
     known_target: Option<&str>,
+    hints: CargoProbeHints<'_>,
 ) -> Pyo3BuildPlan {
     let host = host_triple().to_string();
     // An explicit --target is Cargo's strongest target selector and must win
@@ -282,8 +321,11 @@ pub(crate) fn resolve_for_cargo_invocation(
     }
 
     match known_target {
-        Some(target) => resolve_for_target(workspace_root, args, host, target),
-        None => resolve_for_invocation(workspace_root, args, None),
+        Some(target) => resolve_for_target(workspace_root, args, host, target, hints),
+        None => {
+            let target = resolve_build_target(args, workspace_root);
+            resolve_for_target(workspace_root, args, host, target, hints)
+        }
     }
 }
 
@@ -292,8 +334,14 @@ fn resolve_for_target(
     args: &[String],
     host: String,
     target: String,
+    hints: CargoProbeHints<'_>,
 ) -> Pyo3BuildPlan {
-    let detected = match detect_workspace_pyo3(workspace_root, args, &target) {
+    let probe = if hints.may_skip_probe(args) {
+        Ok(None)
+    } else {
+        detect_workspace_pyo3(workspace_root, args, &target, hints.cargo)
+    };
+    let detected = match probe {
         Ok(value) => value,
         Err(error) => {
             return Pyo3BuildPlan {
@@ -474,7 +522,7 @@ pub fn host_triple() -> &'static str {
 }
 
 pub fn workspace_uses_pyo3(cwd: &Path) -> bool {
-    detect_workspace_pyo3(cwd, &[], host_triple())
+    detect_workspace_pyo3(cwd, &[], host_triple(), None)
         .ok()
         .flatten()
         .is_some()
@@ -488,9 +536,14 @@ fn detect_workspace_pyo3(
     workspace_root: &Path,
     args: &[String],
     target: &str,
+    cargo: Option<&Path>,
 ) -> Result<Option<DetectedPyo3>, String> {
-    let cargo =
-        crate::binaries::resolve_toolchain_binary("cargo").map_err(|error| error.to_string())?;
+    let cargo = match cargo {
+        Some(path) => path.to_path_buf(),
+        None => {
+            crate::binaries::resolve_toolchain_binary("cargo").map_err(|error| error.to_string())?
+        }
+    };
     let mut command = Command::new(&cargo);
     command.args(["metadata", "--format-version", "1"]);
     command.current_dir(workspace_root);
