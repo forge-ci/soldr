@@ -143,13 +143,6 @@ pub fn is_compile_env_var(name: &str) -> bool {
     if NOISE_PREFIXES.iter().any(|p| name.starts_with(p)) {
         return false;
     }
-    // soldr#3801: background-fetch plumbing is wrapper-side only and must
-    // never reach a compile request (hence never a cache key).
-    if name == soldr_cache::cache_lib::SOLDR_LLVM_FETCH_PENDING_ENV_VAR
-        || name == "SOLDR_LLVM_FETCH_WAIT_SECS"
-    {
-        return false;
-    }
     // Shell-prompt / terminal-session state. Exact matches.
     !matches!(
         name,
@@ -197,15 +190,6 @@ mod tests {
             resolve_workspace_target_dir_with(&[], Some(rel), None),
             None
         );
-    }
-
-    #[test]
-    fn llvm_fetch_plumbing_never_reaches_a_compile_request() {
-        assert!(!is_compile_env_var(
-            soldr_cache::cache_lib::SOLDR_LLVM_FETCH_PENDING_ENV_VAR
-        ));
-        assert!(!is_compile_env_var("SOLDR_LLVM_FETCH_WAIT_SECS"));
-        assert!(is_compile_env_var("SOLDR_LLVM_DIR"));
     }
 
     fn session_env() -> (String, String) {

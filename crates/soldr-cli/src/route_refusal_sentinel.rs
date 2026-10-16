@@ -72,7 +72,7 @@ pub(crate) fn record(paths: &SoldrPaths, build_id: Option<u64>) -> Recorded {
     }
 }
 
-pub(crate) fn sweep_stale(dir: &std::path::Path) {
+fn sweep_stale(dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
