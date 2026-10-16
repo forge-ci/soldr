@@ -47,7 +47,7 @@ version = "0.2.4"
 version = "0.4.17"
 
 [dependencies.notify-types]
-version = "1.0.0"
+version = "2.1.0"
 
 [dependencies.walkdir]
 version = "2.4.0"

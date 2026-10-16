@@ -152,6 +152,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 [patch.crates-io]
 # soldr#2406: use the vendored notify with bumped windows-sys (0.52→0.61)
 # and HANDLE type fixes for 0.59+ API to converge the dependency graph.
+# Also takes notify-types 2.x, which drops the unmaintained `instant`
+# (RUSTSEC-2024-0384).
 notify = { path = "_vender/notify" }
 # soldr#2406: bump filetime_creation's windows-sys (0.52→0.61) to converge.
 filetime_creation = { path = "_vender/patches/filetime_creation" }
