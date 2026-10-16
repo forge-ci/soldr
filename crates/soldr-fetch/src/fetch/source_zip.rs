@@ -87,6 +87,13 @@ pub async fn stream_and_extract_source_zip(
 
 /// Extract every file entry of a zip into `dest_dir`, preserving the
 /// archive's internal directory structure (guarding against zip-slip).
+/// True for an entry name with a leading `/` or `\\` or a drive prefix
+/// (`C:`), which zip 2's `enclosed_name` rejected and zip 9 strips.
+fn zip_entry_name_is_rooted(name: &[u8]) -> bool {
+    matches!(name.first(), Some(b'/' | b'\\'))
+        || (name.len() >= 2 && name[0].is_ascii_alphabetic() && name[1] == b':')
+}
+
 fn extract_zip_tree<R: std::io::Read + std::io::Seek>(
     reader: R,
     dest_dir: &Path,
@@ -100,8 +107,11 @@ fn extract_zip_tree<R: std::io::Read + std::io::Seek>(
             .map_err(|e| SoldrError::Archive(e.to_string()))?;
 
         // Reject absolute paths / `..` traversal (zip-slip). `enclosed_name`
-        // returns `None` for anything that would escape the destination.
-        let Some(relative) = entry.enclosed_name() else {
+        // returns `None` for `..` escapes; since zip 9 it silently strips a
+        // leading root instead of rejecting it, so rooted names are refused
+        // explicitly to keep the zip 2 behaviour.
+        let rooted = zip_entry_name_is_rooted(entry.name_raw());
+        let Some(relative) = entry.enclosed_name().filter(|_| !rooted) else {
             return Err(SoldrError::Archive(format!(
                 "source zip entry has an unsafe path: {}",
                 String::from_utf8_lossy(entry.name_raw())
@@ -187,6 +197,25 @@ mod tests {
         let err = extract_zip_tree(std::io::Cursor::new(zip), tmp.path())
             .expect_err("zip-slip must be rejected");
         assert!(format!("{err}").contains("unsafe path"), "{err}");
+    }
+
+    #[test]
+    fn extract_zip_tree_rejects_rooted_names() {
+        for name in ["/abs.txt", "\\abs.txt", "C:/abs.txt"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let zip = make_zip(&[(name, b"pwned")]);
+            // Guard against a vacuous pass: the archive must really carry
+            // the rooted name rather than a writer-normalised one.
+            let mut probe = zip::ZipArchive::new(std::io::Cursor::new(zip.clone())).unwrap();
+            assert_eq!(probe.by_index(0).unwrap().name_raw(), name.as_bytes());
+            let err = extract_zip_tree(std::io::Cursor::new(zip), tmp.path())
+                .expect_err("rooted entry names must be rejected");
+            assert!(format!("{err}").contains("unsafe path"), "{name}: {err}");
+            assert!(
+                std::fs::read_dir(tmp.path()).unwrap().next().is_none(),
+                "{name}"
+            );
+        }
     }
 
     #[test]
