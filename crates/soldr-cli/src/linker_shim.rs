@@ -437,10 +437,8 @@ async fn resolve_driver_clang(
     need: LldNeed,
     mode: FetchMode,
 ) -> Result<ResolvedClang, SoldrError> {
-    let managed_complete = paths
-        .bin
-        .join(format!("llvm-{}", crate::fetch::MANAGED_LLVM_VERSION))
-        .join(".complete");
+    // The one canonical install path (it carries the bundle revision, soldr#3810).
+    let managed_complete = crate::fetch::managed_llvm_install_dir(paths).join(".complete");
     let search = std::env::var_os("PATH");
     let system_clang = search
         .as_deref()
