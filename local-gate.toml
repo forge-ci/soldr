@@ -88,7 +88,9 @@ exclude = [
 keep = ["tests/fixtures/**", "src/soldr/_bundle_bins.py"]
 
 # zackees/ci.yml#198 phase 2: Clippy + Dylint for Windows MSVC and Apple
-# arm64, cross-checked from Linux. Same inputs as the rust lane.
+# arm64, cross-checked from Linux. Same inputs as the rust lane. soldr#3787:
+# per-target Dylint skips on proof (ci/cross_dylint.py skip_reason), so the
+# script and its shared crate graph are lane inputs.
 [gate.lanes.cross]
 run = ["uv", "run", "--no-project", "--python", "3.13", "python", "ci/local_gate.py", "--lane", "cross"]
 tools = ["soldr"]
@@ -98,7 +100,7 @@ exclude = [
   "tests/**", "docker/**", "bosn.toml", ".github/**", "ci/**", "tools/**", "scripts/**", ".claude/**",
   "src/**", "install", "install.sh", "lint", "test", "clean", "package.json", "uv.lock",
 ]
-keep = ["tests/fixtures/**", "src/soldr/_bundle_bins.py"]
+keep = ["tests/fixtures/**", "src/soldr/_bundle_bins.py", "ci/cross_dylint.py", "ci/crate_graph.py"]
 
 # zackees/ci.yml#202 phase 3: Windows-MSVC unit tests under Wine, in a
 # container. Rust inputs plus the lane script and its image. soldr#3704: the
