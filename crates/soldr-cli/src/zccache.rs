@@ -525,6 +525,11 @@ pub(crate) fn spawn_route_prewarm(
 }
 
 fn prewarm_if_enabled(service_name: &str) {
+    // soldr#3823: off unless explicitly enabled while the target-run lanes'
+    // missing route claim is diagnosed.
+    if !crate::core::env_flag::flag(BROKER_PREWARM_ENV_VAR) {
+        return;
+    }
     let optout = std::env::var(BROKER_PREWARM_ENV_VAR).ok();
     if should_prewarm(PrewarmPlanKind::Managed, optout.as_deref()) {
         drop(spawn_route_prewarm(service_name, ensure_route_hook));
