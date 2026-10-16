@@ -30,6 +30,9 @@ _completeness_spec = importlib.util.spec_from_file_location(
 if _completeness_spec is None or _completeness_spec.loader is None:
     raise ImportError(f"cannot load {_completeness_path}")
 _completeness = importlib.util.module_from_spec(_completeness_spec)
+# Registered before exec so the helper's @dataclass classes can resolve their
+# own module namespace when this script runs as a file.
+sys.modules[_completeness_spec.name] = _completeness
 _completeness_spec.loader.exec_module(_completeness)
 
 # soldr#2763: the npm recovery lane pins Python 3.13, but this script is also
