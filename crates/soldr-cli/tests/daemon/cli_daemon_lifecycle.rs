@@ -301,9 +301,13 @@ fn windows_stop_start_is_immediately_status_ready() {
         "restart must replace generation"
     );
     let paths = SoldrPaths::with_root(cache_root.clone());
-    let claim = soldr_cli::daemon::backend_handle_adoption::read_broker_route_claim(&paths)
-        .expect("read route claim")
-        .expect("route claim");
+    // soldr#3823: read under the daemon's generation key (soldr#3374).
+    let claim = common::route_claim::with_published_generation(&cache_root, || {
+        soldr_cli::daemon::backend_handle_adoption::read_broker_route_claim(&paths)
+            .ok()
+            .flatten()
+    })
+    .expect("route claim");
     assert_eq!(claim.started_at_unix_ms, generations[1]);
 }
 
@@ -379,8 +383,11 @@ fn managed_windows_start_has_one_consoleless_owner() {
     );
 
     let paths = SoldrPaths::with_root(cache_root.clone());
-    let (pid, exe) = soldr_cli::daemon::lifecycle::read_route_claim_identity(&paths)
-        .expect("daemon route claim publication");
+    // soldr#3823: read under the daemon's generation key (soldr#3374).
+    let (pid, exe) = common::route_claim::with_published_generation(&cache_root, || {
+        soldr_cli::daemon::lifecycle::read_route_claim_identity(&paths)
+    })
+    .expect("daemon route claim publication");
     // Two canonical placements exist post-#2364: the per-root
     // self-relocation tree (`<root>/runtime/soldr-daemon/...`) and the
     // broker's route-runtime tree

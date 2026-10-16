@@ -11,7 +11,6 @@ use std::process::Output;
 use std::time::{Duration, Instant};
 
 use crate::common;
-use soldr_cli::core::SoldrPaths;
 
 const TARGET: &str = "wasm32-wasip1-threads";
 const BIN: &str = "wasm32_wasip1_threads_materialization";
@@ -23,13 +22,10 @@ struct DaemonGuard {
 }
 
 impl DaemonGuard {
+    /// soldr#3823: under the daemon's own generation key (soldr#3374), not
+    /// the one this test process would derive for itself.
     fn pid(&self) -> Option<u32> {
-        soldr_cli::daemon::backend_handle_adoption::read_broker_route_claim(&SoldrPaths::with_root(
-            self.cache_root.clone(),
-        ))
-        .ok()
-        .flatten()
-        .map(|claim| claim.pid)
+        common::route_claim::route_claim_pid(&self.cache_root)
     }
 
     fn stop_and_assert_exited(&self) {

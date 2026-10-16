@@ -14,8 +14,6 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use soldr_cli::core::SoldrPaths;
-
 /// Read the broker-spawn log under the isolated home installation.
 fn broker_spawn_log(home: &Path) -> String {
     std::fs::read_to_string(home.join(".soldr/broker/broker-spawn.log")).unwrap_or_default()
@@ -32,12 +30,8 @@ fn count_substr(text: &str, needle: &str) -> usize {
 /// Kill the daemon this test launched for `root`, so nothing leaks past the
 /// test. The broker is reaped separately through its stable control endpoint.
 fn stop_daemons_in_root(root: &Path) {
-    let pid = soldr_cli::daemon::backend_handle_adoption::read_broker_route_claim(
-        &SoldrPaths::with_root(root.to_path_buf()),
-    )
-    .ok()
-    .flatten()
-    .map(|claim| claim.pid);
+    // soldr#3823: under the daemon's generation key (soldr#3374).
+    let pid = crate::common::route_claim::route_claim_pid(root);
     if let Some(pid) = pid {
         soldr_platform::process::terminate::terminate_pid(pid);
     }
