@@ -233,6 +233,7 @@ pub(crate) mod broker_lease;
 pub(crate) mod broker_policy;
 pub(crate) mod broker_purge;
 pub(crate) mod broker_reaper;
+pub(crate) mod broker_retry;
 pub(crate) mod broker_server;
 pub mod broker_spawn;
 /// soldr#2900 — Soldr-owned per-build cache bookkeeping. Replaces the

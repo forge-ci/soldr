@@ -862,23 +862,6 @@ pub(crate) fn ensure_cargo_toolchain(explicit_channel: Option<&str>) -> Result<(
 
 pub(crate) use crate::toolchain_prepare::{run_prepare_inner, LinkerSummary, PrepareSummary};
 
-/// Format a plugin entry as `name` or `name@version` for the JSON
-/// payload. Detailed specs with no version collapse to `name`; bare
-/// `*` specs also collapse to `name`.
-pub(crate) fn format_plugin_label(name: &str, spec: &crate::core::PluginSpec) -> String {
-    let version = match spec {
-        crate::core::PluginSpec::Version(v) => Some(v.as_str()),
-        crate::core::PluginSpec::Detailed { version, .. } => version.as_deref(),
-    };
-    let trimmed = version
-        .map(str::trim)
-        .filter(|v| !v.is_empty() && *v != "*");
-    match trimmed {
-        Some(v) => format!("{name}@{v}"),
-        None => name.to_string(),
-    }
-}
-
 /// Install one plugin declared under `[soldr.plugins]` via the
 /// resolved cargo binary (so installs respect soldr-managed
 /// `$CARGO_HOME`). This is bootstrap/dev-tool acquisition, not a

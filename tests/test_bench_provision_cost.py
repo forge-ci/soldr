@@ -3,11 +3,13 @@ the provisioning cost separately instead of charging it to the cold build."""
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -101,9 +103,19 @@ def test_append_result_emits_provision_fields_null_for_other_tools(
 
 @pytest.fixture
 def bench_modules():
+    """Load the bench modules by file path (no sys.path import, so mypy and
+    pylint resolve nothing at import time), keyed by module name."""
     sys.path.insert(0, str(BENCH))
     try:
-        yield
+        loaded: dict[str, ModuleType] = {}
+        for name in ("benchmark_models", "render_comparison_bars"):
+            spec = importlib.util.spec_from_file_location(name, BENCH / f"{name}.py")
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+            loaded[name] = module
+        yield loaded
     finally:
         sys.path.remove(str(BENCH))
         for name in ("benchmark_models", "render_comparison_bars"):
@@ -136,9 +148,9 @@ def _document(with_provision: bool) -> dict:
 
 
 def test_provision_ms_round_trips_through_the_models(bench_modules) -> None:
-    from benchmark_models import ComparisonDocument, HistoryRow
+    models = bench_modules["benchmark_models"]
 
-    doc = ComparisonDocument.from_json(_document(True))
+    doc = models.ComparisonDocument.from_json(_document(True))
     soldr_cold = [
         r for r in doc.results if r.tool == "soldr" and r.scenario_key == "cold"
     ]
@@ -147,24 +159,24 @@ def test_provision_ms_round_trips_through_the_models(bench_modules) -> None:
     assert all(r.provision_ms is None for r in doc.results if r.tool != "soldr")
 
     # Rows written before the field existed (and explicit nulls) still parse.
-    legacy = ComparisonDocument.from_json(_document(False))
+    legacy = models.ComparisonDocument.from_json(_document(False))
     assert all(r.provision_ms is None for r in legacy.results)
     # History rows with and without the field both load.
     for comparison in (_document(True)["results"], _document(False)["results"]):
-        HistoryRow.from_json({"canaries": {}, "comparison": comparison})
+        models.HistoryRow.from_json({"canaries": {}, "comparison": comparison})
 
 
 def test_both_chart_renders_succeed_with_and_without_provision_ms(
     bench_modules, tmp_path: Path
 ) -> None:
     pytest.importorskip("PIL")
-    import render_comparison_bars as renderer
-    from benchmark_models import ComparisonDocument
+    renderer = bench_modules["render_comparison_bars"]
+    models = bench_modules["benchmark_models"]
 
     assert renderer.provision_annotation(None) is None
-    legacy = ComparisonDocument.from_json(_document(False))
+    legacy = models.ComparisonDocument.from_json(_document(False))
     assert all(renderer.provision_annotation(r) is None for r in legacy.results)
-    current = ComparisonDocument.from_json(_document(True))
+    current = models.ComparisonDocument.from_json(_document(True))
     notes = [renderer.provision_annotation(r) for r in current.results]
     assert [n for n in notes if n] == ["+provision 4.200s"]
 

@@ -5,6 +5,7 @@
 //! optimized handoff path; the portable baseline keeps that same connection
 //! and transparently proxies it to the selected daemon endpoint.
 
+use crate::broker_retry::effective_retry_after_ms;
 use interprocess::local_socket::traits::tokio::Listener as _;
 use prost::Message;
 use running_process::broker::protocol::{
@@ -783,27 +784,6 @@ fn retryable_route_refusal(reply: &HelloReply) -> Option<(String, u64)> {
     (ErrorCode::try_from(refused.code) == Ok(ErrorCode::ErrorRateLimited)
         && refused.retry_after_ms > 0)
         .then(|| (refused.reason.clone(), refused.retry_after_ms))
-}
-
-/// running-process `hello_router` refusal text for the single-flight case: another
-/// requester already began launching this service's backend (`ErrorRateLimited`,
-/// `retry_after` 1000). The reason text is the only discriminator the wire exposes;
-/// the other rate-limited refusals (budget exhausted, storm trip) use other reasons.
-const IN_FLIGHT_LAUNCH_REASON: &str = "backend spawn already in progress";
-
-/// Re-poll ceiling for the in-flight case (soldr#3800). The launch finishes in a few
-/// hundred ms, so the old uniform 5..1000 ms back-off was mostly idle time added to every
-/// later first wrapper. `route_retry_delay` draws uniformly from 5..=ceiling (jitter kept).
-const IN_FLIGHT_LAUNCH_RETRY_MAX_MS: u64 = 50;
-
-/// Ceiling to feed `route_retry_delay`: short for an in-flight launch, the
-/// server-provided hint for every other rate-limited refusal.
-fn effective_retry_after_ms(reason: &str, retry_after_ms: u64) -> u64 {
-    if reason.contains(IN_FLIGHT_LAUNCH_REASON) {
-        retry_after_ms.min(IN_FLIGHT_LAUNCH_RETRY_MAX_MS)
-    } else {
-        retry_after_ms
-    }
 }
 
 fn route_retry_delay(retry_after_ms: u64) -> Duration {
