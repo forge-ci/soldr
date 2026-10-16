@@ -57,6 +57,7 @@ pub mod archive;
 pub mod forge_dispatch;
 pub mod github;
 pub mod llvm;
+pub mod llvm_background;
 /// soldr#997 Phase A — LLVM-tools bundle from soldr-toolchain
 /// `recipes/llvm-tools-linux-x64/`. See module doc for why this is
 /// distinct from [`llvm`].
@@ -127,6 +128,11 @@ pub mod zstd_sysroot;
 
 pub use apple_sdk::{ensure_apple_sdk, MANAGED_APPLE_SDK_VERSION};
 pub use llvm::{ensure_llvm_toolchain, MANAGED_LLVM_VERSION};
+pub use llvm_background::{
+    check_managed_llvm_host, llvm_fetch_wait_from_env, llvm_install_complete, managed_llvm_bin_dir,
+    managed_llvm_install_dir, start_background_llvm_fetch, wait_for_managed_llvm,
+    LLVM_FETCH_WAIT_ENV_VAR,
+};
 pub use manifest_lookup::{
     fetch_verified_catalogue_asset, supports_min_client_version, AssetTransport, ManifestEntry,
     ManifestIndex, Part, CATALOGUE_CAPABILITY, CATALOGUE_DOC_NAME, CATALOGUE_V2_DOC_NAME,

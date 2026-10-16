@@ -110,6 +110,7 @@ pub(crate) async fn provision_native_build_tools(
         explicit_target.as_deref(),
         paths,
         false,
+        crate::linker::FetchMode::Await,
     )
     .await?
     {

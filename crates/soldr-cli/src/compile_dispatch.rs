@@ -122,6 +122,9 @@ where
     O: Write,
     E: Write,
 {
+    // soldr#3801: a compile that links through the managed clang shim waits
+    // for the front door's background LLVM fetch; nothing else does.
+    crate::llvm_fetch_wait::gate_linking_compile(rustc_argv).map_err(SoldrError::Other)?;
     match crate::session_transport::session_hot_path(rustc_argv) {
         crate::session_transport::SessionHotPathOutcome::Served(exit_code) => Ok(exit_code),
         crate::session_transport::SessionHotPathOutcome::HardFail(error) => {

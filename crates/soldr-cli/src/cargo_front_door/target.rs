@@ -112,9 +112,16 @@ pub(super) async fn apply_linker_override(
     paths: &SoldrPaths,
     dylint_active: bool,
 ) -> Result<(), SoldrError> {
-    apply_linker_override_reporting(command, args, explicit_target, paths, dylint_active)
-        .await
-        .map(|_| ())
+    apply_linker_override_reporting(
+        command,
+        args,
+        explicit_target,
+        paths,
+        dylint_active,
+        linker::FetchMode::Background,
+    )
+    .await
+    .map(|_| ())
 }
 
 /// What [`apply_linker_override_reporting`] did, so `soldr toolchain prepare`
@@ -144,6 +151,7 @@ pub(crate) async fn apply_linker_override_reporting(
     explicit_target: Option<&str>,
     paths: &SoldrPaths,
     dylint_active: bool,
+    fetch_mode: linker::FetchMode,
 ) -> Result<LinkerOutcome, SoldrError> {
     // `Fast` is the automatic/default linker (soldr#3262): it is a best-effort
     // convenience, not a hard requirement. If the triple cannot be detected
@@ -227,8 +235,17 @@ pub(crate) async fn apply_linker_override_reporting(
         args,
         injection.rustflags.as_deref(),
     );
-    linker::materialize_linker_driver_shim_resolving(paths, &target, &mut injection, rustc_lld)
-        .await?;
+    let pending = linker::materialize_linker_driver_shim_resolving(
+        paths,
+        &target,
+        &mut injection,
+        rustc_lld,
+        fetch_mode,
+    )
+    .await?;
+    if let Some(install_dir) = pending {
+        crate::linker_shim::export_pending_fetch(command, &install_dir);
+    }
     let reported = injection.clone();
     let prefix = linker::cargo_target_env_prefix(&target);
     let linker_key = format!("CARGO_TARGET_{prefix}_LINKER");

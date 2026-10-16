@@ -99,6 +99,13 @@ pub const ZCCACHE_SESSION_ID_ENV_VAR: &str = "ZCCACHE_SESSION_ID";
 /// `RecordCompile` events to a single build session.
 pub const SOLDR_BUILD_SESSION_ID_ENV_VAR: &str = "SOLDR_BUILD_SESSION_ID";
 
+/// soldr#3801: set by the front door on the cargo child while the managed
+/// LLVM is still being fetched in the background; its value is the install
+/// directory. A linking wrapper waits on that install before dispatching.
+/// Build-orchestration plumbing -- never a compile-cache input
+/// (`is_compile_env_var` refuses it).
+pub const SOLDR_LLVM_FETCH_PENDING_ENV_VAR: &str = "SOLDR_LLVM_FETCH_PENDING_DIR";
+
 /// Legacy external-zccache binary variable retained for compatibility tests.
 /// The normal cache route uses Soldr IPC and the embedded service.
 pub const ZCCACHE_BINARY_ENV_VAR: &str = "SOLDR_ZCCACHE_BIN";
