@@ -32,6 +32,9 @@ def load_release_completeness() -> Any:
     if spec is None or spec.loader is None:
         raise RuntimeError(f"could not load release completeness helper: {path}")
     module = importlib.util.module_from_spec(spec)
+    # Registered before exec so the helper's @dataclass classes can resolve
+    # their own module namespace when this script runs as a file.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return cast(Any, module)
 
