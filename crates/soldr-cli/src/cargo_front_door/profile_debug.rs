@@ -537,7 +537,7 @@ fn cargo_profile_lookup_start_dir(args: &[String]) -> Result<std::path::PathBuf,
     Ok(cargo_profile_lookup_start_dir_from(args, &cwd))
 }
 
-fn cargo_profile_lookup_start_dir_from(
+pub(super) fn cargo_profile_lookup_start_dir_from(
     args: &[String],
     cwd: &std::path::Path,
 ) -> std::path::PathBuf {
