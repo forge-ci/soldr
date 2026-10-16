@@ -55,6 +55,9 @@ pub(crate) struct CrossToolsSummary {
     pub cxx: String,
     pub ar: String,
     pub linker: String,
+    /// The Windows resource compiler (`llvm-rc`) for MSVC targets; `null`
+    /// otherwise (soldr#3810). Additive.
+    pub rc: Option<String>,
 }
 
 impl CrossToolsSummary {
@@ -84,6 +87,7 @@ pub(crate) async fn provision_cross_tools(
         cxx: text(&tools.cxx),
         ar: text(&tools.ar),
         linker: text(&tools.linker),
+        rc: tools.rc.as_deref().map(text),
     })
 }
 

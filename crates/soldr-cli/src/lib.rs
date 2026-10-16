@@ -335,6 +335,7 @@ pub(crate) mod host_tool_link;
 /// soldr#2310 — `soldr install <github-url|path>` prebuilt-first tool install.
 pub mod install;
 pub mod install_shims;
+pub mod ld_cmd;
 pub mod linker;
 pub mod linker_project;
 pub mod linker_shim;

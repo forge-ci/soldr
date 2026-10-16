@@ -26,6 +26,10 @@ pub(crate) struct ClangCross {
     pub linker: PathBuf,
     pub bin_dir: PathBuf,
     pub sysroot: PathBuf,
+    /// The Windows resource compiler (`llvm-rc`) for MSVC targets: CMake's
+    /// Windows-Clang module requires one and looks for it only on `PATH`
+    /// (soldr#3810).
+    pub rc: Option<PathBuf>,
 }
 
 pub(crate) fn handles_target(target: &str) -> bool {
@@ -65,6 +69,8 @@ pub(crate) async fn prepare(paths: &SoldrPaths, target: &str) -> Result<ClangCro
             ar.file_name().unwrap_or_default().to_string_lossy()
         )));
     }
+    let rc = bin_dir.join(crate::platform::executable::name::native("llvm-rc"));
+    let rc = (target.ends_with("-pc-windows-msvc") && rc.is_file()).then_some(rc);
     Ok(ClangCross {
         linker: cc.clone(),
         cc,
@@ -72,6 +78,7 @@ pub(crate) async fn prepare(paths: &SoldrPaths, target: &str) -> Result<ClangCro
         ar,
         bin_dir,
         sysroot,
+        rc,
     })
 }
 
@@ -91,51 +98,31 @@ pub(crate) fn apple_spec(target: &str, sdk: &Path) -> DriverSpec {
 }
 
 pub(crate) fn msvc_spec(target: &str, xwin: &Path) -> DriverSpec {
-    // Bundles lay libs out per MS arch name (`x64`, `arm64`) or per Rust arch
-    // name (`x86_64`, `aarch64`); take whichever exists, as the cargo path does.
-    let arch_dirs: &[&str] = if target.starts_with("aarch64-") {
-        &["arm64", "aarch64"]
-    } else {
-        &["x64", "x86_64"]
-    };
-    let include_roots: Vec<PathBuf> = [
-        xwin.join("crt").join("include"),
-        xwin.join("sdk").join("include").join("ucrt"),
-        xwin.join("sdk").join("include").join("um"),
-        xwin.join("sdk").join("include").join("shared"),
-        xwin.join("sdk").join("include").join("winrt"),
-        xwin.join("sdk").join("include").join("cppwinrt"),
-    ]
-    .into_iter()
-    .filter(|dir| dir.is_dir())
-    .collect();
+    // The include/lib directory lists are shared with the cargo path
+    // (`blessed_build_xwin.rs`) and `soldr link`, so the three cannot drift.
+    let include_roots = crate::blessed_build::xwin_include_dirs(xwin);
     let mut common = vec![
         format!("--target={target}"),
         "-fms-compatibility".to_string(),
         "-fms-extensions".to_string(),
+        // Embed `/DEFAULTLIB:msvcrt` in every object, as `cl /MD` does, so a
+        // raw `soldr link` of a `soldr cc` object finds the CRT. The dynamic
+        // CRT matches Rust's MSVC default (no `crt-static`).
+        "-fms-runtime-lib=dll".to_string(),
     ];
     for dir in &include_roots {
         common.push("-isystem".to_string());
         common.push(dir.display().to_string());
     }
-    // soldr#3415: resolve any `#include` casing against the case-folded SDK.
-    if let Ok(Some(overlay)) =
-        crate::fetch::xwin_case_overlay::ensure_case_overlay(xwin, &include_roots)
-    {
-        common.push("-ivfsoverlay".to_string());
-        common.push(overlay.display().to_string());
-    }
     let mut config_lines = vec!["-fuse-ld=lld".to_string()];
-    for lib in arch_dirs.iter().flat_map(|arch| {
-        [
-            xwin.join("crt").join("lib").join(arch),
-            xwin.join("sdk").join("lib").join("um").join(arch),
-            xwin.join("sdk").join("lib").join("ucrt").join(arch),
-        ]
-    }) {
-        if lib.is_dir() {
-            config_lines.push(format!("-L{}", lib.display()));
-        }
+    for lib in crate::blessed_build::xwin_lib_dirs(xwin, target) {
+        config_lines.push(format!("-L{}", lib.display()));
+    }
+    // soldr#3415: resolve any `#include` casing against the case-folded SDK.
+    // In the config file, not on the command line: clang never reports a
+    // config-file option as unused, so a link-only invocation stays quiet.
+    if let Some(overlay) = crate::blessed_build::xwin_case_overlay(xwin, &include_roots) {
+        config_lines.push(format!("-ivfsoverlay {}", overlay.display()));
     }
     DriverSpec {
         common,
@@ -175,6 +162,7 @@ fn write_drivers(
         .join(target)
         .join(&digest[..16]);
     std::fs::create_dir_all(&dir)?;
+    link_sibling_tools(bin_dir, &dir)?;
     let config = dir.join(format!("{target}.cfg"));
     crate::linker_shim::write_content_addressed_shim(&config, &config_body)?;
     let config_arg = format!("--config={}", config.display());
@@ -195,6 +183,52 @@ fn write_drivers(
     let cxx = written.pop().expect("two drivers written");
     let cc = written.pop().expect("two drivers written");
     Ok((cc, cxx))
+}
+
+/// LLVM binutils linked next to the drivers. CMake looks for `llvm-ar` /
+/// `llvm-ranlib` / ... in the compiler's own directory when the compiler is
+/// clang; without them it falls back to the host's GNU `ranlib`, which
+/// corrupts a Mach-O or COFF static archive (found by the soldr#3806 CMake
+/// cross test).
+const SIBLING_TOOLS: &[&str] = &[
+    "llvm-ar",
+    "llvm-ranlib",
+    "llvm-nm",
+    "llvm-objcopy",
+    "llvm-objdump",
+    "llvm-strip",
+    "llvm-lib",
+    "llvm-rc",
+    "llvm-mt",
+];
+
+fn link_sibling_tools(bin_dir: &Path, dir: &Path) -> Result<(), SoldrError> {
+    for name in SIBLING_TOOLS {
+        let name = crate::platform::executable::name::native(name);
+        let (source, dest) = (bin_dir.join(&name), dir.join(&name));
+        if source.is_file() && !dest.exists() {
+            link_or_copy(&source, &dest)?;
+        }
+    }
+    Ok(())
+}
+
+/// Hard-link `source` to `dest` (same file system under the soldr root),
+/// copying when a link is impossible. Tolerates a concurrent writer.
+fn link_or_copy(source: &Path, dest: &Path) -> Result<(), SoldrError> {
+    if std::fs::hard_link(source, dest).is_ok() || dest.exists() {
+        return Ok(());
+    }
+    let staged = dest.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::copy(source, &staged)?;
+    match std::fs::rename(&staged, dest) {
+        Ok(()) => Ok(()),
+        Err(_) if dest.exists() => {
+            let _ = std::fs::remove_file(&staged);
+            Ok(())
+        }
+        Err(error) => Err(SoldrError::Io(error)),
+    }
 }
 
 /// The driver body: execs the absolute managed clang with the target flags

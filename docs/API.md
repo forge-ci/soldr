@@ -442,7 +442,7 @@ When soldr starts, it decides its mode in this order:
 
 ## Built-in Commands
 
-### `soldr cc` / `soldr c++` (soldr#2335)
+### `soldr cc` / `soldr c++` (soldr#2335, soldr#3806)
 
 Compile and link C or C++ with a verified compiler/sysroot bundle from the
 soldr-toolchain catalogue:
@@ -470,6 +470,8 @@ arguments:
 - `--print-linker`
 - `--print-sysroot` (the Apple SDK root, the xwin root for MSVC, the glibc/musl
   sysroot for Linux; an error for targets without one)
+- `--print-rc` (the managed `llvm-rc` resource compiler; `win-*` MSVC only,
+  soldr#3810)
 
 The query output is only the prepared executable (or directory) path. For the
 Apple and MSVC targets the printed compiler and linker driver is a
@@ -481,6 +483,23 @@ Windows SDK), so it works as `CC` / `CMAKE_C_COMPILER` on its own:
 soldr cc --target aarch64-apple-darwin --print-cc      # .../cc-driver/v1/aarch64-apple-darwin/<digest>/aarch64-apple-darwin-clang
 soldr cc --target x86_64-pc-windows-msvc --print-sysroot
 ```
+
+The driver directory also holds the managed `llvm-ar`, `llvm-ranlib`, `llvm-nm`,
+... so CMake picks matching binutils from `CMAKE_C_COMPILER` alone (a host GNU
+`ranlib` corrupts Mach-O/COFF archives). Two more things CMake needs for `win-*`:
+its Windows-Clang module requires a resource compiler and searches only `PATH`
+for it, and the xwin bundle has no debug CRT (`msvcrtd.lib`, like cargo-xwin):
+
+```bash
+cmake -S . -B build-win -DCMAKE_SYSTEM_NAME=Windows \
+  -DCMAKE_C_COMPILER="$(soldr cc --target win-x64 --print-cc)" \
+  -DCMAKE_CXX_COMPILER="$(soldr c++ --target win-x64 --print-cxx)" \
+  -DCMAKE_RC_COMPILER="$(soldr cc --target win-x64 --print-rc)" \
+  -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
+```
+
+MSVC objects embed `/DEFAULTLIB:msvcrt` (`-fms-runtime-lib=dll`, like `cl /MD`
+and Rust's MSVC default), so `soldr link` can link them without naming the CRT.
 
 For the other targets invoke the `soldr cc`
 or `soldr c++` wrapper when the target's required sysroot arguments must be
@@ -497,8 +516,34 @@ cmake --build build
 `soldr toolchain prepare --target <T>` and `soldr toolchain ensure --target <T>
 --json` provision the same tools ahead of time (soldr#3806). `ensure --json`
 reports them under the additive `build_tools.cross` object
-(`target`, `bin_dir`, `sysroot`, `cc`, `cxx`, `ar`, `linker`); `schema_version`
+(`target`, `bin_dir`, `sysroot`, `cc`, `cxx`, `ar`, `linker`, and `rc` for MSVC
+targets); `schema_version`
 stays 1 and the key is absent without `--target`.
+
+### `soldr ld` / `soldr link` (soldr#3806)
+
+Run a raw target linker with the target's sysroot and library search paths
+injected. The two verbs differ by the **argument syntax** they accept, like
+`clang` and `clang-cl`:
+
+```bash
+soldr ld   --target mac-arm64 main.o -lSystem -o app             # GNU ld syntax
+soldr ld   --target linux-x64-glibc_2_17 --fuse=reld ... -o app
+soldr link --target win-x64 main.obj /OUT:app.exe                # MSVC link.exe syntax
+```
+
+| Verb | Syntax | Targets | Default linker |
+|---|---|---|---|
+| `soldr ld` | GNU ld (`-o`, `-L`, `-l`) | `linux-*`, `linux-*-musl`, `mac-*`, `win-x64-gnu` | managed `ld.lld` / `ld64.lld` / `ld.lld -m i386pep` |
+| `soldr link` | MSVC (`/OUT:`, `/LIBPATH:`) | `win-*` MSVC | managed `lld-link` + xwin `/LIBPATH:`s |
+
+Using the wrong verb for a target is an error that names the right one.
+`--fuse=<linker>` (case-insensitive, overrides `SOLDR_LINKER`) selects the
+linker: `lld` / `default`, `ld` (the GNU ld in the target's GCC toolchain),
+`reld` (ELF only, pinned and sha256-verified), `mold` (ELF only, from `PATH`),
+`rust-lld`, or `fast` (reld). An unsupported pairing fails rather than falling
+back. `--print-ld` / `--print-link` print a content-addressed linker shim
+usable as `LD` / `CMAKE_LINKER`; `--print-sysroot` prints the sysroot.
 
 ### `soldr wheel` (soldr#2139)
 

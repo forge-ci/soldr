@@ -37,6 +37,11 @@ pub(crate) struct CcArgs {
     #[arg(long, group = "print_tool")]
     pub(crate) print_sysroot: bool,
 
+    /// Print the Windows resource compiler (`llvm-rc`, `win-*` MSVC targets)
+    /// for `CMAKE_RC_COMPILER` instead of invoking the compiler
+    #[arg(long, group = "print_tool")]
+    pub(crate) print_rc: bool,
+
     /// Arguments forwarded verbatim to the selected compiler
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub(crate) args: Vec<String>,
@@ -58,6 +63,8 @@ pub(crate) struct NativeToolchain {
     /// The SDK / sysroot root, when the target has one.
     pub(crate) sysroot: Option<PathBuf>,
     pub(crate) compiler_args: Vec<String>,
+    /// The Windows resource compiler, for MSVC targets (soldr#3810).
+    pub(crate) rc: Option<PathBuf>,
 }
 
 pub(crate) async fn run(args: CcArgs, language: Language) -> Result<i32, SoldrError> {
@@ -72,6 +79,17 @@ pub(crate) async fn run(args: CcArgs, language: Language) -> Result<i32, SoldrEr
     let (rust_triple, tools) = prepare_for_target(&paths, &args.target, language).await?;
     let resolved_triple = rust_triple.as_str();
 
+    if args.print_rc {
+        let rc = tools.rc.as_ref().ok_or_else(|| {
+            SoldrError::Other(format!(
+                "soldr {}: target {resolved_triple} has no resource compiler \
+                 (only win-* MSVC targets ship llvm-rc)",
+                language.command_name()
+            ))
+        })?;
+        println!("{}", rc.display());
+        return Ok(0);
+    }
     if args.print_sysroot {
         let sysroot = tools.sysroot.as_ref().ok_or_else(|| {
             SoldrError::Other(format!(
@@ -109,7 +127,12 @@ pub(crate) async fn run(args: CcArgs, language: Language) -> Result<i32, SoldrEr
 }
 
 fn requests_print(args: &CcArgs) -> bool {
-    args.print_cc || args.print_cxx || args.print_ar || args.print_linker || args.print_sysroot
+    args.print_cc
+        || args.print_cxx
+        || args.print_ar
+        || args.print_linker
+        || args.print_sysroot
+        || args.print_rc
 }
 
 /// Resolve a user-facing `--target` spelling and prepare the compiler
@@ -177,6 +200,7 @@ pub(crate) async fn prepare_native_toolchain(
             bin_dir: toolchain.bin_dir,
             sysroot: Some(toolchain.sysroot.clone()),
             compiler_args: vec![format!("--sysroot={}", toolchain.sysroot.display())],
+            rc: None,
         });
     }
 
@@ -193,6 +217,7 @@ pub(crate) async fn prepare_native_toolchain(
             bin_dir: toolchain.bin_dir,
             sysroot: Some(toolchain.sysroot.clone()),
             compiler_args: vec![format!("--sysroot={}", toolchain.sysroot.display())],
+            rc: None,
         });
     }
 
@@ -209,6 +234,7 @@ pub(crate) async fn prepare_native_toolchain(
             bin_dir,
             sysroot: None,
             compiler_args: Vec::new(),
+            rc: None,
         });
     }
 
@@ -222,6 +248,7 @@ pub(crate) async fn prepare_native_toolchain(
             bin_dir: cross.bin_dir,
             sysroot: Some(cross.sysroot),
             compiler_args: Vec::new(),
+            rc: cross.rc,
         });
     }
 
@@ -295,6 +322,7 @@ mod tests {
             bin_dir: PathBuf::from("/sdk"),
             sysroot: None,
             compiler_args: Vec::new(),
+            rc: None,
         };
         let args = CcArgs {
             target: "host".to_string(),
@@ -303,6 +331,7 @@ mod tests {
             print_ar: false,
             print_linker: false,
             print_sysroot: false,
+            print_rc: false,
             args: Vec::new(),
         };
         assert_eq!(
@@ -340,6 +369,7 @@ mod tests {
             print_ar: false,
             print_linker: false,
             print_sysroot: false,
+            print_rc: false,
             args: vec!["hello.c".to_string()],
         };
         assert!(requests_print(&args));

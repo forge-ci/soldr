@@ -331,6 +331,10 @@ pub(crate) enum Commands {
     /// Compile C++ source with a catalogue-backed target compiler (soldr#2335)
     #[command(name = "c++")]
     Cxx(crate::cc_cmd::CcArgs),
+    /// Link with a target linker in GNU ld syntax (ELF, Mach-O, win-x64-gnu) (soldr#3806)
+    Ld(crate::ld_cmd::LdArgs),
+    /// Link with a target linker in MSVC link.exe syntax (win-* MSVC) (soldr#3806)
+    Link(crate::ld_cmd::LinkArgs),
     /// Build an abi3 Python wheel through soldr's blessed toolchain (soldr#2139)
     ///
     /// `soldr wheel [--release] [--host-glibc] [--target <triple>]` resolves

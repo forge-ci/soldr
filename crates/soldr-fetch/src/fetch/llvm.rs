@@ -26,7 +26,7 @@
 //!      The legacy Git LFS URL remains only as the pinned logical identity;
 //!      bytes come from ordinary-Git multipart objects on the publication's
 //!      orphan `public-a` or `public-b` branch and are cached at
-//!      `~/.soldr/bin/llvm-<MANAGED_LLVM_VERSION>/`.
+//!      `~/.soldr/bin/llvm-<MANAGED_LLVM_VERSION>-<MANAGED_LLVM_REVISION>/`.
 //!
 //! Supported managed hosts (see `host_llvm_asset`):
 //!   - `x86_64-unknown-linux-gnu` (the GHA-hosted xwin lane)
@@ -66,6 +66,13 @@ use super::manifest_lookup::{self, AssetTransport, CatalogueSource, ManifestEntr
 /// so users on either host get the same toolchain.
 pub const MANAGED_LLVM_VERSION: &str = "21.1.5";
 
+/// Revision of the `MANAGED_LLVM_VERSION` bundles. `r2` adds `llvm-rc` and
+/// `llvm-mt` (soldr#3810, clang-tool-chain-bins#78) so CMake's Windows-Clang
+/// configure has a resource compiler for `soldr cc --target win-*`. It is
+/// part of the install directory name so an existing r1 install is not
+/// reused for a bundle that lacks those tools.
+pub const MANAGED_LLVM_REVISION: &str = "r2";
+
 /// Env-var override: when set to an existing directory, soldr uses
 /// that LLVM install as-is (no fetch, no SHA check). The directory
 /// is expected to be the **bin dir** containing `clang-cl` / `lld-link`
@@ -91,24 +98,24 @@ const LLVM_ASSETS: &[(&str, LlvmAsset)] = &[
         "x86_64-unknown-linux-gnu",
         LlvmAsset {
             plat_arch: "linux-x86_64",
-            url: "https://media.githubusercontent.com/media/zackees/clang-tool-chain-bins/main/assets/clang/linux/x86_64/llvm-21.1.5-linux-x86_64.tar.zst",
-            sha256: "4021cc49d70472122761709e7376835dfc857b5ec77183fa969b5f61d0f13a2f",
+            url: "https://media.githubusercontent.com/media/zackees/clang-tool-chain-bins/main/assets/clang/linux/x86_64/llvm-21.1.5-r2-linux-x86_64.tar.zst",
+            sha256: "7cd1c0a6fa94ba716368099b29017343ae3fc55c50b03d9e99ad8983a8d0ba7b",
         },
     ),
     (
         "aarch64-unknown-linux-gnu",
         LlvmAsset {
             plat_arch: "linux-arm64",
-            url: "https://media.githubusercontent.com/media/zackees/clang-tool-chain-bins/main/assets/clang/linux/arm64/llvm-21.1.5-linux-arm64.tar.zst",
-            sha256: "df774b7fc1e392458325552addb67bf8c11bd452ad7bc660cf77103c617f89c5",
+            url: "https://media.githubusercontent.com/media/zackees/clang-tool-chain-bins/main/assets/clang/linux/arm64/llvm-21.1.5-r2-linux-arm64.tar.zst",
+            sha256: "63a126496b6fe627481d54257f6841b01319033246abff5a3f8ded0e1c2b318e",
         },
     ),
     (
         "x86_64-pc-windows-msvc",
         LlvmAsset {
             plat_arch: "win-x86_64",
-            url: "https://media.githubusercontent.com/media/zackees/clang-tool-chain-bins/main/assets/clang/win/x86_64/llvm-21.1.5-win-x86_64.tar.zst",
-            sha256: "8d6dd1cbc2261f8e6fa657b48f10a6e44223441d4b5487f056838cb8c2403a77",
+            url: "https://media.githubusercontent.com/media/zackees/clang-tool-chain-bins/main/assets/clang/win/x86_64/llvm-21.1.5-r2-win-x86_64.tar.zst",
+            sha256: "083a7ef76f18110924f6500f77ea1b2a87616b4b5882f2f99a84d476845f868a",
         },
     ),
 ];

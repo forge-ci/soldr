@@ -166,13 +166,14 @@
       "binary": "fetch_tools",
       "modules": [
         "cli_build_from_source",
+        "cli_ld_link",
         "cli_global_upgrade",
         "cli_maturin",
         "cli_rust_analyzer",
         "fetch_crgx"
       ],
       "disposition": "native-linux-once",
-      "reason": "These sources use file and process fixtures to assert portable resolution, upgrade, and command-line policy."
+      "reason": "These sources use file and process fixtures to assert portable resolution, upgrade, and command-line policy. cli_ld_link cross-links from an x86_64 Linux host (soldr#3806), so replaying it on other hosts adds nothing."
     },
     {
       "id": "fetch-tools-target-replay",

@@ -20,15 +20,7 @@ fn clang_shim_names() -> Vec<String> {
 /// stops shipping the winrt include tree shouldn't make the whole
 /// CFLAGS injection error out).
 fn xwin_msvc_cflags(cache_dir: &std::path::Path) -> String {
-    let candidates = [
-        cache_dir.join("crt").join("include"),
-        cache_dir.join("sdk").join("include").join("ucrt"),
-        cache_dir.join("sdk").join("include").join("um"),
-        cache_dir.join("sdk").join("include").join("shared"),
-        cache_dir.join("sdk").join("include").join("winrt"),
-        cache_dir.join("sdk").join("include").join("cppwinrt"),
-    ];
-    let existing: Vec<std::path::PathBuf> = candidates.into_iter().filter(|p| p.is_dir()).collect();
+    let existing = xwin_include_dirs(cache_dir);
     let mut flags = existing
         .iter()
         // No space between `/imsvc` and the path. clang-cl accepts
@@ -46,15 +38,75 @@ fn xwin_msvc_cflags(cache_dir: &std::path::Path) -> String {
     // case-insensitive clang overlay resolves any spelling; anything it does not
     // list falls through to the real file system. Best-effort: without it the
     // include trees still work for their stored and aliased casings.
-    match crate::fetch::xwin_case_overlay::ensure_case_overlay(cache_dir, &existing) {
-        Ok(Some(overlay)) => flags.push_str(&format!(" -vfsoverlay {}", overlay.display())),
-        Ok(None) => {}
-        Err(error) => eprintln!(
-            "soldr build: could not write the SDK case-insensitive overlay ({error}); \
-             mixed-case #include spellings may not resolve"
-        ),
+    if let Some(overlay) = xwin_case_overlay(cache_dir, &existing) {
+        flags.push_str(&format!(" -vfsoverlay {}", overlay.display()));
     }
     flags
+}
+
+/// The xwin bundle's C/C++ include directories that exist on disk, in search
+/// order. Shared by the cargo path above and `soldr cc` (soldr#3806) so the
+/// two cannot disagree about which SDK headers a target sees.
+pub(crate) fn xwin_include_dirs(cache_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    [
+        cache_dir.join("crt").join("include"),
+        cache_dir.join("sdk").join("include").join("ucrt"),
+        cache_dir.join("sdk").join("include").join("um"),
+        cache_dir.join("sdk").join("include").join("shared"),
+        cache_dir.join("sdk").join("include").join("winrt"),
+        cache_dir.join("sdk").join("include").join("cppwinrt"),
+    ]
+    .into_iter()
+    .filter(|p| p.is_dir())
+    .collect()
+}
+
+/// soldr#3415: the case-insensitive header overlay for `include_dirs`, or
+/// `None` when it is not needed or could not be written (best-effort).
+pub(crate) fn xwin_case_overlay(
+    cache_dir: &std::path::Path,
+    include_dirs: &[std::path::PathBuf],
+) -> Option<std::path::PathBuf> {
+    match crate::fetch::xwin_case_overlay::ensure_case_overlay(cache_dir, include_dirs) {
+        Ok(overlay) => overlay,
+        Err(error) => {
+            eprintln!(
+                "soldr: could not write the SDK case-insensitive overlay ({error}); \
+                 mixed-case #include spellings may not resolve"
+            );
+            None
+        }
+    }
+}
+
+/// The xwin bundle's per-arch library directories for an MSVC target that
+/// exist on disk (`crt/lib/<arch>`, `sdk/lib/{um,ucrt}/<arch>`). Empty for a
+/// non-MSVC or unsupported-arch triple. Shared with `soldr cc` / `soldr link`.
+pub(crate) fn xwin_lib_dirs(
+    cache_dir: &std::path::Path,
+    target_triple: &str,
+) -> Vec<std::path::PathBuf> {
+    if !target_triple.ends_with("-pc-windows-msvc") {
+        return Vec::new();
+    }
+    let arch_dirs: &[&str] = if target_triple.starts_with("aarch64-") {
+        &["arm64", "aarch64"]
+    } else if target_triple.starts_with("x86_64-") {
+        &["x64", "x86_64"]
+    } else {
+        return Vec::new();
+    };
+    arch_dirs
+        .iter()
+        .flat_map(|arch| {
+            [
+                cache_dir.join("crt").join("lib").join(arch),
+                cache_dir.join("sdk").join("lib").join("um").join(arch),
+                cache_dir.join("sdk").join("lib").join("ucrt").join(arch),
+            ]
+        })
+        .filter(|p| p.is_dir())
+        .collect()
 }
 
 /// Build the rustc lld-link + CRT flags and `-C link-arg=/LIBPATH:<path>`
@@ -82,16 +134,12 @@ fn xwin_msvc_link_args(
     target_triple: &str,
     linkage: CrtLinkage,
 ) -> String {
-    if !target_triple.ends_with("-pc-windows-msvc") {
+    if !target_triple.ends_with("-pc-windows-msvc")
+        || !(target_triple.starts_with("aarch64-") || target_triple.starts_with("x86_64-"))
+    {
         return String::new();
     }
-    let arch_dirs: &[&str] = if target_triple.starts_with("aarch64-") {
-        &["arm64", "aarch64"]
-    } else if target_triple.starts_with("x86_64-") {
-        &["x64", "x86_64"]
-    } else {
-        return String::new();
-    };
+    let lib_dirs = xwin_lib_dirs(cache_dir, target_triple);
     // Exclude the CRT we are not using and name the one we are, for both the
     // UCRT and the VCRuntime. Naming without excluding is not enough: the
     // unwanted archive still arrives via another object's default-lib
@@ -122,16 +170,8 @@ fn xwin_msvc_link_args(
             .flat_map(|arg| ["-C".to_string(), (*arg).to_string()]),
     );
     args.extend(
-        arch_dirs
+        lib_dirs
             .iter()
-            .flat_map(|arch| {
-                [
-                    cache_dir.join("crt").join("lib").join(arch),
-                    cache_dir.join("sdk").join("lib").join("um").join(arch),
-                    cache_dir.join("sdk").join("lib").join("ucrt").join(arch),
-                ]
-            })
-            .filter(|p| p.is_dir())
             .flat_map(|p| {
                 vec![
                     "-C".to_string(),

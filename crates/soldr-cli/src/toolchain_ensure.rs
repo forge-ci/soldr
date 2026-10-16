@@ -631,6 +631,7 @@ mod tests {
                     cxx: "/drv/c++".to_string(),
                     ar: "/llvm/bin/llvm-ar".to_string(),
                     linker: "/drv/cc".to_string(),
+                    rc: None,
                 }))
             },
         };
