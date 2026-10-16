@@ -115,9 +115,7 @@ def test_smoke_installs_exact_wheel_and_proves_version_channel_and_driver(
             raise AssertionError("published cargo-dylint 6 rejects deprecated --list")
         if command == ["uv", "venv", "--clear", str(venv)]:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        if command == uv_pip_install_command(
-            venv, "--only-binary=:all:", "soldr==0.9.11"
-        ):
+        if command == smoke.published_install_command(venv, "0.9.11"):
             write_fake_soldr_console(venv, windows=True)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if command == [str(soldr), "version", "--json"]:
@@ -135,9 +133,7 @@ def test_smoke_installs_exact_wheel_and_proves_version_channel_and_driver(
     monkeypatch.setattr(smoke, "run_captured", fake_run)
     smoke.smoke(version="0.9.11", repo_root=repo, venv=venv, state_root=state)
     assert calls[0] == ["uv", "venv", "--clear", str(venv)]
-    assert calls[1] == uv_pip_install_command(
-        venv, "--only-binary=:all:", "soldr==0.9.11"
-    )
+    assert calls[1] == smoke.published_install_command(venv, "0.9.11")
     assert calls[-1] == [
         str(soldr),
         "dylint",
@@ -264,3 +260,89 @@ def test_windows_monitor_and_release_gate_orchestrate_the_tested_script() -> Non
     )
     assert "- smoke-published-dylint" in release
     assert "needs.smoke-published-dylint.result != 'success'" in release
+
+
+def test_published_install_ignores_config_and_cache_and_names_pypi(
+    tmp_path: Path,
+) -> None:
+    """soldr#3834: resolution must not depend on runner/repo uv config."""
+
+    venv = tmp_path / "venv"
+    command = smoke.published_install_command(venv, "0.9.35")
+    assert command[: len(uv_pip_install_command(venv))] == uv_pip_install_command(venv)
+    for flag in ("--no-config", "--refresh", "--only-binary=:all:"):
+        assert flag in command
+    assert command[command.index("--index-url") + 1] == "https://pypi.org/simple"
+    assert command[-1] == "soldr==0.9.35"
+
+
+def test_install_retries_only_while_the_version_is_not_yet_resolvable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts: list[list[str]] = []
+    sleeps: list[float] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        attempts.append(command)
+        if len(attempts) < 3:
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="error: No solution found when resolving dependencies\n"
+                "  cause: Because there is no version of soldr==0.9.35 ...",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(smoke, "run_captured", fake_run)
+    smoke.install_published(
+        venv=tmp_path / "venv",
+        version="0.9.35",
+        env={},
+        cwd=tmp_path,
+        sleep=sleeps.append,
+    )
+    assert len(attempts) == 3
+    assert sleeps == [smoke.INSTALL_RETRY_SECONDS] * 2
+
+
+def test_install_gives_up_after_the_last_attempt_and_on_other_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    def never_resolvable(_command: list[str], **_kwargs: object) -> SimpleNamespace:
+        nonlocal calls
+        calls += 1
+        return SimpleNamespace(
+            returncode=1, stdout="", stderr="error: No solution found when resolving"
+        )
+
+    monkeypatch.setattr(smoke, "run_captured", never_resolvable)
+    with pytest.raises(smoke.PublishedDylintSmokeError):
+        smoke.install_published(
+            venv=tmp_path / "v",
+            version="9.9.9",
+            env={},
+            cwd=tmp_path,
+            sleep=lambda _s: None,
+        )
+    assert calls == smoke.INSTALL_ATTEMPTS
+
+    def network_error(_command: list[str], **_kwargs: object) -> SimpleNamespace:
+        nonlocal calls
+        calls += 1
+        return SimpleNamespace(
+            returncode=2, stdout="", stderr="error: connection reset"
+        )
+
+    calls = 0
+    monkeypatch.setattr(smoke, "run_captured", network_error)
+    with pytest.raises(smoke.PublishedDylintSmokeError):
+        smoke.install_published(
+            venv=tmp_path / "v",
+            version="0.9.35",
+            env={},
+            cwd=tmp_path,
+            sleep=lambda _s: None,
+        )
+    assert calls == 1, "a non-resolution failure must not be retried"
