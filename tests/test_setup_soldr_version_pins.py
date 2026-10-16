@@ -83,6 +83,8 @@ def test_non_action_bootstraps_install_the_latest_release() -> None:
     root = Path(__file__).resolve().parents[1]
     for relative in (
         "ci/win_wheel_local.py",
+        "ci/docker-aarch64-windows-msvc-cross/Dockerfile",
+        "docker/cook-shared-cache/Dockerfile",
         ".github/workflows/docker-linux-cross-smoke.yml",
         ".github/workflows/build-all-from-linux.yml",
     ):

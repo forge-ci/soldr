@@ -67,26 +67,14 @@ ENV PATH=/root/.cargo/bin:$PATH \
     RUSTUP_HOME=/root/.rustup \
     CARGO_HOME=/root/.cargo
 
-# Install the catalogue-v2-capable soldr v0.9.6 GitHub release. The
-# blessed `soldr build --target aarch64-pc-windows-msvc` surface
-# installs clang shim names so ring's hardcoded `clang` invocations
-# route to clang-cl.
-ENV SOLDR_VERSION=0.9.6 \
-    SOLDR_ASSET_URL=https://github.com/zackees/soldr/releases/download/v0.9.6/soldr-v0.9.6-x86_64-unknown-linux-gnu.tar.zst \
-    SOLDR_ASSET_SHA256=d10b34b52f39be291de6e367ce355709ca9b8dff41a6d912462ddd8afdd5454c \
-    SOLDR_ASSET_SIZE=22377859
-
+# Install the latest published soldr. Only setup-soldr's default pins a soldr
+# version; this image takes the current release. The blessed
+# `soldr build --target aarch64-pc-windows-msvc` surface installs clang shim
+# names so ring's hardcoded `clang` invocations route to clang-cl.
+COPY --from=ghcr.io/astral-sh/uv:0.9.18 /uv /usr/local/bin/uv
 RUN set -eu; \
-    echo "fetching soldr ${SOLDR_VERSION}"; \
-    download-large-asset --url "$SOLDR_ASSET_URL" --output /tmp/soldr.tar.zst \
-        --sha256 "$SOLDR_ASSET_SHA256" --expected-size "$SOLDR_ASSET_SIZE"; \
-    apt-get update && apt-get install -y --no-install-recommends zstd \
-      && rm -rf /var/lib/apt/lists/*; \
-    mkdir -p /opt/soldr; \
-    tar --use-compress-program=zstd -xf /tmp/soldr.tar.zst -C /opt/soldr; \
-    rm /tmp/soldr.tar.zst; \
-    chmod +x /opt/soldr/soldr || true; \
-    ls /opt/soldr; \
+    UV_TOOL_DIR=/opt/soldr-tool UV_TOOL_BIN_DIR=/opt/soldr \
+        uv tool install --python-preference only-managed soldr; \
     /opt/soldr/soldr --version
 
 ENV PATH=/opt/soldr:$PATH

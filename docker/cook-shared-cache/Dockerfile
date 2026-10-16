@@ -85,27 +85,26 @@ RUN { dbus-uuidgen 2>/dev/null \
 RUN rustup default 1.98.1 \
     && rustup component add rustfmt clippy
 
-# Bootstrap current source with a known, previously published Soldr. Keep
+# Bootstrap current source with the latest published Soldr. Keep
 # this isolated from the warm runner volumes as immutable image state. The
 # bootstrap must include zccache's amalgamation admission gate (Soldr 0.9.6+):
 # this image invokes it to compile current Soldr before the current source can
 # provide that protection itself. It must also carry the PDEATHSIG fix
 # (soldr#3211), which landed after 0.9.15, so a cold bootstrap compile cannot
 # be SIGTERMed mid-run (soldr#2930).
-ARG SOLDR_BOOTSTRAP_VERSION=0.9.21
 RUN python3 -m venv /opt/soldr-bootstrap \
-    && /opt/soldr-bootstrap/bin/pip install --disable-pip-version-check \
-       "soldr==${SOLDR_BOOTSTRAP_VERSION}" \
-    && /opt/soldr-bootstrap/bin/soldr --version \
-    && test "$(/opt/soldr-bootstrap/bin/soldr --version)" = \
-       "soldr ${SOLDR_BOOTSTRAP_VERSION}"
+    && /opt/soldr-bootstrap/bin/pip install --disable-pip-version-check soldr \
+    && /opt/soldr-bootstrap/bin/soldr --version
 
-# The bootstrap's daemon and embedded-cache state live on the persistent
-# `/root/.soldr` volume. Scope that state by the published bootstrap version:
-# otherwise a daemon restored from an older image can service the new bootstrap
-# through the shared socket/cache route and silently bypass its newer
-# amalgamation-admission policy.
-ENV SOLDR_CACHE_DIR="/root/.soldr/bootstrap-v${SOLDR_BOOTSTRAP_VERSION}"
+# The bootstrap is the latest published soldr (only setup-soldr's default pins
+# a soldr version). Its daemon and embedded-cache state live on the persistent
+# `/root/.soldr` volume under a bootstrap root of their own. This used to be
+# keyed by the pinned bootstrap version so a daemon restored from an older image
+# could not service a newer bootstrap; since soldr#3568 daemon routes, their
+# private cache stores and root claims are keyed per daemon-image generation,
+# and a container's daemons die with it, so no older live daemon can be left
+# behind in the volume to take the root over.
+ENV SOLDR_CACHE_DIR="/root/.soldr/bootstrap"
 ENV PATH="/opt/soldr-bootstrap/bin:${PATH}"
 # bosn runs every task as `sh -lc`, and a Debian login shell's /etc/profile
 # overwrites PATH, dropping the ENV above and the base image's
