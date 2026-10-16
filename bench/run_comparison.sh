@@ -3,7 +3,6 @@
 # benchmarks and emits benchmark-output/comparison.json.
 
 set -euo pipefail
-export RUSTFLAGS="-Clink-self-contained=-linker"  # EXPERIMENT: force the managed-LLVM linker path (soldr#3801)
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${HERE}/.." && pwd)"
@@ -179,7 +178,7 @@ run_build() {
             # soldr#3607: the build auto-starts a daemon owning this root; the
             # EXIT trap must stop it before deleting WORK_DIR.
             measure::register_soldr_root "${WORK_DIR}" "${cache_dir}"
-            (cd "${project}" && SOLDR_CACHE_DIR="${cache_dir}" CARGO_TARGET_DIR="${target_dir}" run_with_timeout "${COMPARISON_BUILD_TIMEOUT_SECONDS}" soldr cargo build --release)
+            (cd "${project}" && RUSTFLAGS="-Clink-self-contained=-linker" SOLDR_CACHE_DIR="${cache_dir}" CARGO_TARGET_DIR="${target_dir}" run_with_timeout "${COMPARISON_BUILD_TIMEOUT_SECONDS}" soldr cargo build --release)
             ;;
         *)
             echo "unknown tool: ${tool}" >&2
@@ -193,6 +192,8 @@ run_build() {
 # (same SOLDR_CACHE_DIR, CARGO_TARGET_DIR and PATH) so the build finds exactly
 # what prepare put there. The compile cache stays empty: prepare starts no daemon.
 run_prepare() {
+    # EXPERIMENT (soldr#3801): skip pre-provisioning so the LLVM fetch is inside the timed build.
+    return 0
     local project="$1"
     local cache_dir="$2"
     local target_dir="$3"
