@@ -35,7 +35,10 @@ const LOCK_POLL: Duration = Duration::from_millis(25);
 /// The directory the managed LLVM installs into (`.complete` lives here).
 #[must_use]
 pub fn managed_llvm_install_dir(paths: &SoldrPaths) -> PathBuf {
-    paths.bin.join(format!("llvm-{MANAGED_LLVM_VERSION}"))
+    paths.bin.join(format!(
+        "llvm-{MANAGED_LLVM_VERSION}-{}",
+        super::llvm::MANAGED_LLVM_REVISION
+    ))
 }
 
 /// The managed LLVM `bin` directory, whether or not it is installed yet.

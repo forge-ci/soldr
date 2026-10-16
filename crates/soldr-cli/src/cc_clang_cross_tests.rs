@@ -103,3 +103,38 @@ fn drivers_are_content_addressed_and_idempotent() {
     let (cc2, _) = write_drivers(&paths, "x86_64-apple-darwin", &bin, &other).unwrap();
     assert_ne!(cc, cc2, "a different SDK must be a different driver path");
 }
+
+#[test]
+fn drivers_sit_beside_the_llvm_binutils_cmake_needs() {
+    // soldr#3806: without llvm-ranlib beside the driver, CMake used the host
+    // GNU ranlib and corrupted a Mach-O static archive.
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = SoldrPaths::with_root(tmp.path().join("root"));
+    let bin = tmp.path().join("llvm");
+    std::fs::create_dir_all(&bin).unwrap();
+    let native = crate::platform::executable::name::native;
+    for tool in ["clang", "clang++", "llvm-ranlib", "llvm-rc"] {
+        std::fs::write(bin.join(native(tool)), tool).unwrap();
+    }
+    let spec = apple_spec("aarch64-apple-darwin", Path::new("/sdk"));
+    let (cc, _) = write_drivers(&paths, "aarch64-apple-darwin", &bin, &spec).unwrap();
+    let dir = cc.parent().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.join(native("llvm-ranlib"))).unwrap(),
+        "llvm-ranlib"
+    );
+    assert!(dir.join(native("llvm-rc")).is_file());
+    assert!(
+        !dir.join(native("llvm-ar")).exists(),
+        "absent tools are skipped"
+    );
+}
+
+#[test]
+fn msvc_objects_name_the_crt_and_link_only_flags_stay_in_the_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let spec = msvc_spec("x86_64-pc-windows-msvc", tmp.path());
+    assert!(spec.common.contains(&"-fms-runtime-lib=dll".to_string()));
+    assert!(!spec.common.iter().any(|arg| arg.contains("vfsoverlay")));
+    assert!(!spec.common.iter().any(|arg| arg.contains("fuse-ld")));
+}

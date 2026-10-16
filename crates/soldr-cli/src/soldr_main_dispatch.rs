@@ -51,6 +51,8 @@ async fn dispatch_build_command(
         Commands::Cxx(args) => {
             exit_with(crate::cc_cmd::run(args, crate::cc_cmd::Language::Cxx).await)
         }
+        Commands::Ld(args) => exit_with(crate::ld_cmd::run_ld(args).await),
+        Commands::Link(args) => exit_with(crate::ld_cmd::run_link(args).await),
         Commands::Wheel(args) => run_wheel_command(&args, flags).await,
         Commands::Cargo { args } => run_cargo_command(args, flags).await,
         Commands::Dylint { args } => exit_with(
@@ -179,6 +181,8 @@ async fn dispatch_state_command(command: Commands, flags: DispatchFlags) -> Resu
         Commands::Build { .. }
         | Commands::Cc(_)
         | Commands::Cxx(_)
+        | Commands::Ld(_)
+        | Commands::Link(_)
         | Commands::Wheel(_)
         | Commands::Cargo { .. }
         | Commands::Dylint { .. }

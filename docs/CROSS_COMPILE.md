@@ -56,6 +56,21 @@ alias, CI, release, and catalogue contract. Raw Rust triples remain accepted.
 | `linux-arm64-musl` | `aarch64-unknown-linux-musl` | Cross-build + native run | Shipped |
 <!-- canonical-target-contract:end -->
 
+Aliases follow `<os>-<arch>[-<abi>][-glibc_<major>_<minor>]` (soldr#3806), so a
+few predictable spellings are accepted beyond the table:
+
+- `win-arm` / `mac-arm` mean `win-arm64` / `mac-arm64` (neither OS has a
+  supported ARM32 target). `linux-arm` stays ambiguous because armv7 Linux
+  is real; use `linux-arm64`.
+- `x86_64` / `amd64` and `aarch64` are accepted for `x64` and `arm64`.
+- `linux-x64-glibc_2_17` (also `glibc2.17`) is the alias form of
+  `x86_64-unknown-linux-gnu.2.17` and selects the same catalogue glibc floor.
+  A glibc suffix on a non-GNU alias (`mac-x64-glibc_2_17`,
+  `linux-x64-musl-glibc_2_17`) or an unbacked floor is an error.
+
+Every `--target` surface (`build`, `prepare`, `env`, `wheel`, `cc`, `c++`,
+`ld`, `link`, `toolchain prepare|ensure`) resolves through the same resolver.
+
 The target is the only toolchain choice in normal builds:
 
 ```bash

@@ -12,7 +12,12 @@
 //!
 //! ## Grammar
 //!
-//! `<os>-<arch>[-<libc-or-abi>]`. All-lowercase, hyphen-separated.
+//! `<os>-<arch>[-<libc-or-abi>][-glibc_<major>_<minor>]`. Case-insensitive,
+//! hyphen-separated. The optional glibc suffix (soldr#3806) is only legal on
+//! GNU/Linux aliases and selects the same catalogue sysroot floor as the
+//! `<triple>.<major>.<minor>` spelling (soldr#2139): `linux-x64-glibc_2_17`
+//! resolves exactly like `x86_64-unknown-linux-gnu.2.17`. `glibc2.17` and
+//! `glibc_2.17` are accepted too.
 //! `arch` is always the short form: `x64` (= `x86_64` / `amd64`) and
 //! `arm64` (= `aarch64`). 32-bit triples don't ship in soldr.
 //!
@@ -120,9 +125,62 @@ pub fn strip_glibc_floor_in_args(args: &mut [String]) {
     }
 }
 
-fn target_for_known_alias(input: &str) -> Option<&'static str> {
+fn target_for_known_alias(input: &str) -> Option<String> {
+    // soldr#3806: an alias with a glibc suffix becomes the
+    // `<triple>.<major>.<minor>` spelling the build path already floors and
+    // strips (soldr#2139). An invalid suffix is left alone here and rejected
+    // by the resolver/guard with a precise error.
+    if let Ok(Some(versioned)) = alias_with_glibc_floor_as_triple(input) {
+        return Some(versioned);
+    }
     let lower = input.trim().to_ascii_lowercase();
-    canonical_lookup(&lower).or_else(|| synonym_lookup(&lower).and_then(canonical_lookup))
+    canonical_lookup(&lower)
+        .or_else(|| synonym_lookup(&lower).and_then(canonical_lookup))
+        .map(str::to_string)
+}
+
+/// Split `linux-x64-glibc_2_17` into (`linux-x64`, `2.17`).
+///
+/// Accepts `-glibc_<maj>_<min>`, `-glibc<maj>.<min>`, `-glibc_<maj>.<min>`
+/// and `-glibc<maj>_<min>`. Returns `None` when there is no glibc suffix.
+fn split_alias_glibc_suffix(lower: &str) -> Option<(&str, String)> {
+    let (alias, suffix) = lower.rsplit_once("-glibc")?;
+    let version = suffix.strip_prefix('_').unwrap_or(suffix);
+    let (major, minor) = version.split_once(['_', '.'])?;
+    let numeric = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
+    (numeric(major) && numeric(minor)).then(|| (alias, format!("{major}.{minor}")))
+}
+
+/// soldr#3806: rewrite a glibc-suffixed alias to `<triple>.<major>.<minor>`.
+///
+/// `Ok(None)` when `input` carries no alias glibc suffix. An `Err` when the
+/// alias part is not a GNU/Linux alias (`mac-x64-glibc_2_17`,
+/// `linux-x64-musl-glibc_2_17`) or the floor is not catalogue-backed.
+fn alias_with_glibc_floor_as_triple(input: &str) -> Result<Option<String>, AliasError> {
+    let raw = input.trim();
+    let lower = raw.to_ascii_lowercase();
+    let Some((alias, floor)) = split_alias_glibc_suffix(&lower) else {
+        return Ok(None);
+    };
+    let triple =
+        canonical_lookup(alias).or_else(|| synonym_lookup(alias).and_then(canonical_lookup));
+    match triple {
+        Some(triple) if triple.ends_with("-linux-gnu") => {
+            let versioned = format!("{triple}.{floor}");
+            reject_glibc_versioned(&versioned).map_err(|_| AliasError::GlibcVersioned {
+                input: raw.to_string(),
+                base: triple.to_string(),
+                version: floor.clone(),
+            })?;
+            Ok(Some(versioned))
+        }
+        Some(triple) => Err(AliasError::GlibcVersioned {
+            input: raw.to_string(),
+            base: triple.to_string(),
+            version: floor,
+        }),
+        None => Ok(None),
+    }
 }
 
 /// Synonym → canonical alias table. Every entry's value MUST appear
@@ -139,6 +197,10 @@ const SYNONYMS: &[(&str, &str)] = &[
     ("win-aarch64", "win-arm64"),
     ("windows-arm64", "win-arm64"),
     ("windows-aarch64", "win-arm64"),
+    // soldr#3806: Windows has no supported ARM32 target, so the short
+    // spelling is unambiguous.
+    ("win-arm", "win-arm64"),
+    ("windows-arm", "win-arm64"),
     // macOS
     ("mac-x86_64", "mac-x64"),
     ("mac-amd64", "mac-x64"),
@@ -152,6 +214,10 @@ const SYNONYMS: &[(&str, &str)] = &[
     ("darwin-arm64", "mac-arm64"),
     ("darwin-aarch64", "mac-arm64"),
     ("apple-silicon", "mac-arm64"),
+    // soldr#3806: there has never been an ARM32 Mac.
+    ("mac-arm", "mac-arm64"),
+    ("macos-arm", "mac-arm64"),
+    ("darwin-arm", "mac-arm64"),
     // Linux glibc
     ("linux-x86_64", "linux-x64"),
     ("linux-amd64", "linux-x64"),
@@ -249,6 +315,8 @@ pub enum TargetSurface {
     Cxx,
     Wheel,
     Lint,
+    Ld,
+    Link,
 }
 
 impl TargetSurface {
@@ -261,6 +329,8 @@ impl TargetSurface {
         TargetSurface::Cxx,
         TargetSurface::Wheel,
         TargetSurface::Lint,
+        TargetSurface::Ld,
+        TargetSurface::Link,
     ];
 
     /// The verb as it appears on the command line, e.g. `soldr {verb} --target`.
@@ -273,6 +343,8 @@ impl TargetSurface {
             TargetSurface::Cxx => "c++",
             TargetSurface::Wheel => "wheel",
             TargetSurface::Lint => "lint",
+            TargetSurface::Ld => "ld",
+            TargetSurface::Link => "link",
         }
     }
 }
@@ -331,6 +403,16 @@ pub fn resolve_soldr_target(input: &str) -> Result<ResolvedTarget, AliasError> {
     // which would ship a binary whose glibc floor is not the one that was asked
     // for. Say what soldr cannot do, and name the tool that can.
     reject_glibc_versioned(raw)?;
+
+    // soldr#3806: `linux-x64-glibc_2_17` is the alias spelling of
+    // `x86_64-unknown-linux-gnu.2.17`. Rewrite it to that triple form and
+    // resolve again, so both spellings share one floor gate and one result.
+    if let Some(versioned) = alias_with_glibc_floor_as_triple(raw)? {
+        let mut resolved = resolve_soldr_target(&versioned)?;
+        resolved.input = raw.to_string();
+        resolved.via_alias = true;
+        return Ok(resolved);
+    }
 
     // soldr#2139: a supported floor survived the gate above. Resolve the base
     // triple through the ordinary path and carry the floor beside it --
@@ -434,8 +516,8 @@ fn looks_like_rust_triple(input: &str) -> bool {
 /// Returns the suggested unambiguous alias.
 fn check_ambiguous(input: &str) -> Option<&'static str> {
     match input {
-        "mac-arm" | "macos-arm" | "darwin-arm" => Some("mac-arm64"),
-        "win-arm" | "windows-arm" => Some("win-arm64"),
+        // armv7 Linux is a real, common target, so `linux-arm` stays
+        // ambiguous; `win-arm` / `mac-arm` are synonyms (soldr#3806).
         "linux-arm" => Some("linux-arm64"),
         _ => None,
     }
@@ -556,378 +638,5 @@ fn host_triple() -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn canonical_alias_resolves_to_rust_triple() {
-        let r = resolve_soldr_target("win-x64").unwrap();
-        assert_eq!(r.rust_triple, "x86_64-pc-windows-msvc");
-        assert!(r.via_alias);
-        let r = resolve_soldr_target("mac-arm64").unwrap();
-        assert_eq!(r.rust_triple, "aarch64-apple-darwin");
-        assert!(r.via_alias);
-    }
-
-    #[test]
-    fn synonym_resolves_to_canonical_triple() {
-        let r = resolve_soldr_target("apple-silicon").unwrap();
-        assert_eq!(r.rust_triple, "aarch64-apple-darwin");
-        let r = resolve_soldr_target("musl-x64").unwrap();
-        assert_eq!(r.rust_triple, "x86_64-unknown-linux-musl");
-        let r = resolve_soldr_target("linux-amd64-musl").unwrap();
-        assert_eq!(r.rust_triple, "x86_64-unknown-linux-musl");
-    }
-
-    #[test]
-    fn rust_triple_passthrough() {
-        let r = resolve_soldr_target("x86_64-pc-windows-msvc").unwrap();
-        assert_eq!(r.rust_triple, "x86_64-pc-windows-msvc");
-        assert!(!r.via_alias);
-        let r = resolve_soldr_target("wasm32-unknown-unknown").unwrap();
-        assert_eq!(r.rust_triple, "wasm32-unknown-unknown");
-        assert!(!r.via_alias);
-    }
-
-    #[test]
-    fn case_insensitivity() {
-        let r = resolve_soldr_target("WIN-X64").unwrap();
-        assert_eq!(r.rust_triple, "x86_64-pc-windows-msvc");
-        let r = resolve_soldr_target("Apple-Silicon").unwrap();
-        assert_eq!(r.rust_triple, "aarch64-apple-darwin");
-    }
-
-    #[test]
-    fn ambiguous_arm_rejected_with_suggestion() {
-        let err = resolve_soldr_target("mac-arm").unwrap_err();
-        match err {
-            AliasError::Ambiguous { disambiguated, .. } => {
-                assert_eq!(disambiguated, "mac-arm64");
-            }
-            other => panic!("expected Ambiguous, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn thirty_two_bit_rejected() {
-        let err = resolve_soldr_target("win-x86").unwrap_err();
-        match err {
-            AliasError::Thirty2Bit { suggestion, .. } => {
-                assert_eq!(suggestion, "win-x64");
-            }
-            other => panic!("expected Thirty2Bit, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn the_floor_suffix_is_stripped_from_both_argv_spellings() {
-        // The suffix must never reach a cargo child. Both spellings are
-        // covered because argv carries whichever the user typed.
-        let mut split = vec![
-            "build".to_string(),
-            "--target".to_string(),
-            "x86_64-unknown-linux-gnu.2.17".to_string(),
-            "--release".to_string(),
-        ];
-        strip_glibc_floor_in_args(&mut split);
-        // The borrowing form must agree, since it is what the spawn uses.
-        assert_eq!(args_without_glibc_floor(&split).as_ref(), split.as_slice());
-        assert_eq!(split[2], "x86_64-unknown-linux-gnu");
-        assert_eq!(split[3], "--release", "unrelated args must be untouched");
-
-        let mut joined = vec![
-            "build".to_string(),
-            "--target=aarch64-unknown-linux-gnu.2.28".to_string(),
-        ];
-        strip_glibc_floor_in_args(&mut joined);
-        assert_eq!(joined[1], "--target=aarch64-unknown-linux-gnu");
-    }
-
-    #[test]
-    fn stripping_leaves_ordinary_targets_alone() {
-        // Including musl, which has no glibc to floor, and a bare `--target`
-        // at the end of argv, which must not index past the end.
-        let mut args = vec![
-            "build".to_string(),
-            "--target".to_string(),
-            "x86_64-unknown-linux-musl".to_string(),
-        ];
-        strip_glibc_floor_in_args(&mut args);
-        assert_eq!(args[2], "x86_64-unknown-linux-musl");
-
-        let mut trailing = vec!["build".to_string(), "--target".to_string()];
-        strip_glibc_floor_in_args(&mut trailing);
-        assert_eq!(trailing, vec!["build".to_string(), "--target".to_string()]);
-    }
-
-    #[test]
-    fn the_catalogue_glibc_baseline_resolves_to_the_bare_triple() {
-        // The GNU catalogue currently provides a glibc 2.17 sysroot. A higher
-        // requested floor must not be accepted and silently mapped to 2.17.
-        // `rust_triple` stays bare because rustc does not understand the
-        // suffixed soldr spelling.
-        for (input, base) in [
-            ("x86_64-unknown-linux-gnu.2.17", "x86_64-unknown-linux-gnu"),
-            (
-                "aarch64-unknown-linux-gnu.2.17",
-                "aarch64-unknown-linux-gnu",
-            ),
-        ] {
-            let resolved = resolve_soldr_target(input).unwrap();
-            assert_eq!(resolved.rust_triple, base, "{input}");
-            assert_eq!(resolved.glibc_floor.as_deref(), Some("2.17"), "{input}");
-            assert_eq!(resolved.input, input);
-        }
-        assert!(resolve_soldr_target("aarch64-unknown-linux-gnu.2.28").is_err());
-    }
-
-    #[test]
-    fn a_floor_on_an_unenforceable_target_is_still_rejected() {
-        // The floor is only meaningful where soldr links through managed zig.
-        // Anywhere else soldr would have to drop the suffix and ship a binary
-        // whose floor is not the one that was asked for -- silently wrong, and
-        // strictly worse than refusing.
-        let err = resolve_soldr_target("i686-unknown-linux-gnu.2.17").unwrap_err();
-        match &err {
-            AliasError::GlibcVersioned { base, version, .. } => {
-                assert_eq!(base, "i686-unknown-linux-gnu");
-                assert_eq!(version, "2.17");
-            }
-            other => panic!("expected GlibcVersioned, got {other:?}"),
-        }
-
-        // The message has to name the way forward, or the user is stuck.
-        let rendered = err.to_string();
-        assert!(
-            rendered.contains("zigbuild"),
-            "the error must point at a tool that can do it: {rendered}"
-        );
-        assert!(
-            rendered.contains("x86_64-unknown-linux-gnu")
-                && rendered.contains("aarch64-unknown-linux-gnu"),
-            "the error must name the triples where a floor *is* honoured: {rendered}"
-        );
-    }
-
-    #[test]
-    fn only_glibc_triples_take_the_versioned_path() {
-        // The gate keys on `-linux-gnu`, so nothing else is diverted into an
-        // error about a libc it does not have.
-        for input in [
-            "x86_64-unknown-linux-musl.2.17",
-            "x86_64-apple-darwin.11.0",
-            "x86_64-unknown-linux-gnu.foo",
-        ] {
-            let err = resolve_soldr_target(input).unwrap_err();
-            assert!(
-                !matches!(err, AliasError::GlibcVersioned { .. }),
-                "{input} must not be treated as glibc-versioned, got {err:?}"
-            );
-        }
-
-        // And the plain triple still resolves, i.e. the gate did not widen.
-        let ok = resolve_soldr_target("x86_64-unknown-linux-gnu").unwrap();
-        assert_eq!(ok.rust_triple, "x86_64-unknown-linux-gnu");
-    }
-
-    // soldr#2139: `soldr build` never calls `resolve_soldr_target` -- it only
-    // runs `normalize_target_aliases_in_args`, which passes an unrecognised
-    // target straight through. So the guard is also exposed on its own and
-    // called from every blessed-prep entry. These pin that the standalone
-    // form agrees with the resolver in both directions.
-    #[test]
-    fn the_standalone_guard_rejects_what_the_resolver_rejects() {
-        // soldr#2139: the guard now splits on whether the floor can be
-        // *enforced*, so it must agree with the resolver in both directions.
-        let err = reject_glibc_versioned("i686-unknown-linux-gnu.2.17").unwrap_err();
-        match err {
-            AliasError::GlibcVersioned {
-                input,
-                base,
-                version,
-            } => {
-                assert_eq!(input, "i686-unknown-linux-gnu.2.17");
-                assert_eq!(base, "i686-unknown-linux-gnu");
-                assert_eq!(version, "2.17");
-            }
-            other => panic!("expected GlibcVersioned, got {other:?}"),
-        }
-        // Case and surrounding whitespace must not smuggle an unenforceable
-        // floor past the guard.
-        assert!(reject_glibc_versioned("  I686-Unknown-Linux-GNU.2.17 ").is_err());
-        assert!(resolve_soldr_target("i686-unknown-linux-gnu.2.17").is_err());
-
-        // ...and the enforceable ones pass both, however they are spelled.
-        assert!(reject_glibc_versioned("  X86_64-Unknown-Linux-GNU.2.17 ").is_ok());
-        assert!(reject_glibc_versioned("aarch64-unknown-linux-gnu.2.17").is_ok());
-        assert!(resolve_soldr_target("aarch64-unknown-linux-gnu.2.17").is_ok());
-        assert!(reject_glibc_versioned("aarch64-unknown-linux-gnu.2.28").is_err());
-    }
-
-    #[test]
-    fn the_standalone_guard_does_not_over_reject() {
-        // This one runs on *every* prepared target, so a false positive would
-        // break builds that work today -- including custom triples that the
-        // alias table has never heard of and must not be judged on.
-        for input in [
-            "x86_64-unknown-linux-gnu",
-            "aarch64-unknown-linux-gnu",
-            "x86_64-unknown-linux-musl.2.17",
-            "x86_64-apple-darwin.11.0",
-            "x86_64-unknown-linux-gnu.foo",
-            "thumbv7em-none-eabihf",
-            "some-vendor-custom-linux-gnueabi",
-        ] {
-            assert!(
-                reject_glibc_versioned(input).is_ok(),
-                "{input} must pass the guard untouched",
-            );
-        }
-    }
-
-    #[test]
-    fn all_alias_rejected_for_build() {
-        let err = resolve_soldr_target("all").unwrap_err();
-        assert!(matches!(err, AliasError::AllNotBuildable));
-    }
-
-    #[test]
-    fn unknown_input_carries_jaro_winkler_suggestion() {
-        let err = resolve_soldr_target("win-arm6").unwrap_err();
-        match err {
-            AliasError::Unknown { suggestion, .. } => {
-                assert_eq!(suggestion, "win-arm64");
-            }
-            other => panic!("expected Unknown with suggestion, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn native_resolves_to_a_real_triple() {
-        let r = resolve_soldr_target("native").unwrap();
-        assert!(r.via_alias);
-        // Resolved triple varies by host; just confirm it's non-empty
-        // and looks like a triple.
-        assert!(looks_like_rust_triple(&r.rust_triple));
-    }
-
-    #[test]
-    fn synonyms_table_targets_are_all_canonical() {
-        // Static invariant: every synonym value must appear as a key
-        // in CANONICAL_ALIASES. If this fails, the resolver's
-        // synonym → canonical → triple chain panics in production.
-        let canonical_keys: std::collections::HashSet<&str> =
-            CANONICAL_ALIASES.iter().map(|(k, _)| *k).collect();
-        for (syn, canonical_target) in SYNONYMS {
-            assert!(
-                canonical_keys.contains(canonical_target),
-                "synonym `{syn}` → `{canonical_target}` is not a canonical alias key"
-            );
-        }
-    }
-
-    #[test]
-    fn canonical_aliases_match_canonical_targets_const() {
-        // Soldr ships TWO related canonical-list tables:
-        //   - crate::core::CANONICAL_TARGETS (Rust triples)
-        //   - target_alias::CANONICAL_ALIASES (alias → triple)
-        // Their VALUES (Rust triples) must agree as a set.
-        let triples_const: std::collections::HashSet<&str> =
-            crate::core::CANONICAL_TARGETS.iter().copied().collect();
-        let triples_alias: std::collections::HashSet<&str> =
-            CANONICAL_ALIASES.iter().map(|(_, t)| *t).collect();
-        assert_eq!(triples_const, triples_alias);
-    }
-
-    #[test]
-    fn canonical_aliases_normalize_in_cargo_arguments() {
-        for (alias, triple) in CANONICAL_ALIASES {
-            let mut split = vec![
-                "build".to_string(),
-                "--target".to_string(),
-                alias.to_string(),
-            ];
-            normalize_target_aliases_in_args(&mut split);
-            assert_eq!(split[2], *triple, "split --target form drifted for {alias}");
-
-            let mut equals = vec!["build".to_string(), format!("--target={alias}")];
-            normalize_target_aliases_in_args(&mut equals);
-            assert_eq!(
-                equals[1],
-                format!("--target={triple}"),
-                "equals --target form drifted for {alias}"
-            );
-        }
-    }
-
-    // soldr#3390: every AliasError variant, rendered against every surface.
-    // RED on `main` for `AllNotBuildable` (its body named `soldr build`
-    // unconditionally) and for any call site that kept its own prefix.
-    #[test]
-    fn every_alias_error_renders_cleanly_for_every_surface() {
-        let errors: Vec<(&str, AliasError)> = vec![
-            ("Unknown", resolve_soldr_target("win-armm").unwrap_err()),
-            ("Ambiguous", resolve_soldr_target("mac-arm").unwrap_err()),
-            ("Thirty2Bit", resolve_soldr_target("win-x86").unwrap_err()),
-            (
-                "GlibcVersioned",
-                resolve_soldr_target("i686-unknown-linux-gnu.2.17").unwrap_err(),
-            ),
-            ("AllNotBuildable", resolve_soldr_target("all").unwrap_err()),
-        ];
-
-        for (name, error) in &errors {
-            // The bare, unrendered Display never names the wrong command --
-            // an incomplete message beats a false one.
-            let bare = error.to_string();
-            assert!(
-                !bare.contains("soldr build"),
-                "{name}: bare Display must not name a command: {bare:?}"
-            );
-
-            for &surface in TargetSurface::ALL {
-                let verb = surface.verb();
-                let rendered = error.render(surface);
-                let expected_prefix = format!("soldr {verb} --target");
-                assert!(
-                    rendered.starts_with(&expected_prefix),
-                    "{name}/{verb}: expected prefix {expected_prefix:?}, got {rendered:?}"
-                );
-                // `AllNotBuildable`'s own body legitimately names
-                // `soldr prepare --target all` -- that is the one command
-                // `all` IS valid for, not an accidental doubling -- so
-                // rendering it for the `Prepare` surface is the one case
-                // where the prefix and the body both contain the same
-                // substring. Every other combination must see it exactly
-                // once; a second occurrence anywhere else is exactly the
-                // wheel/lint verb-doubling this test exists to catch.
-                let allowed_occurrences =
-                    if *name == "AllNotBuildable" && surface == TargetSurface::Prepare {
-                        2
-                    } else {
-                        1
-                    };
-                let occurrences = rendered.matches(&expected_prefix).count();
-                assert_eq!(
-                    occurrences, allowed_occurrences,
-                    "{name}/{verb}: expected {allowed_occurrences} occurrence(s) of \
-                     {expected_prefix:?} in {rendered:?}"
-                );
-                if surface != TargetSurface::Build {
-                    assert!(
-                        !rendered.contains("soldr build"),
-                        "{name}/{verb}: a non-build surface must never name build: {rendered:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn target_surface_all_has_seven_distinct_verbs() {
-        assert_eq!(TargetSurface::ALL.len(), 7);
-        let verbs: std::collections::HashSet<&str> =
-            TargetSurface::ALL.iter().map(|s| s.verb()).collect();
-        assert_eq!(verbs.len(), 7, "verbs must be pairwise distinct");
-    }
-}
+#[path = "target_alias_tests.rs"]
+mod tests;
