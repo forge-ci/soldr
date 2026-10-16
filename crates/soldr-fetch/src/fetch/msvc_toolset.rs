@@ -9,7 +9,7 @@
 //! the "or download it" half: a soldr-managed MSVC toolset bundle,
 //! repackaged the same way the `cmake`/`ninja` bundles in
 //! [`super::cmake_tools`] are — pinned version, sha256-verified,
-//! extracted under `~/.soldr-dev/bin/syslib/msvc/<version>/<slug>/package/`.
+//! extracted under `~/.soldr/bin/syslib/msvc/<version>/<slug>/package/`.
 //!
 //! Bundle layout (forge recipe `msvc-<shape>` on
 //! zackees/soldr-toolchain), mirroring a real MSVC toolset root:

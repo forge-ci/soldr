@@ -15,25 +15,18 @@ const CARGO_ABORT_LOG_FILE: &str = "cargo-aborts.jsonl";
 /// Persistent record of every small-tool probe (soldr#3389).
 pub const SMALL_TOOL_LOG_FILE: &str = "small-tools.jsonl";
 
-/// soldr#1597 Phase 1: the home-anchored default root name, split by
-/// build provenance. Official (`release-auto.yml`-published) builds keep
-/// the historical `~/.soldr`. Dev/manual builds default to a distinct
-/// `~/.soldr-dev` root instead, so a locally-built daemon and a
-/// managed/prod daemon never collide on `state.sqlite3` / the PID file /
-/// the IPC socket when `SOLDR_CACHE_DIR` is left unset (the confirmed
-/// bug: both used to fall back to the same `~/.soldr`, defeating the
-/// broker's "dev doesn't stomp prod" design intent). An explicit
-/// `SOLDR_CACHE_DIR` always wins over this default either way.
+/// The home-anchored default root name: `~/.soldr`, for every build.
+///
+/// soldr#1597 once sent dev/manual builds to a separate `~/.soldr-dev` so a
+/// locally built daemon could not collide with a managed one on the shared
+/// state. That isolation now lives where it belongs: daemon routes, route
+/// claims and the root-owner lock are keyed per daemon-image generation
+/// (soldr#3374), so two builds share one root without stomping each other.
+/// The separate root only cost a second, always-cold compile cache -- a source
+/// build installed for daily use hit nothing the release build had cached.
+/// An explicit `SOLDR_CACHE_DIR` still wins.
 fn default_home_dir_name() -> &'static str {
-    default_home_dir_name_for(crate::build_provenance::is_official_build())
-}
-
-fn default_home_dir_name_for(official: bool) -> &'static str {
-    if official {
-        ".soldr"
-    } else {
-        ".soldr-dev"
-    }
+    ".soldr"
 }
 
 /// The soldr version segment used by per-version `~/.soldr/v<X.Y.Z>/**`
@@ -544,26 +537,10 @@ mod tests {
     }
 
     #[test]
-    fn default_home_dir_name_diverges_by_build_provenance() {
-        // soldr#1597 Phase 1: this is the whole fix. An official build and
-        // a dev build must resolve to different home-anchored roots so a
-        // locally-built daemon and a managed/prod daemon never collide on
-        // state.sqlite3 / the PID file / the IPC socket when SOLDR_CACHE_DIR
-        // is left unset.
-        assert_eq!(default_home_dir_name_for(true), ".soldr");
-        assert_eq!(default_home_dir_name_for(false), ".soldr-dev");
-        assert_ne!(
-            default_home_dir_name_for(true),
-            default_home_dir_name_for(false)
-        );
-    }
-
-    #[test]
-    fn dev_build_under_test_defaults_to_soldr_dev_root() {
-        // The test binary is always a local/dev build (SOLDR_RELEASE_CI is
-        // never set for `cargo test` runs), so the real, non-injectable
-        // `default_home_dir_name()` must resolve to the dev root.
-        assert_eq!(default_home_dir_name(), ".soldr-dev");
+    fn every_build_defaults_to_the_soldr_root() {
+        // Dev and release builds share `~/.soldr`; daemon generations are
+        // isolated by image hash, not by a second root.
+        assert_eq!(default_home_dir_name(), ".soldr");
     }
 
     #[test]
