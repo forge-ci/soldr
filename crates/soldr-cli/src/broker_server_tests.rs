@@ -232,8 +232,9 @@ fn macos_listener_restricts_socket_permissions_after_bind() {
 
 #[test]
 fn in_flight_launch_refusal_retries_within_fifty_ms() {
-    let ceiling = effective_retry_after_ms("backend spawn already in progress", 1_000);
-    assert_eq!(ceiling, IN_FLIGHT_LAUNCH_RETRY_MAX_MS);
+    let ceiling =
+        crate::broker_retry::effective_retry_after_ms("backend spawn already in progress", 1_000);
+    assert_eq!(ceiling, crate::broker_retry::IN_FLIGHT_LAUNCH_RETRY_MAX_MS);
     for _ in 0..500 {
         let delay = route_retry_delay(ceiling);
         assert!(delay <= Duration::from_millis(50), "{delay:?}");
@@ -243,7 +244,7 @@ fn in_flight_launch_refusal_retries_within_fifty_ms() {
 #[test]
 fn other_rate_limited_refusals_keep_the_server_hint() {
     assert_eq!(
-        effective_retry_after_ms("backend spawn budget exhausted", 1_000),
+        crate::broker_retry::effective_retry_after_ms("backend spawn budget exhausted", 1_000),
         1_000
     );
 }

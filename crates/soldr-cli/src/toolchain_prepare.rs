@@ -9,8 +9,7 @@ use crate::cargo_front_door::provision::BuildToolsSummary;
 use crate::core::{SoldrError, SoldrPaths};
 
 use crate::toolchain::{
-    format_plugin_label, rustup_component_add, rustup_target_add,
-    rustup_toolchain_install_with_profile,
+    rustup_component_add, rustup_target_add, rustup_toolchain_install_with_profile,
 };
 
 /// Summary of what `prepare` actually did, used by
@@ -140,4 +139,21 @@ pub(crate) fn unpinned_provisioning_allowed() -> bool {
 /// Print the report for a finished provisioning step to stderr.
 pub(crate) fn report_build_tools(summary: &BuildToolsSummary) {
     eprintln!("{}", summary.render());
+}
+
+/// Format a plugin entry as `name` or `name@version` for the JSON
+/// payload. Detailed specs with no version collapse to `name`; bare
+/// `*` specs also collapse to `name`.
+fn format_plugin_label(name: &str, spec: &crate::core::PluginSpec) -> String {
+    let version = match spec {
+        crate::core::PluginSpec::Version(v) => Some(v.as_str()),
+        crate::core::PluginSpec::Detailed { version, .. } => version.as_deref(),
+    };
+    let trimmed = version
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && *v != "*");
+    match trimmed {
+        Some(v) => format!("{name}@{v}"),
+        None => name.to_string(),
+    }
 }
