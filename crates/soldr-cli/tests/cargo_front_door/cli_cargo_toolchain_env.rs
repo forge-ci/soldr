@@ -101,6 +101,11 @@ fn front_door_run(
         .env("SOLDR_TEST_RUSTC_BIN", &rustc)
         .env("CARGO_TARGET_DIR", workspace.join("target"))
         .env("PATH", isolated_test_path())
+        // soldr#3823: the fake toolchain links nothing, and its fake rustc
+        // cannot prove it ships lld, so the default fast linker would demand a
+        // clang driver that a clang-less runner without the live catalogue
+        // cannot provide. This test is about RUSTUP_TOOLCHAIN, not linking.
+        .env("SOLDR_LINKER", "default")
         .env_remove("RUSTUP_TOOLCHAIN");
     if let Some(value) = caller_value {
         command.env("RUSTUP_TOOLCHAIN", value);
