@@ -29,7 +29,14 @@ const CHECKSUM: &str =
 fn include_only_out_dir_crate_hits_in_a_fresh_worktree() {
     let workdir = unique_temp_dir("out-dir-cross-worktree");
     let cache_dir = workdir.join("shared-cache");
-    let guard = FixtureGuard::new(workdir.clone(), cache_dir.clone());
+    // soldr#3823: an isolated home, so the builds use this fixture's own
+    // broker. On a CI runner the default home already holds a broker from an
+    // earlier step (a different Soldr image); routed through it, the compile
+    // journal this test tails for HIT/MISS lines is never written.
+    let home = workdir.join("home");
+    fs::create_dir_all(&home).expect("create isolated home");
+    let _broker = common::BrokerHomeGuard::new(&cache_dir, &home);
+    let guard = FixtureGuard::new(workdir.clone(), cache_dir.clone()).with_home(home.clone());
     let vendor = workdir.join("vendor");
     write_vendored_crates(&vendor);
     let repo = workdir.join("repo");
@@ -65,7 +72,7 @@ fn include_only_out_dir_crate_hits_in_a_fresh_worktree() {
         );
     }
 
-    let cold = soldr_cargo_check(&first, &cache_dir);
+    let cold = soldr_cargo_check(&first, &cache_dir, &home);
     assert_eq!(
         crate_outcome(&cold, "gen_dep"),
         Some(Outcome::Miss),
@@ -73,7 +80,7 @@ fn include_only_out_dir_crate_hits_in_a_fresh_worktree() {
     );
 
     // The fresh worktree differs from the first only in where it lives.
-    let warm = soldr_cargo_check(&second, &cache_dir);
+    let warm = soldr_cargo_check(&second, &cache_dir, &home);
     assert_eq!(
         crate_outcome(&warm, "gen_dep"),
         Some(Outcome::Hit),
@@ -87,7 +94,7 @@ fn include_only_out_dir_crate_hits_in_a_fresh_worktree() {
 
     // A hit must hand Cargo dep-info for *this* worktree's OUT_DIR; otherwise
     // Cargo sees a changed env dependency and recompiles on every build.
-    let rerun = soldr_cargo_check(&second, &cache_dir);
+    let rerun = soldr_cargo_check(&second, &cache_dir, &home);
     assert_eq!(
         crate_outcome(&rerun, "gen_dep"),
         None,
@@ -178,12 +185,17 @@ embed-dep = "0.1.0"
 
 /// Runs `soldr cargo check` with the target dir left inside the worktree, the
 /// layout every real checkout uses, and returns soldr's combined output.
-fn soldr_cargo_check(worktree: &Path, cache_dir: &Path) -> String {
+fn soldr_cargo_check(worktree: &Path, cache_dir: &Path, home: &Path) -> String {
     let mut command = common::isolated_soldr_command();
     command
         .args(["cargo", "check", "--offline"])
         .current_dir(worktree)
         .env("SOLDR_CACHE_DIR", cache_dir)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        // Keep the caller's toolchain; the isolated home has no rustup state.
+        .env("RUSTUP_HOME", caller_rustup_home())
+        .env("CARGO_HOME", home.join("cargo"))
         .env("SOLDR_ALLOW_UNPINNED", "1")
         .env_remove("CARGO_TARGET_DIR");
     let started = std::time::Instant::now();
@@ -248,4 +260,29 @@ fn strip_ansi(text: &str) -> String {
         out.push(c);
     }
     out
+}
+
+/// The rustup home the test process itself uses, so a soldr child with an
+/// isolated `HOME` still finds the pinned toolchain.
+fn caller_rustup_home() -> std::path::PathBuf {
+    if let Some(value) = std::env::var_os("RUSTUP_HOME").filter(|value| !value.is_empty()) {
+        return std::path::PathBuf::from(value);
+    }
+    let real_home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .expect("test process has a home directory");
+    std::path::PathBuf::from(real_home).join(".rustup")
+}
+
+#[test]
+fn crate_outcome_reads_colorized_and_plain_tags() {
+    let colored = "0.61 soldr[cache] gen_dep \u{1b}[33m[MISS]\u{1b}[0m";
+    assert_eq!(crate_outcome(colored, "gen_dep"), Some(Outcome::Miss));
+    let hit = "soldr[cache] gen_dep \u{1b}[32m[HIT!]\u{1b}[0m";
+    assert_eq!(crate_outcome(hit, "gen_dep"), Some(Outcome::Hit));
+    assert_eq!(
+        crate_outcome("soldr[cache] gen_dep [MISS]", "gen_dep"),
+        Some(Outcome::Miss)
+    );
+    assert_eq!(crate_outcome(colored, "embed_dep"), None);
 }

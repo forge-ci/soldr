@@ -475,7 +475,14 @@ pub(crate) fn scrub_outer_soldr_env(command: &mut Command) -> &mut Command {
             "1",
         )
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
-        .env_remove("SOLDR_LINKER")
+        // soldr#3823: the fast-linker default drives the link through a clang
+        // driver, and on a host without system clang (and without rustc's own
+        // lld) that clang is managed LLVM -- which needs the catalogue that
+        // MANIFEST_DISABLE above switches off. Fixtures model a front door,
+        // not linker selection, so leave the linker alone; a test that
+        // exercises linker injection sets or removes SOLDR_LINKER itself after
+        // calling this helper (cli_cargo_linker, cli_cargo_dylint_link).
+        .env("SOLDR_LINKER", "default")
         .env_remove("CARGO_BUILD_TARGET")
         // Local Docker builders keep the outer compilation cache in a named
         // /target volume. Test fixtures must still exercise their own
