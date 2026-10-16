@@ -26,11 +26,24 @@ use std::time::{Duration, Instant};
 pub(crate) struct FixtureGuard {
     workdir: PathBuf,
     cache_dir: PathBuf,
+    /// The isolated home the fixture's builds ran under, when they had one:
+    /// `daemon stop` must reach the same broker (soldr#3823).
+    home: Option<PathBuf>,
 }
 
 impl FixtureGuard {
     pub(crate) fn new(workdir: PathBuf, cache_dir: PathBuf) -> Self {
-        Self { workdir, cache_dir }
+        Self {
+            workdir,
+            cache_dir,
+            home: None,
+        }
+    }
+
+    /// Stop the daemon through the broker of `home` (soldr#3823).
+    pub(crate) fn with_home(mut self, home: PathBuf) -> Self {
+        self.home = Some(home);
+        self
     }
 
     fn daemon_pid(&self) -> Option<u32> {
@@ -42,6 +55,9 @@ impl FixtureGuard {
         command
             .args(["daemon", "stop"])
             .env("SOLDR_CACHE_DIR", &self.cache_dir);
+        if let Some(home) = &self.home {
+            command.env("HOME", home).env("USERPROFILE", home);
+        }
         command.output().expect("run soldr daemon stop")
     }
 
