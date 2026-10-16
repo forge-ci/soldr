@@ -400,6 +400,41 @@ fn extract_zip_tree<R: std::io::Read + std::io::Seek>(
 mod tests {
     use super::*;
 
+    fn zip_with(build: impl FnOnce(&mut zip::ZipWriter<std::io::Cursor<Vec<u8>>>)) -> Vec<u8> {
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        build(&mut zw);
+        zw.finish().unwrap().into_inner()
+    }
+
+    /// The zip 2.x -> 9.x migration must keep `ZipArchive::extract`'s
+    /// containment guarantees: `..` entries and symlinks that point
+    /// outside the destination are rejected, never written.
+    #[test]
+    fn extract_zip_tree_rejects_traversal_and_escaping_symlink() {
+        use std::io::Write;
+        let opts = zip::write::SimpleFileOptions::default();
+
+        let outer = tempfile::tempdir().unwrap();
+        let dest = outer.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+
+        let slip = zip_with(|zw| {
+            zw.start_file("../escape.txt", opts).unwrap();
+            zw.write_all(b"pwned").unwrap();
+        });
+        let _ = extract_zip_tree(std::io::Cursor::new(slip), &dest);
+        assert!(!outer.path().join("escape.txt").exists());
+
+        let link = zip_with(|zw| {
+            zw.add_symlink("link", "../outside", opts).unwrap();
+            zw.start_file("link/payload", opts).unwrap();
+            zw.write_all(b"pwned").unwrap();
+        });
+        let _ = extract_zip_tree(std::io::Cursor::new(link), &dest);
+        assert!(!outer.path().join("outside").exists());
+        assert!(!outer.path().join("payload").exists());
+    }
+
     #[test]
     fn zig_download_url_known_targets() {
         // Smoke: we don't hit the network in unit tests, just verify the
