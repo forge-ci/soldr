@@ -1,30 +1,21 @@
-"""Every lane that builds with soldr must pin which soldr (soldr#1799).
+"""No lane pins soldr; setup-soldr's default is the one pin (soldr#1799).
 
-Historically, setup-soldr defaulted to 0.8.23, which predates
-`3dc25a94 fix(gc): retire automatic target pruning (#1820)` — first released in
-0.8.24. Under 0.8.23 soldr garbage-collects live artifacts out of `target/`
-after every build, so the *next* build recompiles the whole workspace.
+soldr#1799 began as a stale *default*: setup-soldr used to resolve to 0.8.23,
+which garbage-collected live artifacts out of `target/` after every build, so
+every lane recompiled the world and stayed green while running 10-50x slower.
+The first fix pinned `version:` at every call site and kept the pins agreeing.
 
-This was measured, not assumed. From the CI log of a run whose two build steps
-issue byte-identical commands:
+Pins at call sites then became the problem themselves: they lagged releases,
+and an old soldr installed on a shared host (a pinned `uv tool install`, a
+PEP 723 `soldr==` dependency) downgraded every other session or started an old
+daemon that took over `~/.soldr` and locked newer daemons out. So the pin now
+lives in exactly one place -- setup-soldr's own default, which its ingest
+workflow bumps to the current release on every soldr release -- and every call
+site and bootstrap here takes that default or the latest published release.
 
-    build 1   0 `Compiling` lines                      <- genuinely warm
-              target-gc (after): pruned 91 families, 43.0 MB
-    build 2   163 crate(s) recompiled
-              target-gc (after): pruned 89 families, 41.7 MB
-
-The tell is the second prune reclaiming the same amount again. Genuinely stale
-families would collapse to ~0 on the second pass; instead build 2 recreated
-what gc had just deleted and gc deleted it again. Steady-state loop.
-
-Nothing fails when this happens. The lane is green and merely 10-50x slower,
-forever, which is precisely the #1799 symptom and precisely why it survived
-this long. There is corroborating evidence in the tree that it was felt but not
-traced: the dylint steps in `ci.yml` carry `SOLDR_NO_GC_TARGET: "1"` with a
-comment blaming "v0.8.23, whose post-command target pruning can remove Dylint's
-cdylib" — a local workaround for the global bug.
-
-So: pin the version at every call site that builds, and keep them agreeing.
+This file guards the policy: no `version:` at a setup-soldr call site (except
+a named, frozen experiment), and no `soldr==X.Y.Z` in the non-action
+bootstraps.
 """
 
 from __future__ import annotations
@@ -42,17 +33,10 @@ WORKFLOWS = sorted(
 USES = re.compile(r"^(\s*)uses:\s*zackees/setup-soldr@")
 VERSION = re.compile(r"\s*version:\s*(\S+)")
 
-# Call sites that must NOT be pinned, and why. Each entry is load-bearing: an
-# unexplained absence from this list is what the test is looking for.
+# Call sites that may pin, and why. Each entry is load-bearing.
 EXEMPT = {
-    # This workflow exists to test the action itself, so it has to exercise the
-    # action's own default. Pinning it would make it stop testing the thing it
-    # is named for.
-    "setup-soldr-action.yml": "tests the action's default resolution",
-    # A measurement baseline, pinned to 0.7.28 on purpose so the cache-delta
-    # numbers stay comparable across runs. It is pinned, just not to our
-    # version, so it is exempt from the agreement check rather than from
-    # pinning.
+    # A measurement baseline, frozen at 0.7.28 on purpose so the cache-delta
+    # numbers stay comparable across runs. It is an experiment, not a lane.
     "cache-delta-experiment.yml": "0.7.28 experiment baseline",
 }
 
@@ -82,31 +66,34 @@ def _call_sites() -> "list[tuple[str, int, str | None]]":
     return sites
 
 
-def test_every_building_call_site_pins_a_version() -> None:
-    unpinned = [
-        f"{name}:{line}"
+def test_no_call_site_pins_a_version() -> None:
+    pinned = [
+        f"{name}:{line} ({version})"
         for name, line, version in _call_sites()
-        if version is None and name not in EXEMPT
+        if version is not None and name not in EXEMPT
     ]
-    assert not unpinned, (
-        "these setup-soldr call sites take the action's default version, which "
-        "GCs live target/ artifacts and makes every build recompile the world "
-        "(soldr#1799): " + ", ".join(unpinned) + ". Pin `version:`, or add the "
-        "workflow to EXEMPT in this file with the reason."
+    assert not pinned, (
+        "these setup-soldr call sites pin `version:`; take the action's "
+        "default instead -- setup-soldr's default is the one soldr pin: "
+        + ", ".join(pinned)
     )
 
 
-def test_pinned_versions_agree() -> None:
-    versions: dict[str, list[str]] = {}
-    for name, line, version in _call_sites():
-        if version is None or name in EXEMPT:
-            continue
-        versions.setdefault(version, []).append(f"{name}:{line}")
-    assert len(versions) <= 1, (
-        "lanes are building with different soldr versions, so a cache or "
-        "behaviour difference between them is unattributable: "
-        + "; ".join(f"{v} at {', '.join(w)}" for v, w in sorted(versions.items()))
+def test_non_action_bootstraps_install_the_latest_release() -> None:
+    root = Path(__file__).resolve().parents[1]
+    for relative in (
+        "ci/win_wheel_local.py",
+        "ci/docker-aarch64-windows-msvc-cross/Dockerfile",
+        "docker/cook-shared-cache/Dockerfile",
+        ".github/workflows/docker-linux-cross-smoke.yml",
+        ".github/workflows/build-all-from-linux.yml",
+    ):
+        text = (root / relative).read_text(encoding="utf-8")
+        assert not re.search(r"soldr==\d", text), f"{relative} pins soldr"
+    build_all = (root / ".github/workflows/build-all-from-linux.yml").read_text(
+        encoding="utf-8"
     )
+    assert 'default: ""' in build_all, "build-all-from-linux must default to latest"
 
 
 def test_every_setup_soldr_call_disables_cook_delta() -> None:
@@ -138,36 +125,6 @@ def test_every_setup_soldr_call_disables_cook_delta() -> None:
         "archives out of the shared cook-layer budget (soldr#3347 / "
         "setup-soldr#528): " + ", ".join(missing_or_enabled)
     )
-
-
-def test_the_pin_is_new_enough_for_catalogue_v2() -> None:
-    for name, line, version in _call_sites():
-        if version is None or name in EXEMPT:
-            continue
-        parts = tuple(int(p) for p in version.split("."))
-        assert parts >= (0, 9, 5), (
-            f"{name}:{line} pins soldr {version}, which predates catalogue v2. "
-            "The live non-LFS publication intentionally has no catalogue.v1.json."
-        )
-
-
-def test_non_action_bootstraps_are_catalogue_v2_capable() -> None:
-    root = Path(__file__).resolve().parents[1]
-    expected = "0.9.6"
-    assert f'SOLDR_VERSION = "{expected}"' in (
-        root / "ci/win_wheel_local.py"
-    ).read_text(encoding="utf-8")
-    assert f"ENV SOLDR_VERSION={expected}" in (
-        root / "ci/docker-aarch64-windows-msvc-cross/Dockerfile"
-    ).read_text(encoding="utf-8")
-    assert f"soldr=={expected}" in (
-        root / ".github/workflows/docker-linux-cross-smoke.yml"
-    ).read_text(encoding="utf-8")
-    build_all = (root / ".github/workflows/build-all-from-linux.yml").read_text(
-        encoding="utf-8"
-    )
-    assert f'default: "{expected}"' in build_all
-    assert f"inputs.soldr_version || '{expected}'" in build_all
 
 
 def test_pep517_backend_requirement_is_a_floor_not_a_pin() -> None:

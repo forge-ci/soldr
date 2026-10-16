@@ -239,7 +239,7 @@ mod status_retry_tests {
             compile_backend: crate::daemon::protocol::COMPILE_BACKEND_EMBEDDED.to_string(),
             compile_jobs: 1,
             compile_jobs_source: "test".to_string(),
-            in_flight_compiles: 0,
+            in_flight_compiles: Some(0),
         }
     }
 

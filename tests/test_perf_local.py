@@ -28,65 +28,23 @@ def test_docker_context_is_small_because_image_copies_no_source() -> None:
     assert perf_local.DOCKER_CONTEXT == "docker/cook-shared-cache"
 
 
-def test_docker_image_bootstraps_with_amalgamation_safe_published_soldr() -> None:
+def test_docker_image_bootstraps_with_the_latest_published_soldr() -> None:
+    """Only setup-soldr's default pins soldr; the perf image takes the latest."""
     dockerfile = (Path(__file__).parents[1] / perf_local.DOCKERFILE).read_text(
         encoding="utf-8"
     )
 
-    bootstrap = re.search(
-        r"^ARG SOLDR_BOOTSTRAP_VERSION=(\d+)\.(\d+)\.(\d+)$", dockerfile, re.M
-    )
-    assert bootstrap, (
-        "Docker bootstrap version must remain an explicit published SemVer pin"
-    )
-    version = tuple(map(int, bootstrap.groups()))
-    assert version >= (0, 9, 6), (
-        "Soldr 0.9.6 is the minimum bootstrap carrying zccache's "
-        "amalgamation-exclusive admission gate; older bootstraps can OOM an 8 GiB runner"
-    )
-    assert version == (
-        0,
-        9,
-        21,
-    ), "keep the bootstrap on the repository's current published release"
-    assert '"soldr==${SOLDR_BOOTSTRAP_VERSION}"' in dockerfile
-    assert "/opt/soldr-bootstrap/bin/soldr --version" in dockerfile
+    assert "SOLDR_BOOTSTRAP_VERSION" not in dockerfile
+    assert not re.search(r"soldr==\d", dockerfile), "the bootstrap must not pin soldr"
     assert (
-        'ENV SOLDR_CACHE_DIR="/root/.soldr/bootstrap-v${SOLDR_BOOTSTRAP_VERSION}"'
+        "/opt/soldr-bootstrap/bin/pip install --disable-pip-version-check soldr"
         in dockerfile
-    ), (
-        "The persistent bootstrap cache/runtime root must be scoped by the explicit "
-        "published bootstrap version, so a retained older daemon cannot service it."
     )
-
-    # soldr#2930: the blessed default LinkerChoice::Fast on Linux without
-    # `reld` on PATH resolves to a driver shim that execs clang
-    # (`exec clang -fuse-ld=lld "$@"`), so the apt layer must install both
-    # clang and lld or every link in the image fails with `clang: not found`.
-    apt_install = re.search(
-        r"apt-get install -y --no-install-recommends(.*?)&& rm -rf",
-        dockerfile,
-        re.S,
+    assert "/opt/soldr-bootstrap/bin/soldr --version" in dockerfile
+    assert 'ENV SOLDR_CACHE_DIR="/root/.soldr/bootstrap"' in dockerfile, (
+        "The bootstrap's daemon/cache state keeps its own root on the persistent "
+        "volume, apart from the runner's warm roots."
     )
-    assert apt_install, "expected an apt-get install block in the Dockerfile"
-    packages = set(apt_install.group(1).split())
-    assert "clang" in packages, "clang is required by the Fast linker shim (#2930)"
-    assert "lld" in packages, "lld is required by the Fast linker shim (#2930)"
-
-    for profile in (
-        "DEV",
-        "TEST",
-        "RELEASE",
-        "BENCH",
-        "CI_BOOTSTRAP",
-        "CI_RELEASE",
-        "CI_NEXTEST",
-    ):
-        assert f"CARGO_PROFILE_{profile}_OPT_LEVEL=0" in dockerfile
-        assert f"CARGO_PROFILE_{profile}_LTO=false" in dockerfile
-        assert f"CARGO_PROFILE_{profile}_CODEGEN_UNITS=256" in dockerfile
-        assert f"CARGO_PROFILE_{profile}_INCREMENTAL=true" in dockerfile
-        assert f"CARGO_PROFILE_{profile}_DEBUG=0" in dockerfile
 
 
 def test_bosn_workspace_test_hands_off_from_bootstrap_to_source() -> None:

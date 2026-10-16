@@ -60,7 +60,10 @@ pub(crate) fn render(info: &StatusInfo, paths: &SoldrPaths, json: bool) {
         "soldr-daemon: pid={} generation={} uptime={}s requests={} protocol={}",
         info.pid, info.generation, info.uptime_secs, info.request_count, info.version
     );
-    println!("  in-flight compiles: {}", info.in_flight_compiles);
+    match info.in_flight_compiles {
+        Some(count) => println!("  in-flight compiles: {count}"),
+        None => println!("  in-flight compiles: unknown (daemon does not report it)"),
+    }
     println!(
         "  pkg version: {} (this cli: {})",
         claimed_pkg,

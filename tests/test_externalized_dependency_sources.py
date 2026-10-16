@@ -195,15 +195,16 @@ def test_no_manifest_declares_a_path_dependency_on_them() -> None:
     for manifest in workspace_manifests():
         text = manifest.read_text(encoding="utf-8")
         for dep in dependency_specs(text):
-            if (
-                is_externalized(dep.name)
-                and "path" in dep.spec
-                and "_vender" in dep.spec
-            ) or (
+            if "path" not in dep.spec:
+                continue
+            externalized_into_vender = (
+                is_externalized(dep.name) and "_vender" in dep.spec
+            )
+            amalgamation_off_its_vendor_path = (
                 dep.name in VENDORED_AMALGAMATIONS
-                and "path" in dep.spec
                 and f'"{VENDORED_AMALGAMATIONS[dep.name]}"' not in dep.spec
-            ):
+            )
+            if externalized_into_vender or amalgamation_off_its_vendor_path:
                 offenders.append(f"{manifest.relative_to(REPO_ROOT)}: {dep.spec}")
     assert not offenders, "path dependencies reintroduced (soldr#2835):\n" + "\n".join(
         offenders

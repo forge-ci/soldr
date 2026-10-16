@@ -969,7 +969,7 @@ def test_mac_x64_distribution_uses_pinned_setup_soldr_and_the_blessed_build() ->
     assert (
         "uses: zackees/setup-soldr@a07bab94f16124b5c6857b137a237a53a61e06d1" in release
     )
-    assert "version: 0.9.27" in release
+    assert "version: 0.9.27" not in release  # one pin: setup-soldr's default
     assert "cross-targets: ${{ matrix.setup_target }}" in release
     assert "target-wheel-hook" in release
     # soldr#2469 step 2.2: the GitHub gate delegates both release lookup
@@ -1047,7 +1047,7 @@ def test_release_wheels_use_soldr_with_legacy_hooks_for_other_platforms() -> Non
     assert (
         "uses: zackees/setup-soldr@a07bab94f16124b5c6857b137a237a53a61e06d1" in release
     )
-    assert "version: 0.9.27" in release
+    assert "version: 0.9.27" not in release  # one pin: setup-soldr's default
     assert "cross-targets: ${{ matrix.setup_target }}" in release
     assert ".github/scripts/prepare_release_wheel.py" in release
     assert '--runner-os "$RUNNER_OS"' in release

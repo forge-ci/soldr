@@ -227,7 +227,6 @@ jobs:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
           save-cache: ${{ env.ACT && 'true' || 'auto' }}
           cook-delta: false
-          version: 0.9.27
           toolchain: 1.98.1
           # Provision the ci-test Dylint foundation once, separately from
           # the stable source-driver target tree used by the prescribed DAG.

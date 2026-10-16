@@ -82,7 +82,6 @@ jobs:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
           save-cache: ${{ env.ACT && 'true' || 'auto' }}
           cook-delta: false
-          version: 0.9.27
           toolchain: 1.98.1
           cache: false
 

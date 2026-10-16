@@ -187,12 +187,12 @@ max-threads = 2
 # which needs the per-child instrumentation soldr#3152 asks for.
 
 [[profile.default.overrides]]
-filter = '(binary(cache_gc) & test(/^agent_worktree_share::/)) + (binary(daemon) & test(/^(cli_daemon_builds|cli_daemon_flush_caches|cli_daemon_lifecycle|cli_daemon_single_instance|cli_daemon_target_touch|daemon_cache_maintenance|daemon_restart_warmth|daemon_rss_ceiling)::/))'
+filter = '(binary(cache_gc) & test(/^(agent_worktree_share|out_dir_cross_worktree)::/)) + (binary(daemon) & test(/^(cli_daemon_builds|cli_daemon_flush_caches|cli_daemon_lifecycle|cli_daemon_single_instance|cli_daemon_target_touch|daemon_cache_maintenance|daemon_restart_warmth|daemon_rss_ceiling)::/))'
 platform = { target = 'cfg(target_os = "linux")' }
 test-group = 'soldr-cold-start-linux'
 
 [[profile.default.overrides]]
-filter = '(binary(cache_gc) & test(/^agent_worktree_share::/)) + (binary(daemon) & test(/^(cli_daemon_builds|cli_daemon_flush_caches|cli_daemon_lifecycle|cli_daemon_single_instance|cli_daemon_target_touch|daemon_cache_maintenance|daemon_restart_warmth|daemon_rss_ceiling)::/))'
+filter = '(binary(cache_gc) & test(/^(agent_worktree_share|out_dir_cross_worktree)::/)) + (binary(daemon) & test(/^(cli_daemon_builds|cli_daemon_flush_caches|cli_daemon_lifecycle|cli_daemon_single_instance|cli_daemon_target_touch|daemon_cache_maintenance|daemon_restart_warmth|daemon_rss_ceiling)::/))'
 test-group = 'soldr-runtime'
 
 # soldr#3038: `daemon_rss_ceiling` spawns its own broker-owned daemon and

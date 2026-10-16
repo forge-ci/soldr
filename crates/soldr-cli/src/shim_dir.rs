@@ -17,6 +17,7 @@
 //! sees the sentinel and does NOT re-install another shim layer.
 
 use crate::core::{SoldrError, SoldrPaths};
+use std::ffi::OsStr;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
@@ -316,8 +317,19 @@ pub(crate) fn write_trampoline_shim(path: &Path, soldr_bin: &Path) -> Result<(),
 
 /// Apply the shim dir to `command`'s environment so the child sees it
 /// at the front of PATH and inherits the recursion sentinel.
+///
+/// Prepends onto the command's *effective* PATH: its own value when one is
+/// already set, else this process's. Rebuilding from the process PATH alone
+/// discarded every directory an earlier step had put on the command -- the
+/// PEP 517 maturin child lost the linker-shim dir `apply_pep517_override`
+/// prepended, so cargo's bare `-C linker=clang-<digest>` resolved to nothing
+/// and every link failed with "linker `clang-...` not found".
 pub(crate) fn apply_to_command(command: &mut std::process::Command, shim_dir: &Path) {
-    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let existing = command
+        .get_envs()
+        .find(|(key, _)| *key == OsStr::new("PATH"))
+        .map(|(_, value)| value.map(OsStr::to_os_string).unwrap_or_default())
+        .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
     // Build "shim_dir<sep>existing" without copying the OsString — we
     // need OS-specific separators (';' on Windows, ':' elsewhere). The
     // canonical way is `env::join_paths`, but that requires a Vec of
@@ -508,6 +520,25 @@ mod tests {
             path_str.starts_with(&guard.path.to_string_lossy().to_string()),
             "PATH must lead with the shim dir: {path_str}"
         );
+    }
+
+    /// Regression: the PEP 517 maturin child puts the linker-shim dir on its
+    /// PATH before the child shim dir is applied. Applying the shim dir must
+    /// keep that entry, or the bare `-C linker=clang-<digest>` cannot resolve.
+    #[test]
+    fn apply_to_command_keeps_a_path_already_set_on_the_command() {
+        let guard = build_shim_dir().expect("build_shim_dir");
+        let linker_shims = std::env::temp_dir().join("soldr-test-linker-shims");
+        let mut cmd = std::process::Command::new("does-not-matter");
+        cmd.env("PATH", &linker_shims);
+        apply_to_command(&mut cmd, &guard.path);
+        let path = cmd
+            .get_envs()
+            .find(|(key, _)| *key == OsStr::new("PATH"))
+            .and_then(|(_, value)| value)
+            .expect("PATH must be set");
+        let entries: Vec<std::path::PathBuf> = std::env::split_paths(path).collect();
+        assert_eq!(entries, vec![guard.path.clone(), linker_shims]);
     }
 
     #[test]

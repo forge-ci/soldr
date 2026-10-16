@@ -56,7 +56,8 @@
         "cli_gc_report_only",
         "cli_gc_rustup_purge",
         "cli_gc_target",
-        "cook_auto_gc"
+        "cook_auto_gc",
+        "out_dir_cross_worktree"
       ],
       "disposition": "native-linux-once",
       "reason": "These tests use temporary files and child commands to validate portable cache policy and traversal logic; platform-specific delete semantics have their own replay source."

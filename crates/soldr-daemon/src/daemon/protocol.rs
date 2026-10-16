@@ -575,9 +575,11 @@ pub struct StatusInfo {
     #[serde(default)]
     pub compile_jobs_source: String,
     /// soldr#3815: compiles in flight right now. The broker consults this
-    /// before reaping a route whose requesters have exited.
+    /// before reaping a route whose requesters have exited. `None` means the
+    /// daemon did not report it (an image that predates the field): unknown,
+    /// never idle.
     #[serde(default)]
-    pub in_flight_compiles: u32,
+    pub in_flight_compiles: Option<u32>,
 }
 
 /// Canonical `compile_backend` value emitted by the daemon. The
@@ -705,7 +707,7 @@ mod tests {
             compile_backend: COMPILE_BACKEND_EMBEDDED.to_string(),
             compile_jobs: 8,
             compile_jobs_source: "default".to_string(),
-            in_flight_compiles: 0,
+            in_flight_compiles: Some(0),
         };
         assert_eq!(info.cook_stats_or_zero(), CookStats::default());
     }
