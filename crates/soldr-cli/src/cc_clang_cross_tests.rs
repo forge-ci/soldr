@@ -52,9 +52,11 @@ fn msvc_spec_lists_existing_sdk_dirs_only() {
     assert!(spec.config_lines.contains(&"-fuse-ld=lld".to_string()));
 }
 
-#[cfg(unix)]
 #[test]
 fn unix_driver_execs_absolute_clang_then_flags_then_caller_args() {
+    if crate::platform::host::facts::os() == crate::platform::host::facts::HostOs::Windows {
+        return;
+    }
     let body = render_driver(
         Path::new("/llvm/bin/clang"),
         &["--target=x".to_string(), "it's".to_string()],
@@ -64,9 +66,11 @@ fn unix_driver_execs_absolute_clang_then_flags_then_caller_args() {
     assert!(body.ends_with("exec '/llvm/bin/clang' '--target=x' 'it'\\''s' \"$@\"\n"));
 }
 
-#[cfg(unix)]
 #[test]
 fn drivers_are_content_addressed_and_idempotent() {
+    if crate::platform::host::facts::os() == crate::platform::host::facts::HostOs::Windows {
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     let paths = SoldrPaths::with_root(tmp.path().join("root"));
     let bin = tmp.path().join("llvm");
