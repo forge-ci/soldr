@@ -28,11 +28,7 @@ fn fake_llvm_bin() -> tempfile::TempDir {
         .path()
         .join(format!("clang{}", std::env::consts::EXE_SUFFIX));
     std::fs::write(&clang, "#!/bin/sh\nexit 0\n").expect("write clang");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&clang, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    }
+    crate::platform::fs::permissions::make_executable(&clang).expect("chmod");
     dir
 }
 

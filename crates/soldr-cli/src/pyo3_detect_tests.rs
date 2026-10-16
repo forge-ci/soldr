@@ -538,10 +538,12 @@ fn unproven_lock_still_runs_probe() {
     assert_eq!(plan.mode, PlanMode::Unresolved);
 }
 
-#[cfg(unix)]
 #[test]
 fn probe_runs_the_cargo_the_front_door_passed() {
-    use std::os::unix::fs::PermissionsExt;
+    if crate::platform::host::facts::os() == crate::platform::host::facts::HostOs::Windows {
+        // The probe fake is a POSIX shell script; Windows hosts cannot run it.
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     let marker = temp.path().join("ran");
     let cargo = temp.path().join("fake-cargo");
@@ -550,7 +552,7 @@ fn probe_runs_the_cargo_the_front_door_passed() {
         format!("#!/bin/sh\necho \"$@\" > '{}'\nexit 1\n", marker.display()),
     )
     .unwrap();
-    std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::platform::fs::permissions::make_executable(&cargo).unwrap();
 
     let hints = CargoProbeHints {
         cargo: Some(&cargo),

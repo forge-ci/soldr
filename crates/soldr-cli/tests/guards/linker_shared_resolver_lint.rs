@@ -32,14 +32,15 @@ const RESOLVER_CALL_MARKERS: &[&str] = &[
 ];
 
 /// Files that must each call the shared resolver at least once: the cargo
-/// front door's linker injection, the PEP 517 fallback path, `soldr
-/// prepare`'s reld fetch + restore report, and `soldr toolchain
-/// prepare`/`ensure`'s reld fetch.
+/// front door's linker injection, the PEP 517 fallback path, and `soldr
+/// prepare`'s reld fetch + restore report. `soldr toolchain prepare`/`ensure`
+/// no longer resolves the choice itself: since soldr#3802 it provisions through
+/// `cargo_front_door::provision`, which calls the front door's own
+/// `target.rs` linker override, so it reaches the one resolver by delegation.
 const REQUIRED_CALLER_FILES: &[&str] = &[
     "crates/soldr-cli/src/cargo_front_door/target.rs",
     "crates/soldr-cli/src/linker.rs",
     "crates/soldr-cli/src/prepare_cmd.rs",
-    "crates/soldr-cli/src/toolchain_prepare.rs",
 ];
 
 fn repo_root() -> std::path::PathBuf {
