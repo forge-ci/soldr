@@ -60,6 +60,7 @@ mod nested_cargo_guard;
 pub(crate) mod no_cache_detach;
 mod orphan_rmeta;
 mod profile_debug;
+pub(crate) mod provision;
 mod strip_diagnostics;
 mod subcommand;
 mod target;

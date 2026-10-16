@@ -2,9 +2,10 @@
 //!
 //! Split out of `toolchain.rs` to stay under the per-file line ceiling
 //! (soldr#3276): this module owns the "install + components + targets +
-//! plugins + linker" pipeline shared by `prepare` and `ensure`, and the
-//! reld-specific fetch it reports in the `--json` payload.
+//! plugins + build tools" pipeline shared by `prepare` and `ensure`, and the
+//! build-tool provisioning it reports in the `--json` payload.
 
+use crate::cargo_front_door::provision::BuildToolsSummary;
 use crate::core::{SoldrError, SoldrPaths};
 
 use crate::toolchain::{
@@ -20,6 +21,8 @@ pub(crate) struct PrepareSummary {
     pub targets_added: Vec<String>,
     pub plugins_installed: Vec<String>,
     pub linker: Option<LinkerSummary>,
+    /// soldr#3802: what build-tool provisioning did (or why it did nothing).
+    pub build_tools: Option<BuildToolsSummary>,
 }
 
 /// Reported in the `soldr toolchain prepare` / `soldr toolchain ensure`
@@ -85,51 +88,56 @@ pub(crate) fn run_prepare_inner(
         }
     }
 
-    summary.linker = fetch_selected_linker()?;
+    let build_tools = provision_build_tools()?;
+    report_build_tools(&build_tools);
+    summary.linker = build_tools
+        .linker
+        .as_ref()
+        .and_then(|linker| linker.reld.as_ref().map(|path| (linker, path)))
+        .map(|(linker, path)| LinkerSummary {
+            choice: linker.choice.clone(),
+            path: path.clone(),
+            version: crate::fetch::MANAGED_RELD_VERSION.to_string(),
+        });
+    summary.build_tools = Some(build_tools);
 
     Ok((0, summary))
 }
 
-/// Fetch a pinned `reld` when the project explicitly selects it, mirroring
-/// the resolution `soldr cargo`'s front door and `soldr prepare` already
-/// apply (`linker::resolve_project_choice_from_cwd`: env > cargo config >
-/// Cargo.toml metadata > user config). Returns `None` -- no network call --
-/// when reld is not selected.
+/// Provision the build tools a native `soldr cargo build` would fetch
+/// (soldr#3802): the linker driver's managed LLVM and shim, a selected `reld`,
+/// and the managed cmake/ninja. Runs the front door's own functions (see
+/// [`crate::cargo_front_door::provision`]), so prepare and build cannot
+/// disagree. Idempotent: an already-provisioned root does no network work.
 ///
 /// `run_prepare_inner` is sync but is also called from the async
-/// `toolchain ensure` path, so the fetch runs on a dedicated OS thread with
+/// `toolchain ensure` path, so the work runs on a dedicated OS thread with
 /// its own current-thread runtime (a nested `block_on` would panic).
-fn fetch_selected_linker() -> Result<Option<LinkerSummary>, SoldrError> {
+pub(crate) fn provision_build_tools() -> Result<BuildToolsSummary, SoldrError> {
     let paths = SoldrPaths::new()?;
-    let host_triple = crate::core::TargetTriple::host()?.triple();
-    let selection =
-        crate::linker::resolve_project_choice_from_cwd(Some(&host_triple), &paths, false)?;
-    if !selection.needs_reld() {
-        return Ok(None);
-    }
-
-    let fetch_paths = paths.clone();
-    let fetched = std::thread::spawn(move || -> Result<std::path::PathBuf, SoldrError> {
+    std::thread::spawn(move || -> Result<BuildToolsSummary, SoldrError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| {
-                SoldrError::Other(format!("could not create reld fetch runtime: {error}"))
+                SoldrError::Other(format!("could not create build-tool runtime: {error}"))
             })?;
-        runtime.block_on(crate::fetch::ensure_reld(&fetch_paths))
+        runtime.block_on(crate::cargo_front_door::provision::provision_native_build_tools(&paths))
     })
     .join()
-    .map_err(|_| SoldrError::Other("reld fetch thread panicked".to_string()))?;
-    let path = match fetched {
-        Ok(path) => path,
-        Err(error) if selection.is_explicit() => {
-            return Err(crate::linker::reld_fetch_error(error))
-        }
-        Err(_) => return Ok(None),
-    };
-    Ok(Some(LinkerSummary {
-        choice: "reld".to_string(),
-        path: path.to_string_lossy().into_owned(),
-        version: crate::fetch::MANAGED_RELD_VERSION.to_string(),
-    }))
+    .map_err(|_| SoldrError::Other("build-tool provisioning thread panicked".to_string()))?
+}
+
+/// True when build tools may be provisioned without a `rust-toolchain.toml`
+/// channel: the same opt-ins `soldr cargo` accepts (`RUSTUP_TOOLCHAIN`,
+/// `--allow-unpinned` / `SOLDR_ALLOW_UNPINNED`).
+pub(crate) fn unpinned_provisioning_allowed() -> bool {
+    std::env::current_dir()
+        .ok()
+        .is_some_and(|cwd| crate::toolchain::require_toolchain_pin(&cwd).is_ok())
+}
+
+/// Print the report for a finished provisioning step to stderr.
+pub(crate) fn report_build_tools(summary: &BuildToolsSummary) {
+    eprintln!("{}", summary.render());
 }

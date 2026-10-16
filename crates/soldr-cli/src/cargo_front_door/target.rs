@@ -112,6 +112,39 @@ pub(super) async fn apply_linker_override(
     paths: &SoldrPaths,
     dylint_active: bool,
 ) -> Result<(), SoldrError> {
+    apply_linker_override_reporting(command, args, explicit_target, paths, dylint_active)
+        .await
+        .map(|_| ())
+}
+
+/// What [`apply_linker_override_reporting`] did, so `soldr toolchain prepare`
+/// (soldr#3802) can report it without re-deciding anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LinkerOutcome {
+    /// Nothing was selected or fetched; the reason is user-facing.
+    Skipped(&'static str),
+    /// A linker injection was resolved (and its driver/reld provisioned).
+    Applied(AppliedLinker),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AppliedLinker {
+    pub choice: linker::LinkerChoice,
+    pub target: String,
+    pub injection: linker::LinkerInjection,
+    /// The managed `reld` binary, when this choice fetched one.
+    pub reld: Option<std::path::PathBuf>,
+}
+
+/// [`apply_linker_override`] returning the decision it made. Same code path:
+/// the plain function above is a thin wrapper.
+pub(crate) async fn apply_linker_override_reporting(
+    command: &mut std::process::Command,
+    args: &[String],
+    explicit_target: Option<&str>,
+    paths: &SoldrPaths,
+    dylint_active: bool,
+) -> Result<LinkerOutcome, SoldrError> {
     // `Fast` is the automatic/default linker (soldr#3262): it is a best-effort
     // convenience, not a hard requirement. If the triple cannot be detected
     // (e.g. a repo-local fake rustc without rustup, or a non-build command
@@ -133,7 +166,9 @@ pub(super) async fn apply_linker_override(
     )?;
     let choice = selection.choice;
     if matches!(choice, linker::LinkerChoice::Default) {
-        return Ok(());
+        return Ok(LinkerOutcome::Skipped(
+            "no soldr linker selected (default, or the project declares its own linker)",
+        ));
     }
     // soldr#3483 backstop: a Dylint build's linker is its lint library's own
     // `[target.'cfg(all())'] linker = "dylint-link"` declaration — dylint-link
@@ -148,11 +183,15 @@ pub(super) async fn apply_linker_override(
     // `SOLDR_LINKER` is a user decision and still wins, exactly as it does
     // over a project's own config (soldr#3277).
     if dylint_active && !matches!(selection.source, linker::LinkerSource::Env) {
-        return Ok(());
+        return Ok(LinkerOutcome::Skipped("dylint scope uses its own linker"));
     }
     let target = match target_result {
         Ok(target) => target,
-        Err(_) if matches!(choice, linker::LinkerChoice::Fast) => return Ok(()),
+        Err(_) if matches!(choice, linker::LinkerChoice::Fast) => {
+            return Ok(LinkerOutcome::Skipped(
+                "could not detect the host target triple, so the fast linker was not resolved",
+            ))
+        }
         Err(error) => return Err(error),
     };
 
@@ -165,15 +204,22 @@ pub(super) async fn apply_linker_override(
         if let Some(dir) = reld.parent() {
             crate::linker_shim::prepend_command_path(command, dir)?;
         }
-        return Ok(());
+        return Ok(LinkerOutcome::Applied(AppliedLinker {
+            choice,
+            target,
+            injection: linker::LinkerInjection::default(),
+            reld: Some(reld),
+        }));
     }
 
     let mut injection = linker::resolve_for_target(choice, &target)?;
+    let mut reld_path = None;
     if matches!(choice, linker::LinkerChoice::Reld) {
         let reld = crate::fetch::ensure_reld(paths)
             .await
             .map_err(linker::reld_fetch_error)?;
         linker::inject_resolved_reld(&mut injection, &reld)?;
+        reld_path = Some(reld);
     }
     let rustc_lld = crate::linker_shim::rustc_lld::for_command(
         &target,
@@ -183,6 +229,7 @@ pub(super) async fn apply_linker_override(
     );
     linker::materialize_linker_driver_shim_resolving(paths, &target, &mut injection, rustc_lld)
         .await?;
+    let reported = injection.clone();
     let prefix = linker::cargo_target_env_prefix(&target);
     let linker_key = format!("CARGO_TARGET_{prefix}_LINKER");
     let rustflags_key = format!("CARGO_TARGET_{prefix}_RUSTFLAGS");
@@ -202,7 +249,12 @@ pub(super) async fn apply_linker_override(
             command.env(&rustflags_key, rustflags);
         }
     }
-    Ok(())
+    Ok(LinkerOutcome::Applied(AppliedLinker {
+        choice,
+        target,
+        injection: reported,
+        reld: reld_path,
+    }))
 }
 
 /// Synchronous bridge for unit tests that only inspect the command environment.

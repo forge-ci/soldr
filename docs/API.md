@@ -1528,6 +1528,20 @@ pinned, sha256-verified `reld` binary described under the `SOLDR_LINKER` entry
 in the environment variable table below, so the linker is in place before the
 child build starts.
 
+`soldr toolchain prepare`/`ensure` also provision the build tools a native
+`soldr cargo build --release` would fetch inside the build (soldr#3802): the
+linker driver's managed LLVM and shim (exactly when the build would need them,
+so a host whose rustc supplies lld fetches nothing), `reld` when selected, and
+the managed cmake/ninja (skipped when `Cargo.lock` proves no `cmake` crate). It
+runs the front door's own functions, so prepare and build cannot disagree, and
+is idempotent. A report line says what was provisioned, or `nothing provisioned
+(<reason>)`. `--json` adds an optional `build_tools` object (`provisioned`,
+`linker`, `cmake`, `note`; `null` when it did not run); `schema_version` stays
+1. Without a `rust-toolchain.toml` channel the rustup steps are skipped, and the
+build tools are still provisioned under `--allow-unpinned` /
+`RUSTUP_TOOLCHAIN`. The README benchmark runs this before its timed cold build
+and reports it separately as `provision_ms`.
+
 #### `soldr toolchain ensure`
 
 One-shot "make sure this host can build" verb (issue #407 Phase 2):

@@ -72,7 +72,9 @@ NEW_LINE="$(
                     scenario_key,
                     tool,
                     wall_ms,
-                    cache_bytes
+                    cache_bytes,
+                    provision_ms,
+                    provision_bytes
                 }
             ]
         }'
@@ -173,7 +175,7 @@ jq -n \
                     ts: "ISO-8601 UTC timestamp of the run",
                     sha: "git sha of the main-commit being measured",
                     canaries: "object mapping canary name -> wall-time milliseconds",
-                    comparison: "array of compact README comparison rows: benchmark, fixture, scenario_key, tool, wall_ms, cache_bytes"
+                    comparison: "array of compact README comparison rows: benchmark, fixture, scenario_key, tool, wall_ms, cache_bytes, provision_ms, provision_bytes (the last two null except soldr cold, soldr#3802)"
                 }
             },
             index_html: {

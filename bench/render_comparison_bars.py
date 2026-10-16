@@ -123,6 +123,20 @@ def seconds_label(ms: Any) -> str:
     return f"{seconds:.3f}s"
 
 
+def provision_annotation(row: ComparisonResult | None) -> str | None:
+    """Return "+provision X s" for a cold row that pre-provisioned its tools (soldr#3802).
+
+    None when the row has no provisioning cost (bare cargo, sccache, or a result
+    written before ``provision_ms`` existed), so older history still renders.
+    """
+    if row is None:
+        return None
+    ms = row.provision_ms
+    if not isinstance(ms, (int, float)) or ms <= 0:
+        return None
+    return f"+provision {seconds_label(ms)}"
+
+
 def bytes_label(value: Any) -> str:
     if not isinstance(value, (int, float)) or value < 0:
         return "n/a"
@@ -451,6 +465,15 @@ def render_benchmark(doc: ComparisonDocument, benchmark: str) -> Path:
                     else "#6e7681"
                 ),
             )
+            provision_note = provision_annotation(cold_row)
+            if provision_note:
+                canvas.text(
+                    bar_x0,
+                    row_y + 45,
+                    f"cold excludes one-time tool setup: {provision_note}",
+                    font=small_font,
+                    fill=colors.warm,
+                )
             cache_value = warm_row.cache_bytes if warm_row else None
             canvas.text(
                 bar_x1 + 12,

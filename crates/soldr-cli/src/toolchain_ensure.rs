@@ -11,6 +11,7 @@ use serde::Serialize;
 use std::io::Write;
 use std::time::Instant;
 
+use crate::cargo_front_door::provision::BuildToolsSummary;
 use crate::core::{
     command_output_with_timeout, suppress_windows_console_window, RustToolchainManifest,
     SoldrError, SoldrPaths,
@@ -34,6 +35,12 @@ pub(crate) struct ToolchainEnsureOutput {
     /// project selects it (`SOLDR_LINKER=reld` or `linker = "reld"` in
     /// `config.toml`), `null` otherwise. Does not bump `schema_version`.
     pub linker: Option<LinkerSummary>,
+    /// Additive (soldr#3802): what build-tool provisioning did -- the linker
+    /// driver, `reld` and managed cmake/ninja a native `soldr cargo build`
+    /// would fetch -- or why it did nothing (`provisioned: false` + `note`).
+    /// `null` when provisioning did not run (no pin and no opt-in). Does not
+    /// bump `schema_version`.
+    pub build_tools: Option<BuildToolsSummary>,
     pub smoke_verify: SmokeVerify,
     pub elapsed_ms: u128,
     /// Additive (soldr#3693): set when an early step (bootstrap, manifest
@@ -53,6 +60,7 @@ impl ToolchainEnsureOutput {
             targets_added: Vec::new(),
             plugins_installed: Vec::new(),
             linker: None,
+            build_tools: None,
             smoke_verify: SmokeVerify::default(),
             elapsed_ms: 0,
             error: None,
@@ -110,6 +118,7 @@ pub(crate) async fn run_toolchain_ensure(json: bool) -> Result<i32, SoldrError> 
         },
         prepare: &run_prepare_inner,
         smoke: &run_smoke_verify,
+        unpinned_build_tools: &unpinned_build_tools,
     };
     run_ensure_pipeline(json, started, bootstrap, &steps, &mut std::io::stdout())
 }
@@ -123,6 +132,9 @@ pub(crate) struct EnsureSteps<'a> {
     pub load_manifest: &'a dyn Fn() -> Result<RustToolchainManifest, SoldrError>,
     pub prepare: &'a PrepareFn<'a>,
     pub smoke: &'a dyn Fn(&[String]) -> Result<SmokeVerify, SoldrError>,
+    /// Build-tool provisioning when no channel is declared; `None` when the
+    /// caller did not opt into an unpinned build.
+    pub unpinned_build_tools: &'a dyn Fn() -> Result<Option<BuildToolsSummary>, SoldrError>,
 }
 
 /// Runs the ensure pipeline after bootstrap. In `--json` mode an early error
@@ -176,6 +188,12 @@ fn ensure_steps(
     partial.targets_added = prepare_summary.targets_added;
     partial.plugins_installed = prepare_summary.plugins_installed;
     partial.linker = prepare_summary.linker;
+    partial.build_tools = prepare_summary.build_tools;
+    if manifest.channel.is_none() {
+        // soldr#3802: no rustup work without a pin, but build tools are still
+        // provisionable under an unpinned opt-in.
+        partial.build_tools = (steps.unpinned_build_tools)()?;
+    }
 
     // 4. If prepare reported a non-zero exit, surface it without running
     //    smoke verify (the toolchain is already broken).
@@ -244,6 +262,15 @@ async fn bootstrap_rustup_if_missing() -> Result<bool, SoldrError> {
         // will surface the standard "rustup not found" message.
         crate::fetch::AutoBootstrapOutcome::OptedOut => Ok(false),
     }
+}
+
+fn unpinned_build_tools() -> Result<Option<BuildToolsSummary>, SoldrError> {
+    if !crate::toolchain_prepare::unpinned_provisioning_allowed() {
+        return Ok(None);
+    }
+    let summary = crate::toolchain_prepare::provision_build_tools()?;
+    crate::toolchain_prepare::report_build_tools(&summary);
+    Ok(Some(summary))
 }
 
 fn run_smoke_verify(declared_targets: &[String]) -> Result<SmokeVerify, SoldrError> {
@@ -381,6 +408,7 @@ mod tests {
             targets_added: vec![],
             plugins_installed: vec!["cargo-nextest@0.9".to_string()],
             linker: None,
+            build_tools: None,
             smoke_verify: SmokeVerify {
                 cargo_version: Some("cargo 1.94.1".to_string()),
                 rustc_version: Some("rustc 1.94.1".to_string()),
@@ -416,6 +444,7 @@ mod tests {
                 path: "/home/user/.soldr/bin/reld-0.1.0/reld".to_string(),
                 version: "0.1.0".to_string(),
             }),
+            build_tools: None,
             smoke_verify: SmokeVerify {
                 cargo_version: Some("cargo 1.94.1".to_string()),
                 rustc_version: Some("rustc 1.94.1".to_string()),
@@ -433,6 +462,7 @@ mod tests {
 
         let without_linker = ToolchainEnsureOutput {
             linker: None,
+            build_tools: None,
             ..without_linker_defaults()
         };
         let json = serde_json::to_string(&without_linker).expect("serialise");
@@ -458,6 +488,7 @@ mod tests {
                 ))
             },
             smoke: &|_| panic!("smoke verify must not run after prepare error"),
+            unpinned_build_tools: &|| Ok(None),
         };
         let mut out = Vec::new();
         let code = run_ensure_pipeline(true, Instant::now(), Ok(false), &steps, &mut out)
@@ -480,6 +511,7 @@ mod tests {
             load_manifest: &|| panic!("manifest must not be read after bootstrap error"),
             prepare: &|_, _| panic!("prepare must not run"),
             smoke: &|_| panic!("smoke must not run"),
+            unpinned_build_tools: &|| Ok(None),
         };
         let mut out = Vec::new();
         let code = run_ensure_pipeline(
@@ -497,6 +529,62 @@ mod tests {
         assert!(parsed["error"].as_str().unwrap().contains("rustup-init"));
     }
 
+    /// soldr#3802: the additive `build_tools` key is `null` when provisioning
+    /// did not run, and an object (with an explicit "nothing provisioned"
+    /// shape) when it did. `schema_version` stays 1 and every prior key stays.
+    #[test]
+    fn build_tools_key_is_additive_null_or_object() {
+        let absent = serde_json::to_string(&without_linker_defaults()).expect("serialise");
+        let parsed: Value = serde_json::from_str(&absent).expect("parse");
+        assert!(parsed["build_tools"].is_null());
+        assert!(absent.contains("\"build_tools\":null"));
+        assert_eq!(parsed["schema_version"], Value::from(1));
+
+        let nothing = ToolchainEnsureOutput {
+            build_tools: Some(BuildToolsSummary {
+                provisioned: false,
+                linker: None,
+                cmake: false,
+                note: Some("linker: no soldr linker selected".to_string()),
+            }),
+            ..without_linker_defaults()
+        };
+        let parsed: Value =
+            serde_json::from_str(&serde_json::to_string(&nothing).expect("serialise"))
+                .expect("parse");
+        assert_eq!(parsed["build_tools"]["provisioned"], Value::from(false));
+        assert_eq!(parsed["build_tools"]["cmake"], Value::from(false));
+        assert!(parsed["build_tools"]["linker"].is_null());
+        assert!(parsed["build_tools"]["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("no soldr linker")));
+        assert!(parsed["linker"].is_null(), "the reld key is untouched");
+    }
+
+    /// Without a channel the ensure pipeline still provisions build tools
+    /// when the caller opted into an unpinned build (soldr#3802).
+    #[test]
+    fn ensure_without_channel_reports_unpinned_build_tools() {
+        let steps = EnsureSteps {
+            load_manifest: &|| Ok(RustToolchainManifest::default()),
+            prepare: &|_, _| panic!("no channel, no prepare"),
+            smoke: &|_| panic!("no channel, no smoke"),
+            unpinned_build_tools: &|| {
+                Ok(Some(BuildToolsSummary {
+                    provisioned: true,
+                    cmake: true,
+                    ..BuildToolsSummary::default()
+                }))
+            },
+        };
+        let mut out = Vec::new();
+        let code = run_ensure_pipeline(true, Instant::now(), Ok(false), &steps, &mut out)
+            .expect("pipeline");
+        assert_eq!(code, 0);
+        let parsed: Value = serde_json::from_slice(&out).expect("json");
+        assert_eq!(parsed["build_tools"]["cmake"], Value::from(true));
+    }
+
     fn without_linker_defaults() -> ToolchainEnsureOutput {
         ToolchainEnsureOutput {
             schema_version: SCHEMA_VERSION,
@@ -506,6 +594,7 @@ mod tests {
             targets_added: vec![],
             plugins_installed: vec![],
             linker: None,
+            build_tools: None,
             smoke_verify: SmokeVerify::default(),
             elapsed_ms: 0,
             error: None,

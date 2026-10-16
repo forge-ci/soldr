@@ -60,9 +60,13 @@ append_result() {
     local wall_ms="$9"
     local cache_bytes="${10}"
     local project_path="${11}"
+    # soldr#3802: one-time tool provisioning, timed outside wall_ms. JSON null
+    # for bare cargo / sccache and for every non-cold scenario.
+    local provision_ms="${12:-null}"
+    local provision_bytes="${13:-null}"
 
     cat >>"${RESULTS_JSONL}" <<EOF
-{"benchmark":$(json_escape "$benchmark"),"fixture":$(json_escape "$fixture"),"scenario_key":$(json_escape "$scenario_key"),"scenario":$(json_escape "$scenario"),"mode":$(json_escape "$mode"),"tool":$(json_escape "$tool"),"tool_label":$(json_escape "$tool_label"),"command":$(json_escape "$command_text"),"wall_ms":${wall_ms},"cache_bytes":${cache_bytes},"cache_scope":$(json_escape "tool-isolated-after-measured-run"),"project_path":$(json_escape "$project_path")}
+{"benchmark":$(json_escape "$benchmark"),"fixture":$(json_escape "$fixture"),"scenario_key":$(json_escape "$scenario_key"),"scenario":$(json_escape "$scenario"),"mode":$(json_escape "$mode"),"tool":$(json_escape "$tool"),"tool_label":$(json_escape "$tool_label"),"command":$(json_escape "$command_text"),"wall_ms":${wall_ms},"cache_bytes":${cache_bytes},"provision_ms":${provision_ms},"provision_bytes":${provision_bytes},"cache_scope":$(json_escape "tool-isolated-after-measured-run"),"project_path":$(json_escape "$project_path")}
 EOF
 }
 
@@ -183,6 +187,23 @@ run_build() {
     esac
 }
 
+# soldr#3802: pay soldr's one-time tool provisioning (linker-driver LLVM, shims,
+# cmake/ninja) before the timed build, under the IDENTICAL env run_build uses
+# (same SOLDR_CACHE_DIR, CARGO_TARGET_DIR and PATH) so the build finds exactly
+# what prepare put there. The compile cache stays empty: prepare starts no daemon.
+run_prepare() {
+    local project="$1"
+    local cache_dir="$2"
+    local target_dir="$3"
+    local unpinned=()
+    if [[ ! -f "${project}/rust-toolchain.toml" && ! -f "${project}/rust-toolchain" ]]; then
+        unpinned=(--allow-unpinned)
+    fi
+    mkdir -p "${cache_dir}"
+    measure::register_soldr_root "${WORK_DIR}" "${cache_dir}"
+    (cd "${project}" && SOLDR_CACHE_DIR="${cache_dir}" CARGO_TARGET_DIR="${target_dir}" run_with_timeout "${COMPARISON_BUILD_TIMEOUT_SECONDS}" soldr ${unpinned[@]+"${unpinned[@]}"} toolchain prepare)
+}
+
 clean_project() {
     local project="$1"
     local target_dir="$2"
@@ -190,12 +211,16 @@ clean_project() {
     rm -rf "${target_dir}"
 }
 
+# Prints "<wall_ms> <cache_bytes> <provision_ms> <provision_bytes>"; the last
+# two are "null" except for soldr, whose tools are pre-provisioned (soldr#3802).
 measure_cold() {
     local benchmark="$1"
     local fixture="$2"
     local tool="$3"
     local samples=()
     local cache_bytes=0
+    local provision_ms=null
+    local provision_bytes=null
     for idx in 1; do
         local cell="${WORK_DIR}/${benchmark}/cold/${tool}/${idx}"
         local project cache target ms
@@ -203,11 +228,20 @@ measure_cold() {
         project="${CREATED_PROJECT}"
         cache="${cell}/cache"
         target="${cell}/target"
+        if [[ "${tool}" == "soldr" ]]; then
+            provision_ms="$(measure_command "${benchmark} cold ${tool} provision ${idx}" run_prepare "${project}" "${cache}" "${target}")"
+            provision_bytes="$(dir_size_bytes "${cache}")"
+        fi
         ms="$(measure_command "${benchmark} cold ${tool} sample ${idx}" run_build "${tool}" "${project}" "${cache}" "${target}")"
         samples+=("${ms}")
         cache_bytes="$(dir_size_bytes "${cache}")"
+        if [[ "${provision_bytes}" != "null" ]]; then
+            # The root after the build still holds the provisioned tools; report
+            # only what the build itself added so cache_bytes is not inflated.
+            cache_bytes=$(( cache_bytes > provision_bytes ? cache_bytes - provision_bytes : 0 ))
+        fi
     done
-    printf '%s %s\n' "$(median_ms "${samples[@]}")" "${cache_bytes}"
+    printf '%s %s %s %s\n' "$(median_ms "${samples[@]}")" "${cache_bytes}" "${provision_ms}" "${provision_bytes}"
 }
 
 measure_warm() {
@@ -267,8 +301,8 @@ for benchmark in rust-only rust-c; do
         label="$(tool_label "${tool}")"
         command="$(command_text "${tool}")"
 
-        read -r ms cache_bytes < <(measure_cold "${benchmark}" "${fixture}" "${tool}")
-        append_result "${benchmark}" "${fixture}" "cold" "Cold build" "cold" "${tool}" "${label}" "${command}" "${ms}" "${cache_bytes}" "single-sample"
+        read -r ms cache_bytes provision_ms provision_bytes < <(measure_cold "${benchmark}" "${fixture}" "${tool}")
+        append_result "${benchmark}" "${fixture}" "cold" "Cold build (tools pre-provisioned)" "cold" "${tool}" "${label}" "${command}" "${ms}" "${cache_bytes}" "single-sample" "${provision_ms}" "${provision_bytes}"
 
         read -r ms cache_bytes < <(measure_warm "${benchmark}" "${fixture}" "${tool}")
         append_result "${benchmark}" "${fixture}" "warm" "Clean-target rebuild (same workspace; warm compiler cache)" "warm" "${tool}" "${label}" "${command}" "${ms}" "${cache_bytes}" "single-sample"
@@ -295,7 +329,7 @@ jq -s \
         sccache_version: $sccache_version,
         schema_version: 2,
         scenarios: [
-            {key: "cold", label: "Cold build", samples: 1},
+            {key: "cold", label: "Cold build (tools pre-provisioned)", samples: 1},
             {key: "warm", label: "Clean-target rebuild (same workspace; warm compiler cache)", samples: 1},
             {key: "worktree-share", label: "Agent worktree / parent-child share", samples: 1}
         ],
