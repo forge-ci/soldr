@@ -33,8 +33,58 @@ pub(crate) struct BuildToolsSummary {
     pub provisioned: bool,
     pub linker: Option<BuildToolsLinker>,
     pub cmake: bool,
+    /// soldr#3806: what `soldr cc --target <T>` needs, when `--target` was
+    /// given. Absent otherwise, so existing consumers see no new key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross: Option<CrossToolsSummary>,
     /// Why nothing (or only part) was provisioned. `None` when both steps ran.
     pub note: Option<String>,
+}
+
+/// The compiler toolchain `soldr cc --target <target>` exposes: the same paths
+/// `--print-cc/--print-cxx/--print-ar/--print-linker/--print-sysroot` print.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CrossToolsSummary {
+    /// Canonical Rust triple.
+    pub target: String,
+    /// The managed LLVM (or GCC) bin directory.
+    pub bin_dir: String,
+    /// The Apple SDK / xwin root / sysroot, when the target has one.
+    pub sysroot: Option<String>,
+    pub cc: String,
+    pub cxx: String,
+    pub ar: String,
+    pub linker: String,
+}
+
+impl CrossToolsSummary {
+    pub(crate) fn render(&self) -> String {
+        format!(
+            "soldr: cc toolchain ready for {}: cc {} sysroot {}",
+            self.target,
+            self.cc,
+            self.sysroot.as_deref().unwrap_or("(none)")
+        )
+    }
+}
+
+/// Provision and describe what `soldr cc --target <target>` runs.
+pub(crate) async fn provision_cross_tools(
+    paths: &SoldrPaths,
+    target: &str,
+) -> Result<CrossToolsSummary, SoldrError> {
+    let (triple, tools) =
+        crate::cc_cmd::prepare_for_target(paths, target, crate::cc_cmd::Language::C).await?;
+    let text = |path: &std::path::Path| path.to_string_lossy().into_owned();
+    Ok(CrossToolsSummary {
+        target: triple,
+        bin_dir: text(&tools.bin_dir),
+        sysroot: tools.sysroot.as_deref().map(text),
+        cc: text(&tools.cc),
+        cxx: text(&tools.cxx),
+        ar: text(&tools.ar),
+        linker: text(&tools.linker),
+    })
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]

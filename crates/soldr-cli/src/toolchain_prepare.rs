@@ -5,7 +5,7 @@
 //! plugins + build tools" pipeline shared by `prepare` and `ensure`, and the
 //! build-tool provisioning it reports in the `--json` payload.
 
-use crate::cargo_front_door::provision::BuildToolsSummary;
+use crate::cargo_front_door::provision::{BuildToolsSummary, CrossToolsSummary};
 use crate::core::{SoldrError, SoldrPaths};
 
 use crate::toolchain::{
@@ -114,14 +114,35 @@ pub(crate) fn run_prepare_inner(
 /// its own current-thread runtime (a nested `block_on` would panic).
 pub(crate) fn provision_build_tools() -> Result<BuildToolsSummary, SoldrError> {
     let paths = SoldrPaths::new()?;
-    std::thread::spawn(move || -> Result<BuildToolsSummary, SoldrError> {
+    block_on_thread(async move {
+        crate::cargo_front_door::provision::provision_native_build_tools(&paths).await
+    })
+}
+
+/// Provision what `soldr cc --target <target>` needs (soldr#3806): the managed
+/// LLVM plus the Apple SDK / xwin SDK / sysroot, through the same
+/// `cc_cmd::prepare_for_target` the compiler driver runs.
+pub(crate) fn provision_cross_target(target: &str) -> Result<CrossToolsSummary, SoldrError> {
+    let paths = SoldrPaths::new()?;
+    let target = target.to_string();
+    block_on_thread(async move {
+        crate::cargo_front_door::provision::provision_cross_tools(&paths, &target).await
+    })
+}
+
+fn block_on_thread<T, F>(future: F) -> Result<T, SoldrError>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = Result<T, SoldrError>> + Send + 'static,
+{
+    std::thread::spawn(move || -> Result<T, SoldrError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| {
                 SoldrError::Other(format!("could not create build-tool runtime: {error}"))
             })?;
-        runtime.block_on(crate::cargo_front_door::provision::provision_native_build_tools(&paths))
+        runtime.block_on(future)
     })
     .join()
     .map_err(|_| SoldrError::Other("build-tool provisioning thread panicked".to_string()))?

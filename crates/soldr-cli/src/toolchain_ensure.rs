@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::io::Write;
 use std::time::Instant;
 
-use crate::cargo_front_door::provision::BuildToolsSummary;
+use crate::cargo_front_door::provision::{BuildToolsSummary, CrossToolsSummary};
 use crate::core::{
     command_output_with_timeout, suppress_windows_console_window, RustToolchainManifest,
     SoldrError, SoldrPaths,
@@ -85,7 +85,10 @@ pub(crate) struct SmokeVerify {
 /// underlying `prepare` pipeline reported a non-zero rustup / cargo
 /// exit. In `--json` mode the JSON payload is emitted unconditionally
 /// (even on smoke-verify failure) so the consumer can introspect.
-pub(crate) async fn run_toolchain_ensure(json: bool) -> Result<i32, SoldrError> {
+pub(crate) async fn run_toolchain_ensure(
+    json: bool,
+    target: Option<String>,
+) -> Result<i32, SoldrError> {
     let started = Instant::now();
 
     // soldr#2892: in `--json` this process's stdout IS the payload, and the
@@ -119,6 +122,12 @@ pub(crate) async fn run_toolchain_ensure(json: bool) -> Result<i32, SoldrError> 
         prepare: &run_prepare_inner,
         smoke: &run_smoke_verify,
         unpinned_build_tools: &unpinned_build_tools,
+        cross_tools: &|| {
+            target
+                .as_deref()
+                .map(crate::toolchain_prepare::provision_cross_target)
+                .transpose()
+        },
     };
     run_ensure_pipeline(json, started, bootstrap, &steps, &mut std::io::stdout())
 }
@@ -135,6 +144,9 @@ pub(crate) struct EnsureSteps<'a> {
     /// Build-tool provisioning when no channel is declared; `None` when the
     /// caller did not opt into an unpinned build.
     pub unpinned_build_tools: &'a dyn Fn() -> Result<Option<BuildToolsSummary>, SoldrError>,
+    /// soldr#3806: provisions what `soldr cc --target` needs; `None` without
+    /// `--target`.
+    pub cross_tools: &'a dyn Fn() -> Result<Option<CrossToolsSummary>, SoldrError>,
 }
 
 /// Runs the ensure pipeline after bootstrap. In `--json` mode an early error
@@ -193,6 +205,15 @@ fn ensure_steps(
         // soldr#3802: no rustup work without a pin, but build tools are still
         // provisionable under an unpinned opt-in.
         partial.build_tools = (steps.unpinned_build_tools)()?;
+    }
+    if let Some(cross) = (steps.cross_tools)()? {
+        eprintln!("{}", cross.render());
+        let tools = partial.build_tools.get_or_insert_with(|| BuildToolsSummary {
+            note: Some("native host build tools not provisioned".to_string()),
+            ..BuildToolsSummary::default()
+        });
+        tools.provisioned = true;
+        tools.cross = Some(cross);
     }
 
     // 4. If prepare reported a non-zero exit, surface it without running
@@ -489,6 +510,7 @@ mod tests {
             },
             smoke: &|_| panic!("smoke verify must not run after prepare error"),
             unpinned_build_tools: &|| Ok(None),
+            cross_tools: &|| Ok(None),
         };
         let mut out = Vec::new();
         let code = run_ensure_pipeline(true, Instant::now(), Ok(false), &steps, &mut out)
@@ -512,6 +534,7 @@ mod tests {
             prepare: &|_, _| panic!("prepare must not run"),
             smoke: &|_| panic!("smoke must not run"),
             unpinned_build_tools: &|| Ok(None),
+            cross_tools: &|| Ok(None),
         };
         let mut out = Vec::new();
         let code = run_ensure_pipeline(
@@ -545,6 +568,7 @@ mod tests {
                 provisioned: false,
                 linker: None,
                 cmake: false,
+                cross: None,
                 note: Some("linker: no soldr linker selected".to_string()),
             }),
             ..without_linker_defaults()
@@ -573,7 +597,38 @@ mod tests {
                 Ok(Some(BuildToolsSummary {
                     provisioned: true,
                     cmake: true,
+                    cross: None,
                     ..BuildToolsSummary::default()
+                }))
+            },
+            cross_tools: &|| Ok(None),
+        };
+        let mut out = Vec::new();
+        let code = run_ensure_pipeline(true, Instant::now(), Ok(false), &steps, &mut out)
+            .expect("pipeline");
+        assert_eq!(code, 0);
+        let parsed: Value = serde_json::from_slice(&out).expect("json");
+        assert_eq!(parsed["build_tools"]["cmake"], Value::from(true));
+    }
+
+    /// soldr#3806: `--target` reports the cc toolchain under the additive
+    /// `build_tools.cross` key; the schema version does not move.
+    #[test]
+    fn ensure_with_target_reports_cross_tools_additively() {
+        let steps = EnsureSteps {
+            load_manifest: &|| Ok(RustToolchainManifest::default()),
+            prepare: &|_, _| panic!("no channel, no prepare"),
+            smoke: &|_| panic!("no channel, no smoke"),
+            unpinned_build_tools: &|| Ok(None),
+            cross_tools: &|| {
+                Ok(Some(CrossToolsSummary {
+                    target: "aarch64-apple-darwin".to_string(),
+                    bin_dir: "/llvm/bin".to_string(),
+                    sysroot: Some("/sdk".to_string()),
+                    cc: "/drv/cc".to_string(),
+                    cxx: "/drv/c++".to_string(),
+                    ar: "/llvm/bin/llvm-ar".to_string(),
+                    linker: "/drv/cc".to_string(),
                 }))
             },
         };
@@ -582,7 +637,20 @@ mod tests {
             .expect("pipeline");
         assert_eq!(code, 0);
         let parsed: Value = serde_json::from_slice(&out).expect("json");
-        assert_eq!(parsed["build_tools"]["cmake"], Value::from(true));
+        assert_eq!(parsed["schema_version"], Value::from(1));
+        let cross = &parsed["build_tools"]["cross"];
+        assert_eq!(cross["target"], Value::from("aarch64-apple-darwin"));
+        assert_eq!(cross["sysroot"], Value::from("/sdk"));
+        assert_eq!(cross["cc"], Value::from("/drv/cc"));
+        assert_eq!(parsed["build_tools"]["provisioned"], Value::from(true));
+    }
+
+    /// Without `--target` the payload has no `cross` key at all.
+    #[test]
+    fn ensure_without_target_has_no_cross_key() {
+        let summary = BuildToolsSummary::default();
+        let json = serde_json::to_value(&summary).expect("serialise");
+        assert!(json.get("cross").is_none(), "{json}");
     }
 
     fn without_linker_defaults() -> ToolchainEnsureOutput {

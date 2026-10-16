@@ -40,9 +40,11 @@ fn run_shims_command(json: bool) -> Result<(), SoldrError> {
 async fn run_toolchain_subcommand(subcommand: ToolchainSubcommand) -> Result<(), SoldrError> {
     match subcommand {
         ToolchainSubcommand::Install => exit_with(toolchain::run_toolchain_install()),
-        ToolchainSubcommand::Prepare => exit_with(toolchain::run_toolchain_prepare()),
-        ToolchainSubcommand::Ensure { json } => {
-            exit_with(toolchain_ensure::run_toolchain_ensure(json).await)
+        ToolchainSubcommand::Prepare { target } => {
+            exit_with(toolchain::run_toolchain_prepare(target.as_deref()))
+        }
+        ToolchainSubcommand::Ensure { json, target } => {
+            exit_with(toolchain_ensure::run_toolchain_ensure(json, target).await)
         }
         ToolchainSubcommand::Link {
             shim_dir,

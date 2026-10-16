@@ -253,6 +253,7 @@ pub mod cargo_front_door;
 pub mod cargo_metadata_soldr;
 pub(crate) mod cargo_toolchain_shim;
 pub mod cc_cmd;
+mod cc_clang_cross;
 /// soldr#2867 — frozen host-validation plan and executor.
 pub(crate) mod ci_test;
 pub mod cli_args;

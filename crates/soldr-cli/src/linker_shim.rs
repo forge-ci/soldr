@@ -504,7 +504,7 @@ pub(crate) fn render_windows_linker_driver_shim(clang: &str, driver_arg: &str) -
     format!("@echo off\r\n\"{clang}\" \"{escaped}\" %*\r\n")
 }
 
-fn shell_single_quote(value: &str) -> String {
+pub(crate) fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
