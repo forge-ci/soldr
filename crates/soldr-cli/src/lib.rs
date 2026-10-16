@@ -330,6 +330,7 @@ pub mod gc;
 /// globally-installed soldr binary.
 pub mod global_upgrade;
 pub(crate) mod host_pressure;
+pub(crate) mod host_tool_link;
 /// soldr#2310 — `soldr install <github-url|path>` prebuilt-first tool install.
 pub mod install;
 pub mod install_shims;

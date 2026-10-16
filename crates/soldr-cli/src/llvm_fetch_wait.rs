@@ -64,7 +64,7 @@ fn crate_type_links(args: &[String]) -> bool {
 }
 
 /// The value of the last `-C linker=...` (any spelling) in `args`.
-fn linker_arg(args: &[String]) -> Option<&str> {
+pub(crate) fn linker_arg(args: &[String]) -> Option<&str> {
     let mut found = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {

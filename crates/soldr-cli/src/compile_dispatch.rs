@@ -122,8 +122,11 @@ where
     O: Write,
     E: Write,
 {
-    // soldr#3801: a compile that links through the managed clang shim waits
-    // for the front door's background LLVM fetch; nothing else does.
+    // soldr#3801: build-script and proc-macro links use the system `cc`, so
+    // they never wait; a final link through the managed clang shim waits for
+    // the front door's background LLVM fetch.
+    let rewritten = crate::host_tool_link::rewrite_with_system_cc(rustc_argv);
+    let rustc_argv = rewritten.as_deref().unwrap_or(rustc_argv);
     crate::llvm_fetch_wait::gate_linking_compile(rustc_argv).map_err(SoldrError::Other)?;
     match crate::session_transport::session_hot_path(rustc_argv) {
         crate::session_transport::SessionHotPathOutcome::Served(exit_code) => Ok(exit_code),
