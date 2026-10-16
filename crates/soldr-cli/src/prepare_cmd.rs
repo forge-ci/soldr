@@ -578,9 +578,7 @@ pub(crate) fn expected_state_paths(
         });
     }
     if attrs.needs_llvm_toolchain {
-        let llvm_dir = paths
-            .bin
-            .join(format!("llvm-{}", crate::fetch::MANAGED_LLVM_VERSION));
+        let llvm_dir = crate::fetch::managed_llvm_install_dir(paths);
         entries.push(RestoreEntry {
             label: format!("LLVM {}", crate::fetch::MANAGED_LLVM_VERSION),
             present: llvm_dir.is_dir(),
