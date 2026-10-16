@@ -1,0 +1,664 @@
+//! `DaemonServer` construction, configuration setters, and test seams.
+//!
+//! The hot-path `run()` and watcher pipeline live in `server::run`; this file
+//! groups the smaller lifecycle methods so `mod.rs` stays thin.
+
+use super::*;
+
+/// Monotonic counter ensuring each `DaemonServer` instance gets unique
+/// artifact and depfile directories, even within the same process.
+pub(super) static SERVER_INSTANCE: AtomicU64 = AtomicU64::new(0);
+pub(super) static ARTIFACT_PERSIST_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+impl DaemonServer {
+    /// Create a new daemon server bound to the given endpoint, using the
+    /// configured cache directory (resolved via [`crate::daemon_core::core::config::default_cache_dir`]).
+    ///
+    /// Production callers should use this. Tests must not, unless they hold
+    /// `tests::CacheDirEnvGuard` for the whole call: this resolves the root
+    /// from the process-global `ZCCACHE_CACHE_DIR`, so an unguarded test
+    /// reads whatever root a *concurrently running* guarded test installed,
+    /// and the two daemons then contend for one cache root (#1254, #1261).
+    ///
+    /// The guard serializes its holders on a mutex, so guarded callers are
+    /// safe. Everything else should bind an isolated root via
+    /// `tests::bind_isolated_server`, which needs no global state at all and
+    /// therefore cannot participate in the race.
+    pub fn bind(endpoint: &str) -> Result<Self, crate::daemon_core::ipc::IpcError> {
+        let cache_dir = crate::daemon_core::core::config::default_cache_dir();
+        let staging_root = crate::daemon_core::core::config::staging_dir_override();
+        Self::bind_with_roots(endpoint, &cache_dir, staging_root.as_ref())
+    }
+
+    /// Create a new daemon server bound to the given endpoint, rooted at an
+    /// explicit cache directory. Bypasses the `ZCCACHE_CACHE_DIR` env var so
+    /// parallel tests can each operate in isolation.
+    pub fn bind_with_cache_dir(
+        endpoint: &str,
+        cache_dir: &crate::daemon_core::core::NormalizedPath,
+    ) -> Result<Self, crate::daemon_core::ipc::IpcError> {
+        Self::bind_with_roots(endpoint, cache_dir, None)
+    }
+
+    fn bind_with_roots(
+        endpoint: &str,
+        cache_dir: &crate::daemon_core::core::NormalizedPath,
+        staging_root: Option<&crate::daemon_core::core::NormalizedPath>,
+    ) -> Result<Self, crate::daemon_core::ipc::IpcError> {
+        let listener = IpcListener::bind(endpoint)?;
+        let backend_identity = crate::daemon_core::ipc::current_backend_identity(endpoint)
+            .map_err(|err| daemon_identity_error(endpoint, &err))?;
+        let (state, index_writer_rx) = new_shared_state(
+            endpoint,
+            cache_dir,
+            staging_root,
+            backend_identity,
+            None,
+            None,
+        )
+        .map_err(|error| cache_root_error(cache_dir, &error))?;
+
+        Ok(Self {
+            listener,
+            shutdown: Arc::clone(&state.shutdown),
+            index_writer_rx: Some(index_writer_rx),
+            state,
+        })
+    }
+
+    /// Return the dependency-graph snapshot owned by this server's cache
+    /// root. This must not consult `ZCCACHE_CACHE_DIR`: test harnesses and
+    /// embedded callers may bind a daemon to an explicit root while another
+    /// daemon shares the process with a different environment-derived root.
+    #[allow(dead_code)] // Used by the standalone daemon entrypoint feature set.
+    #[must_use]
+    pub(crate) fn depgraph_file_path(&self) -> crate::daemon_core::core::NormalizedPath {
+        depgraph_file_path_for_cache_dir(&self.state.cache_dir)
+    }
+}
+
+/// Report a cache-root preparation failure as the filesystem fault it is.
+///
+/// Preparing the cache root is a filesystem operation, not an endpoint one.
+/// Both bind paths used to flatten `new_shared_state`'s `io::Error` into
+/// `IpcError::Endpoint(String)`, so a cache-root collision surfaced as
+/// "endpoint error: Cannot create a file when that file already exists" —
+/// which reads as a named-pipe fault and sent the #1259 diagnosis down the
+/// wrong path entirely (#1261). Preserve the `ErrorKind` so callers can still
+/// match on it, and name the offending root so the log explains itself.
+pub(super) fn cache_root_error(
+    cache_dir: &crate::daemon_core::core::NormalizedPath,
+    error: &std::io::Error,
+) -> crate::daemon_core::ipc::IpcError {
+    crate::daemon_core::ipc::IpcError::Io(std::io::Error::new(
+        error.kind(),
+        format!(
+            "cache root {} unusable: {error}",
+            cache_dir.as_path().display()
+        ),
+    ))
+}
+
+/// Report a daemon-identity failure with the endpoint it was resolved for.
+pub(super) fn daemon_identity_error(
+    endpoint: &str,
+    error: &kernal_api::daemon_identity::DaemonIdentityError,
+) -> crate::daemon_core::ipc::IpcError {
+    crate::daemon_core::ipc::IpcError::Endpoint(format!("daemon identity for {endpoint}: {error}"))
+}
+
+/// Return the dependency-graph snapshot path for one daemon cache root.
+pub(super) fn depgraph_file_path_for_cache_dir(
+    cache_dir: &crate::daemon_core::core::NormalizedPath,
+) -> crate::daemon_core::core::NormalizedPath {
+    crate::daemon_core::core::config::depgraph_dir_from_cache_dir(cache_dir).join("depgraph.bin")
+}
+
+pub(super) fn new_shared_state(
+    endpoint: &str,
+    cache_dir: &crate::daemon_core::core::NormalizedPath,
+    staging_root: Option<&crate::daemon_core::core::NormalizedPath>,
+    backend_identity: kernal_api::daemon_identity::DaemonIdentity,
+    host_admission_classifier: Option<Arc<dyn compile_resource_gate::HostAdmissionClassifier>>,
+    blocking_runtime: Option<kernal_api::async_engine::RuntimeHandle>,
+) -> std::io::Result<(
+    Arc<SharedState>,
+    kernal_api::async_engine::UnboundedReceiver<IndexWriterCommand>,
+)> {
+    let shutdown = Arc::new(kernal_api::async_engine::Notify::new());
+    let now = now_secs();
+    let instance = SERVER_INSTANCE.fetch_add(1, Ordering::Relaxed);
+    // #1162: claim the root before touching any of its state files, so a
+    // second writer fails fast rather than part-initializing over a live one.
+    let cache_root_lock = CacheRootWriterLock::acquire(cache_dir.as_path())?;
+    let artifact_dir = crate::daemon_core::core::config::artifacts_dir_from_cache_dir(cache_dir);
+    std::fs::create_dir_all(&artifact_dir).ok();
+    ensure_object_layout(&artifact_dir)?;
+    if let Err(error) = queue_orphaned_objects(&artifact_dir) {
+        tracing::warn!(%error, "failed to queue orphaned artifact objects");
+    }
+
+    // Artifact loading is deferred to a background task in run() so the
+    // daemon starts accepting connections immediately (Bug 6 fix).
+    let artifacts: DashMap<String, CachedArtifact> = DashMap::new();
+
+    // Issue #784 phase 2d: open the artifact-index store EMPTY
+    // here so the readiness lockfile fires before reading +
+    // decoding the bincode blob. The on-disk entries are merged
+    // into the live `DashMap` by `artifact_store_loader()` in a
+    // `tokio::task::spawn_blocking` after the lockfile. The
+    // existing on-disk-fallback contract in
+    // `util::lookup_artifact_with_disk_fallback` is preserved: if
+    // a DashMap-miss request races ahead of the background load,
+    // it calls `load_from_disk` synchronously on the spot so the
+    // fallback still hits.
+    let index_path = crate::daemon_core::core::config::index_path_from_cache_dir(cache_dir);
+    let artifact_store = Arc::new(ArtifactStore::open_empty(&index_path));
+
+    let (index_writer_tx, index_writer_rx) =
+        kernal_api::async_engine::unbounded_channel::<IndexWriterCommand>();
+    let index_writer_shutdown = Arc::new(Notify::new());
+
+    // Try to restore the metadata cache from disk. A wrong-version /
+    // corrupt snapshot falls back to an empty cache (the
+    // `MetadataCache::lookup` stat-verify safety net still guards
+    // correctness on every subsequent lookup).
+    let metadata_path = crate::daemon_core::core::config::metadata_path_from_cache_dir(cache_dir);
+    let compiler_hash_cache_path =
+        crate::daemon_core::core::config::compiler_hash_cache_path_from_cache_dir(cache_dir);
+    let system_includes_cache_path =
+        crate::daemon_core::core::config::system_includes_cache_path_from_cache_dir(cache_dir);
+    // Issue #541: persist the discovered C/C++ system include paths
+    // across daemon restarts so the next daemon does not pay the
+    // ~30-50 ms `<compiler> -v -E -x c++ NUL` spawn on its first
+    // C/C++ compile. Stat-verify on lookup catches in-place compiler
+    // upgrades, so a stale snapshot is harmless.
+    //
+    // Issue #784 phase 2c: start empty here. The on-disk snapshot
+    // is loaded by `system_includes_loader()`'s `load_and_install()`
+    // in a `spawn_blocking` AFTER the daemon's readiness lockfile is
+    // written, so the disk read is removed from the spawn→lockfile
+    // critical path. Compile requests arriving during the merge
+    // window pay the cold compiler probe — same outcome as before
+    // #541's persistence existed.
+    let system_includes_loaded = crate::daemon_core::depgraph::SystemIncludeCache::new();
+    // Issue #517: hashing rustc's ~150 MB binary on the cold path
+    // costs ~50-60 ms per first-after-restart compile. Loading the
+    // (path, mtime, size, hash) snapshot from a prior daemon makes
+    // that first compile near-instant — the stat-verify in
+    // `get_or_hash_with` keeps correctness if the binary changed since.
+    //
+    // Issue #784: start empty here. The on-disk snapshot is loaded
+    // by `compiler_hash_cache_loader()`'s `install()` in a
+    // `spawn_blocking` AFTER the daemon's readiness lockfile is
+    // written, so the disk read is removed from the spawn→lockfile
+    // critical path. Compile requests arriving during the merge
+    // window take the cold blake3 path — same outcome as before
+    // #517's persistence existed.
+    let compiler_hash_cache = CompilerHashCache::new();
+    // Issue #784 phase 2b: same deferred-load pattern as
+    // `compiler_hash_cache` above — start with an empty
+    // `CacheSystem`; the on-disk `metadata.bin` snapshot is read
+    // by `metadata_cache_loader()`'s `load_and_install()` in a
+    // `spawn_blocking` AFTER the readiness lockfile is written.
+    // Compile requests during the merge window take the cold-path
+    // re-stat / re-hash; the stat-verify safety net in
+    // `MetadataCache::get_cached_hash_if_stat_valid` keeps cache
+    // keys correct either way.
+    let cache_system = CacheSystem::new();
+    let exec_store = KvStore::open(cache_dir).map_err(|error| match error {
+        KvError::Io(error) => error,
+        other => std::io::Error::other(format!("cannot open exec cache: {other}")),
+    })?;
+
+    // Issue #813 / #810: log the effective compile-priority default
+    // policy at daemon start so the behaviour is observable without
+    // strace. Interactive hosts default to `Low` for both compile
+    // and link children; CI runners (detected via well-known env
+    // vars) preserve the historical `Normal` default.
+    let ci_env = crate::daemon_core::daemon::process::is_ci_host();
+    match ci_env {
+        Some(env_var) => tracing::info!(
+            ci_env = env_var,
+            "[zccache] CI detected via {env_var} — compile/link priority defaults to Normal \
+                 (set ZCCACHE_COMPILE_PRIORITY to override)",
+        ),
+        None => tracing::info!(
+            "[zccache] interactive host — compile/link priority defaults to Low \
+                 (set ZCCACHE_COMPILE_PRIORITY to override)",
+        ),
+    }
+
+    // Issue #813 / #816: global compile-concurrency cap. Wraps all
+    // daemon-spawned compiler children in a tokio semaphore so the
+    // box can't be saturated by M cargo invocations each asking for
+    // num_cpus rustcs (M*N explosion).
+    let compile_concurrency =
+        crate::daemon_core::daemon::server::compile_concurrency::resolve_pool(ci_env.is_some());
+    match &compile_concurrency {
+        Some(sem) => tracing::info!(
+            cap = sem.available_permits(),
+            "[zccache] compile concurrency capped at {} via in-process semaphore \
+                 (set ZCCACHE_MAX_PARALLEL_COMPILES to override; =0 to disable)",
+            sem.available_permits()
+        ),
+        None => tracing::info!(
+            "[zccache] compile concurrency uncapped (ZCCACHE_MAX_PARALLEL_COMPILES=0)",
+        ),
+    }
+
+    Ok((
+        Arc::new(SharedState {
+            blocking_runtime,
+            endpoint: endpoint.to_string(),
+            backend_probe: crate::daemon_core::ipc::backend_probe_responder(backend_identity),
+            daemon_namespace: crate::daemon_core::core::config::daemon_namespace_label(),
+            cache_dir: cache_dir.clone(),
+            private_daemon: PrivateDaemonLifecycle::new(),
+            sessions: SessionManager::new(std::time::Duration::from_secs(300)),
+            session_staged_profiles: DashMap::new(),
+            link_output_locks: DashMap::new(),
+            system_includes: Mutex::new(system_includes_loaded),
+            system_include_probes: KeyedLocks::default(),
+            system_includes_cache_path,
+            dep_graph: arc_swap::ArcSwap::from_pointee(DepGraph::new()),
+            artifacts,
+            cache_system,
+            watcher: Mutex::new(None),
+            watched_dirs: Mutex::new(HashSet::new()),
+            shutdown,
+            last_activity: AtomicU64::new(now),
+            active_cache_requests: AtomicUsize::new(0),
+            cache_requests_idle: Notify::new(),
+            start_time: now,
+            stats: StatsCollector::new(),
+            profiler: PhaseProfiler::new(),
+            artifact_dir,
+            staging: StagingRoot::new(
+                cache_dir.as_path(),
+                staging_root.map(|path| path.as_path()),
+                instance,
+            )?,
+            cache_root_lock,
+            metadata_path,
+            compiler_hash_cache_path,
+            depfile_tmpdir: {
+                let dir = crate::daemon_core::core::config::depfile_dir_from_cache_dir(cache_dir)
+                    .join(format!("{}-{instance}", std::process::id()));
+                std::fs::create_dir_all(&dir).ok();
+                dir
+            },
+            fast_hit_cache: DashMap::new(),
+            watcher_active: AtomicBool::new(false),
+            watcher_degradations: AtomicU64::new(0),
+            rsp_cache: DashMap::new(),
+            request_cache: DashMap::new(),
+            session_worktree_roots: DashMap::new(),
+            ended_sessions: DashMap::new(),
+            request_validation_cache: DashMap::new(),
+            compiler_hash_cache,
+            include_scan_cache: Arc::new(crate::daemon_core::depgraph::scanner::RecursiveScanCache::default()),
+            watched_raw_dirs: DashMap::new(),
+            pch_source_map: DashMap::new(),
+            journal: CompileJournal::new(crate::daemon_core::core::config::log_dir_from_cache_dir(cache_dir)),
+            in_flight_bytes: AtomicUsize::new(0),
+            disk_maintenance: Mutex::new(()),
+            disk_maintenance_progress: tokio::sync::watch::channel(
+                DiskMaintenanceProgress::default(),
+            )
+            .0,
+            depgraph_persistence: StdMutex::new(()),
+            artifact_publication: Arc::new(kernal_api::async_engine::RwLock::new(())),
+            staged_materialization_lock: Arc::new(StdMutex::new(std::sync::Weak::new())),
+            persist_semaphore: Arc::new(tokio::sync::Semaphore::new(persist_workers_default())),
+            compile_concurrency,
+            compile_resource_gate:
+                crate::daemon_core::daemon::server::compile_resource_gate::CompileResourceGate::default(),
+            host_admission_classifier,
+            compile_queue: Arc::new(
+                crate::daemon_core::daemon::server::compile_progress::CompileQueueGauge::default(),
+            ),
+            artifact_store,
+            index_writer_tx,
+            index_writer_shutdown,
+            artifacts_loaded: AtomicBool::new(false),
+            compiler_hash_cache_loaded: AtomicBool::new(false),
+            metadata_cache_loaded: AtomicBool::new(false),
+            system_includes_loaded: AtomicBool::new(false),
+            artifact_store_loaded: AtomicBool::new(false),
+            shutdown_event_logged: AtomicBool::new(false),
+            shutdown_requested: AtomicBool::new(false),
+            index_writer_gone: AtomicBool::new(false),
+            fingerprint: FingerprintManager::new(),
+            dep_graph_persisted: AtomicBool::new(false),
+            dep_graph_load_complete: AtomicBool::new(true),
+            dep_graph_load_notify: Arc::new(Notify::new()),
+            depgraph_load_warning: StdMutex::new(None),
+            in_flight_exec: DashMap::new(),
+            pending_cache_writes: DashMap::new(),
+            exec_store,
+            // Never seeded from this process's environment: a lazily spawned
+            // daemon inherits whichever shell started it, and every client
+            // forwards its own ZCCACHE_MODE per request (#1683). Embedded hosts
+            // seed it from their own environment at start.
+            materialization_mode_default: MaterializationModeDefault::new(None),
+        }),
+        index_writer_rx,
+    ))
+}
+
+impl DaemonServer {
+    /// Get a handle to signal shutdown.
+    #[must_use]
+    pub fn shutdown_handle(&self) -> Arc<kernal_api::async_engine::Notify> {
+        Arc::clone(&self.shutdown)
+    }
+
+    /// Subscribe to disk-maintenance pass outcomes (#1846). Lets a caller
+    /// await the startup eviction scan itself instead of polling its marker
+    /// file against a wall-clock budget. In-process only: no IPC message.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn disk_maintenance_progress(
+        &self,
+    ) -> tokio::sync::watch::Receiver<DiskMaintenanceProgress> {
+        self.state.disk_maintenance_progress.subscribe()
+    }
+
+    /// Copy the daemon identity this daemon proves to identity probes.
+    #[must_use]
+    pub fn backend_identity(&self) -> kernal_api::daemon_identity::DaemonIdentity {
+        self.state.backend_probe.identity()
+    }
+
+    /// Replace the dependency graph with a pre-loaded one.
+    ///
+    /// **Pre-#640**: this required `&mut self` and `Arc::get_mut` —
+    /// constraints that locked the call to BEFORE `run()` and prevented
+    /// post-bind injection from a background task. The field is now
+    /// `ArcSwap<Arc<DepGraph>>` so atomic replacement is safe at any
+    /// time, including from a `tokio::task::spawn_blocking` started
+    /// after `run()`.
+    ///
+    /// Marks the graph as persisted because it was restored from disk.
+    pub fn set_dep_graph(&self, graph: crate::daemon_core::depgraph::DepGraph) {
+        self.state.dep_graph.store(std::sync::Arc::new(graph));
+        self.state
+            .dep_graph_persisted
+            .store(true, Ordering::Release);
+        self.state
+            .dep_graph_load_complete
+            .store(true, Ordering::Release);
+        self.state.dep_graph_load_notify.notify_waiters();
+    }
+
+    /// Mark startup depgraph classification as pending.
+    ///
+    /// The daemon binary calls this before it offloads `depgraph.bin` loading
+    /// to `spawn_blocking`. Compile handlers use the paired notify to avoid
+    /// making the first warm compile race against the empty default graph.
+    #[doc(hidden)]
+    pub fn mark_dep_graph_load_pending(&self) {
+        self.state
+            .dep_graph_load_complete
+            .store(false, Ordering::Release);
+    }
+
+    /// Record a load-time depgraph warning to mirror into per-session logs.
+    ///
+    /// Called by the daemon's startup path after [`crate::daemon_core::depgraph::classify_load`]
+    /// returns a non-`Loaded` outcome that warrants surfacing (version
+    /// mismatch, corruption, I/O error). The warning is appended to each
+    /// session's log file at `SessionStart` so a cold fallback caused by a
+    /// stale or corrupt `depgraph.bin` is visible to operators. Issue #320.
+    ///
+    /// **Post-#640**: takes `&self` and uses the field's existing
+    /// canonical async `Mutex` via `blocking_lock` — safe to call from a
+    /// `tokio::task::spawn_blocking` after `run()` has started so the
+    /// daemon can move the depgraph load off the bind critical path.
+    pub fn set_depgraph_load_warning(&self, warning: String) {
+        let mut guard = self
+            .state
+            .depgraph_load_warning
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(warning);
+    }
+
+    /// Get a snapshot of the phase profiler (for benchmarks).
+    #[must_use]
+    pub fn profile_snapshot(&self) -> super::super::stats::ProfileSnapshot {
+        self.state.profiler.snapshot()
+    }
+
+    /// Cloneable handle for sampling the phase profiler *while the server is
+    /// running* (for benchmarks).
+    ///
+    /// `profile_snapshot` takes `&self`, so a profiling test that hands the
+    /// server to a `run()` task can only reach it by wrapping the server in a
+    /// `Mutex` — and `run()` holds that lock for the daemon's entire lifetime,
+    /// so any mid-run `lock().await.profile_snapshot()` deadlocks. Take this
+    /// handle *before* moving the server into the task and sample without
+    /// locking. See `daemon_cold_path_profile_test`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn profile_handle(&self) -> ProfileHandle {
+        ProfileHandle {
+            state: Arc::clone(&self.state),
+        }
+    }
+
+    /// Test-only seam: exercise the DashMap → on-disk-`ArtifactStore`
+    /// fallback used by every artifact-lookup site.
+    ///
+    /// Returns `true` if the key is found either in the in-memory
+    /// `artifacts` DashMap or in the on-disk artifact store (in which
+    /// case the DashMap is hydrated as a side-effect). Lets perf tests
+    /// assert that warm-after-restore lookups hit the on-disk store
+    /// without spinning up an IPC server + real compile.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_lookup_artifact(&self, key_hex: &str) -> bool {
+        lookup_artifact_with_disk_fallback(&self.state, key_hex).is_some()
+    }
+
+    /// Test-only seam: report whether the background artifact-load
+    /// task has finished hydrating `state.artifacts`. Used by
+    /// `perf_artifact_fallback_test.rs` to assert that the fallback
+    /// path is the one being exercised (not the post-load fast path).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_artifacts_loaded(&self) -> bool {
+        self.state.artifacts_loaded.load(Ordering::Acquire)
+    }
+
+    /// Test-only seam: report the number of entries currently in the
+    /// in-memory `state.artifacts` DashMap. Lets the perf test assert
+    /// that a fresh bind (before `run()`) starts with an empty
+    /// DashMap, proving that any subsequent hit comes from the
+    /// on-disk fallback path.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_artifacts_len(&self) -> usize {
+        self.state.artifacts.len()
+    }
+
+    /// Test-only seam: insert a synthetic system-includes entry for the
+    /// given compiler path. Issue #558 — lets the `handle_clear` test
+    /// pre-populate the cache before sending Clear so the test can
+    /// verify the entry survives.
+    #[doc(hidden)]
+    pub async fn test_insert_system_includes(
+        &self,
+        compiler: crate::daemon_core::core::NormalizedPath,
+        paths: Vec<crate::daemon_core::core::NormalizedPath>,
+    ) {
+        let mut cache = self.state.system_includes.lock().await;
+        cache.insert(compiler, paths);
+    }
+
+    /// Test-only seam: report the number of entries currently in the
+    /// in-memory `state.system_includes` cache. Issue #558 — used to
+    /// assert `handle_clear` preserves compiler-environment data
+    /// (consistent with `compiler_hash_cache` which is also preserved).
+    #[doc(hidden)]
+    #[must_use]
+    pub async fn test_system_includes_len(&self) -> usize {
+        self.state.system_includes.lock().await.len()
+    }
+
+    /// Test-only seam: borrow the `SharedState` so tests can invoke
+    /// the request handlers directly (e.g. `handle_clear`) without
+    /// standing up the full IPC machinery. Issue #558.
+    #[doc(hidden)]
+    #[cfg(test)]
+    #[must_use]
+    pub(super) fn test_state(&self) -> &SharedState {
+        &self.state
+    }
+
+    /// Test-only seam: clone the `Arc<SharedState>` so tests can call
+    /// handlers whose signatures want an owned arc (e.g. `handle_exec_probe`).
+    /// Issue #838.
+    #[doc(hidden)]
+    #[cfg(test)]
+    #[must_use]
+    pub(super) fn test_state_arc(&self) -> Arc<SharedState> {
+        Arc::clone(&self.state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #1261: a cache root the daemon cannot prepare must report itself as a
+    /// filesystem fault naming the root, not as an opaque endpoint error.
+    ///
+    /// The old mapping flattened `new_shared_state`'s `io::Error` into
+    /// `IpcError::Endpoint(String)`, so a cache-root collision surfaced as
+    /// "endpoint error: Cannot create a file when that file already exists"
+    /// — which reads as a named-pipe fault and sent the #1259 diagnosis down
+    /// the wrong path entirely. Binding onto a *file* is the portable way to
+    /// make root preparation fail on every platform.
+    #[tokio::test]
+    async fn unusable_cache_root_reports_a_filesystem_error_naming_the_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let not_a_dir = tmp.path().join("cache-root-is-a-file");
+        std::fs::write(&not_a_dir, b"occupied").unwrap();
+
+        // `DaemonServer` is not `Debug`, so `expect_err` is unavailable here.
+        let Err(error) = DaemonServer::bind_with_cache_dir(
+            &crate::daemon_core::ipc::unique_test_endpoint(),
+            &not_a_dir.clone().into(),
+        ) else {
+            panic!("a cache root that is a regular file must not bind");
+        };
+
+        assert!(
+            matches!(error, crate::daemon_core::ipc::IpcError::Io(_)),
+            "cache-root preparation failure must not masquerade as an endpoint \
+             error; got {error:?}"
+        );
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(&not_a_dir.display().to_string()),
+            "the error must name the offending cache root so the log is \
+             self-explanatory; got {rendered}"
+        );
+    }
+
+    fn make_ctx(source: &str) -> crate::daemon_core::depgraph::CompileContext {
+        crate::daemon_core::depgraph::CompileContext {
+            source_file: source.into(),
+            include_search: crate::daemon_core::depgraph::IncludeSearchPaths::default(),
+            defines: Vec::new(),
+            undefines: Vec::new(),
+            flags: Vec::new(),
+            force_includes: Vec::new(),
+            unknown_flags: Vec::new(),
+            compiler_hash: crate::daemon_core::hash::hash_bytes(b"test-fixture"),
+        }
+    }
+
+    fn dummy_hash(path: &std::path::Path) -> Option<crate::daemon_core::hash::ContentHash> {
+        Some(crate::daemon_core::hash::hash_bytes(path.to_string_lossy().as_bytes()))
+    }
+
+    #[test]
+    fn depgraph_snapshot_path_uses_explicit_cache_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = crate::daemon_core::core::NormalizedPath::new(tmp.path());
+
+        let path = depgraph_file_path_for_cache_dir(&cache_dir);
+
+        assert_eq!(
+            path,
+            crate::daemon_core::core::config::depgraph_dir_from_cache_dir(&cache_dir).join("depgraph.bin")
+        );
+        assert!(path.starts_with(&cache_dir));
+    }
+
+    #[tokio::test]
+    async fn depgraph_load_gate_waits_until_loaded_graph_is_visible() {
+        let cache_root = tempfile::tempdir().unwrap();
+        let server = crate::daemon_core::daemon::server::tests::bind_isolated_server(cache_root.path());
+        let state = Arc::clone(&server.state);
+        let setter = server.dep_graph_setter();
+
+        let graph = crate::daemon_core::depgraph::DepGraph::new();
+        let ctx = make_ctx("/src/warm.cc");
+        let key = graph.register(ctx);
+        graph.update(
+            &key,
+            crate::daemon_core::depgraph::ScanResult {
+                resolved: Vec::new(),
+                unresolved: Vec::new(),
+                has_computed: false,
+            },
+            dummy_hash,
+        );
+
+        server.mark_dep_graph_load_pending();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            setter.install(Some(graph), None);
+        });
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            state.dep_graph_load_notify.notified(),
+        )
+        .await
+        .expect("depgraph load notify should fire");
+        handle.join().unwrap();
+
+        assert!(
+            !state.dep_graph.load().is_cold(&key),
+            "first compile must see the loaded warm graph instead of the empty default"
+        );
+        assert!(state.dep_graph_persisted.load(Ordering::Acquire));
+    }
+}
+
+/// Lock-free handle for sampling a running daemon's phase profiler.
+///
+/// See [`DaemonServer::profile_handle`] for why this exists.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ProfileHandle {
+    state: Arc<SharedState>,
+}
+
+impl ProfileHandle {
+    /// Snapshot the phase profiler without acquiring any lock.
+    #[must_use]
+    pub fn snapshot(&self) -> super::super::stats::ProfileSnapshot {
+        self.state.profiler.snapshot()
+    }
+
+    /// Zero the phase profiler, e.g. between benchmark batches.
+    pub fn reset(&self) {
+        self.state.profiler.reset();
+    }
+}

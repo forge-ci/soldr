@@ -1,0 +1,215 @@
+//! Shared complete-set publication and index commit for staged producers.
+
+use super::*;
+
+pub(super) fn publish_and_materialize_staged_link(
+    state: &SharedState,
+    plan: &StagedCompilePlan,
+    key: &str,
+    metadata: ArtifactIndex,
+    sources: &[NormalizedPath],
+    mode: MaterializationMode,
+) -> std::io::Result<bool> {
+    let publication = publish_artifact_paths_observed(state, key, metadata, sources);
+    let salvage_reason = publication.as_ref().err().map(|reason| reason.id());
+    materialize_link_plan_observed(state, plan, salvage_reason, mode)?;
+    Ok(publication.is_ok())
+}
+
+pub(super) fn record_staged_publication_failure(state: &SharedState, reason: StagedPublishFailure) {
+    use crate::daemon_core::daemon::staged_stats::{StagedCounter, StagedFailure};
+    state
+        .profiler
+        .staged
+        .count(StagedCounter::PublicationFailure);
+    if reason == StagedPublishFailure::Conflict {
+        state
+            .profiler
+            .staged
+            .count(StagedCounter::PublicationConflict);
+        state
+            .profiler
+            .staged
+            .failure(StagedFailure::PublicationConflict);
+    } else {
+        state.profiler.staged.failure(reason.failure());
+    }
+}
+
+/// Hand an index insert to the index writer, observing the send result.
+///
+/// #1177 Part A: three call sites did `let _ = index_writer_tx.send(..)`. That
+/// send only fails when the index-writer task is **gone**, which means the
+/// daemon has silently stopped durably recording anything it caches — every
+/// artifact it publishes from that moment on is invisible to the next daemon
+/// start, so the cache is quietly write-only. The old spelling made that
+/// indistinguishable from success.
+///
+/// Reported once per daemon rather than once per compile: the condition is
+/// permanent (the receiver does not come back), so an event per compile would
+/// turn one fault into an unbounded log. The first occurrence carries the
+/// artifact key so the failure has a concrete anchor.
+pub(super) fn enqueue_index_insert(state: &SharedState, key: String, metadata: ArtifactIndex) {
+    if state
+        .index_writer_tx
+        .send(IndexWriterCommand::Insert(key.clone(), metadata))
+        .is_err()
+        && !state.index_writer_gone.swap(true, Ordering::AcqRel)
+    {
+        tracing::error!(
+            artifact_key = %key,
+            "index writer is gone; published artifacts are no longer being recorded \
+             durably and will not survive a daemon restart"
+        );
+        crate::daemon_core::core::lifecycle::write_event(
+            crate::daemon_core::core::lifecycle::EVENT_INDEX_WRITER_GONE,
+            serde_json::json!({
+                "artifact_key": key,
+                "consequence": "published artifacts are not durably indexed",
+            }),
+        );
+    }
+}
+
+pub(super) fn send_staged_index_insert(
+    state: &SharedState,
+    key: String,
+    metadata: ArtifactIndex,
+) -> Result<u64, StagedPublishFailure> {
+    let started = std::time::Instant::now();
+    #[cfg(test)]
+    inject_staged_fault(&state.artifact_dir, StagedFaultPoint::IndexCommit)
+        .map_err(|_| StagedPublishFailure::IndexCommit)?;
+    state
+        .index_writer_tx
+        .send(IndexWriterCommand::Insert(key, metadata))
+        .map_err(|_| StagedPublishFailure::IndexCommit)?;
+    Ok(started.elapsed().as_nanos() as u64)
+}
+
+pub(super) fn record_staged_publication_success(
+    state: &SharedState,
+    persisted: PersistArtifactFileStats,
+    index_commit_ns: u64,
+) {
+    if !persisted.staged {
+        return;
+    }
+    use crate::daemon_core::daemon::staged_stats::{StagedBytes, StagedCounter, StagedTiming};
+    state
+        .profiler
+        .staged
+        .count(StagedCounter::PublicationSuccess);
+    state
+        .profiler
+        .staged
+        .timing(StagedTiming::Hashing, persisted.staged_hash_ns);
+    state.profiler.staged.timing(
+        StagedTiming::Publication,
+        persisted
+            .staged_publication_ns
+            .saturating_add(index_commit_ns),
+    );
+    state
+        .profiler
+        .staged
+        .bytes(StagedBytes::Publication, persisted.copy_bytes);
+}
+
+/// Persist a staged producer's complete output set and commit its index entry.
+/// A failure is recorded exactly once and never makes the artifact cacheable.
+pub(super) fn publish_artifact_paths_observed(
+    state: &SharedState,
+    key: &str,
+    metadata: ArtifactIndex,
+    sources: &[NormalizedPath],
+) -> Result<PersistArtifactFileStats, StagedPublishFailure> {
+    let persisted =
+        // Staged producers publish through the staged store, which never
+        // hardlinks; the mode only reaches the legacy fallback, so the
+        // service default applies (#1683).
+        persist_artifact_paths_with_stats(
+            &state.artifact_dir,
+            key,
+            sources,
+            state.non_rustc_materialization_mode(None),
+        )
+        .map_err(|error| {
+            staged_publish_failure(&error).unwrap_or(StagedPublishFailure::StoreSetup)
+        });
+    let persisted = match persisted {
+        Ok(persisted) => persisted,
+        Err(reason) => {
+            record_staged_publication_failure(state, reason);
+            return Err(reason);
+        }
+    };
+    let index_commit_ns = match send_staged_index_insert(state, key.to_string(), metadata) {
+        Ok(elapsed_ns) => elapsed_ns,
+        Err(reason) => {
+            record_staged_publication_failure(state, reason);
+            return Err(reason);
+        }
+    };
+    record_staged_publication_success(state, persisted, index_commit_ns);
+    Ok(persisted)
+}
+
+pub(super) fn record_staged_hit_materialization(
+    state: &SharedState,
+    output_count: usize,
+    started: std::time::Instant,
+    observed: Option<StagedMaterializationStats>,
+) -> bool {
+    use crate::daemon_core::daemon::staged_stats::{StagedBytes, StagedCounter, StagedFailure, StagedTiming};
+    let elapsed_ns = started.elapsed().as_nanos() as u64;
+    match observed {
+        Some(observed) => {
+            state
+                .profiler
+                .staged
+                .add_count(StagedCounter::MaterializeReflink, observed.reflink_count);
+            state
+                .profiler
+                .staged
+                .add_count(StagedCounter::MaterializeHardlink, observed.hardlink_count);
+            state
+                .profiler
+                .staged
+                .add_count(StagedCounter::MaterializeCopy, observed.copy_count);
+            state
+                .profiler
+                .staged
+                .bytes(StagedBytes::Materialization, observed.copy_bytes);
+            state
+                .profiler
+                .staged
+                .timing(StagedTiming::HitMaterialization, elapsed_ns);
+            true
+        }
+        None => {
+            state
+                .profiler
+                .staged
+                .count(StagedCounter::MaterializeFailure);
+            state
+                .profiler
+                .staged
+                .failure(StagedFailure::RequestedMaterialization);
+            state
+                .profiler
+                .staged
+                .timing(StagedTiming::HitMaterialization, elapsed_ns);
+            crate::daemon_core::core::lifecycle::write_event(
+                crate::daemon_core::core::lifecycle::EVENT_STAGED_MATERIALIZATION_FAILED,
+                serde_json::json!({
+                    "reason": "requested_materialization",
+                    "output_count": output_count,
+                    "copied_bytes": 0,
+                    "elapsed_ns": elapsed_ns,
+                }),
+            );
+            false
+        }
+    }
+}

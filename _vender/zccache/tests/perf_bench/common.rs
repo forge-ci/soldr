@@ -1,0 +1,508 @@
+//! Shared helpers used by every perf benchmark module.
+//!
+//! Contents:
+//! - `ClientConn` platform-correct connection alias.
+//! - Constants (`NUM_FILES`, `WARM_TRIALS`, RSP sizes, RUSTC sizes).
+//! - `start_daemon` — boots an in-process daemon on a unique endpoint.
+//! - Tool finders: `find_sccache`, `find_empp`, `find_archiver`.
+//! - `bench_exe_name`, file-system cleanup helpers, generic tool runners.
+//! - Session helpers: `start_zccache_session`, `end_zccache_session`,
+//!   `clear_zccache`, `start_fresh_sccache`, `stop_sccache`.
+//! - Reporting helpers: `median`, `fmt_dur`, `print_trials*`, `fmt_ratio`.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::panic_in_result_fn,
+    clippy::unwrap_in_result
+)]
+
+use std::path::Path;
+use std::time::{Duration, Instant};
+use zccache::core::NormalizedPath;
+use zccache::daemon::DaemonServer;
+use zccache::protocol::{Request, Response};
+
+#[cfg(unix)]
+pub type ClientConn = zccache::ipc::IpcConnection;
+#[cfg(windows)]
+pub type ClientConn = zccache::ipc::IpcClientConnection;
+
+pub const NUM_FILES: usize = 50;
+pub const WARM_TRIALS: usize = 5;
+
+/// Number of synthetic `-D` defines in the large response file.
+pub const RSP_NUM_DEFINES: usize = 200;
+/// Number of synthetic `-I` include paths in the large response file.
+pub const RSP_NUM_INCLUDES: usize = 50;
+
+pub const RUSTC_NUM_FILES: usize = 50;
+pub const RUSTC_WARM_TRIALS: usize = 5;
+
+/// Cache root whose teardown runs the canonical in-process unknown-event gate.
+///
+/// Perf guard supplies a sidecar path. In that mode the directory is retained
+/// for the outer, full-rule Rust audit and is removed only after that audit
+/// passes. Ordinary local benchmark runs retain automatic temporary cleanup.
+pub struct PerfCacheRoot {
+    directory: Option<tempfile::TempDir>,
+    retain_for_outer_audit: bool,
+}
+
+impl PerfCacheRoot {
+    fn new(directory: tempfile::TempDir, retain_for_outer_audit: bool) -> Self {
+        Self {
+            directory: Some(directory),
+            retain_for_outer_audit,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        self.directory
+            .as_ref()
+            .expect("perf cache root is available until teardown")
+            .path()
+    }
+}
+
+impl Drop for PerfCacheRoot {
+    fn drop(&mut self) {
+        let audit_result = if std::thread::panicking() {
+            Ok(())
+        } else {
+            zccache_test_support::assert_no_unknown_events(self.path(), None)
+        };
+        if self.retain_for_outer_audit || audit_result.is_err() {
+            if let Some(directory) = self.directory.take() {
+                let _retained_path = directory.keep();
+            }
+        }
+        if let Err(error) = audit_result {
+            panic!("perf cache-root unknown-event audit failed:\n{error}");
+        }
+    }
+}
+
+/// Boot a daemon rooted at a fresh per-test cache directory.
+///
+/// The returned [`PerfCacheRoot`] must be held by the caller. Bind order
+/// in the returned tuple is intentional: the cache root is declared first so
+/// Rust's reverse-order drop guarantees the daemon (`server_handle`) shuts
+/// down before the cache root is audited.
+/// The delivery chain every benchmark row runs under, stated explicitly so
+/// the published numbers name it (#1792): `ZCCACHE_MODE` when the harness
+/// sets one, else `REFLINK_OR_LINK_OR_COPY` (reflink, else hardlink, else
+/// copy). The bench's IPC requests carry no environment, so the daemon's
+/// default is what applies.
+pub fn bench_materialization_mode() -> zccache::core::config::MaterializationMode {
+    zccache::core::config::materialization_mode_from_env()
+        .expect("ZCCACHE_MODE must name a valid mode")
+        .unwrap_or(zccache::core::config::MaterializationMode::ReflinkOrLinkOrCopy)
+}
+
+pub async fn start_daemon() -> (
+    PerfCacheRoot,
+    String,
+    tokio::task::JoinHandle<()>,
+    std::sync::Arc<kernal_api::async_engine::Notify>,
+) {
+    let cache_dir = zccache::test_support::temp_cache_dir().unwrap();
+    let runtime_roots_sidecar = std::env::var_os("PERF_GUARD_RUNTIME_ROOTS_FILE");
+    if let Some(sidecar) = runtime_roots_sidecar.as_ref() {
+        use std::io::Write;
+        let sidecar = std::path::PathBuf::from(sidecar);
+        if let Some(parent) = sidecar.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(sidecar)
+        {
+            let _ = writeln!(file, "{}", cache_dir.path().display());
+        }
+    }
+    let endpoint = zccache::ipc::unique_test_endpoint();
+    let normalized = zccache::core::NormalizedPath::new(cache_dir.path());
+    let mut server = DaemonServer::bind_with_cache_dir(&endpoint, &normalized).unwrap();
+    server.set_materialization_mode_default(Some(bench_materialization_mode()));
+    let shutdown = server.shutdown_handle();
+    let handle = tokio::spawn(async move {
+        server.run(0).await.unwrap();
+    });
+    (
+        PerfCacheRoot::new(cache_dir, runtime_roots_sidecar.is_some()),
+        endpoint,
+        handle,
+        shutdown,
+    )
+}
+
+pub fn find_sccache() -> Option<NormalizedPath> {
+    for path in &["sccache", "C:/tools/python13/Scripts/sccache.exe"] {
+        let p = NormalizedPath::new(path);
+        if p.exists() {
+            return Some(p);
+        }
+        if let Ok(output) = std::process::Command::new(path).arg("--version").output() {
+            if output.status.success() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+pub fn find_empp() -> Option<NormalizedPath> {
+    if let Some(p) = zccache::test_support::find_on_path("em++") {
+        return Some(p);
+    }
+    let extra: &[&str] = if cfg!(windows) {
+        &[
+            "C:/emsdk/upstream/emscripten",
+            "C:/Program Files/emsdk/upstream/emscripten",
+        ]
+    } else {
+        &[
+            "/usr/local/emsdk/upstream/emscripten",
+            "/opt/emsdk/upstream/emscripten",
+        ]
+    };
+    let suffix = if cfg!(windows) { ".bat" } else { "" };
+    for dir in extra {
+        let candidate = NormalizedPath::new(format!("{dir}/em++{suffix}"));
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+pub fn find_archiver() -> Option<NormalizedPath> {
+    zccache::test_support::find_on_path("ar")
+        .or_else(|| zccache::test_support::find_on_path("llvm-ar"))
+}
+
+pub fn bench_exe_name(stem: &str) -> String {
+    if cfg!(windows) {
+        format!("{stem}.exe")
+    } else {
+        stem.to_string()
+    }
+}
+
+pub fn clean_objects(dir: &Path) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) == Some("o") {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+pub fn clear_dir_contents(dir: &Path) {
+    if !dir.exists() {
+        std::fs::create_dir_all(dir).unwrap();
+        return;
+    }
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).unwrap();
+        } else {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+}
+
+pub fn remove_path_if_exists(path: &Path) {
+    if path.is_dir() {
+        let _ = std::fs::remove_dir_all(path);
+    } else {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+pub fn remove_output_and_sidecars(output: &Path) {
+    remove_path_if_exists(output);
+    let Some(parent) = output.parent() else {
+        return;
+    };
+    let Some(stem) = output.file_stem().and_then(|s| s.to_str()) else {
+        return;
+    };
+    for ext in [
+        "a", "data", "dSYM", "exe", "html", "js", "lib", "map", "pdb", "wasm",
+    ] {
+        remove_path_if_exists(&parent.join(format!("{stem}.{ext}")));
+    }
+}
+
+pub fn clean_link_outputs(cwd: &Path, outputs: &[String]) {
+    for output in outputs {
+        let path = Path::new(output);
+        if path.is_absolute() {
+            remove_output_and_sidecars(path);
+        } else {
+            remove_output_and_sidecars(&cwd.join(path));
+        }
+    }
+}
+
+pub fn command_failure(description: &str, output: &std::process::Output) -> String {
+    format!(
+        "{description} failed with status {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+pub fn try_run_tool(
+    tool: &Path,
+    args: &[String],
+    cwd: &Path,
+    description: &str,
+) -> Result<(), String> {
+    let output = std::process::Command::new(tool)
+        .args(args)
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("failed to run {description}: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(command_failure(description, &output))
+    }
+}
+
+pub fn run_tool_timed(tool: &Path, args: &[String], cwd: &Path, description: &str) -> Duration {
+    let start = Instant::now();
+    let output = std::process::Command::new(tool)
+        .args(args)
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run {description}: {e}"));
+    let elapsed = start.elapsed();
+    assert!(
+        output.status.success(),
+        "{}",
+        command_failure(description, &output)
+    );
+    elapsed
+}
+
+pub fn try_run_sccache_tool_timed(
+    sccache: &Path,
+    tool: &Path,
+    args: &[String],
+    cwd: &Path,
+    description: &str,
+) -> Result<Duration, String> {
+    let start = Instant::now();
+    let output = std::process::Command::new(sccache)
+        .arg(tool)
+        .args(args)
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("failed to run {description}: {e}"))?;
+    let elapsed = start.elapsed();
+    if output.status.success() {
+        Ok(elapsed)
+    } else {
+        Err(command_failure(description, &output))
+    }
+}
+
+pub fn start_fresh_sccache(sccache: &Path, cache_dir: &Path) -> String {
+    let cache_dir_str = cache_dir.to_string_lossy().into_owned();
+    std::env::set_var("SCCACHE_DIR", &cache_dir_str);
+    let _ = std::process::Command::new(sccache)
+        .arg("--stop-server")
+        .env("SCCACHE_DIR", &cache_dir_str)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    clear_dir_contents(cache_dir);
+    let _ = std::process::Command::new(sccache)
+        .arg("--start-server")
+        .env("SCCACHE_DIR", &cache_dir_str)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    cache_dir_str
+}
+
+pub fn stop_sccache(sccache: &Path) {
+    let _ = std::process::Command::new(sccache)
+        .arg("--stop-server")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    std::env::remove_var("SCCACHE_DIR");
+}
+
+/// Receive the terminal response for a compile request, ignoring heartbeats.
+pub async fn recv_compile_result(
+    client: &mut ClientConn,
+) -> (i32, std::sync::Arc<Vec<u8>>, std::sync::Arc<Vec<u8>>, bool) {
+    loop {
+        match client.recv().await.unwrap() {
+            Some(Response::CompileProgress { .. }) => continue,
+            Some(Response::CompileResult {
+                exit_code,
+                stdout,
+                stderr,
+                cached,
+            }) => return (exit_code, stdout, stderr, cached),
+            Some(Response::Error { message }) => panic!("compile error: {message}"),
+            other => panic!("expected CompileResult, got: {other:?}"),
+        }
+    }
+}
+
+pub async fn clear_zccache(client: &mut ClientConn) {
+    client.send(&Request::Clear).await.unwrap();
+    match client.recv().await.unwrap() {
+        Some(Response::Cleared { .. }) => {}
+        other => panic!("expected Cleared, got: {other:?}"),
+    }
+}
+
+pub async fn start_zccache_session(client: &mut ClientConn, working_dir: &str) -> String {
+    client
+        .send(&Request::SessionStart {
+            client_pid: std::process::id(),
+            working_dir: working_dir.into(),
+            log_file: None,
+            track_stats: true,
+            journal_path: None,
+            profile: false,
+            private_daemon: None,
+        })
+        .await
+        .unwrap();
+    match client.recv().await.unwrap() {
+        Some(Response::SessionStarted { session_id, .. }) => session_id,
+        other => panic!("expected SessionStarted, got: {other:?}"),
+    }
+}
+
+pub async fn end_zccache_session(client: &mut ClientConn, session_id: String) {
+    client
+        .send(&Request::SessionEnd { session_id })
+        .await
+        .unwrap();
+    let _ = client.recv::<Response>().await;
+}
+
+// ── Reporting ───────────────────────────────────────────────────────────
+
+pub fn median(times: &[Duration]) -> Duration {
+    let mut sorted: Vec<Duration> = times.to_vec();
+    sorted.sort();
+    sorted[sorted.len() / 2]
+}
+
+pub fn fmt_dur(d: Duration) -> String {
+    format!("{:.3}s", d.as_secs_f64())
+}
+
+pub fn dir_size_bytes(path: &Path) -> u64 {
+    fn walk(path: &Path) -> u64 {
+        let Ok(metadata) = std::fs::symlink_metadata(path) else {
+            return 0;
+        };
+        if metadata.is_file() {
+            return metadata.len();
+        }
+        if !metadata.is_dir() {
+            return 0;
+        }
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return 0;
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| walk(&entry.path()))
+            .sum()
+    }
+    walk(path)
+}
+
+pub fn fmt_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let bytes_f = bytes as f64;
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes_f < MIB {
+        format!("{:.1} KiB", bytes_f / KIB)
+    } else if bytes_f < GIB {
+        format!("{:.1} MiB", bytes_f / MIB)
+    } else {
+        format!("{:.1} GiB", bytes_f / GIB)
+    }
+}
+
+pub fn print_trials(label: &str, times: &[Duration]) {
+    print_trials_per(label, times, None);
+}
+
+/// Like `print_trials` but also reports per-call latency when `files_per_trial`
+/// is known. Useful when a single trial sums N sequential cache lookups so the
+/// reader can see whether the per-call cost is in the expected ~1ms range or
+/// taking a slow path.
+pub fn print_trials_per(label: &str, times: &[Duration], files_per_trial: Option<usize>) {
+    let med = median(times);
+    let min = times.iter().min().unwrap();
+    let max = times.iter().max().unwrap();
+    if let Some(n) = files_per_trial {
+        let per_call_ms = (med.as_secs_f64() / n as f64) * 1000.0;
+        eprintln!(
+            "        {label:<14}{} ({} \u{2013} {}) -> {:.2} ms/call \u{00d7} {n}",
+            fmt_dur(med),
+            fmt_dur(*min),
+            fmt_dur(*max),
+            per_call_ms,
+        );
+    } else {
+        eprintln!(
+            "        {label:<14}{} ({} \u{2013} {})",
+            fmt_dur(med),
+            fmt_dur(*min),
+            fmt_dur(*max),
+        );
+    }
+}
+
+pub fn fmt_ratio(baseline: Duration, test: Duration, bold: bool) -> String {
+    let ratio = baseline.as_secs_f64() / test.as_secs_f64();
+    let text = if ratio >= 10.0 {
+        format!("{ratio:.0}x faster")
+    } else if ratio >= 1.05 {
+        format!("{ratio:.1}x faster")
+    } else if ratio > 0.95 {
+        "~same".to_string()
+    } else {
+        let inv = 1.0 / ratio;
+        if inv >= 10.0 {
+            format!("{inv:.0}x slower")
+        } else {
+            format!("{inv:.1}x slower")
+        }
+    };
+    if bold && ratio >= 2.0 {
+        format!("**{text}**")
+    } else {
+        text
+    }
+}

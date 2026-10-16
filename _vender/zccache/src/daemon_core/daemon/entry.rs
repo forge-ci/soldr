@@ -1,0 +1,912 @@
+//! Standalone `zccache-daemon` process entry point, as a library function.
+//!
+//! Extracted from `src/bin/zccache-daemon.rs` (issue #997) so the daemon
+//! `main` can be invoked from more than one binary — the transitional
+//! `zccache-daemon` bin shim today, and the `argv[0]` multi-call dispatch in
+//! the `zccache` binary (issue #998) next. The bin becomes a 3-line shim that
+//! installs the global allocator and calls [`run`]; all behavior lives here.
+//!
+//! On the long-lived foreground path, the daemon releases its launch handles
+//! (exe file lock on Windows, implicit cwd handle on all OSes) via
+//! [`crate::daemon_core::daemon::trampoline`] before entering `run_server`.
+
+use clap::Parser;
+
+use crate::daemon_core::core::NormalizedPath;
+
+/// Upper bound for the tokio multi-thread runtime's `spawn_blocking` pool.
+///
+/// **Sizing rationale (ISSUE-502, Linux Docker 2026-06-25):**
+///
+/// The previous hardcoded `16` was undersized for the daemon's actual
+/// blocking-task fan-out. Three sources of `spawn_blocking` traffic share
+/// this pool:
+///
+/// 1. **Cache-check fan-out** (`handle_compile_multi.rs:367-389`): a
+///    50-file wave spawns up to 50 concurrent metadata/hash lookups.
+/// 2. **Persist concurrency** (`persist_workers_default`): on Linux now
+///    scales with host parallelism (ISSUE-501), so a 32-core box may
+///    have 32+ persist tasks in flight.
+/// 3. **Background loaders** (depgraph / compiler-hash / metadata /
+///    system-includes / artifact-store): five concurrent `spawn_blocking`
+///    tasks at daemon startup, plus per-request loader fall-throughs.
+///
+/// A 50-wide fan-out alone exhausted the prior 16-thread budget, leaving
+/// persist + loader tasks queued behind cache lookups.
+///
+/// We compute `clamp(parallelism * 8, 128, 512)`. The `* 8` multiplier
+/// (raised from `* 4`) and the floor lift (64 → 128) come from a
+/// follow-up after PR #919 / ISSUE-502: the previous 4× / 64-floor sized
+/// the pool tight against the *critical* paths (cache-check fan-out +
+/// persist concurrency + loaders), leaving no headroom for *non-critical*
+/// blocking work (hashing under `lookup_since_async`, watcher
+/// canonicalize, per-request fs metadata calls). Doubling the multiplier
+/// and floor moves those non-critical paths out of the queue tail so a
+/// 50-wide cargo cold burst doesn't park hashing behind persist.
+///
+/// Resulting sizes:
+/// - 1–16 cores → 128 (floor)
+/// - 32 cores → 256
+/// - ≥ 64 cores → 512 (ceiling — matches tokio's stated default).
+fn daemon_max_blocking_threads() -> usize {
+    let parallelism = crate::daemon_core::platform::host::available_parallelism().unwrap_or(8);
+    parallelism.saturating_mul(8).clamp(128, 512)
+}
+
+const DAEMON_PROFILE_ENV: &str = "ZCCACHE_DAEMON_PROFILE";
+const TOKIO_CONSOLE_PROFILE: &str = "tokio-console";
+const TOKIO_CONSOLE_BIND_ENV: &str = "TOKIO_CONSOLE_BIND";
+const TOKIO_CONSOLE_DEFAULT_BIND: &str = "127.0.0.1:6669";
+
+/// zccache daemon -- local compiler cache service.
+#[derive(Debug, Parser)]
+#[command(name = "zccache-daemon", version, about)]
+pub struct Args {
+    /// Path to configuration file.
+    #[arg(long)]
+    config: Option<NormalizedPath>,
+
+    /// Log level (trace, debug, info, warn, error).
+    #[arg(long, default_value = "info")]
+    log_level: String,
+
+    /// Run in foreground (don't daemonize).
+    #[arg(long)]
+    foreground: bool,
+
+    /// IPC endpoint (default: platform-specific).
+    #[arg(long)]
+    endpoint: Option<String>,
+
+    /// Idle timeout in seconds (0 = no timeout).
+    ///
+    /// Default comes from `zccache::core::config::DEFAULT_IDLE_TIMEOUT_SECS`
+    /// (60 minutes), kept as the single source of truth so `Config::default`
+    /// and this flag never drift apart.
+    ///
+    /// Reads `ZCCACHE_IDLE_TIMEOUT_SECS` from the environment when the
+    /// flag is not given. Setting the env var on `zccache-cli` propagates
+    /// to the daemon via `spawn_daemon`'s inherited environment, so a
+    /// caller can ask for a shorter idle window without touching the
+    /// command line. `0` disables the timeout (daemon runs forever).
+    #[arg(
+        long,
+        default_value_t = crate::daemon_core::core::config::DEFAULT_IDLE_TIMEOUT_SECS,
+        env = "ZCCACHE_IDLE_TIMEOUT_SECS"
+    )]
+    idle_timeout: u64,
+
+    /// Disable loading/saving the dependency graph from/to disk.
+    #[arg(long)]
+    no_depgraph_cache: bool,
+
+    /// File path to redirect the daemon's own stdout + stderr onto.
+    ///
+    /// Set by `zccache-cli`'s `spawn_daemon` so that errors which fire
+    /// before the lifecycle log / panic hook can attach (dyld failures on
+    /// macOS, Gatekeeper kills, early-init panics) leave evidence on
+    /// disk instead of disappearing into `/dev/null`. When unset the
+    /// daemon falls back to the legacy detach-stdio behavior.
+    #[arg(long)]
+    log_file: Option<NormalizedPath>,
+}
+
+/// Parse argv and run the daemon: foreground server, or status print.
+///
+/// This is the former `fn main` of the `zccache-daemon` binary. The binary
+/// shim installs the global allocator and calls this.
+pub fn run() {
+    let args = Args::parse();
+    run_with(args);
+}
+
+/// Parse the daemon [`Args`] from an explicit argv and run. Used by the
+/// hidden `zccache daemon-run …` escape hatch (#998): an argv[0]-independent
+/// way to enter the daemon (debugging, `noexec` cache dirs, or platforms where
+/// argv[0] is unreliable). The caller synthesizes a leading `zccache-daemon`
+/// program-name token followed by the daemon flags.
+pub fn run_from<I, T>(argv: I)
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let args = Args::parse_from(argv);
+    run_with(args);
+}
+
+/// Run the daemon from already-parsed [`Args`]. Split out so `argv[0]`
+/// dispatch (#998) and tests can drive the daemon without going through
+/// `Args::parse()` on the real process argv.
+pub fn run_with(args: Args) {
+    if args.foreground {
+        // FIRST thing in the long-lived path: drop any stdio handles we
+        // inherited from the spawning process. Without this, an orphaned
+        // daemon keeps its grandparent's pipe write ends alive and the
+        // grandparent's pipe reader (e.g. `subprocess.Popen(stdout=PIPE)`)
+        // never sees EOF after the parent exits. See issue #276.
+        //
+        // When the CLI hands us a `--log-file` we redirect stdout +
+        // stderr onto that file instead of `/dev/null` (stdin stays
+        // nulled) so failures that fire before the lifecycle log /
+        // panic hook still leave evidence on disk. Must run before
+        // init_tracing() so the subscriber's writes land in the log
+        // file too.
+        match args.log_file.as_deref() {
+            Some(path) => crate::daemon_core::daemon::trampoline::redirect_stdio_to_log(path),
+            None => crate::daemon_core::daemon::trampoline::detach_stdio(),
+        }
+        init_tracing(&args.log_level);
+        // Long-lived process: release exe-file lock and cwd handle so
+        // `pip install --upgrade zccache` and `rm -rf <project>` can
+        // succeed while the daemon is running. See issue #134.
+        crate::daemon_core::daemon::trampoline::unlock_exe();
+        crate::daemon_core::daemon::trampoline::release_cwd();
+        run_server(args);
+    } else {
+        print_status(&args);
+    }
+}
+
+fn print_status(args: &Args) {
+    let endpoint = args
+        .endpoint
+        .clone()
+        .unwrap_or_else(crate::daemon_core::ipc::default_endpoint);
+
+    println!("zccache-daemon v{}", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("  endpoint:   {endpoint}");
+    println!(
+        "  namespace:  {}",
+        crate::daemon_core::core::config::daemon_namespace_label()
+    );
+    // #1904: the lock belongs to the endpoint printed on the line above, not
+    // unconditionally to the default one.
+    println!(
+        "  lock file:  {}",
+        crate::daemon_core::ipc::lock_file_path_for(&endpoint).display()
+    );
+    println!();
+
+    // Try to connect and get status from a running daemon
+    #[expect(
+        clippy::expect_used,
+        reason = "current-thread runtime construction with enable_all only fails on OS resource exhaustion; daemon-status query cannot proceed without it"
+    )]
+    let rt = kernal_api::async_engine::RuntimeBuilder::current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to create async runtime");
+
+    match rt.run(query_daemon_status(&endpoint)) {
+        Ok(status) => {
+            println!("  status:     running");
+            println!("  daemon ns:  {}", status.daemon_namespace);
+            println!("  daemon ep:  {}", status.endpoint);
+            println!(
+                "  private:    {}",
+                if status.private_daemon.enabled {
+                    "yes"
+                } else {
+                    "no"
+                }
+            );
+            println!("  uptime:     {}s", status.uptime_secs);
+            println!("  artifacts:  {}", status.artifact_count);
+            println!("  cache size: {} bytes", status.cache_size_bytes);
+            println!("  metadata:   {} entries", status.metadata_entries);
+            println!(
+                "  hits/miss:  {} / {}",
+                status.cache_hits, status.cache_misses
+            );
+        }
+        Err(_) => {
+            println!("  status:     not running");
+            println!();
+            println!("Start with: zccache-daemon --foreground");
+        }
+    }
+}
+
+async fn query_daemon_status(
+    endpoint: &str,
+) -> Result<crate::daemon_core::protocol::DaemonStatus, Box<dyn std::error::Error>> {
+    let resp = crate::daemon_core::ipc::daemon_control_roundtrip(
+        endpoint,
+        crate::daemon_core::ipc::DaemonControlRequest::Status,
+        None,
+    )
+    .await?;
+    match resp {
+        Some(crate::daemon_core::protocol::Response::Status(s)) => Ok(s),
+        Some(other) => Err(format!("unexpected response: {other:?}").into()),
+        None => Err("connection closed".into()),
+    }
+}
+
+fn run_server(args: Args) {
+    let endpoint = args.endpoint.unwrap_or_else(crate::daemon_core::ipc::default_endpoint);
+    let idle_timeout = args.idle_timeout;
+
+    // The returned guard MUST stay alive — drop unregisters the
+    // OS-level signal/exception handlers. Bind it for the whole
+    // `run_server` lifetime by storing it in this stack frame.
+    //
+    // #1720: the upstream bounded sampler makes native capture affordable by
+    // default for the daemon. ZCCACHE_NATIVE_CRASH_CAPTURE=0 temporarily
+    // disables it without removing panic dumps.
+    let _crash_guard = if crate::daemon_core::core::config::native_crash_capture_enabled() {
+        crate::daemon_core::core::crash::install("zccache-daemon")
+    } else {
+        crate::daemon_core::core::crash::install_without_native_capture("zccache-daemon")
+    };
+    crate::daemon_core::core::crash::check_previous_crashes();
+
+    tracing::info!(%endpoint, idle_timeout, "zccache-daemon starting");
+
+    // ── Issue #640: pre-bind probe to cut second-wave spawn herd ─────────
+    //
+    // Before paying the 3+ s depgraph-load cost, check whether another
+    // daemon is already serving at this endpoint. A short async probe
+    // (timeout: 500 ms) is enough — if it succeeds we know a live
+    // daemon owns the pipe and we can exit cleanly without writing a
+    // spawn event, lock file, or doing any heavy init.
+    //
+    // This DOES NOT help the initial cohort racing for the bind from a
+    // cold start (none of them have written a lock file yet); those
+    // are still caught by the post-bind PermissionDenied → INFO+exit 0
+    // path landed in #639. What it DOES catch is the second wave:
+    // every daemon spawn that fires AFTER one daemon has already
+    // registered its lock file. In the user's #637 repro (277 spawns
+    // over 3 hours, spaced anywhere from 11 ms to ~10 s apart) this
+    // is most of the herd.
+    //
+    // A short-lived async runtime hosts the probe so we don't
+    // need to bring up the full multi-thread runtime before deciding
+    // whether to defer.
+    {
+        #[expect(
+            clippy::expect_used,
+            reason = "current-thread probe runtime construction with enable_all only fails on OS resource exhaustion; daemon-defer probe cannot proceed without it"
+        )]
+        let probe_rt = kernal_api::async_engine::RuntimeBuilder::current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create async probe runtime");
+        let existing_daemon = probe_rt.run(crate::daemon_core::ipc::probe_existing_daemon(
+            &endpoint,
+            std::time::Duration::from_millis(500),
+        ));
+        if existing_daemon {
+            tracing::info!(
+                %endpoint,
+                "active daemon already serving — deferring"
+            );
+            // Do NOT remove the lock file — it belongs to the live daemon.
+            std::process::exit(0);
+        }
+    }
+
+    // Issue #273: on Windows, warn once on stderr if the cache dir is
+    // not on Defender's exclusion list. Non-fatal; no-ops off Windows
+    // and when `ZCCACHE_QUIET` is set.
+    let cache_root = crate::daemon_core::core::config::default_cache_dir();
+    let daemon_state_root = crate::daemon_core::core::config::daemon_state_dir();
+    tracing::info!(
+        daemon_namespace = %crate::daemon_core::core::config::daemon_namespace_label(),
+        mutable_state_dir = %daemon_state_root.display(),
+        "resolved daemon cache state"
+    );
+    // Off the critical path: the PowerShell query can outlive the CLI's
+    // lockfile grace (see `spawn_first_run_banner`).
+    crate::daemon_core::core::defender::spawn_first_run_banner(cache_root.clone());
+
+    #[expect(
+        clippy::expect_used,
+        reason = "multi-thread runtime construction with enable_all only fails on OS resource exhaustion; daemon cannot proceed without it"
+    )]
+    let rt = kernal_api::async_engine::RuntimeBuilder::multi_thread()
+        .enable_all()
+        .max_blocking_threads(daemon_max_blocking_threads())
+        .build()
+        .expect("failed to create async runtime");
+
+    let no_depgraph_cache = args.no_depgraph_cache;
+    // Cache root for the v1 CacheManifest published after a successful bind
+    // (zackees/running-process#435); cloned so it survives the async move.
+    let manifest_cache_root = cache_root.clone();
+    rt.run(async move {
+        // ── Issue #640: bind FIRST, then load depgraph in background ─────
+        //
+        // The prior flow loaded the depgraph (3+ s on a populated cache)
+        // BEFORE the bind, so for the entire load window every parallel
+        // `ninja -jN` client whose connect failed ALSO spawned a daemon.
+        // 277 redundant spawns per FastLED build per #637.
+        //
+        // With #642's `ArcSwap<DepGraph>` foundation, `set_dep_graph` is
+        // now `&self` + atomic-swap-safe, so the load can fire from a
+        // `spawn_blocking` AFTER `server.run()` has started the accept
+        // loop. Compile requests arriving during the load window wait
+        // until the persisted graph has been classified and published,
+        // avoiding the fresh-daemon `cold_skip` race fixed in zccache#798.
+        //
+        // The pre-bind probe (#641) and bind-error race discrimination
+        // (#639) both still fire in their original order — only the
+        // depgraph load itself moves.
+
+        // ── Issue #637/#639: discriminate loser-of-race from real bind failure ──
+        //
+        // #1905: `write_lock_file` runs well below this block, so on every
+        // bind failure this process has NOT created the lock file. Track
+        // ownership explicitly — nothing before `write_lock_file` may delete
+        // a lock file this process did not write, or it unlinks the winning
+        // daemon's file and makes a live daemon undiscoverable.
+        // #1904: the guard owns the endpoint's OWN lock path, so its cleanup
+        // can only ever unlink a lock file belonging to the endpoint this
+        // process just tried to bind.
+        let mut lock_file = crate::daemon_core::daemon::lock_file_guard::LockFileGuard::new(
+            crate::daemon_core::ipc::lock_file_path_for(&endpoint),
+        );
+        let bind_endpoint = endpoint.clone();
+        let bind_result = kernal_api::async_engine::launch_blocking(move || {
+            crate::daemon_core::daemon::DaemonServer::bind(&bind_endpoint)
+        })
+        .detach_on_drop()
+        .await;
+        let server = match bind_result {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                // #1905: `WouldBlock` — cache-root writer contention from
+                // `CacheRootWriterLock::acquire`, where THIS daemon bound its
+                // endpoint fine but a different daemon already owns the cache
+                // root — is deliberately NOT in this list. This arm exits 0
+                // to mean "another daemon owns this endpoint", which is a
+                // different claim from "another daemon owns this cache
+                // root"; deferring on it would silently drop a real bind
+                // failure. Ownership, not error-kind enumeration, is what
+                // keeps the winner's lock file safe (`lock_file` below).
+                let is_pipe_in_use = matches!(
+                    &e,
+                    crate::daemon_core::ipc::IpcError::Io(io_err) if matches!(
+                        io_err.kind(),
+                        std::io::ErrorKind::PermissionDenied
+                            | std::io::ErrorKind::AddrInUse
+                            | std::io::ErrorKind::AlreadyExists
+                    )
+                );
+                if is_pipe_in_use {
+                    tracing::info!(
+                        %endpoint,
+                        error = %e,
+                        "another daemon already owns endpoint — deferring"
+                    );
+                    // Do NOT remove the lock file — it belongs to the
+                    // winning daemon, not us.
+                    std::process::exit(0);
+                }
+                tracing::error!(
+                    wrote_lock_file = lock_file.wrote_lock_file(),
+                    "failed to bind {endpoint}: {e}"
+                );
+                // #1905: no-op — we never wrote the lock file.
+                lock_file.remove_if_owned();
+                std::process::exit(1);
+            }
+            Err(e) => {
+                tracing::error!("failed to join daemon bind worker for {endpoint}: {e}");
+                // #1905: same — a no-op before `write_lock_file`.
+                lock_file.remove_if_owned();
+                std::process::exit(1);
+            }
+        };
+
+        // Bind won — we are THE daemon. NOW write the spawn event and
+        // lock file (loser-of-race exits at bind above without
+        // polluting either).
+        let spawn_meta = crate::daemon_core::daemon::lifecycle::client_meta(env!("CARGO_PKG_VERSION"));
+        crate::daemon_core::daemon::lifecycle::write_event(
+            crate::daemon_core::daemon::lifecycle::EVENT_SPAWN,
+            serde_json::json!({
+                "endpoint": &endpoint,
+                "daemon_namespace": crate::daemon_core::core::config::daemon_namespace_label(),
+                "idle_timeout": idle_timeout,
+                "version": env!("CARGO_PKG_VERSION"),
+                // #755 acceptance #4: the daemon binary that bound
+                // this endpoint, so coexisting fbuild-bundled vs.
+                // PyPI installs land distinguishable rows.
+                "client_version": spawn_meta["client_version"],
+                "client_binary_path": spawn_meta["client_binary_path"],
+            }),
+        );
+        let pid = std::process::id();
+        match crate::daemon_core::daemon::startup_lockfile::record_ownership(&endpoint, pid) {
+            crate::daemon_core::daemon::startup_lockfile::StartupDecision::Serve => {
+                // #1905: only now does this process own the lock file, so
+                // only now may its cleanup paths remove it.
+                lock_file.mark_written();
+            }
+            crate::daemon_core::daemon::startup_lockfile::StartupDecision::RefuseServing { error } => {
+                // #1905: `write_lock_file` creates the parent directory
+                // before the write, so this failure is either a create
+                // failure (the file at this path is untouched) or a
+                // partially-applied `fs::write` (a truncated remnant).
+                // Only the second is ours to clean up:
+                // `read_lock_file_pid` cannot parse a truncated file, so
+                // leaving it makes `probe_existing_daemon` read it as
+                // "no pid" forever. An unparseable file is also the only
+                // shape here that is provably not another daemon's record,
+                // so this stays inside the #1905 invariant. Ownership stays
+                // unrecorded, so the `remove_if_owned` calls below remain
+                // no-ops for this process.
+                //
+                // #1904: scoped to the endpoint this process bound — reading
+                // and removing the DEFAULT endpoint's lock here would delete
+                // the live default daemon's record whenever a custom-endpoint
+                // daemon fails to start.
+                if crate::daemon_core::ipc::read_lock_file_pid_for(&endpoint).is_none() {
+                    let _ = std::fs::remove_file(crate::daemon_core::ipc::lock_file_path_for(&endpoint));
+                }
+                // #1903: we won the bind but cannot record ownership, so we
+                // are undiscoverable and unstoppable — both
+                // `check_running_daemon` and `probe_existing_daemon` read
+                // the lock file, and `zccache stop` reports success while
+                // this process keeps the cache-root writer lock. Serving
+                // here is what produced that state; refuse to serve instead
+                // of reporting a successful start.
+                tracing::error!(%endpoint, %error, "failed to write lock file — refusing to serve");
+                crate::daemon_core::daemon::startup_lockfile::report_unrecorded(&endpoint, &error);
+                // The endpoint is ours (we won the bind), so retire it. The
+                // lock file is NOT ours to remove: we never wrote one, and
+                // the removal above only unlinks a provably unparseable
+                // remnant — see #1905.
+                let _ = crate::daemon_core::ipc::retire_endpoint(&endpoint);
+                std::process::exit(1);
+            }
+        }
+        // #1005: advisory top-level marker of the last version that bound.
+        // Diagnostics / warm-start hint only, never authoritative for identity.
+        if let Err(e) = crate::daemon_core::core::config::write_last_version_marker() {
+            tracing::debug!("failed to write last-version marker: {e}");
+        }
+        // #1904: the identity sidecar belongs to the endpoint this process
+        // just bound. Writing the default endpoint's sidecar here let a
+        // daemon on a custom `--endpoint` overwrite the default daemon's
+        // identity, so every later kill decision taken against the default
+        // endpoint verified against — and terminated — this daemon.
+        let backend_identity = server.backend_identity();
+        if let Err(e) = crate::daemon_core::ipc::write_backend_identity_for(&endpoint, &backend_identity) {
+            tracing::warn!("failed to write running-process backend identity: {e}");
+        }
+        // Publish the v1 CacheManifest so broker peers can discover this
+        // daemon's cache roots (zackees/running-process#435). Best-effort:
+        // a registry write failure is logged inside publish_manifest and
+        // never blocks startup. Skipped under RUNNING_PROCESS_DISABLE=1.
+        if let Some(path) = crate::daemon_core::ipc::publish_manifest(&manifest_cache_root) {
+            tracing::debug!(manifest = %path.display(), "published running-process cache manifest");
+        }
+
+        // Install the ServiceDefinition into the running-process service-
+        // definition dir so the shared broker can discover us without the
+        // user running `zccache install-servicedef` manually (#720 Phase 2).
+        // Idempotent + best-effort like publish_manifest above; a write
+        // failure is logged and ignored. Skipped under
+        // RUNNING_PROCESS_DISABLE=1. The version-policy refinement (#720
+        // Phase 0) is the follow-up that turns the current exact-version
+        // pin into a real compatibility floor + range.
+        if let Ok(binary) = crate::daemon_core::platform::executable::current_image() {
+            let _ = crate::daemon_core::ipc::publish_service_definition(&binary);
+        }
+
+        // Spawn the depgraph load. Holds a `DepGraphSetter` that survives
+        // the spawn_blocking boundary; on completion atomically installs
+        // the graph + warning via #642's ArcSwap.
+        server.mark_dep_graph_load_pending();
+        let setter = server.dep_graph_setter();
+        let depgraph_path = server.depgraph_file_path();
+        let load_handle = kernal_api::async_engine::launch_blocking(move || {
+            if no_depgraph_cache {
+                let _ = std::fs::remove_file(&depgraph_path);
+                tracing::info!("depgraph cache disabled — starting with empty graph");
+                setter.install(None, None);
+                return;
+            }
+            // #1157: the classify/quarantine/recover policy lives in
+            // `daemon::depgraph_load` so its degraded arms are reachable from
+            // a unit test — inline here they could only ever be pinned by
+            // re-emitting their events by hand, which cannot catch an arm that
+            // stops firing.
+            let load = crate::daemon_core::daemon::depgraph_load::load_for_startup(&depgraph_path);
+            if let Some(ref w) = load.warning {
+                eprintln!("{w}");
+            }
+            setter.install(load.graph, load.warning);
+        });
+
+        // Issue #784: move the compiler-hash cache load off the
+        // spawn→lockfile critical path, using the same `spawn_blocking`
+        // shape as the depgraph load above. The loader logs at WARN on
+        // disk failure and leaves the in-memory cache empty; the
+        // stat-verify in `get_or_hash_with` keeps cache-key correctness
+        // either way. Fire-and-forget — the JoinHandle is dropped; if
+        // shutdown fires mid-load, the shutdown save path checks the
+        // `compiler_hash_cache_loaded` flag and skips the write so the
+        // on-disk snapshot is preserved (see `server::run`'s shutdown
+        // arm).
+        let compiler_hash_loader = server.compiler_hash_cache_loader();
+        kernal_api::async_engine::launch_blocking(move || {
+            compiler_hash_loader.load_and_install();
+        })
+        .detach();
+
+        // Issue #784 phase 2b: same shape for the on-disk `metadata.bin`
+        // snapshot. This is the biggest of the four #784 deferrals —
+        // load time scales with the number of cached files, so on a
+        // FastLED-scale cache it was the dominant cost between bind and
+        // lockfile. Same shutdown-save gating as the compiler-hash
+        // loader: `metadata_cache_loaded` flag tells `server::run`'s
+        // shutdown arm whether the in-memory state is canonical.
+        let metadata_loader = server.metadata_cache_loader();
+        kernal_api::async_engine::launch_blocking(move || {
+            metadata_loader.load_and_install();
+        })
+        .detach();
+
+        // Issue #784 phase 2c: same shape for the on-disk
+        // system-includes snapshot. The loader briefly acquires the
+        // `system_includes: Mutex<...>` via `blocking_lock()` to merge
+        // entries from the loaded cache into the live one. Same
+        // shutdown-save gating as the compiler-hash loader:
+        // `system_includes_loaded` tells `server::run`'s shutdown arm
+        // whether the in-memory state is canonical.
+        let system_includes_loader = server.system_includes_loader();
+        kernal_api::async_engine::launch_blocking(move || {
+            system_includes_loader.load_and_install();
+        })
+        .detach();
+
+        // Issue #784 phase 2d: same shape for the on-disk artifact
+        // index blob. The store was constructed empty in
+        // `bind_with_cache_dir`; the loader holds an
+        // `Arc<ArtifactStore>` clone and inserts the on-disk entries
+        // directly into the live `DashMap` request handlers read.
+        // Coexists with the synchronous on-demand load in
+        // `util::lookup_artifact_with_disk_fallback`: both paths do
+        // identical `DashMap::insert` operations, so racing them
+        // produces converged state. The `artifact_store_loaded` flag
+        // prevents redundant disk reads.
+        let artifact_store_loader = server.artifact_store_loader();
+        kernal_api::async_engine::launch_blocking(move || {
+            artifact_store_loader.load_and_install();
+        })
+        .detach();
+
+        // Wire up Ctrl+C to trigger graceful shutdown
+        let shutdown = server.shutdown_handle();
+        kernal_api::async_engine::launch(async move {
+            if let Ok(()) = kernal_api::async_engine::wait_for_interrupt().await {
+                tracing::info!("received Ctrl+C — shutting down");
+                shutdown.notify_waiters();
+            }
+        })
+        .detach();
+
+        // zackees/soldr#2436 D6: SIGTERM takes the same graceful drain as
+        // Ctrl+C. Supervisors (soldr's displacement policy, systemd, CI
+        // reapers) speak SIGTERM; before this it fell through to the default
+        // disposition — immediate death — losing up to a full save interval
+        // of depgraph registrations on every routine daemon displacement.
+        #[cfg(unix)]
+        {
+            let shutdown = server.shutdown_handle();
+            kernal_api::async_engine::launch(async move {
+                let mut sigterm = match kernal_api::async_engine::TerminationSignal::new() {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        tracing::warn!("could not install SIGTERM handler: {error}");
+                        return;
+                    }
+                };
+                if sigterm.recv().await.is_some() {
+                    tracing::info!("received SIGTERM — shutting down");
+                    shutdown.notify_waiters();
+                }
+            })
+            .detach();
+        }
+
+        tracing::info!(%endpoint, "listening for connections");
+
+        // Take `mut server` here so `server.run(&mut self)` can borrow.
+        let mut server = server;
+        if let Err(e) = server.run(idle_timeout).await {
+            tracing::error!("server error: {e}");
+            lock_file.remove_if_owned();
+            // Best-effort: abort the background load if it hasn't
+            // landed yet. If it has, the swap is harmless.
+            load_handle.cancel();
+            std::process::exit(1);
+        }
+
+        tracing::info!("daemon exiting cleanly");
+        lock_file.remove_if_owned();
+        // The load may still be running if shutdown came in <3 s after
+        // start; abort is safe (nothing for the swap to corrupt).
+        load_handle.cancel();
+    });
+}
+
+fn init_tracing(level: &str) {
+    use tracing_subscriber::EnvFilter;
+    let mut filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
+    // When a parent process (notably soldr) launches us with a narrowed
+    // `RUST_LOG=zccache_daemon=info`, the directive *only* matches the
+    // `zccache_daemon` target — INFO logs emitted from sibling crates
+    // (`crate::artifact`, `crate::fscache`, `crate::hash`, ...) are
+    // silently dropped, which has blocked perf-cluster diagnostics
+    // (runs 26255457227 / 26258412256 / 26260816043 — see PERF.md).
+    // Add explicit `<crate>=info` directives so the cross-crate logs
+    // always survive the filter regardless of how the env was set.
+    for target in [
+        "crate::artifact",
+        "crate::compiler",
+        "crate::core",
+        "crate::depgraph",
+        "crate::download",
+        "crate::fingerprint",
+        "crate::fscache",
+        "crate::gha",
+        "crate::hash",
+        "crate::ipc",
+        "crate::protocol",
+        "crate::symbols",
+        "crate::watcher",
+    ] {
+        if let Ok(d) = format!("{target}=info").parse() {
+            filter = filter.add_directive(d);
+        }
+    }
+    let profile = std::env::var(DAEMON_PROFILE_ENV).ok();
+    let tokio_console_enabled = profile.as_deref() == Some(TOKIO_CONSOLE_PROFILE);
+
+    if tokio_console_enabled {
+        let bind = std::env::var(TOKIO_CONSOLE_BIND_ENV)
+            .unwrap_or_else(|_| TOKIO_CONSOLE_DEFAULT_BIND.to_string());
+        init_tokio_console_tracing(filter, &bind);
+        return;
+    }
+
+    init_fmt_tracing(filter);
+
+    if let Some(profile) = profile {
+        if profile != TOKIO_CONSOLE_PROFILE {
+            tracing::warn!(
+                profile,
+                "unknown daemon profile requested; running without extra profiling"
+            );
+        }
+    }
+}
+
+/// Install the stderr sink, plus the opt-in bounded file sink (#1165 item 5).
+///
+/// stderr stays the default and is never taken away: whoever supervises the
+/// daemon owns that stream and is expected to rotate it. `ZCCACHE_LOG_FILE`
+/// *adds* a size-capped file alongside it for operators who have no
+/// supervisor doing that — previously there was no bounded option at all.
+fn init_fmt_tracing(filter: tracing_subscriber::EnvFilter) {
+    use tracing_subscriber::prelude::*;
+
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .with_target(true)
+        .with_thread_ids(true);
+
+    match super::log_sink::BoundedFileSink::from_env() {
+        Some(sink) => {
+            // ANSI off for the file: escape codes in a log an operator greps
+            // months later are noise, not colour.
+            let file_layer = tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_thread_ids(true)
+                .with_ansi(false)
+                .with_writer(sink);
+            // The filter is applied once at the registry rather than per
+            // layer, so both sinks are guaranteed to agree on what they see.
+            tracing_subscriber::registry()
+                .with(stderr_layer)
+                .with(file_layer)
+                .with(filter)
+                .init();
+        }
+        None => tracing_subscriber::registry()
+            .with(stderr_layer)
+            .with(filter)
+            .init(),
+    }
+}
+
+#[cfg(feature = "tokio-console")]
+fn init_tokio_console_tracing(filter: tracing_subscriber::EnvFilter, bind: &str) {
+    use tracing_subscriber::prelude::*;
+
+    let console_layer = std::panic::catch_unwind(console_subscriber::spawn);
+    match console_layer {
+        Ok(console_layer) => {
+            tracing_subscriber::registry()
+                .with(console_layer)
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_target(true)
+                        .with_thread_ids(true)
+                        .with_filter(filter),
+                )
+                .init();
+            tracing::info!(
+                bind,
+                "tokio-console daemon profile enabled; connect with `tokio-console {bind}`"
+            );
+        }
+        Err(_) => {
+            init_fmt_tracing(filter);
+            tracing::warn!(
+                bind,
+                "tokio-console daemon profile requested but unavailable; \
+                 rebuild with RUSTFLAGS=\"--cfg tokio_unstable\""
+            );
+        }
+    }
+}
+
+#[cfg(not(feature = "tokio-console"))]
+fn init_tokio_console_tracing(filter: tracing_subscriber::EnvFilter, bind: &str) {
+    init_fmt_tracing(filter);
+    tracing::warn!(
+        bind,
+        "tokio-console daemon profile requested but zccache was built without \
+         the `tokio-console` feature"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // #997: the daemon arg parser is now library-testable. Before the
+    // extraction this lived in a bin and could not be unit-tested.
+    #[test]
+    fn args_default_is_background_status_mode() {
+        let args = Args::parse_from(["zccache-daemon"]);
+        assert!(!args.foreground);
+        assert_eq!(args.log_level, "info");
+        assert!(args.endpoint.is_none());
+    }
+
+    #[test]
+    fn args_foreground_and_endpoint_parse() {
+        let args = Args::parse_from([
+            "zccache-daemon",
+            "--foreground",
+            "--endpoint",
+            "test-endpoint",
+            "--idle-timeout",
+            "0",
+        ]);
+        assert!(args.foreground);
+        assert_eq!(args.endpoint.as_deref(), Some("test-endpoint"));
+        assert_eq!(args.idle_timeout, 0);
+    }
+
+    /// #1904: the daemon writes its lock through
+    /// `startup_lockfile::record_ownership(&endpoint, pid)` and removes it
+    /// through `LockFileGuard`, whose path is
+    /// `lock_file_path_for(&endpoint)`. Pin the property that makes the bug
+    /// real — a daemon serving a non-default endpoint can never land on (or
+    /// clear) the default daemon's record.
+    ///
+    /// Before this, `run_server` called the endpoint-less
+    /// `write_lock_file` / `remove_lock_file`, so a `--endpoint
+    /// /tmp/custom.sock` daemon overwrote the default daemon's PID and
+    /// `zccache stop` on the default endpoint force-killed the wrong
+    /// process.
+    ///
+    /// Path- and write-level only: starting two real daemons is integration
+    /// territory, and the property under test — *which path this call site
+    /// targets* — is fully determined by the endpoint-scoped helpers.
+    #[test]
+    fn daemon_lock_write_is_scoped_to_its_own_endpoint() {
+        let custom = std::env::temp_dir()
+            .join("zccache-1904-custom.sock")
+            .to_string_lossy()
+            .into_owned();
+
+        assert_ne!(
+            crate::daemon_core::ipc::lock_file_path_for(&custom),
+            crate::daemon_core::ipc::lock_file_path(),
+            "a custom endpoint must not resolve to the default daemon's lock path"
+        );
+
+        let pid = std::process::id();
+        crate::daemon_core::ipc::write_lock_file_for(&custom, pid).expect("write endpoint-scoped lock");
+
+        // On unix the lock lands next to the endpoint; on Windows it lands in
+        // the cache dir under the endpoint-scoped name. Either way the
+        // endpoint-scoped read finds it and the endpoint-less read does not.
+        assert_eq!(crate::daemon_core::ipc::read_lock_file_pid_for(&custom), Some(pid));
+        assert_ne!(
+            crate::daemon_core::ipc::read_lock_file_pid(),
+            Some(pid),
+            "writing the custom endpoint's lock must not publish this PID as the \
+             default daemon's"
+        );
+
+        // Removed by resolved path, not through `ipc::remove_lock_file`: the
+        // #1905 wiring guard forbids that literal in this file, because an
+        // unconditional removal deletes whichever daemon won the bind.
+        let _ = std::fs::remove_file(crate::daemon_core::ipc::lock_file_path_for(&custom).as_path());
+        assert_eq!(crate::daemon_core::ipc::read_lock_file_pid_for(&custom), None);
+    }
+
+    /// #1904, identity half: `run_server` writes the sidecar with
+    /// `write_backend_identity_for(&endpoint, …)`. A daemon bound to a
+    /// non-default endpoint must not land on the default daemon's identity,
+    /// because that record is what `zccache stop` authorises a kill against —
+    /// an overwrite there is how a stop aimed at one daemon terminated
+    /// another.
+    ///
+    /// Path- and write-level, like the lock test above: `run_server` is not
+    /// reachable from a unit test without starting a daemon.
+    #[test]
+    fn daemon_identity_write_is_scoped_to_its_own_endpoint() {
+        let custom = std::env::temp_dir()
+            .join("zccache-1904-identity.sock")
+            .to_string_lossy()
+            .into_owned();
+        assert_ne!(
+            crate::daemon_core::ipc::backend_identity_path_for(&custom),
+            crate::daemon_core::ipc::backend_identity_path(),
+            "a custom endpoint must not resolve to the default daemon's identity path"
+        );
+
+        let identity = crate::daemon_core::ipc::current_backend_identity(&custom)
+            .expect("capture this process's identity for the fixture");
+        crate::daemon_core::ipc::write_backend_identity_for(&custom, &identity)
+            .expect("write endpoint-scoped identity");
+
+        assert_eq!(
+            crate::daemon_core::ipc::read_backend_identity_for(&custom).map(|d| d.pid()),
+            Some(std::process::id()),
+            "the daemon must be able to read back its own endpoint's identity"
+        );
+        // Compared by PID rather than by absence: the default endpoint's
+        // sidecar may legitimately hold a real daemon's identity on the host
+        // running this test. What must never happen is this process publishing
+        // itself there.
+        assert_ne!(
+            crate::daemon_core::ipc::read_backend_identity().map(|d| d.pid()),
+            Some(std::process::id()),
+            "#1904: a daemon on {custom} must not publish its identity as the \
+             DEFAULT endpoint's"
+        );
+
+        let _ = std::fs::remove_file(crate::daemon_core::ipc::backend_identity_path_for(&custom).as_path());
+    }
+}

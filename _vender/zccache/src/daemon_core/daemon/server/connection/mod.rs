@@ -1,0 +1,562 @@
+//! Per-client IPC connection dispatch loop.
+//!
+//! Split (issue #1154 phase-0, `crates/CLAUDE.md` § File-size discipline)
+//! out of a single 1590-LOC `connection.rs` into this thin loop file plus
+//! `dispatch.rs` (the per-`Request` match arm) and `attribution.rs`
+//! (cache-miss attribution + redacted diagnostic previews — named
+//! `attribution` rather than `miss_reason` so its module path doesn't
+//! shadow the glob-imported `compile_journal::miss_reason` constants
+//! module pulled in via `use super::*`). See `connection/README.md`.
+
+use super::*;
+use crate::daemon_core::protocol::{
+    wire_prost::{self, zccache_v1 as pb},
+    DecodedWireMessage,
+};
+
+mod attribution;
+mod dispatch;
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) use attribution::redacted_args_preview;
+pub(in crate::daemon_core::daemon::server) use attribution::{
+    append_unknown_miss_warning, compile_miss_reason, derive_approx_spans,
+};
+use dispatch::dispatch_request;
+
+enum ResponseWire {
+    ProstV16 {
+        request_id: String,
+    },
+    /// running-process `Frame` envelope lane. `frame_request_id` is the
+    /// frame correlation id to echo; `request_id` is the inner zccache
+    /// prost request id echoed in the response body.
+    FrameV1 {
+        frame_request_id: u64,
+        request_id: String,
+    },
+}
+
+const SERVER_REQUEST_RECV_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Interval between `CompileProgress` heartbeats pushed on an in-flight
+/// compile connection (issue #1216).
+///
+/// Must stay comfortably below every client-side budget it has to keep
+/// alive: the wrapper's 180 s wedge budget
+/// (`ZCCACHE_WEDGE_RECV_TIMEOUT_SECS`) and soldr's 30 s embedded dispatch
+/// budget (soldr#1657). 5 s clears both with a wide margin while costing at
+/// most a few dozen small frames over a minutes-long compile.
+const COMPILE_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Override for [`COMPILE_PROGRESS_INTERVAL`], in milliseconds. `0`
+/// disables heartbeats entirely (the pre-#1216 behavior).
+const COMPILE_PROGRESS_INTERVAL_ENV: &str = "ZCCACHE_COMPILE_PROGRESS_INTERVAL_MS";
+
+pub(in crate::daemon_core::daemon::server) struct PendingJournalContext {
+    context: JournalContext,
+    attributed_miss_reason: Option<&'static str>,
+    context_key: Option<String>,
+    child_memory: crate::daemon_core::daemon::compile_journal::ChildMemory,
+}
+
+impl PendingJournalContext {
+    fn new(
+        context: JournalContext,
+        attributed_miss_reason: Option<&'static str>,
+        context_key: Option<String>,
+        child_memory: crate::daemon_core::daemon::compile_journal::ChildMemory,
+    ) -> Self {
+        Self {
+            context,
+            attributed_miss_reason,
+            context_key,
+            child_memory,
+        }
+    }
+}
+
+fn session_phase_profile(
+    state: &SharedState,
+    session_id: &SessionId,
+) -> crate::daemon_core::protocol::PhaseProfileSummary {
+    let mut totals = state.profiler.totals_snapshot();
+    totals.staged = state.session_staged_profiles.get(session_id).map_or_else(
+        || crate::daemon_core::daemon::staged_stats::StagedProfiler::new().snapshot(),
+        |profile| profile.snapshot(),
+    );
+    totals.into()
+}
+
+/// Run a child-spawning handler (compile / link / exec) while concurrently
+/// watching the client connection for disconnect (issue #967, meta #968).
+///
+/// Returns `Some((response, journal_ctx))` when the handler finished first, or
+/// `None` when the client disconnected while the handler was still running — in
+/// which case the handler future has already been dropped, which drops the
+/// canonical compiler-session lifecycle owner (configured kill-on-drop),
+/// requests native termination/reaping, and releases its compile-concurrency
+/// permit. Returning `None` does not certify that asynchronous cleanup finished.
+///
+/// Before this guard existed, the daemon parked inside the compile/link await
+/// and never read the socket again, so a client that gave up (its 600 s recv
+/// timeout, a `taskkill`, a cancelled build) left the daemon awaiting a compile
+/// whose result could never be delivered — holding a compile-concurrency permit
+/// the whole time. Enough of those wedged the shared semaphore and every later
+/// compile queued forever (issue #962's amplifier; issue #967 is this fix).
+///
+/// The race is `biased` toward the handler so a compile that finishes in the
+/// same poll as an incoming disconnect still returns its response. On disconnect
+/// the handler future is dropped at its next suspension point — the
+/// `child.wait_with_output().await` inside [`crate::daemon_core::daemon::process`].
+///
+/// (Returns `Option` rather than a two-variant enum so the 448-byte completed
+/// payload does not sit next to a zero-size cancelled variant — `clippy::large_enum_variant`.)
+pub(in crate::daemon_core::daemon::server) async fn guarded_dispatch<F>(
+    conn: &mut IpcConnection,
+    handler: F,
+) -> Option<(Response, Option<PendingJournalContext>)>
+where
+    F: std::future::Future<Output = (Response, Option<PendingJournalContext>)>,
+{
+    let mut handler = std::pin::pin!(handler);
+    let disconnect = conn.wait_for_disconnect();
+    let mut disconnect = std::pin::pin!(disconnect);
+    match kernal_api::biased_race!((handler.as_mut()), (disconnect.as_mut())).await {
+        kernal_api::async_engine::BiasedRace2::First(out) => Some(out),
+        kernal_api::async_engine::BiasedRace2::Second(()) => None,
+    }
+}
+
+/// Resolve the heartbeat interval, or `None` when heartbeats are disabled.
+fn compile_progress_interval() -> Option<std::time::Duration> {
+    compile_progress_interval_from(std::env::var(COMPILE_PROGRESS_INTERVAL_ENV).ok().as_deref())
+}
+
+/// The env-var parse, taking the raw value rather than reading the process
+/// environment, so it is testable without mutating global state that every
+/// other test in this binary shares.
+fn compile_progress_interval_from(raw: Option<&str>) -> Option<std::time::Duration> {
+    let Some(raw) = raw else {
+        return Some(COMPILE_PROGRESS_INTERVAL);
+    };
+    match raw.trim().parse::<u64>() {
+        Ok(0) => None,
+        Ok(ms) => Some(std::time::Duration::from_millis(ms)),
+        Err(_) => {
+            tracing::warn!(
+                env = COMPILE_PROGRESS_INTERVAL_ENV,
+                value = raw,
+                "invalid {COMPILE_PROGRESS_INTERVAL_ENV}; using the default interval"
+            );
+            Some(COMPILE_PROGRESS_INTERVAL)
+        }
+    }
+}
+
+/// [`guarded_dispatch`] plus interim `CompileProgress` heartbeats (issue #1216).
+///
+/// Used for the two compile lanes, whose handlers can legitimately park for
+/// minutes inside the compile-concurrency gate. While the handler runs, a
+/// ticker pushes a non-terminal `CompileProgress` frame on the *same*
+/// connection every [`COMPILE_PROGRESS_INTERVAL`]. The wrapper resets its
+/// wedge budget on each one (`wrap/ipc.rs`), so a queued-but-progressing
+/// compile keeps its original connection and cached-path result instead of
+/// being probed, re-run ephemerally, or killed — while a daemon that emits
+/// *nothing* for a full budget still trips the #753/#955 wedge handling.
+///
+/// The per-request queue ticket is published through the
+/// [`super::compile_progress`] task-local scoped around `handler` here,
+/// which is why no progress handle has to be threaded through
+/// `handle_compile` → `pipeline` → `compile_exec`.
+///
+/// ## Old-client safety
+///
+/// Heartbeats are only emitted after the request has been decoded, so the
+/// client's wire version is already known to be one this daemon speaks. A
+/// client too old to understand `CompileProgress` fails version negotiation
+/// before reaching this function (both lanes were bumped in #1216), so it can
+/// never receive a frame it cannot decode.
+///
+/// ## Disconnect detection
+///
+/// The heartbeat write is also the disconnect probe. In particular, do not
+/// race a fresh `conn.wait_for_disconnect()` against every tick. Dropping that
+/// pending read cancels an overlapped named-pipe operation on Windows; a later
+/// read can observe the cancelled operation as a disconnect and drop a healthy
+/// compile connection. A failed heartbeat write returns `None`, which drops the
+/// handler and retains the same bounded client-death detection cadence.
+async fn guarded_dispatch_with_progress<F>(
+    conn: &mut IpcConnection,
+    response_wire: &ResponseWire,
+    state: &SharedState,
+    handler: F,
+) -> Option<(Response, Option<PendingJournalContext>)>
+where
+    F: std::future::Future<Output = (Response, Option<PendingJournalContext>)>,
+{
+    guarded_dispatch_with_progress_every(
+        compile_progress_interval(),
+        conn,
+        response_wire,
+        state,
+        handler,
+    )
+    .await
+}
+
+/// [`guarded_dispatch_with_progress`] with the cadence supplied by the caller.
+///
+/// Split out so a test can drive the heartbeat loop on a millisecond cadence
+/// without setting a process-global env var that every other test in this
+/// binary would race against.
+async fn guarded_dispatch_with_progress_every<F>(
+    interval: Option<std::time::Duration>,
+    conn: &mut IpcConnection,
+    response_wire: &ResponseWire,
+    state: &SharedState,
+    handler: F,
+) -> Option<(Response, Option<PendingJournalContext>)>
+where
+    F: std::future::Future<Output = (Response, Option<PendingJournalContext>)>,
+{
+    let Some(interval) = interval else {
+        return guarded_dispatch(conn, handler).await;
+    };
+    let slot = Arc::new(super::compile_progress::CompileProgressSlot::default());
+    let handler = super::compile_progress::scope(Arc::clone(&slot), handler);
+    let mut handler = std::pin::pin!(handler);
+    loop {
+        // `timeout` polls the handler before it arms its delay, so a request
+        // that is already done (a warm cache hit) returns without any timer
+        // wait. The first heartbeat lands one full interval into the compile
+        // and each later one an interval after the previous. Do not reach for
+        // a periodic timer and burn its "immediate" first tick: that tick
+        // only fires on the runtime timer's next ~1 ms advance, which cost
+        // every compile request ~1 ms (4x a warm C hit's own work).
+        if let Ok(out) = kernal_api::async_engine::timeout(interval, handler.as_mut()).await {
+            return Some(out);
+        }
+        // Borrow of `conn` by the handler's poll above has ended here.
+        let progress = super::compile_progress::progress_response(&slot, &state.compile_queue);
+        if let Response::CompileProgress {
+            queue_position,
+            queue_depth,
+            in_flight,
+            ref phase,
+        } = progress
+        {
+            tracing::info!(
+                event = "compile_progress",
+                queue_position,
+                queue_depth,
+                in_flight,
+                phase = phase.as_str(),
+                "compile_progress phase={phase} queue_position={queue_position} \
+                 queue_depth={queue_depth} in_flight={in_flight}",
+            );
+        }
+        if let Err(error) = send_response_for_wire(conn, response_wire, &progress).await {
+            // This write is the cancellation probe while the handler owns the
+            // request. A broken connection means there is no client left to
+            // receive the terminal response, so dropping `handler` here also
+            // reaps its kill-on-drop compiler child and releases its permit.
+            tracing::warn!(
+                event = "compile_progress_send_failed",
+                error = %error,
+                "failed to push a compile progress heartbeat; cancelling request"
+            );
+            return None;
+        }
+    }
+}
+
+/// Emit the distinguishable client-cancellation diagnostic (issue #967
+/// acceptance): a loud `warn!` plus an on-disk lifecycle record so an operator
+/// can tell "client disconnected mid-compile" apart from a compiler failure, a
+/// daemon crash, or an IPC write error — even after a detached Windows run where
+/// daemon stderr is redirected.
+///
+/// This is deliberately `warn!` (not `info!`): a client vanishing mid-compile is
+/// abnormal — it means daemon work was thrown away and may indicate the client
+/// itself wedged or crashed — so it must complain loudly and leave a forensic
+/// trail, per the daemon's "every cancellation/timeout is logged loud + durable"
+/// rule.
+fn log_client_cancelled(kind: &str) {
+    tracing::warn!(
+        event = "client-cancelled",
+        kind,
+        "client disconnected before the response was produced; \
+         daemon-owned compiler child reaped via kill_on_drop and \
+         compile-concurrency permit released"
+    );
+    super::super::lifecycle::write_event(
+        crate::daemon_core::core::lifecycle::EVENT_CLIENT_CANCELLED,
+        serde_json::json!({
+            "kind": kind,
+            "reason": "client disconnected before response; daemon child reaped, permit released",
+        }),
+    );
+}
+
+/// Handle a single client connection.
+pub(super) async fn handle_connection(
+    mut conn: IpcConnection,
+    state: Arc<SharedState>,
+) -> Result<(), crate::daemon_core::ipc::IpcError> {
+    if conn
+        .try_serve_backend_handle_probe(&state.backend_probe)
+        .await?
+    {
+        state.last_activity.store(now_secs(), Ordering::Relaxed);
+        return Ok(());
+    }
+
+    loop {
+        let request = match conn
+            .recv_wire_with_timeout::<pb::Request>(SERVER_REQUEST_RECV_TIMEOUT)
+            .await
+        {
+            Ok(req) => req,
+            Err(crate::daemon_core::ipc::IpcError::Timeout(timeout)) => {
+                tracing::warn!(
+                    timeout_secs = timeout.as_secs(),
+                    "client connection timed out waiting for next request; closing connection"
+                );
+                return Ok(());
+            }
+            Err(crate::daemon_core::ipc::IpcError::Protocol(
+                crate::daemon_core::protocol::ProtocolError::VersionMismatch { expected, received },
+            )) => {
+                // Don't drop the connection silently — without a reply the
+                // CLI surfaces the (correct) closure as the misleading
+                // "lost connection to daemon (no response received)". Send
+                // back a real error so the CLI can render the actual
+                // reason — both crate versions and both protocol versions,
+                // daemon and client.
+                //
+                // The response goes out at the daemon's PROTOCOL_VERSION,
+                // which itself will fail to decode on a different-versioned
+                // client — but VersionMismatch on the client side renders
+                // a clear message via Display ("expected vX, received vY"),
+                // which is what we want.
+                let daemon_crate = env!("CARGO_PKG_VERSION");
+                let msg = format!(
+                    "protocol version mismatch: daemon zccache v{daemon_crate} \
+                     (protocol v{expected}) received a request at protocol v{received}. \
+                     Run `zccache stop` and retry — the CLI you connected with is built \
+                     against a different PROTOCOL_VERSION than this daemon."
+                );
+                tracing::warn!("{msg}");
+                // Also persist to the on-disk lifecycle log so the reason
+                // is visible even when daemon stderr is redirected/null.
+                // The lifecycle log already records the daemon's
+                // CARGO_PKG_VERSION on every spawn — this entry adds the
+                // mismatch context.
+                super::super::lifecycle::write_event(
+                    crate::daemon_core::core::lifecycle::EVENT_VERSION_MISMATCH,
+                    serde_json::json!({
+                        "daemon_crate_version": daemon_crate,
+                        "daemon_protocol_version": expected,
+                        "client_protocol_version": received,
+                        "reason": "incompatible IPC PROTOCOL_VERSION; client must stop the daemon and let the new one start",
+                    }),
+                );
+                let response = wire_prost::response_to_prost(
+                    &Response::Error {
+                        message: msg.clone(),
+                    },
+                    "protocol-version-mismatch",
+                );
+                let _ = conn.send_prost(&response).await;
+                return Err(crate::daemon_core::ipc::IpcError::Protocol(
+                    crate::daemon_core::protocol::ProtocolError::VersionMismatch { expected, received },
+                ));
+            }
+            Err(e) => return Err(e),
+        };
+        let Some(request) = request else {
+            tracing::debug!("client disconnected");
+            return Ok(());
+        };
+        state.last_activity.store(now_secs(), Ordering::Relaxed);
+
+        let (request, response_wire) = match request {
+            DecodedWireMessage::ProstV16(request) => {
+                let request_id = request.request_id.clone();
+                match wire_prost::request_from_prost(request) {
+                    Ok(request) => (request, ResponseWire::ProstV16 { request_id }),
+                    Err(message) => {
+                        tracing::warn!("{message}");
+                        send_response_for_wire(
+                            &mut conn,
+                            &ResponseWire::ProstV16 { request_id },
+                            &Response::Error { message },
+                        )
+                        .await?;
+                        continue;
+                    }
+                }
+            }
+            DecodedWireMessage::FrameV1 {
+                message: request,
+                request_id: frame_request_id,
+            } => {
+                let request_id = request.request_id.clone();
+                match wire_prost::request_from_prost(request) {
+                    Ok(request) => (
+                        request,
+                        ResponseWire::FrameV1 {
+                            frame_request_id,
+                            request_id,
+                        },
+                    ),
+                    Err(message) => {
+                        tracing::warn!("{message}");
+                        send_response_for_wire(
+                            &mut conn,
+                            &ResponseWire::FrameV1 {
+                                frame_request_id,
+                                request_id,
+                            },
+                            &Response::Error { message },
+                        )
+                        .await?;
+                        continue;
+                    }
+                }
+            }
+        };
+
+        // Dispatch request and capture journal metadata in the same match
+        // to move args/session_id into JournalContext without cloning.
+        // Only env needs cloning because handlers consume it.
+        let journal_start = std::time::Instant::now();
+        let Some((mut response, journal_ctx)) =
+            dispatch_request(request, &mut conn, &response_wire, &state).await?
+        else {
+            return Ok(());
+        };
+
+        // Capture journal metadata BEFORE conn.send so the client unblocks
+        // as soon as the response is on the wire. Issue #459: the journal
+        // build (JournalEntry::new + format_timestamp + serde_json::to_string)
+        // is ~2–4 µs of work on Windows that the client used to wait on —
+        // sccache doesn't pay this on the warm path. `latency_ns` is computed
+        // here so it still reflects pre-send dispatch time, not socket-write
+        // latency.
+        let journal_payload = journal_ctx.and_then(|pending| {
+            let PendingJournalContext {
+                context: ctx,
+                attributed_miss_reason,
+                context_key,
+                child_memory,
+            } = pending;
+            let termination_signal = crate::daemon_core::daemon::compile_journal::termination_signal(&response);
+            let (outcome, exit_code, miss_reason) = extract_outcome(&response)?;
+            let latency_ns = journal_start.elapsed().as_nanos();
+            let miss_reason = compile_miss_reason(
+                &ctx,
+                outcome,
+                attributed_miss_reason.or(miss_reason),
+                latency_ns,
+                state.cache_dir.as_path(),
+            );
+            // Look up session journal path + extended-journal opt-in in the
+            // same query so the session map is touched once.
+            let (session_journal_path, profile_on) = ctx
+                .session_id
+                .as_ref()
+                .and_then(|sid| sid.parse::<SessionId>().ok())
+                .and_then(|parsed| state.sessions.get(&parsed))
+                .map(|s| (s.journal_path.clone(), s.profile))
+                .unwrap_or((None, false));
+            Some((
+                ctx,
+                outcome,
+                exit_code,
+                latency_ns,
+                miss_reason,
+                session_journal_path,
+                profile_on,
+                context_key,
+                termination_signal,
+                child_memory,
+            ))
+        });
+        if let Some((ctx, _, _, latency_ns, reason, _, _, _, _, _)) = journal_payload.as_ref() {
+            if *reason == Some(miss_reason::UNKNOWN) {
+                append_unknown_miss_warning(&mut response, ctx, *latency_ns);
+            }
+        }
+
+        // Send the response BEFORE logging the journal entry. Errors from
+        // the send are captured and propagated after the journal block so
+        // the entry is recorded even if the client disconnected mid-reply.
+        let send_result = send_response_for_wire(&mut conn, &response_wire, &response).await;
+
+        if let Some((
+            ctx,
+            outcome,
+            exit_code,
+            latency_ns,
+            miss_reason,
+            session_journal_path,
+            profile_on,
+            context_key,
+            termination_signal,
+            child_memory,
+        )) = journal_payload
+        {
+            let entry = JournalEntry::new(ctx, outcome, exit_code, latency_ns, miss_reason)
+                .with_context_key(context_key)
+                .with_termination_signal(termination_signal)
+                .with_child_memory(child_memory);
+            // Issue #256: extended-journal fields are populated only
+            // for sessions that opted in via session-start --profile.
+            //
+            // Issue #339: derive per-phase `self_profile_ns` from the
+            // total latency. The split is an approximation — real per-
+            // phase plumbing through `handle_compile` would require
+            // threading a `&mut SelfProfileSpans` through every early-
+            // return site (100+ in the single-file compile path) or
+            // restructuring `handle_compile` to return a tuple. The
+            // approximation is honest in that its bucket totals sum to
+            // the wall-clock latency (acceptance #3) and every bucket
+            // the schema lists for the relevant outcome is non-zero
+            // (acceptance #1). A v2 follow-up can swap this for the
+            // genuine per-site spans.
+            let entry = if profile_on {
+                entry.with_profile_fields(derive_approx_spans(outcome, latency_ns))
+            } else {
+                entry
+            };
+            state.journal.log(&entry, session_journal_path.as_deref());
+        }
+
+        send_result?;
+    }
+}
+
+async fn send_response_for_wire(
+    conn: &mut IpcConnection,
+    response_wire: &ResponseWire,
+    response: &Response,
+) -> Result<(), crate::daemon_core::ipc::IpcError> {
+    match response_wire {
+        ResponseWire::ProstV16 { request_id } => {
+            let response = wire_prost::response_to_prost(response, request_id);
+            conn.send_prost(&response).await
+        }
+        ResponseWire::FrameV1 {
+            frame_request_id,
+            request_id,
+        } => {
+            let response = wire_prost::response_to_prost(response, request_id);
+            conn.send_frame_v1_response(&response, *frame_request_id)
+                .await
+        }
+    }
+}

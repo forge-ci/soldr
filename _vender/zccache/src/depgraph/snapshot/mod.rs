@@ -1,0 +1,414 @@
+//! Disk persistence for the dependency graph via bincode 1 (serde) streaming
+//! serialization (zccache#1661 — rkyv was dropped: its 32-bit relative
+//! pointers capped a snapshot at 2 GiB and overflow panicked instead of
+//! returning an error).
+//!
+//! Saves/loads the graph to `~/.zccache/depgraph/depgraph.bin` so warm contexts
+//! survive daemon restarts and cache hits resume immediately.
+//!
+//! Split into focused submodules so each file stays under 1,000 LOC:
+//! - this file: snapshot types, error type, [`DepGraph::to_snapshot`] /
+//!   [`DepGraph::from_snapshot`] conversion methods, and the tiny
+//!   `paths_to_strings` / `strings_to_paths` helpers used by both
+//!   conversion and tests.
+//! - `persistence`: file I/O — [`save_to_file`], [`load_from_file`],
+//!   [`classify_load`], [`depgraph_file_path`], and [`DepGraphLoadOutcome`].
+//! - `tests` (cfg(test) only): split per concern — roundtrip, persistence,
+//!   behavioral.
+
+use std::path::Path;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use dashmap::DashMap;
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use crate::core::NormalizedPath;
+use crate::hash::ContentHash;
+
+use super::context::{ArtifactKey, CompileContext, ContextKey};
+use super::graph::{ContextEntry, ContextState, DepGraph, FileEntry};
+use super::scanner::{IncludeDirective, IncludeKind};
+use super::search_paths::IncludeSearchPaths;
+
+mod persistence;
+pub mod quarantine;
+#[cfg(test)]
+mod tests;
+
+pub use persistence::{
+    classify_load, depgraph_file_path, inject_save_failures_for_tests, load_from_file,
+    load_from_file_with, save_to_file, save_to_file_with, DepGraphLoadOutcome, LoadOptions,
+    SaveOptions, GC_TTL, SNAPSHOT_BUDGET_BYTES,
+};
+
+/// On-disk format version. Bump when snapshot layout changes.
+///
+/// v9 (zccache#1899): each context gained a persisted `undefines` list so a
+/// reloaded context carries the same key inputs it was registered under.
+/// v8 (zccache#1661): payload switched from rkyv to bincode 1 and each
+/// context gained a persisted wall-clock `last_accessed_unix_ms`. An older
+/// file is classified as a version mismatch, so the first start after
+/// upgrade is a one-time cold depgraph.
+pub const DEPGRAPH_VERSION: u32 = 9;
+
+/// Magic bytes identifying a depgraph snapshot file ("ZCDG").
+pub const DEPGRAPH_MAGIC: [u8; 4] = [0x5A, 0x43, 0x44, 0x47];
+
+/// Header size: 4 (magic) + 4 (version) + 8 (payload len) = 16 bytes.
+pub(crate) const HEADER_SIZE: usize = 16;
+
+// ---------------------------------------------------------------------------
+// Snapshot types (serde/bincode-serializable mirrors of the in-memory types)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DepGraphSnapshot {
+    pub files: Vec<FileEntrySnapshot>,
+    pub contexts: Vec<ContextEntrySnapshot>,
+    pub stats: SnapshotStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileEntrySnapshot {
+    pub path: String,
+    pub includes: Vec<IncludeDirectiveSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncludeDirectiveSnapshot {
+    /// 0=Quoted, 1=AngleBracket, 2=Computed, 3=QuotedNext, 4=AngleBracketNext
+    pub kind: u8,
+    pub path: String,
+    pub line: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextEntrySnapshot {
+    /// Checkout-specific map key for mutable graph state.
+    pub context_key: [u8; 32],
+    /// Root-normalized identity used for artifact-key computation.
+    pub logical_context_key: [u8; 32],
+    pub key_root: Option<String>,
+    pub source_file: String,
+    pub iquote: Vec<String>,
+    pub user: Vec<String>,
+    pub system: Vec<String>,
+    pub after: Vec<String>,
+    pub defines: Vec<String>,
+    /// Sorted undefines. Persisted so a reloaded context carries the same
+    /// key inputs it was registered under (#1899).
+    pub undefines: Vec<String>,
+    pub flags: Vec<String>,
+    pub force_includes: Vec<String>,
+    pub unknown_flags: Vec<String>,
+    pub resolved_includes: Vec<String>,
+    pub unresolved_includes: Vec<String>,
+    pub has_computed_includes: bool,
+    pub artifact_key: Option<[u8; 32]>,
+    pub last_file_hashes: Vec<(String, [u8; 32])>,
+    pub rustc_externs: Vec<RustcExternSnapshot>,
+    /// Rustc env-dep snapshot (zccache#1021): env variable names the
+    /// crate read via `env!()`/`option_env!()` with the blake3 hash of
+    /// each value at the last compile (`None` = unset).
+    pub rustc_env_deps: Vec<RustcEnvDepSnapshot>,
+    /// 0=Cold, 1=Warm, 2=Stale
+    pub state: u8,
+    /// Wall-clock (Unix epoch milliseconds) of the context's last access.
+    /// Persisted so `trim` ages survive daemon restarts (zccache#1661);
+    /// before v8 every load re-stamped `Instant::now()`, so a daemon
+    /// restarted more often than the TTL never trimmed anything.
+    pub last_accessed_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RustcExternSnapshot {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RustcEnvDepSnapshot {
+    pub name: String,
+    pub value_hash: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotStats {
+    pub saved_at_epoch_secs: u64,
+    pub file_count: u64,
+    pub context_count: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("bad magic bytes in depgraph file")]
+    BadMagic,
+
+    #[error("depgraph version mismatch: file has v{file}, expected v{expected}")]
+    VersionMismatch { file: u32, expected: u32 },
+
+    #[error("corrupt depgraph file: {0}")]
+    Corrupt(String),
+}
+
+/// Current wall-clock time as Unix epoch milliseconds (0 if the clock is
+/// before the epoch).
+#[must_use]
+pub fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Conversion: DepGraph <-> Snapshot
+// ---------------------------------------------------------------------------
+
+impl DepGraph {
+    /// Create a serializable snapshot of the current graph state.
+    pub fn to_snapshot(&self) -> DepGraphSnapshot {
+        self.to_snapshot_at(now_unix_ms())
+    }
+
+    /// Like [`Self::to_snapshot`], with an injected wall-clock `now` stamped
+    /// as `saved_at_epoch_secs`. Context access times are already wall-clock
+    /// Unix milliseconds and are persisted verbatim.
+    pub fn to_snapshot_at(&self, now_unix_ms: u64) -> DepGraphSnapshot {
+        let files: Vec<FileEntrySnapshot> = self
+            .files_iter()
+            .map(|entry| {
+                let path = entry.key().to_string_lossy().into_owned();
+                let includes = entry
+                    .value()
+                    .includes
+                    .iter()
+                    .map(|d| IncludeDirectiveSnapshot {
+                        kind: match &d.kind {
+                            IncludeKind::Quoted => 0,
+                            IncludeKind::AngleBracket => 1,
+                            IncludeKind::Computed(_) => 2,
+                            IncludeKind::QuotedNext => 3,
+                            IncludeKind::AngleBracketNext => 4,
+                        },
+                        path: d.path.clone(),
+                        line: d.line,
+                    })
+                    .collect();
+                FileEntrySnapshot { path, includes }
+            })
+            .collect();
+
+        let contexts: Vec<ContextEntrySnapshot> = self
+            .contexts_iter()
+            .map(|entry| {
+                let key = entry.key();
+                let ctx = entry.value();
+                let rustc_externs = self
+                    .get_rustc_externs(key)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(name, path)| RustcExternSnapshot {
+                        name,
+                        path: path.to_string_lossy().into_owned(),
+                    })
+                    .collect();
+                let rustc_env_deps = ctx
+                    .rustc_env_deps
+                    .iter()
+                    .cloned()
+                    .map(|(name, value_hash)| RustcEnvDepSnapshot {
+                        name,
+                        value_hash: value_hash.map(|h| *h.as_bytes()),
+                    })
+                    .collect();
+                ContextEntrySnapshot {
+                    context_key: *key.hash().as_bytes(),
+                    logical_context_key: *ctx.logical_key.hash().as_bytes(),
+                    key_root: ctx
+                        .key_root
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned()),
+                    source_file: ctx.context.source_file.to_string_lossy().into_owned(),
+                    iquote: paths_to_strings(&ctx.context.include_search.iquote),
+                    user: paths_to_strings(&ctx.context.include_search.user),
+                    system: paths_to_strings(&ctx.context.include_search.system),
+                    after: paths_to_strings(&ctx.context.include_search.after),
+                    defines: ctx.context.defines.clone(),
+                    undefines: ctx.context.undefines.clone(),
+                    flags: ctx.context.flags.clone(),
+                    force_includes: paths_to_strings(&ctx.context.force_includes),
+                    unknown_flags: ctx.context.unknown_flags.clone(),
+                    resolved_includes: paths_to_strings(&ctx.resolved_includes),
+                    unresolved_includes: ctx.unresolved_includes.clone(),
+                    has_computed_includes: ctx.has_computed_includes,
+                    artifact_key: ctx.artifact_key.map(|k| *k.hash().as_bytes()),
+                    last_file_hashes: ctx
+                        .last_file_hashes
+                        .iter()
+                        .map(|(p, h)| (p.to_string_lossy().into_owned(), *h.as_bytes()))
+                        .collect(),
+                    rustc_externs,
+                    rustc_env_deps,
+                    state: match ctx.state {
+                        ContextState::Cold => 0,
+                        ContextState::Warm => 1,
+                        ContextState::Stale => 2,
+                    },
+                    last_accessed_unix_ms: ctx.last_accessed_unix_ms,
+                }
+            })
+            .collect();
+
+        DepGraphSnapshot {
+            stats: SnapshotStats {
+                saved_at_epoch_secs: now_unix_ms / 1000,
+                file_count: files.len() as u64,
+                context_count: contexts.len() as u64,
+            },
+            files,
+            contexts,
+        }
+    }
+
+    /// Reconstruct a `DepGraph` from a deserialized snapshot. Each context's
+    /// persisted wall-clock `last_accessed_unix_ms` is restored verbatim, so
+    /// ages survive restarts and reboots without passing through a monotonic
+    /// clock that cannot represent pre-boot times (#1661).
+    pub fn from_snapshot(snap: DepGraphSnapshot) -> Self {
+        let files: DashMap<NormalizedPath, FileEntry> = DashMap::new();
+        snap.files.into_par_iter().for_each(|f| {
+            let path = NormalizedPath::from(f.path.as_str());
+            let includes = f
+                .includes
+                .into_iter()
+                .map(|d| {
+                    let kind = match d.kind {
+                        0 => IncludeKind::Quoted,
+                        1 => IncludeKind::AngleBracket,
+                        3 => IncludeKind::QuotedNext,
+                        4 => IncludeKind::AngleBracketNext,
+                        _ => IncludeKind::Computed(d.path.clone()),
+                    };
+                    IncludeDirective {
+                        kind,
+                        path: d.path,
+                        line: d.line,
+                    }
+                })
+                .collect();
+            files.insert(
+                path,
+                FileEntry {
+                    includes,
+                    scanned_at: Instant::now(),
+                },
+            );
+        });
+
+        let contexts: DashMap<ContextKey, ContextEntry> = DashMap::new();
+        let equivalent_contexts: DashMap<ContextKey, Vec<ContextKey>> = DashMap::new();
+        let rustc_externs: DashMap<ContextKey, Vec<(String, NormalizedPath)>> = DashMap::new();
+        snap.contexts.into_par_iter().for_each(|c| {
+            let key = ContextKey::from_raw(c.context_key);
+            let logical_key = ContextKey::from_raw(c.logical_context_key);
+            let externs: Vec<(String, NormalizedPath)> = c
+                .rustc_externs
+                .into_iter()
+                .map(|entry| (entry.name, NormalizedPath::from(entry.path.as_str())))
+                .collect();
+            let env_deps: Vec<(String, Option<ContentHash>)> = c
+                .rustc_env_deps
+                .into_iter()
+                .map(|entry| (entry.name, entry.value_hash.map(ContentHash::from_bytes)))
+                .collect();
+            let context = CompileContext {
+                source_file: NormalizedPath::from(c.source_file.as_str()),
+                include_search: IncludeSearchPaths {
+                    iquote: strings_to_paths(c.iquote),
+                    user: strings_to_paths(c.user),
+                    system: strings_to_paths(c.system),
+                    after: strings_to_paths(c.after),
+                },
+                defines: c.defines,
+                undefines: c.undefines,
+                flags: c.flags,
+                force_includes: strings_to_paths(c.force_includes),
+                unknown_flags: c.unknown_flags,
+                // Issue #1166 snapshot compatibility: `ContextEntrySnapshot`
+                // persists only the already-computed `context_key` /
+                // `artifact_key` raw bytes (see the struct above), never a
+                // serialized `CompileContext`. This reconstructed
+                // `CompileContext` is used post-load only for freshness
+                // bookkeeping (`entry.context.source_file`,
+                // `.force_includes`, `.include_search` — see
+                // `graph/check.rs`, `graph/update.rs`,
+                // `graph/maintenance.rs`, `watcher_support.rs`); it is
+                // NEVER re-hashed via `.context_key()` to recompute a
+                // lookup key. So this placeholder value cannot cause a
+                // wrong hit: any live compile request computes a *fresh*
+                // context key via `compute_context_key_with`, which now
+                // unconditionally folds the real compiler_hash. A snapshot
+                // written by a pre-#1166 binary has stale on-disk
+                // `context_key` bytes computed WITHOUT compiler identity;
+                // those bytes will never match a freshly computed
+                // (compiler-hash-including) key, so old entries are simply
+                // never looked up again post-upgrade — cold-miss and
+                // re-register, not silently-wrong-hit. No snapshot schema
+                // version bump or explicit migration is needed.
+                compiler_hash: ContentHash::from_bytes([0u8; 32]),
+            };
+            let entry = ContextEntry {
+                logical_key,
+                context,
+                key_root: c.key_root.map(|root| NormalizedPath::from(root.as_str())),
+                resolved_includes: strings_to_paths(c.resolved_includes),
+                unresolved_includes: c.unresolved_includes,
+                has_computed_includes: c.has_computed_includes,
+                artifact_key: c.artifact_key.map(ArtifactKey::from_raw),
+                last_file_hashes: c
+                    .last_file_hashes
+                    .into_iter()
+                    .map(|(p, h)| (NormalizedPath::from(p.as_str()), ContentHash::from_bytes(h)))
+                    .collect(),
+                rustc_env_deps: env_deps,
+                last_accessed_unix_ms: c.last_accessed_unix_ms,
+                state: match c.state {
+                    0 => ContextState::Cold,
+                    1 => ContextState::Warm,
+                    _ => ContextState::Stale,
+                },
+            };
+            contexts.insert(key, entry);
+            equivalent_contexts
+                .entry(logical_key)
+                .and_modify(|instances| instances.push(key))
+                .or_insert_with(|| vec![key]);
+            if !externs.is_empty() {
+                rustc_externs.insert(key, externs);
+            }
+        });
+
+        let mut graph = DepGraph::from_maps_with_rustc_externs(files, contexts, rustc_externs);
+        graph.indexes.equivalent_contexts = equivalent_contexts;
+        graph
+    }
+}
+
+pub(crate) fn paths_to_strings<P: AsRef<Path>>(paths: &[P]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|p| p.as_ref().to_string_lossy().into_owned())
+        .collect()
+}
+
+pub(crate) fn strings_to_paths(strings: Vec<String>) -> Vec<NormalizedPath> {
+    strings.into_iter().map(NormalizedPath::from).collect()
+}

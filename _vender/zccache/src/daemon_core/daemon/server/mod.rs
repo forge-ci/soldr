@@ -1,0 +1,286 @@
+//! Daemon server — accepts IPC connections and handles requests.
+//!
+//! `mod.rs` is intentionally thin: the heavy logic lives in topic-focused
+//! submodules under `server/`. This file defines `DaemonServer` itself, a
+//! handful of constants shared by siblings, and the module wiring (declare +
+//! `use ...::*` re-exports) that lets every submodule use `use super::*;` to
+//! see the common type vocabulary.
+
+use super::compile_journal::{
+    capture_miss_reason, extract_outcome, miss_reason, record_context_key, record_miss_reason,
+    CompileJournal, JournalContext, JournalEntry, SelfProfileSpans,
+};
+use super::fingerprint::FingerprintManager;
+use super::process::CompilePriority;
+use super::stats::{HitPhases, MissPhases, PhaseProfiler, StatsCollector};
+use crate::daemon_core::artifact::{ArtifactIndex, ArtifactStore, ArtifactVerdict, KvError, KvStore};
+use crate::daemon_core::core::config::MaterializationMode;
+use crate::daemon_core::core::NormalizedPath;
+use crate::daemon_core::depgraph::{
+    CompileContext, ContextKey, DepGraph, DepfileStrategy, SessionId, SessionManager,
+    SystemIncludeCache, UserDepFlags,
+};
+use crate::daemon_core::fscache::{CacheSystem, Clock};
+use crate::daemon_core::hash::ContentHash;
+use crate::daemon_core::ipc::{IpcConnection, IpcListener};
+use crate::daemon_core::protocol::{ArtifactData, ArtifactOutput, ArtifactPayload, Request, Response};
+use crate::daemon_core::watcher::{NotifyWatcher, SettleBuffer, SettledEvent};
+use dashmap::DashMap;
+use kernal_api::async_engine::{Mutex, Notify};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
+
+/// Cached result of a verified cache hit, enabling zero-hash fast path.
+///
+/// When the journal clock hasn't advanced since the last verified hit for a
+/// context, we can skip all stat/hash/depgraph work and jump straight to
+/// artifact lookup.
+#[derive(Clone)]
+pub(crate) struct FastHitEntry {
+    pub(crate) clock: Clock,
+    pub(crate) artifact_key_hex: String,
+    pub(crate) cached_at: std::time::Instant,
+}
+
+/// Maximum age for fast-hit cache entries. Matches the High→Medium confidence
+/// decay in the metadata cache. Without watcher events, entries expire and
+/// fall through to the stat-verify slow path. Set to 60s because the watcher
+/// + journal provide real invalidation — this timer is just a safety net.
+const FAST_HIT_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+const EPHEMERAL_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(300);
+const REQUEST_CACHE_MAX_ENTRIES: usize = 4096;
+/// Validation-cache entries are lightweight (~200 bytes: ContentHash + root +
+/// artifact_key hex + clock) vs request_cache's parsed invocation metadata
+/// (multiple KiB per entry). Sized 2× the request cache so sibling-build /
+/// multi-root scenarios don't evict good validation entries while the request
+/// cache is still sparse. Memory cost at the cap: ~1.6 MiB. (#453)
+const REQUEST_VALIDATION_CACHE_MAX_ENTRIES: usize = 8192;
+const RSP_CACHE_MAX_ENTRIES: usize = 1024;
+const RUST_MISS_PROFILE_ENV: &str = "ZCCACHE_PROFILE_RUST_MISS";
+const CC_MISS_PROFILE_ENV: &str = "ZCCACHE_PROFILE_CC_MISS";
+const WORKTREE_ROOT_ENV: &str = "ZCCACHE_WORKTREE_ROOT";
+const PATH_REMAP_ENV: &str = "ZCCACHE_PATH_REMAP";
+const REQUEST_ROOT_MARKER: &str = "$ZCCACHE_WORKTREE_ROOT";
+const LINK_PATH_REMAP_AUTO_KEY_FLAG: &str = "zccache:path-remap=auto";
+const LINK_PATH_REMAP_ROOT_SPECIFIC_FLAG: &str = "zccache:path-remap=root-specific";
+
+pub use loaders::DepGraphSetter;
+
+/// The daemon server that listens for IPC connections.
+pub struct DaemonServer {
+    listener: IpcListener,
+    shutdown: Arc<kernal_api::async_engine::Notify>,
+    state: Arc<SharedState>,
+    /// Receiver for the background index-writer task. Taken in `run()`.
+    index_writer_rx: Option<kernal_api::async_engine::UnboundedReceiver<IndexWriterCommand>>,
+}
+
+/// In-process daemon engine used by the public embedded API.
+///
+/// This owns the same [`SharedState`] as the IPC daemon without binding or
+/// accepting an [`IpcListener`].
+pub(crate) struct EmbeddedDaemon {
+    state: Arc<SharedState>,
+    maintenance_policy: MaintenancePolicy,
+    /// The host-selected execution context. Every embedded background and
+    /// blocking persistence operation uses this when one was supplied.
+    runtime_handle: Option<kernal_api::async_engine::RuntimeHandle>,
+    index_writer_rx: Option<kernal_api::async_engine::UnboundedReceiver<IndexWriterCommand>>,
+    index_writer_handle: Mutex<Option<kernal_api::async_engine::Task<()>>>,
+    maintenance_handle: Mutex<Option<kernal_api::async_engine::Task<()>>>,
+    depgraph_maintenance_handle: Mutex<Option<kernal_api::async_engine::Task<()>>>,
+    /// The post-readiness startup depgraph load (#1652), joined by shutdown.
+    depgraph_load_handle: Mutex<Option<kernal_api::async_engine::Task<()>>>,
+    /// Periodic tasks this service started, as reported by
+    /// [`maintenance_schedule::MaintenanceSchedule::start`] (#1160). Retained
+    /// so the parity guard can assert against a real embedded service rather
+    /// than against the schedule in isolation.
+    maintenance_tasks: Vec<&'static str>,
+}
+
+pub(crate) struct EmbeddedCompileRequest {
+    pub(crate) compiler: PathBuf,
+    pub(crate) args: Vec<String>,
+    pub(crate) cwd: PathBuf,
+    pub(crate) env: Option<Vec<(String, String)>>,
+    pub(crate) stdin: Vec<u8>,
+    /// The host's explicit `--test` harness policy (zccache#1550); `None`
+    /// resolves from `env`, then the service default.
+    pub(crate) test_harness_admission: Option<crate::daemon_core::core::config::TestHarnessAdmission>,
+}
+
+pub(crate) struct EmbeddedCompileResult {
+    pub(crate) exit_code: i32,
+    pub(crate) stdout: Arc<Vec<u8>>,
+    pub(crate) stderr: Arc<Vec<u8>>,
+    pub(crate) cached: bool,
+    /// Memory measured for the children this compile spawned (zccache#1588).
+    pub(crate) child_memory: crate::daemon_core::daemon::compile_journal::ChildMemory,
+    /// The pipeline's admission decision for this request (zccache#1550).
+    pub(crate) admission: (AdmissionDisposition, AdmissionReason),
+    /// Logical compiler-artifact bytes, when a pipeline seam measured them.
+    pub(crate) logical_artifact_bytes: Option<u64>,
+}
+
+pub(crate) struct EmbeddedStatsSnapshot {
+    pub(crate) status: crate::daemon_core::protocol::DaemonStatus,
+    pub(crate) phase_profile: crate::daemon_core::protocol::PhaseProfileSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FlushStepOutcome {
+    Completed,
+    Failed(String),
+    TimedOut,
+}
+
+impl FlushStepOutcome {
+    /// Merges two outcomes of one step: a timeout dominates, and failures join.
+    pub(crate) fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::TimedOut, _) | (_, Self::TimedOut) => Self::TimedOut,
+            (Self::Completed, Self::Completed) => Self::Completed,
+            (Self::Failed(error), Self::Completed) | (Self::Completed, Self::Failed(error)) => {
+                Self::Failed(error)
+            }
+            (Self::Failed(first), Self::Failed(second)) => {
+                Self::Failed(format!("{first}; {second}"))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EmbeddedFlushStepReport {
+    pub(crate) step: String,
+    pub(crate) outcome: FlushStepOutcome,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EmbeddedFlushReport {
+    pub(crate) pending_writes_drained: bool,
+    pub(crate) index_writer_drained: bool,
+    pub(crate) steps: Vec<EmbeddedFlushStepReport>,
+    pub(crate) artifact_entries: u64,
+    pub(crate) metadata_entries: u64,
+}
+
+impl EmbeddedFlushReport {
+    pub(crate) fn is_complete(&self) -> bool {
+        self.pending_writes_drained
+            && self.index_writer_drained
+            && self
+                .steps
+                .iter()
+                .all(|step| matches!(step.outcome, FlushStepOutcome::Completed))
+    }
+}
+
+mod cache_trim;
+mod cached_artifact;
+mod client_env;
+mod compile_concurrency;
+mod compile_progress;
+pub(crate) mod compile_resource_gate;
+mod compiler_hash;
+mod connection;
+mod dependency_policy;
+mod depfile_root;
+mod directory_link;
+mod disk_maintenance;
+mod disk_maintenance_progress;
+pub use disk_maintenance_progress::DiskMaintenanceProgress;
+mod embedded;
+mod embedded_bringup;
+mod handle_clear;
+mod handle_compile;
+mod handle_compile_ephemeral;
+mod handle_compile_multi;
+mod handle_exec;
+mod handle_exec_probe;
+mod handle_link;
+mod handle_release_worktree_handles;
+mod in_flight;
+mod index_reconcile;
+mod inner_trace;
+mod keyed_locks;
+mod keys;
+mod lifecycle;
+mod link_hash;
+mod link_helpers;
+mod link_process;
+mod loaders;
+mod maintenance_schedule;
+mod out_dir;
+mod pch;
+mod pending_writes;
+pub(crate) mod persist;
+mod private_daemon;
+mod request_cache;
+mod rsp_cache;
+mod run;
+mod rustc;
+mod session;
+mod staged_materialize;
+mod staged_publish;
+mod staging_root;
+mod state;
+mod supervise;
+mod test_harness_admission;
+pub use test_harness_admission::{AdmissionDisposition, AdmissionReason};
+mod util;
+mod wal;
+mod watch;
+
+use cache_trim::*;
+use cached_artifact::*;
+pub(crate) use cached_artifact::{CachedArtifact, CachedPayload};
+use client_env::*;
+use compiler_hash::*;
+use connection::handle_connection;
+use dependency_policy::*;
+use depfile_root::*;
+use directory_link::*;
+pub(crate) use disk_maintenance::*;
+use handle_clear::*;
+use handle_compile::handle_compile;
+use handle_compile_ephemeral::*;
+use handle_compile_multi::handle_compile_multi;
+use handle_exec::handle_generic_tool_exec;
+use handle_link::handle_link_ephemeral;
+use handle_release_worktree_handles::handle_release_worktree_handles;
+use in_flight::*;
+use keyed_locks::KeyedLocks;
+use keys::*;
+#[doc(hidden)]
+pub use lifecycle::ProfileHandle;
+use lifecycle::*;
+use link_helpers::*;
+#[cfg(test)]
+use link_process::run_post_link_deploy_hook;
+use maintenance_schedule::*;
+use out_dir::*;
+use pch::*;
+use persist::*;
+
+pub(crate) fn remove_cow_blob(path: &Path) -> std::io::Result<()> {
+    remove_registered_blob(path)
+}
+use private_daemon::*;
+use request_cache::*;
+use rsp_cache::*;
+use rustc::*;
+use session::*;
+use staged_materialize::*;
+use staged_publish::*;
+use staging_root::*;
+use state::*;
+use util::*;
+use wal::*;
+use watch::*;
+
+#[cfg(test)]
+pub(crate) mod tests;

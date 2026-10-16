@@ -1,0 +1,328 @@
+[package]
+name = "zccache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "Local-first compiler cache for C/C++/Rust/Emscripten"
+
+[features]
+default = []
+# Daemon-free rustfmt format-cache API for embedding hosts. This intentionally
+# does not enable the standalone CLI, daemon entry, download, symbols, or clap.
+formatter = []
+# Enables zccache::test_support (dev-only helpers), now in zccache-daemon-core.
+test-support = []
+ci = ["dep:wait-timeout"]
+# The daemon process entry point (`daemon::entry`, #997), now in
+# zccache-daemon-core. Enabled by the standalone `daemon-bin` target and by
+# `cli` (so the `zccache` binary can route to the daemon via argv[0] dispatch,
+# #998). Also pulls clap + tracing-subscriber for the CLI's own use.
+daemon-entry = ["dep:clap", "dep:tracing-subscriber"]
+# The CLI surface now lives in `zccache-cli-core` (#1022 Split A); the facade
+# re-exports `cli`/`download_client`/`download_daemon` from it. clap +
+# tracing-subscriber stay here for the facade's own bins.
+cli = [
+    "formatter",
+    "dep:clap",
+    "dep:tracing-subscriber",
+    "daemon-entry",
+    "download-client",
+    "gha",
+    "symbols"]
+download = ["dep:reqwest"]
+download-client = [
+    "download",
+    "download-protocol",
+    "dep:lzma-rs",
+    "dep:ruzstd",
+    "dep:sevenz-rust",
+    "dep:zip"]
+download-daemon = ["download", "download-protocol"]
+download-daemon-entry = [
+    "download-daemon",
+    "dep:clap",
+    "dep:tracing-subscriber"]
+download-protocol = ["download"]
+gha = ["dep:reqwest"]
+symbols = []
+tokio-console = ["dep:console-subscriber"]
+heap-profile = ["kernal-api/allocator"]
+# Re-export `mimalloc_pprof` so an embedding host (soldr) can use it as its
+# `#[global_allocator]` without adding a separate, version-drifted
+# `mimalloc-pprof` pin of its own (soldr#3053). The dependency carries default
+# features, i.e. mimalloc-pprof's `pprof` (`MI_PPROF=1`) is on, so the
+# re-exported `MiMalloc` exposes the exact allocator counters. soldr reads
+# `prof::stats()` / `prof::dump_file`, which `kernal_api::allocator` does not
+# expose, so this one feature still names the crate directly; its pin matches
+# kernal-api's own `mimalloc-pprof` pin so both resolve to one allocator.
+mimalloc-allocator = ["dep:mimalloc-pprof"]
+# The release binary hosts both daemons behind argv[0] dispatch. The legacy
+# daemon [[bin]] features remain available as source-build/test shims.
+zccache-bin = ["cli", "download-daemon-entry", "kernal-api/allocator"]
+daemon-bin = ["daemon-entry", "symbols", "kernal-api/allocator"]
+download-bin = ["dep:clap", "kernal-api/allocator", "download-client"]
+download-daemon-bin = ["kernal-api/allocator", "download-daemon-entry"]
+fingerprint-bin = ["dep:clap", "kernal-api/allocator"]
+stamp-bin = ["symbols"]
+ci-bin = ["ci", "dep:md5"]
+crash-tools = ["dep:sadness-generator"]
+
+[dependencies]
+
+# core
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# hash
+
+# gha
+reqwest = { workspace = true, features = ["json"], optional = true }
+sha2 = { workspace = true }
+
+# protocol
+bincode = { workspace = true }
+bytes = { workspace = true }
+prost = { workspace = true }
+
+# ipc + test-support: needs full tokio. The tracing feature lets Tokio emit
+# runtime telemetry when the workspace is built with `--cfg tokio_unstable`.
+tokio = { workspace = true, features = ["tracing"] }
+console-subscriber = { workspace = true, optional = true }
+
+# fscache
+dashmap = { workspace = true }
+# arc-swap: atomic pointer swap used by `daemon::server::state::SharedState`
+# to swap `dep_graph: ArcSwap<Arc<DepGraph>>` from the empty-default to the
+# disk-loaded graph after `DaemonServer::bind` returns. Removes the prior
+# `Arc::get_mut` constraint on `DaemonServer::set_dep_graph`, which is
+# the foundation for the deferred-depgraph-load that closes the #637 /
+# #640 first-wave herd window.
+arc-swap = { workspace = true }
+rayon = { workspace = true }
+
+# artifact
+tempfile = { workspace = true }
+
+# watcher
+
+# compiler
+clang = { workspace = true }
+typed-path = { version = "=0.12.3", default-features = false }
+
+# depgraph
+uuid = { version = "1", features = ["v4"] }
+
+# fingerprint
+clap = { workspace = true, optional = true }
+
+# exec (issue #272): regex compiles `--key-args-filter` patterns
+regex = { workspace = true }
+
+# download stack. These remain declared here because the crates.io release
+# amalgamates zccache-cli-core into this public crate.
+tar = { workspace = true }
+flate2 = { workspace = true }
+zip = { workspace = true, optional = true }
+ruzstd = { workspace = true, optional = true }
+lzma-rs = { workspace = true, optional = true }
+sevenz-rust = { workspace = true, optional = true }
+
+# daemon
+# Slice 11 of #782: promote `interprocess` from dev-dependencies to a
+# regular dependency so `ipc::broker_v2::probe_local_socket` can use
+# the local-socket Stream::connect primitive without pulling
+# `kernal_api::broker::client::connect_local_socket` (the v1 path).
+# The version is already locked transitively via running-process; making
+# it explicit in [dependencies] does not add a new resolved crate.
+sadness-generator = { version = "0.6", optional = true }
+
+# ci
+md5 = { version = "0.7", optional = true }
+wait-timeout = { version = "0.2", optional = true }
+
+# shared: used by test_support, download-daemon bin, etc.
+tracing-subscriber = { workspace = true, optional = true }
+
+# Global allocator on every target, now owned by the shared facade
+# (kernal-api#71). `kernal_api::allocator::Allocator` is the one allocator
+# type and dump implementation; this crate no longer names mimalloc.
+#
+# The reasoning that selected mimalloc is preserved because it is still the
+# constraint the facade satisfies: it vendors mimalloc and is pure C with no
+# autotools step, so it cross-compiles cleanly in every direction.
+# tikv-jemalloc was the previous choice on unix but its bundled autoconf
+# invokes a hidden `$(CC) -MM` dep-tracking pass that silently drops the
+# `--sysroot` flag — broke Linux->*-apple-darwin (and would equally break
+# Windows->Linux); see tikv/jemallocator#170. Using one allocator everywhere
+# also removes a per-platform variable from perf analysis. The profiler stays
+# dormant unless explicitly enabled by API or environment.
+#
+# The #1439 floor moves with the pin rather than being lost: mimalloc-pprof
+# before 0.9.3 compiles the vendored amalgamation with MSVC's deprecated
+# C-mode Interlocked atomics wrapper, whose `_acq`/`_rel` ARM64 intrinsics
+# clang-cl does not declare, so the cargo-xwin `aarch64-pc-windows-msvc`
+# release lane cannot build them. That choice is package-scoped, so it can
+# only be made by whoever declares the dependency -- which is now kernal-api,
+# and it pins `=0.9.4`. If that pin ever regresses below 0.9.3 the aarch64
+# Windows release lane breaks here, so it is a facade-side constraint now.
+# The crates.io package amalgamates the internal facade crates below into this
+# crate, so this dependency must carry the union of their kernal-api surfaces.
+# Workspace feature unification masks missing entries during ordinary builds;
+# `cargo package` verifies the self-contained graph and catches drift here.
+kernal-api = { workspace = true, features = [
+    "broker-client",
+    "crash",
+    "daemon-frame-v1",
+    "daemon-identity",
+    "daemon-registration",
+    "daemon-registration-v2",
+    "fs",
+    "fs-watch",
+    "ipc",
+    "ipc-async"] }
+# Only for the `mimalloc-allocator` re-export (soldr#3053); pinned to the same
+# exact version kernal-api declares so the graph holds one mimalloc.
+mimalloc-pprof = { version = "=0.9.4", optional = true }
+memchr = { workspace = true }
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+futures = { workspace = true }
+zccache-test-support = { workspace = true }
+
+# tests/cli/cli_installers.rs builds sample archives to exercise the installer.
+zip = { workspace = true }
+# Self-dep so zccache's own integration tests can pull in the gated
+# test_support module without needing a separate workspace member.
+# Enables `#[tokio::test(start_paused = true)]` for deterministic
+# time-dependent unit tests (issue #717). test-util is a dev-only feature
+# so it does not bloat production builds.
+tokio = { workspace = true, features = ["test-util"] }
+
+[build-dependencies]
+prost-build = { workspace = true }
+protoc-bin-vendored = { workspace = true }
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_JobObjects",
+    "Win32_System_Console",
+    "Win32_System_Threading"] }
+
+[[bench]]
+name = "hashing"
+harness = false
+
+[[bench]]
+name = "scan_metadata"
+harness = false
+
+[[bench]]
+name = "scan_recursive"
+harness = false
+
+[[bench]]
+name = "scan_includes"
+harness = false
+
+[[bench]]
+name = "fingerprint"
+harness = false
+
+[[bin]]
+name = "echo_shim"
+path = "src/bin/echo_shim.rs"
+required-features = ["test-support"]
+
+[[bin]]
+name = "exec_test_tool"
+path = "src/bin/exec_test_tool.rs"
+required-features = ["test-support"]
+
+[[bin]]
+name = "zccache-fp"
+path = "src/bin/zccache-fp.rs"
+required-features = ["fingerprint-bin"]
+
+[[bin]]
+name = "zccache-stamp"
+path = "src/bin/zccache-stamp.rs"
+required-features = ["stamp-bin"]
+
+[[bin]]
+name = "zccache-download-daemon"
+path = "src/bin/zccache-download-daemon.rs"
+required-features = ["download-daemon-bin"]
+
+[[bin]]
+name = "zccache-download"
+path = "src/bin/zccache-download.rs"
+doc = false
+required-features = ["download-bin"]
+
+[[bin]]
+name = "zccache-daemon"
+path = "src/bin/zccache-daemon.rs"
+required-features = ["daemon-bin"]
+
+[[bin]]
+name = "crash-trigger"
+path = "src/bin/crash-trigger.rs"
+required-features = ["crash-tools"]
+
+[[bin]]
+name = "zccache"
+path = "src/bin/zccache.rs"
+required-features = ["zccache-bin"]
+
+[[bin]]
+name = "cli-crash-trigger"
+path = "src/bin/cli-crash-trigger.rs"
+required-features = ["crash-tools"]
+
+[[bin]]
+name = "zccache-ci"
+path = "src/bin/zccache-ci.rs"
+required-features = ["ci-bin"]
+
+[[bench]]
+name = "write_payloads"
+harness = false
+
+[[bench]]
+name = "read_outputs"
+harness = false
+
+[[bench]]
+name = "persist_payloads"
+harness = false
+
+[[bench]]
+name = "warm_restore"
+harness = false
+
+[[bench]]
+name = "exec"
+harness = false
+required-features = ["test-support"]
+
+[[bench]]
+name = "miss_overhead"
+harness = false
+required-features = ["test-support"]
+
+[lints]
+workspace = true

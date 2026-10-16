@@ -1,0 +1,263 @@
+//! Daemon status, session statistics, and timing-profile protocol payloads.
+
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use crate::core::NormalizedPath;
+
+/// One owner PID currently keeping a private daemon alive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivateDaemonOwnerStatus {
+    /// Process ID supplied by the caller.
+    pub pid: u32,
+    /// Number of active sessions/references held by this PID.
+    pub ref_count: u64,
+}
+
+/// Redacted private-daemon diagnostics surfaced through `zccache status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivateDaemonStatus {
+    /// True once a session has opted this daemon into private lifetime semantics.
+    pub enabled: bool,
+    /// Owner PID reference counts. Empty for shared/default daemons.
+    pub owners: Vec<PrivateDaemonOwnerStatus>,
+    /// Private session env keys observed by this daemon. Values are never exposed.
+    pub private_env_keys: Vec<String>,
+}
+
+impl PrivateDaemonStatus {
+    /// Shared/default daemon status with no private lifetime metadata.
+    #[must_use]
+    pub fn shared() -> Self {
+        Self {
+            enabled: false,
+            owners: Vec::new(),
+            private_env_keys: Vec::new(),
+        }
+    }
+}
+
+/// Daemon status information.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DaemonStatus {
+    /// Daemon version (e.g. "1.0.8"). Used by CLI to detect stale daemons.
+    pub version: String,
+    /// Active daemon/socket namespace. `default` means no explicit namespace
+    /// was configured and all endpoint/path names use the historical layout.
+    pub daemon_namespace: String,
+    /// IPC endpoint this daemon bound and serves.
+    pub endpoint: String,
+    /// Private daemon lifetime diagnostics. Values from private env are redacted.
+    pub private_daemon: PrivateDaemonStatus,
+    /// Number of artifacts in cache.
+    pub artifact_count: u64,
+    /// Total size of cached artifacts in bytes.
+    pub cache_size_bytes: u64,
+    /// Number of entries in the metadata cache.
+    pub metadata_entries: u64,
+    /// Daemon uptime in seconds.
+    pub uptime_secs: u64,
+    /// Total cache hits since startup.
+    pub cache_hits: u64,
+    /// Total cache misses since startup.
+    pub cache_misses: u64,
+    /// Total compile requests received.
+    pub total_compilations: u64,
+    /// Non-cacheable invocations (linking, preprocessing, etc.).
+    pub non_cacheable: u64,
+    /// Compilations that exited with non-zero status.
+    pub compile_errors: u64,
+    /// Non-zero compile results served from cache.
+    pub compile_errors_cached: u64,
+    /// Estimated wall-clock time saved in milliseconds.
+    pub time_saved_ms: u64,
+    /// Total link/archive requests received.
+    pub total_links: u64,
+    /// Link cache hits.
+    pub link_hits: u64,
+    /// Link cache misses.
+    pub link_misses: u64,
+    /// Non-cacheable link invocations.
+    pub link_non_cacheable: u64,
+    /// Number of compilation contexts in the dependency graph.
+    pub dep_graph_contexts: u64,
+    /// Number of tracked files in the dependency graph.
+    pub dep_graph_files: u64,
+    /// Total sessions created since daemon start.
+    pub sessions_total: u64,
+    /// Currently active sessions.
+    pub sessions_active: u64,
+    /// Path to the cache directory.
+    pub cache_dir: NormalizedPath,
+    /// On-disk depgraph snapshot format version.
+    pub dep_graph_version: u32,
+    /// Size of the depgraph snapshot file on disk (0 = not persisted).
+    pub dep_graph_disk_size: u64,
+    /// Whether the in-memory dep graph is backed by a persisted snapshot.
+    ///
+    /// `true` if the graph was loaded from disk on startup OR has been
+    /// successfully written to disk since startup (periodic save or shutdown).
+    /// `false` on a fresh daemon that has not yet flushed its first snapshot.
+    pub dep_graph_persisted: bool,
+    /// Whether the file watcher is currently armed. `false` means both fast
+    /// hit tiers are disabled and shared cache blobs re-hash on every read.
+    pub watcher_active: bool,
+    /// Watcher-arm failures since daemon start (issue #1156). Non-zero with
+    /// `watcher_active == true` means the daemon recovered via a re-arm.
+    pub watcher_degradations: u64,
+    /// Whether the index writer has gone away (issue #1177).
+    ///
+    /// `true` means published artifacts are no longer being recorded durably:
+    /// the cache still serves this daemon's in-memory state but nothing it
+    /// publishes will survive a restart. Distinct from a slow daemon, and not
+    /// otherwise visible without reading the lifecycle log.
+    pub index_writer_gone: bool,
+    /// `ZCCACHE_MODE` delivery diagnostics (#1683).
+    pub materialization: MaterializationStatus,
+}
+
+/// Cache-output delivery diagnostics for `ZCCACHE_MODE` (#1683): the
+/// service-default mode and how many outputs each tier delivered since the
+/// daemon started. A request's own `ZCCACHE_MODE` may differ from `mode`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterializationStatus {
+    /// Service-default mode, canonical spelling (`AUTO` when unset).
+    pub mode: String,
+    /// Outputs delivered as copy-on-write clones.
+    pub reflink: u64,
+    /// Outputs delivered as hardlinks to the cache blob.
+    pub hardlink: u64,
+    /// Outputs delivered as independent byte copies.
+    pub copy: u64,
+    /// `REFLINK` deliveries that could not clone and copied instead.
+    pub reflink_fallbacks: u64,
+}
+
+/// Per-session statistics, returned when the session opted in to tracking.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionStats {
+    /// Wall-clock duration of the session in milliseconds.
+    pub duration_ms: u64,
+    /// Total compile requests in this session.
+    pub compilations: u64,
+    /// Cache hits in this session.
+    pub hits: u64,
+    /// Cache misses (cold compiles) in this session.
+    pub misses: u64,
+    /// Non-cacheable invocations (linking, preprocessing, etc.).
+    pub non_cacheable: u64,
+    /// Compilations that exited with non-zero status.
+    pub errors: u64,
+    /// Non-zero compile results served from cache.
+    #[serde(default)]
+    pub errors_cached: u64,
+    /// Estimated wall-clock time saved in milliseconds.
+    pub time_saved_ms: u64,
+    /// Distinct source files compiled.
+    pub unique_sources: u64,
+    /// Total artifact bytes served from cache.
+    pub bytes_read: u64,
+    /// Total artifact bytes stored into cache.
+    pub bytes_written: u64,
+    /// Depgraph/artifact lookup outcome breakdown.
+    #[serde(default)]
+    pub lookup_outcomes: LookupOutcomes,
+    /// Phase-timing aggregate. `None` from older daemons that don't populate
+    /// the field; `Some` from PROTOCOL_VERSION >= 9 daemons.
+    ///
+    /// Legacy hit/miss fields are daemon-wide totals since the last Clear.
+    /// The nested staged-pipeline summary is request-owned and isolated to
+    /// this tracked session; concurrent or ephemeral requests cannot change it.
+    /// Clear resets both the daemon aggregate and active-session summaries.
+    pub phase_profile: Option<PhaseProfileSummary>,
+}
+
+/// Per-session depgraph/artifact lookup outcome counters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct LookupOutcomes {
+    pub depgraph_hit_artifact_hit: u64,
+    pub depgraph_hit_artifact_miss: u64,
+    pub depgraph_cold_skip: u64,
+    #[serde(default)]
+    pub depgraph_other_miss: BTreeMap<String, u64>,
+}
+
+impl From<crate::depgraph::LookupOutcomes> for LookupOutcomes {
+    fn from(outcomes: crate::depgraph::LookupOutcomes) -> Self {
+        Self {
+            depgraph_hit_artifact_hit: outcomes.depgraph_hit_artifact_hit,
+            depgraph_hit_artifact_miss: outcomes.depgraph_hit_artifact_miss,
+            depgraph_cold_skip: outcomes.depgraph_cold_skip,
+            depgraph_other_miss: outcomes.depgraph_other_miss,
+        }
+    }
+}
+
+/// Aggregate phase-timing totals from the daemon's PhaseProfiler.
+///
+/// Totals are in nanoseconds. Divide hit-path totals by `hit_count` and
+/// miss-path totals by `miss_count` to derive per-compile averages.
+///
+/// Use case: a perf harness collects this from a warm-rebuild session to
+/// identify which phase dominates the warm-side wall time (e.g.
+/// `write_output_ns` for artifact materialization vs `depgraph_check_ns`
+/// for depgraph lookups).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PhaseProfileSummary {
+    /// Number of cache-hit compiles that contributed to the hit-path totals.
+    pub hit_count: u64,
+    /// Number of cache-miss compiles that contributed to the miss-path totals.
+    pub miss_count: u64,
+    // ── Hit-path totals (ns) ──
+    /// Argument parsing.
+    pub parse_args_ns: u64,
+    /// Build compile context + register with depgraph.
+    pub build_context_ns: u64,
+    /// Source-file hash via the metadata cache fast path.
+    pub hash_source_ns: u64,
+    /// Header hashes via the metadata cache fast path.
+    pub hash_headers_ns: u64,
+    /// Depgraph verdict lookup.
+    pub depgraph_check_ns: u64,
+    /// Request-level cache lookup.
+    pub request_cache_lookup_ns: u64,
+    /// Cross-root request validation.
+    pub cross_root_validate_ns: u64,
+    /// In-memory artifact-store lookup.
+    pub artifact_lookup_ns: u64,
+    /// Write cached outputs to disk (hardlink-first, copy fallback).
+    pub write_output_ns: u64,
+    /// Stats recording + session bookkeeping.
+    pub bookkeeping_ns: u64,
+    /// Wall-clock total of the hit path.
+    pub total_hit_ns: u64,
+    // ── Miss-path totals (ns) ──
+    /// Run the actual compiler subprocess.
+    pub compiler_exec_ns: u64,
+    /// Scan included files post-compile.
+    pub include_scan_ns: u64,
+    /// Hash all inputs for the artifact key.
+    pub hash_all_ns: u64,
+    /// Persist the new artifact to disk.
+    pub artifact_store_ns: u64,
+    /// Wall-clock total of the miss path.
+    pub total_miss_ns: u64,
+    /// Staged-output pipeline counters, timings, bytes, and bounded failures.
+    #[serde(default)]
+    pub staged: StagedProfileSummary,
+}
+
+/// Aggregate staged-output telemetry.
+///
+/// Keys are a bounded vocabulary owned by the daemon, never user paths,
+/// command lines, cache keys, or raw operating-system error strings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct StagedProfileSummary {
+    #[serde(default)]
+    pub counters: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub timings_ns: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub bytes: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub failures: BTreeMap<String, u64>,
+}

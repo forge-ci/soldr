@@ -1,0 +1,326 @@
+//! Additive host integration and compile-control plumbing for embedded mode.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use kernal_api::async_engine::{CancellationSource, CancellationToken, Semaphore};
+
+use super::{
+    EmbeddedError, ExternalWorkPermit, HostAdmissionClassifier, HostIdentity, MaintenanceOwnership,
+    MaintenancePolicy, Result, ZccacheConfig, ZccacheService, ZccacheStartOptions,
+};
+use crate::daemon_core::daemon::server::EmbeddedDaemon;
+
+/// Receives structured events emitted by an embedded service.
+///
+/// The callback runs inline on the compile task and should return quickly.
+/// Panics are contained and do not fail the compile. Events are redacted using
+/// the service's audit configuration before this callback runs. Registering a
+/// host sink is explicit, so it receives events even when file audit is off.
+pub trait EmbeddedEventSink: Send + Sync + 'static {
+    fn emit(&self, event: &crate::daemon_core::audit::AuditEvent);
+}
+
+impl<F> EmbeddedEventSink for F
+where
+    F: Fn(&crate::daemon_core::audit::AuditEvent) + Send + Sync + 'static,
+{
+    fn emit(&self, event: &crate::daemon_core::audit::AuditEvent) {
+        self(event);
+    }
+}
+
+impl ZccacheService {
+    /// Start an embedded service with a host-owned structured event sink.
+    ///
+    /// This additive constructor keeps [`ZccacheConfig`] and
+    /// [`ZccacheStartOptions`] struct literals source-compatible. The sink
+    /// receives redacted compile events regardless of whether file audit
+    /// output is enabled.
+    pub async fn start_with_event_sink(
+        config: ZccacheConfig,
+        event_sink: Arc<dyn EmbeddedEventSink>,
+    ) -> Result<Self> {
+        Self::start_internal(
+            config,
+            ZccacheStartOptions::default(),
+            Some(event_sink),
+            None,
+        )
+        .await
+    }
+
+    /// Start with both additive service options and a host event sink.
+    pub async fn start_with_options_and_event_sink(
+        config: ZccacheConfig,
+        options: ZccacheStartOptions,
+        event_sink: Arc<dyn EmbeddedEventSink>,
+    ) -> Result<Self> {
+        Self::start_internal(config, options, Some(event_sink), None).await
+    }
+
+    pub(super) async fn start_internal(
+        config: ZccacheConfig,
+        options: ZccacheStartOptions,
+        event_sink: Option<Arc<dyn EmbeddedEventSink>>,
+        host_admission_classifier: Option<Arc<dyn HostAdmissionClassifier>>,
+    ) -> Result<Self> {
+        let compile_permits = match config.limits.max_parallel_compiles {
+            Some(0) => {
+                return Err(EmbeddedError::Start(
+                    "max_parallel_compiles must be greater than zero".to_string(),
+                ));
+            }
+            Some(limit) if limit > Semaphore::MAX_PERMITS => {
+                return Err(EmbeddedError::Start(format!(
+                    "max_parallel_compiles must not exceed {}",
+                    Semaphore::MAX_PERMITS
+                )));
+            }
+            Some(limit) => Some(Arc::new(Semaphore::new(limit))),
+            None => None,
+        };
+        let runtime_handle = config
+            .runtime
+            .handle
+            .as_ref()
+            .map(facade_runtime_handle)
+            .transpose()
+            .map_err(EmbeddedError::Start)?;
+        let endpoint = embedded_endpoint(&config.host);
+        let cache_root =
+            crate::daemon_core::core::config::effective_cache_root_from_top_level(&config.cache_root);
+        let maintenance_policy = MaintenancePolicy::from_limits(
+            options.disk_limits.max_cache_bytes,
+            options.disk_limits.max_cache_percent,
+        )
+        .map_err(EmbeddedError::Start)?;
+        // #1683: the host's own ZCCACHE_MODE seeds the service default. An
+        // invalid value is a start error (decision D4), never a silent AUTO.
+        let host_mode = crate::daemon_core::core::config::materialization_mode_from_env()
+            .map_err(|error| EmbeddedError::Start(error.to_string()))?;
+        let daemon = EmbeddedDaemon::start_with_maintenance(
+            endpoint,
+            cache_root,
+            options.staging_root.as_ref(),
+            runtime_handle.clone(),
+            maintenance_policy,
+            options.maintenance_ownership == MaintenanceOwnership::Embedded,
+            host_admission_classifier,
+        )
+        .await
+        .map_err(|err| EmbeddedError::Start(err.to_string()))?;
+        daemon.set_materialization_mode_default(host_mode);
+        let host_inflight_guard = config
+            .limits
+            .host_in_flight
+            .map(crate::daemon_core::daemon::process::register_host_in_flight_counter)
+            .map(Arc::new);
+        let audit_sink = crate::daemon_core::audit_writer::AuditSink::start(&config.audit, runtime_handle)
+            .map_err(|err| EmbeddedError::Start(err.to_string()))?
+            .map(Arc::new);
+        Ok(Self {
+            daemon: Arc::new(daemon),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            host_cancellation: config.cancellation,
+            force_cancellation: CancellationSource::new(),
+            admission_shutdown: CancellationSource::new(),
+            compile_permits,
+            _host_inflight_guard: host_inflight_guard,
+            audit_sink,
+            event_sink,
+            audit: Arc::new(config.audit),
+        })
+    }
+
+    /// Set the service-wide cache-hit delivery mode (`ZCCACHE_MODE`, #1683).
+    ///
+    /// The service starts with the host process's own `ZCCACHE_MODE` (an
+    /// invalid value fails the start). A compile request whose
+    /// forwarded environment carries a valid `ZCCACHE_MODE` still overrides
+    /// this default for that request. `None` restores `AUTO`.
+    pub fn set_materialization_mode(&self, mode: Option<crate::daemon_core::core::config::MaterializationMode>) {
+        self.daemon.set_materialization_mode_default(mode);
+    }
+
+    /// The service-wide delivery mode default; `None` means `AUTO`.
+    #[must_use]
+    pub fn materialization_mode(&self) -> Option<crate::daemon_core::core::config::MaterializationMode> {
+        self.daemon.materialization_mode_default()
+    }
+
+    /// Reserve one unit from the shared embedded compiler-work budget for
+    /// host-owned work. The returned opaque guard releases its reservation on
+    /// drop, including when a host task is cancelled.
+    pub async fn acquire_external_work_permit(&self) -> Result<ExternalWorkPermit> {
+        self.acquire_compile_permit().await
+    }
+
+    pub(super) async fn acquire_compile_permit(&self) -> Result<ExternalWorkPermit> {
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(EmbeddedError::ShutDown);
+        }
+        if self.force_cancellation.is_cancelled()
+            || self
+                .host_cancellation
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(EmbeddedError::Cancelled);
+        }
+        let Some(semaphore) = &self.compile_permits else {
+            return Ok(ExternalWorkPermit { _permit: None });
+        };
+        let permit = semaphore.acquire();
+        let permit = match &self.host_cancellation {
+            Some(token) => {
+                let force_cancellation = self.force_cancellation.token();
+                let admission_shutdown = self.admission_shutdown.token();
+                let force = force_cancellation.cancelled();
+                let host = token.cancelled();
+                let shutdown = admission_shutdown.cancelled();
+                let mut force = std::pin::pin!(force);
+                let mut host = std::pin::pin!(host);
+                let mut shutdown = std::pin::pin!(shutdown);
+                let mut permit = std::pin::pin!(permit);
+                match kernal_api::biased_race!(
+                    (force.as_mut()),
+                    (host.as_mut()),
+                    (shutdown.as_mut()),
+                    (permit.as_mut()),
+                )
+                .await
+                {
+                    kernal_api::async_engine::BiasedRace4::First(())
+                    | kernal_api::async_engine::BiasedRace4::Second(()) => {
+                        return Err(EmbeddedError::Cancelled);
+                    }
+                    kernal_api::async_engine::BiasedRace4::Third(()) => {
+                        return Err(EmbeddedError::ShutDown);
+                    }
+                    kernal_api::async_engine::BiasedRace4::Fourth(permit) => permit,
+                }
+            }
+            None => {
+                let force_cancellation = self.force_cancellation.token();
+                let admission_shutdown = self.admission_shutdown.token();
+                let force = force_cancellation.cancelled();
+                let shutdown = admission_shutdown.cancelled();
+                let mut force = std::pin::pin!(force);
+                let mut shutdown = std::pin::pin!(shutdown);
+                let mut permit = std::pin::pin!(permit);
+                match kernal_api::biased_race!(
+                    (force.as_mut()),
+                    (shutdown.as_mut()),
+                    (permit.as_mut()),
+                )
+                .await
+                {
+                    kernal_api::async_engine::BiasedRace3::First(()) => {
+                        return Err(EmbeddedError::Cancelled);
+                    }
+                    kernal_api::async_engine::BiasedRace3::Second(()) => {
+                        return Err(EmbeddedError::ShutDown);
+                    }
+                    kernal_api::async_engine::BiasedRace3::Third(permit) => permit,
+                }
+            }
+        };
+        if self.force_cancellation.is_cancelled()
+            || self
+                .host_cancellation
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(EmbeddedError::Cancelled);
+        }
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(EmbeddedError::ShutDown);
+        }
+        Ok(ExternalWorkPermit {
+            _permit: Some(permit),
+        })
+    }
+
+    pub(super) async fn await_compile<T, F>(&self, compile: F) -> Result<T>
+    where
+        F: std::future::Future<Output = std::result::Result<T, String>>,
+    {
+        let mut compile = std::pin::pin!(compile);
+        match &self.host_cancellation {
+            Some(token) => {
+                let force_cancellation = self.force_cancellation.token();
+                let force = force_cancellation.cancelled();
+                let host = token.cancelled();
+                let mut force = std::pin::pin!(force);
+                let mut host = std::pin::pin!(host);
+                match kernal_api::biased_race!(
+                    (force.as_mut()),
+                    (host.as_mut()),
+                    (compile.as_mut()),
+                )
+                .await
+                {
+                    kernal_api::async_engine::BiasedRace3::First(())
+                    | kernal_api::async_engine::BiasedRace3::Second(()) => {
+                        Err(EmbeddedError::Cancelled)
+                    }
+                    kernal_api::async_engine::BiasedRace3::Third(result) => {
+                        result.map_err(EmbeddedError::Compile)
+                    }
+                }
+            }
+            None => {
+                let force_cancellation = self.force_cancellation.token();
+                let force = force_cancellation.cancelled();
+                let mut force = std::pin::pin!(force);
+                match kernal_api::biased_race!((force.as_mut()), (compile.as_mut())).await {
+                    kernal_api::async_engine::BiasedRace2::First(()) => {
+                        Err(EmbeddedError::Cancelled)
+                    }
+                    kernal_api::async_engine::BiasedRace2::Second(result) => {
+                        result.map_err(EmbeddedError::Compile)
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn embedded_endpoint(host: &HostIdentity) -> String {
+    format!(
+        "embedded:{}:{}:{}",
+        sanitize_identity(&host.product),
+        sanitize_identity(&host.instance_id),
+        sanitize_identity(&host.workspace_id)
+    )
+}
+
+fn sanitize_identity(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Bridge the host's Tokio handle -- the public `RuntimeHooks` contract soldr
+/// and fbuild build against -- to the kernal-api handle zccache launches its
+/// background work through. Entering the handle makes it the ambient runtime,
+/// which is exactly what the facade's `RuntimeHandle::current` captures.
+fn facade_runtime_handle(
+    handle: &tokio::runtime::Handle,
+) -> std::result::Result<kernal_api::async_engine::RuntimeHandle, String> {
+    let _entered = handle.enter();
+    kernal_api::async_engine::RuntimeHandle::current()
+        .map_err(|error| format!("host runtime handle is not usable: {error:?}"))
+}
+
+#[cfg(test)]
+#[path = "mode_tests.rs"]
+mod mode_tests;

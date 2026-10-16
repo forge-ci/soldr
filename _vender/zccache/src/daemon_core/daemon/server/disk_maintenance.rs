@@ -1,0 +1,1391 @@
+//! Shared bounded disk-retention policy for standalone and embedded services.
+//!
+//! Every entry point receives one exact artifact root.  This module never
+//! discovers a parent directory or a sibling product root (issue #1148).
+
+use super::*;
+use std::collections::{HashMap, HashSet};
+use std::io;
+use std::path::Path;
+
+#[path = "disk_maintenance_journals.rs"]
+mod journals;
+use journals::release_reaped_session_journals;
+// #1907: re-exported so the `#[cfg(test)]` child module can unit-test the
+// pure path filter without a running daemon.
+#[cfg(test)]
+use journals::journal_paths_to_release;
+#[path = "disk_maintenance_retired.rs"]
+mod retired;
+use retired::{retired_store_bytes, versioned_top_level};
+use std::time::{Duration, SystemTime};
+
+pub(crate) const CACHE_BYTES_ENV: &str = "ZCCACHE_CACHE_SIZE_BYTES";
+pub(crate) const CACHE_PERCENT_ENV: &str = "ZCCACHE_CACHE_SIZE_PERCENT";
+const GIB: u64 = 1024 * 1024 * 1024;
+const SOFT_AGE: Duration = Duration::from_secs(4 * 24 * 60 * 60);
+const EXPIRE_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const PRESSURE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// How long an ended session's tombstone is kept before it is reclaimed
+/// (#1165).
+///
+/// The tombstone turns a request arriving after `SessionEnd` into a clean
+/// `unknown session` error. Expiring one does **not** resurrect the session:
+/// the id is gone from `sessions` either way, so a very late request still
+/// fails, just with a less specific message. That bounds the cost of choosing
+/// this badly to error-message quality rather than correctness.
+///
+/// An hour is orders of magnitude beyond any in-flight request a disconnected
+/// client could still deliver, while making the map proportional to recent
+/// activity instead of to daemon uptime.
+const ENDED_SESSION_TTL: Duration = Duration::from_secs(60 * 60);
+// A maintenance pass must not invalidate a result that was just published.
+// The next pressure pass can reclaim it if the disk is still constrained.
+const HARD_PRESSURE_MIN_AGE: Duration = PRESSURE_INTERVAL;
+/// How often the maintenance loop checks the latched shutdown flag. `run()`
+/// waits for this loop before draining, and `zccache stop` waits for `run()`,
+/// so this interval is paid on every stop; a 1 s poll made each stop of an
+/// idle daemon take about a second.
+pub(super) const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const FULL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const FULL_MARKER: &str = ".disk-maintenance-last-full-v1";
+/// Grace period for retired `v<VERSION>` stores (issues #1659, #1673). It
+/// gates both the whole-store `.last-active` check (a store stamped within
+/// this window is still in use and is left alone) and the per-file unused
+/// check (a file touched within this window survives a routine sweep). Only
+/// stores of an *older* version than the running daemon are ever swept;
+/// newer sibling stores belong to a newer daemon and are never touched.
+const RETIRED_STORE_MAX_AGE: Duration = Duration::from_secs(72 * 60 * 60);
+
+fn launch_maintenance_blocking<F, R>(
+    runtime_handle: Option<&kernal_api::async_engine::RuntimeHandle>,
+    operation: F,
+) -> kernal_api::async_engine::Task<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    match runtime_handle {
+        Some(handle) => handle.launch_blocking(operation),
+        None => kernal_api::async_engine::launch_blocking(operation),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MaintenanceKind {
+    Pressure,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BudgetSpec {
+    Dynamic,
+    Bytes(u64),
+    Percent(u8),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MaintenancePolicy {
+    budget: BudgetSpec,
+}
+
+impl Default for MaintenancePolicy {
+    fn default() -> Self {
+        Self {
+            budget: BudgetSpec::Dynamic,
+        }
+    }
+}
+
+impl MaintenancePolicy {
+    pub(crate) fn from_env() -> Result<Self, String> {
+        Self::from_values(
+            std::env::var(CACHE_BYTES_ENV).ok().as_deref(),
+            std::env::var(CACHE_PERCENT_ENV).ok().as_deref(),
+        )
+    }
+
+    fn from_values(bytes: Option<&str>, percent: Option<&str>) -> Result<Self, String> {
+        match (
+            bytes.filter(|v| !v.trim().is_empty()),
+            percent.filter(|v| !v.trim().is_empty()),
+        ) {
+            (Some(_), Some(_)) => Err(format!(
+                "{CACHE_BYTES_ENV} and {CACHE_PERCENT_ENV} are mutually exclusive"
+            )),
+            (Some(value), None) => {
+                let bytes = value.parse::<u64>().map_err(|_| {
+                    format!("{CACHE_BYTES_ENV} must be a positive integer byte count")
+                })?;
+                if bytes == 0 {
+                    return Err(format!("{CACHE_BYTES_ENV} must be greater than zero"));
+                }
+                Ok(Self {
+                    budget: BudgetSpec::Bytes(bytes),
+                })
+            }
+            (None, Some(value)) => {
+                let percent = value.parse::<u8>().map_err(|_| {
+                    format!("{CACHE_PERCENT_ENV} must be an integer from 1 through 100")
+                })?;
+                if !(1..=100).contains(&percent) {
+                    return Err(format!(
+                        "{CACHE_PERCENT_ENV} must be an integer from 1 through 100"
+                    ));
+                }
+                Ok(Self {
+                    budget: BudgetSpec::Percent(percent),
+                })
+            }
+            (None, None) => Ok(Self::default()),
+        }
+    }
+
+    pub(crate) fn from_limits(bytes: Option<u64>, percent: Option<u8>) -> Result<Self, String> {
+        match (bytes, percent) {
+            (Some(_), Some(_)) => {
+                Err("max_cache_bytes and max_cache_percent are mutually exclusive".to_string())
+            }
+            (Some(0), None) => Err("max_cache_bytes must be greater than zero".to_string()),
+            (Some(bytes), None) => Ok(Self {
+                budget: BudgetSpec::Bytes(bytes),
+            }),
+            (None, Some(percent)) if !(1..=100).contains(&percent) => {
+                Err("max_cache_percent must be an integer from 1 through 100".to_string())
+            }
+            (None, Some(percent)) => Ok(Self {
+                budget: BudgetSpec::Percent(percent),
+            }),
+            (None, None) => Ok(Self::default()),
+        }
+    }
+
+    fn budget_bytes(self, capacity_bytes: u64) -> u64 {
+        let requested = match self.budget {
+            BudgetSpec::Dynamic => capacity_bytes
+                .saturating_mul(5)
+                .checked_div(100)
+                .unwrap_or(0)
+                .clamp(40 * GIB, 200 * GIB),
+            BudgetSpec::Bytes(bytes) => bytes,
+            BudgetSpec::Percent(percent) => capacity_bytes
+                .saturating_mul(u64::from(percent))
+                .checked_div(100)
+                .unwrap_or(0),
+        };
+        // Keep the requested recovery reserve attainable on ordinary disks.
+        // On small disks, half the volume is the largest feasible reserve.
+        let recovery_reserve = recovery_free_bytes(capacity_bytes);
+        requested.min(capacity_bytes.saturating_sub(recovery_reserve))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FilesystemSpace {
+    pub(crate) capacity_bytes: u64,
+    pub(crate) free_bytes: u64,
+}
+
+pub(crate) trait MaintenanceEnvironment: Send + Sync {
+    fn now(&self) -> SystemTime;
+    fn filesystem_space(&self, root: &Path) -> io::Result<FilesystemSpace>;
+}
+
+pub(crate) struct RealMaintenanceEnvironment;
+
+impl MaintenanceEnvironment for RealMaintenanceEnvironment {
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
+    }
+
+    fn filesystem_space(&self, root: &Path) -> io::Result<FilesystemSpace> {
+        Ok(FilesystemSpace {
+            capacity_bytes: kernal_api::platform::resources::total_space(root)?,
+            free_bytes: kernal_api::platform::resources::available_space(root)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MaintenancePressure {
+    None,
+    Soft,
+    Hard,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DiskMaintenanceReport {
+    pub(crate) kind: MaintenanceKind,
+    pub(crate) pressure: MaintenancePressure,
+    pub(crate) budget_bytes: u64,
+    pub(crate) usage_before_bytes: u64,
+    pub(crate) usage_after_bytes: u64,
+    pub(crate) bytes_reclaimed: u64,
+    pub(crate) artifacts_removed: usize,
+    pub(crate) expired_artifacts_removed: usize,
+    pub(crate) pending_write_bytes: u64,
+    /// Bytes freed by reclaiming retired sibling `v<VERSION>` stores during
+    /// this pass (already included in `bytes_reclaimed`).
+    pub(crate) retired_bytes_reclaimed: u64,
+}
+
+#[derive(Debug)]
+struct DiskArtifact {
+    key: String,
+    allocated_bytes: u64,
+    /// Allocated bytes of this artifact's files whose link count is exactly
+    /// one and whose blocks are not proven shared -- the space evicting it
+    /// actually returns. A file hard-linked into a build tree (or whose count
+    /// is unknown) frees nothing when the cache copy is unlinked (issue
+    /// #1659), nor does one reflinked into a build tree (#1687).
+    reclaimable_bytes: u64,
+    last_access: SystemTime,
+    recently_published: bool,
+    legacy_files: Vec<NormalizedPath>,
+    staged: bool,
+    staged_generation: Option<String>,
+}
+
+#[derive(Debug)]
+struct MaintenancePlan {
+    pressure: MaintenancePressure,
+    selected: Vec<String>,
+    expired: HashSet<String>,
+}
+
+fn low_space_bytes(capacity: u64) -> u64 {
+    capacity
+        .saturating_mul(5)
+        .checked_div(100)
+        .unwrap_or(0)
+        .max(20 * GIB)
+        .min(capacity)
+}
+
+/// Free space below which the disk is critical: free-space pressure may then
+/// evict live, recently used entries (subject to [`HARD_PRESSURE_MIN_AGE`]).
+///
+/// Above this floor, low free space alone only evicts entries idle longer
+/// than [`SOFT_AGE`]. A large shared disk can sit below [`low_space_bytes`]
+/// indefinitely while holding hundreds of GiB that are not the cache (a
+/// 1.8 TiB host with 40 GiB free is below its 92 GiB low-space mark). There
+/// the recovery reserve is unreachable, so treating low space as hard
+/// pressure evicted every entry older than five minutes on every pass: a
+/// restored CI cache was discarded mid-job and each job saved only its last
+/// few minutes of work (bosn#503).
+fn critical_space_bytes(capacity: u64) -> u64 {
+    capacity
+        .checked_div(100)
+        .unwrap_or(0)
+        .max(5 * GIB)
+        .min(low_space_bytes(capacity))
+}
+
+fn recovery_free_bytes(capacity: u64) -> u64 {
+    let desired = capacity
+        .saturating_mul(8)
+        .checked_div(100)
+        .unwrap_or(0)
+        .max(30 * GIB);
+    // On small volumes the absolute 30 GiB target is not simultaneously
+    // attainable with a useful cache. Reserve at most half the volume so the
+    // dynamic budget remains non-zero (and exceeds 10 GiB once capacity is
+    // above 20 GiB).
+    desired.min(capacity / 2)
+}
+
+fn age(now: SystemTime, then: SystemTime) -> Duration {
+    now.duration_since(then).unwrap_or_default()
+}
+
+#[cfg(test)]
+fn plan_maintenance(
+    policy: MaintenancePolicy,
+    kind: MaintenanceKind,
+    now: SystemTime,
+    space: FilesystemSpace,
+    artifacts: &[DiskArtifact],
+    pending_write_bytes: u64,
+) -> MaintenancePlan {
+    plan_maintenance_at_least(
+        policy,
+        kind,
+        now,
+        space,
+        artifacts,
+        pending_write_bytes,
+        0,
+        MaintenancePressure::None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_maintenance_at_least(
+    policy: MaintenancePolicy,
+    kind: MaintenanceKind,
+    now: SystemTime,
+    space: FilesystemSpace,
+    artifacts: &[DiskArtifact],
+    pending_write_bytes: u64,
+    retired_bytes: u64,
+    minimum_pressure: MaintenancePressure,
+) -> MaintenancePlan {
+    let budget = policy.budget_bytes(space.capacity_bytes);
+    let artifact_bytes = artifacts.iter().fold(0_u64, |total, artifact| {
+        total.saturating_add(artifact.allocated_bytes)
+    });
+    // Retired sibling stores count against the budget (#1659): they occupy
+    // the same disk, and the pass reclaims them before any live entry.
+    let usage = artifact_bytes
+        .saturating_add(pending_write_bytes)
+        .saturating_add(retired_bytes);
+    let mut selected = HashSet::new();
+    // Accounted-usage reduction vs. real free-space gain: evicting a file
+    // that is hard-linked elsewhere lowers the former but not the latter.
+    let mut reclaimed = 0_u64;
+    let mut freed = 0_u64;
+    let mut expired = HashSet::new();
+
+    if kind == MaintenanceKind::Full {
+        for artifact in artifacts
+            .iter()
+            .filter(|artifact| age(now, artifact.last_access) > EXPIRE_AGE)
+        {
+            selected.insert(artifact.key.clone());
+            expired.insert(artifact.key.clone());
+            reclaimed = reclaimed.saturating_add(artifact.allocated_bytes);
+            freed = freed.saturating_add(artifact.reclaimable_bytes);
+        }
+    }
+
+    let projected_usage = usage.saturating_sub(reclaimed);
+    let projected_free = space.free_bytes.saturating_add(freed);
+    let space_low = projected_free < low_space_bytes(space.capacity_bytes);
+    let hard =
+        projected_usage >= budget || projected_free < critical_space_bytes(space.capacity_bytes);
+    let soft = !hard && (space_low || projected_usage >= budget.saturating_mul(85) / 100);
+    let detected_pressure = if hard {
+        MaintenancePressure::Hard
+    } else if soft {
+        MaintenancePressure::Soft
+    } else {
+        MaintenancePressure::None
+    };
+    let pressure = match (minimum_pressure, detected_pressure) {
+        (MaintenancePressure::Hard, _) | (_, MaintenancePressure::Hard) => {
+            MaintenancePressure::Hard
+        }
+        (MaintenancePressure::Soft, _) | (_, MaintenancePressure::Soft) => {
+            MaintenancePressure::Soft
+        }
+        _ => MaintenancePressure::None,
+    };
+
+    let (usage_need, free_need) = match pressure {
+        MaintenancePressure::Hard => (
+            projected_usage.saturating_sub(budget.saturating_mul(80) / 100),
+            recovery_free_bytes(space.capacity_bytes).saturating_sub(projected_free),
+        ),
+        // Low (not critical) free space reclaims only idle entries: the
+        // candidate filter below admits nothing younger than SOFT_AGE.
+        MaintenancePressure::Soft => (
+            projected_usage.saturating_sub(budget.saturating_mul(70) / 100),
+            if space_low {
+                recovery_free_bytes(space.capacity_bytes).saturating_sub(projected_free)
+            } else {
+                0
+            },
+        ),
+        MaintenancePressure::None => (0, 0),
+    };
+
+    if usage_need > 0 || free_need > 0 {
+        let mut candidates: Vec<&DiskArtifact> = artifacts
+            .iter()
+            .filter(|artifact| !selected.contains(&artifact.key))
+            .filter(|artifact| {
+                let artifact_age = age(now, artifact.last_access);
+                (pressure == MaintenancePressure::Hard
+                    && (!artifact.recently_published || artifact_age > HARD_PRESSURE_MIN_AGE))
+                    || artifact_age > SOFT_AGE
+            })
+            .collect();
+        // #1659: entries whose files are linked only from the cache
+        // (`reclaimable_bytes > 0`) actually return disk space, so they go
+        // first; LRU order is kept within each group.
+        candidates.sort_by_key(|artifact| (artifact.reclaimable_bytes == 0, artifact.last_access));
+        let mut usage_reclaimed = 0_u64;
+        let mut free_reclaimed = 0_u64;
+        for artifact in candidates {
+            if usage_reclaimed >= usage_need && free_reclaimed >= free_need {
+                break;
+            }
+            // Once only fully shared entries remain, evicting them frees no
+            // disk space. Soft pressure stops there. Hard pressure keeps
+            // going (the pre-#1659 behaviour) so accounted usage still
+            // converges on the budget instead of starving; the usage counter
+            // still bounds how many are taken, and the free-space counter
+            // only credits bytes that are really returned -- so a shared
+            // entry is never evicted just to chase a free-space shortfall it
+            // cannot help with.
+            if artifact.reclaimable_bytes == 0
+                && (pressure != MaintenancePressure::Hard || usage_reclaimed >= usage_need)
+            {
+                break;
+            }
+            selected.insert(artifact.key.clone());
+            usage_reclaimed = usage_reclaimed.saturating_add(artifact.allocated_bytes);
+            free_reclaimed = free_reclaimed.saturating_add(artifact.reclaimable_bytes);
+        }
+    }
+
+    let mut selected: Vec<String> = selected.into_iter().collect();
+    selected.sort();
+    MaintenancePlan {
+        pressure,
+        selected,
+        expired,
+    }
+}
+
+fn add_file(
+    path: &Path,
+    artifact: &mut DiskArtifact,
+    seen: &mut HashSet<crate::daemon_core::platform::fs::FileIdentity>,
+) -> io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Ok(());
+    }
+    artifact.last_access = artifact
+        .last_access
+        .max(metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH));
+    if crate::daemon_core::platform::fs::identity::file_identity(path)
+        .ok()
+        .is_none_or(|id| seen.insert(id))
+    {
+        let allocated = crate::daemon_core::platform::fs::volume::allocated_bytes(path, &metadata);
+        artifact.allocated_bytes = artifact.allocated_bytes.saturating_add(allocated);
+        // Unknown link count is treated as shared: never over-promise space.
+        // A reflink clone in a build tree leaves the cache file at nlink == 1
+        // while sharing its blocks, so proven sharing is excluded too (#1687).
+        if crate::daemon_core::core::config::file_may_free_space_on_removal(path) {
+            artifact.reclaimable_bytes = artifact.reclaimable_bytes.saturating_add(allocated);
+        }
+    }
+    Ok(())
+}
+
+fn validate_owned_artifact_root(artifact_dir: &Path) -> io::Result<()> {
+    let metadata = std::fs::symlink_metadata(artifact_dir)?;
+    if crate::daemon_core::platform::fs::links::classify(artifact_dir)
+        .is_ok_and(|kind| kind != crate::daemon_core::platform::fs::links::LinkKind::Regular)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing disk maintenance through linked artifact root: {}",
+                artifact_dir.display()
+            ),
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "artifact root is not a directory: {}",
+                artifact_dir.display()
+            ),
+        ));
+    }
+    validate_staged_artifact_root(artifact_dir)?;
+    Ok(())
+}
+
+fn add_tree(
+    root: &Path,
+    artifact: &mut DiskArtifact,
+    seen: &mut HashSet<crate::daemon_core::platform::fs::FileIdentity>,
+) -> io::Result<()> {
+    if root.is_file() {
+        return add_file(root, artifact, seen);
+    }
+    if !root.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(root)?.flatten() {
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if crate::daemon_core::platform::fs::links::classify(&path)
+            .is_ok_and(|kind| kind != crate::daemon_core::platform::fs::links::LinkKind::Regular)
+        {
+            continue;
+        }
+        if metadata.is_dir() {
+            add_tree(&path, artifact, seen)?;
+        } else if metadata.is_file() {
+            add_file(&path, artifact, seen)?;
+        }
+    }
+    Ok(())
+}
+
+fn legacy_key(name: &str) -> Option<(&str, Option<usize>)> {
+    if name.starts_with('.') {
+        return None;
+    }
+    let (key, output_index) = if let Some(key) = name.strip_suffix(".meta") {
+        (key, None)
+    } else if let Some(key) = name.strip_suffix(".pack") {
+        (key, None)
+    } else {
+        let (key, output) = name.rsplit_once('_')?;
+        let output_index = output.parse::<usize>().ok()?;
+        (key, Some(output_index))
+    };
+    (key.len() <= 128 && !key.is_empty()).then_some((key, output_index))
+}
+
+fn scan_artifacts(artifact_dir: &Path) -> io::Result<Vec<DiskArtifact>> {
+    let mut groups: HashMap<String, DiskArtifact> = HashMap::new();
+    let mut seen = HashSet::new();
+    if !artifact_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    for entry in std::fs::read_dir(artifact_dir)?.flatten() {
+        let path = entry.path();
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some((key, output_index)) = legacy_key(&name) else {
+            continue;
+        };
+        if let Some(output_index) = output_index {
+            crate::daemon_core::artifact::record_legacy_artifact_access(
+                &path,
+                key,
+                output_index,
+                crate::daemon_core::artifact::LegacyArtifactAccessPurpose::EvictionScan,
+                "daemon::disk_maintenance::scan_artifacts",
+            );
+        }
+        let artifact = groups
+            .entry(key.to_string())
+            .or_insert_with(|| DiskArtifact {
+                key: key.to_string(),
+                allocated_bytes: 0,
+                reclaimable_bytes: 0,
+                last_access: SystemTime::UNIX_EPOCH,
+                recently_published: false,
+                legacy_files: Vec::new(),
+                staged: false,
+                staged_generation: None,
+            });
+        add_file(&path, artifact, &mut seen)?;
+        artifact.legacy_files.push(path.into());
+    }
+
+    let staged_root = artifact_dir.join(".staged-v2");
+    for staged in scan_v2_disk_artifacts(artifact_dir)? {
+        let key = staged.key;
+        let artifact = groups.entry(key.clone()).or_insert_with(|| DiskArtifact {
+            key: key.clone(),
+            allocated_bytes: 0,
+            reclaimable_bytes: 0,
+            last_access: SystemTime::UNIX_EPOCH,
+            recently_published: false,
+            legacy_files: Vec::new(),
+            staged: true,
+            staged_generation: None,
+        });
+        artifact.staged = true;
+        artifact.staged_generation = staged.generation;
+        artifact.last_access = artifact.last_access.max(staged.mtime);
+        add_tree(&staged_root.join(&key), artifact, &mut seen)?;
+        add_file(
+            &staged_root.join(format!("{key}.current")),
+            artifact,
+            &mut seen,
+        )
+        .ok();
+    }
+    Ok(groups.into_values().collect())
+}
+
+struct MaintenancePass<'a> {
+    artifact_dir: &'a Path,
+    artifacts: &'a DashMap<String, CachedArtifact>,
+    artifact_store: &'a ArtifactStore,
+    index_writer_tx: Option<&'a kernal_api::async_engine::UnboundedSender<IndexWriterCommand>>,
+    dep_graph: &'a DepGraph,
+    pending_write_bytes: u64,
+    policy: MaintenancePolicy,
+    kind: MaintenanceKind,
+    environment: &'a dyn MaintenanceEnvironment,
+    /// `(top_level, current v<VERSION>)` when the cache root is a versioned
+    /// store whose retired siblings count against the budget (#1659).
+    retired_top_level: Option<(crate::daemon_core::core::NormalizedPath, String)>,
+}
+
+fn refresh_live_access(
+    scanned: &mut [DiskArtifact],
+    artifacts: &DashMap<String, CachedArtifact>,
+    dep_graph: &DepGraph,
+    now: SystemTime,
+) {
+    for artifact in scanned {
+        // A staged generation carries its own durable publication mtime. Use
+        // it before index hydration has populated `artifacts`, otherwise a
+        // low-space startup pass can evict the generation during the narrow
+        // interval before its metadata is visible.
+        artifact.recently_published = artifact.staged
+            && dep_graph.references_artifact_key(&artifact.key)
+            && age(now, artifact.last_access) <= HARD_PRESSURE_MIN_AGE;
+        if let Some(cached) = artifacts.get(&artifact.key) {
+            let access = cached.access_snapshot();
+            let live_last_use = if access.used_in_process {
+                now.checked_sub(access.last_used.elapsed()).unwrap_or(now)
+            } else {
+                access.last_used_wall.min(now)
+            };
+            artifact.last_access = artifact.last_access.max(live_last_use);
+            let published_at = SystemTime::UNIX_EPOCH
+                .checked_add(Duration::from_secs(cached.meta.stored_at_secs))
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            // A staged artifact's durable generation may be restored by a
+            // new daemon before its first lookup. Retain its short
+            // publication grace window across that restart so low-space
+            // startup maintenance cannot evict it before depgraph load.
+            // Legacy artifacts keep the existing in-process-only behavior.
+            artifact.recently_published |= access.published_in_process
+                || (artifact.staged && age(now, published_at) <= HARD_PRESSURE_MIN_AGE);
+        }
+    }
+}
+
+fn remove_planned_artifacts(
+    artifact_dir: &Path,
+    scanned: &[DiskArtifact],
+    plan: &MaintenancePlan,
+    artifacts: &DashMap<String, CachedArtifact>,
+    artifact_store: &ArtifactStore,
+    index_writer_tx: Option<&kernal_api::async_engine::UnboundedSender<IndexWriterCommand>>,
+    dep_graph: &DepGraph,
+) -> io::Result<Vec<String>> {
+    let planned: HashSet<&str> = plan.selected.iter().map(String::as_str).collect();
+    let staged_expected: HashMap<String, Option<String>> = scanned
+        .iter()
+        .filter(|artifact| artifact.staged && planned.contains(artifact.key.as_str()))
+        .map(|artifact| (artifact.key.clone(), artifact.staged_generation.clone()))
+        .collect();
+    let staged_removed = evict_v2_artifact_keys_if_unchanged(artifact_dir, &staged_expected)?;
+    let selected: HashSet<&str> = scanned
+        .iter()
+        .filter(|artifact| {
+            planned.contains(artifact.key.as_str())
+                && (!artifact.staged || staged_removed.contains(&artifact.key))
+        })
+        .map(|artifact| artifact.key.as_str())
+        .collect();
+    for artifact in scanned
+        .iter()
+        .filter(|artifact| selected.contains(artifact.key.as_str()))
+    {
+        for file in &artifact.legacy_files {
+            if let Err(error) = remove_cow_blob(file) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    return Err(error);
+                }
+            }
+        }
+    }
+    let removed_keys: Vec<String> = plan
+        .selected
+        .iter()
+        .filter(|key| selected.contains(key.as_str()))
+        .cloned()
+        .collect();
+    if removed_keys.is_empty() {
+        return Ok(removed_keys);
+    }
+
+    let keys: Vec<&str> = removed_keys.iter().map(String::as_str).collect();
+    // The caller owns the publication barrier's write side. Every cache hit
+    // that acquired an owned read lease has therefore finished payload
+    // discovery and enqueued its access checkpoint; the subsequent Remove is
+    // ordered after every such Insert. New lookups cannot acquire a lease and
+    // rehydrate the entry from ArtifactStore in the gap.
+    artifact_store.remove_batch(&keys);
+    dep_graph.invalidate_artifact_keys(&removed_keys.iter().cloned().collect());
+    for key in &removed_keys {
+        artifacts.remove(key);
+    }
+    if let Some(tx) = index_writer_tx {
+        let _ = tx.send(IndexWriterCommand::Remove(removed_keys.clone()));
+    }
+    Ok(removed_keys)
+}
+
+#[cfg(test)]
+fn maintain_disk_artifacts(pass: MaintenancePass<'_>) -> io::Result<DiskMaintenanceReport> {
+    maintain_disk_artifacts_with_barrier(pass, None, None)
+}
+
+// `shutdown_requested` is checked between eviction rounds so a shutdown
+// mid-scan doesn't have to wait out however many rounds a large cache still
+// has queued (zccache#1775). `None` in tests that don't exercise shutdown.
+fn maintain_disk_artifacts_with_barrier(
+    pass: MaintenancePass<'_>,
+    publication_barrier: Option<&Arc<kernal_api::async_engine::RwLock<()>>>,
+    shutdown_requested: Option<&AtomicBool>,
+) -> io::Result<DiskMaintenanceReport> {
+    let MaintenancePass {
+        artifact_dir,
+        artifacts,
+        artifact_store,
+        index_writer_tx,
+        dep_graph,
+        pending_write_bytes,
+        policy,
+        kind,
+        environment,
+        retired_top_level,
+    } = pass;
+
+    validate_owned_artifact_root(artifact_dir)?;
+    let now = environment.now();
+    let initial_space = environment.filesystem_space(artifact_dir)?;
+    let mut scanned = scan_artifacts(artifact_dir)?;
+    refresh_live_access(&mut scanned, artifacts, dep_graph, now);
+    let mut retired_bytes = retired_top_level
+        .as_ref()
+        .map_or(0, |(top_level, current)| {
+            retired_store_bytes(top_level, current)
+        });
+    let mut retired_swept = false;
+    let mut retired_bytes_reclaimed = 0_u64;
+    let usage_before = scanned
+        .iter()
+        .fold(pending_write_bytes, |total, artifact| {
+            total.saturating_add(artifact.allocated_bytes)
+        })
+        .saturating_add(retired_bytes);
+    let mut pressure = MaintenancePressure::None;
+    let mut removed = HashSet::new();
+    let mut expired_removed = HashSet::new();
+    let mut artifact_bytes_reclaimed = 0_u64;
+
+    loop {
+        // zccache#1775: bail between rounds rather than only checking once
+        // before this blocking scan started — a large cache can take
+        // multiple scan/plan/commit/rescan rounds, and shutdown must not
+        // wait out however many are still queued.
+        if shutdown_requested.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            break;
+        }
+        let space = environment.filesystem_space(artifact_dir)?;
+        let plan = plan_maintenance_at_least(
+            policy,
+            kind,
+            now,
+            space,
+            &scanned,
+            pending_write_bytes,
+            retired_bytes,
+            pressure,
+        );
+        // #1659: reclaim retired sibling stores before evicting any live
+        // entry. At most once per pass (bounded work, no loop): whatever
+        // survives -- a live writer lock, young shared files -- stays with
+        // the periodic retired-store sweep, and the re-plan below evicts
+        // live entries only for the remaining shortfall. We are already on
+        // a blocking maintenance worker, so the sweep runs inline.
+        if !retired_swept && retired_bytes > 0 && plan.pressure != MaintenancePressure::None {
+            if let Some((top_level, current)) = retired_top_level.as_ref() {
+                retired_swept = true;
+                let sweep = crate::daemon_core::core::config::sweep_retired_version_stores_in_with_mode(
+                    top_level,
+                    current,
+                    RETIRED_STORE_MAX_AGE,
+                    now,
+                    crate::daemon_core::core::config::RetiredSweepMode::Pressure,
+                );
+                retired_bytes_reclaimed =
+                    retired_bytes_reclaimed.saturating_add(sweep.bytes_reclaimed);
+                retired_bytes = retired_store_bytes(top_level, current);
+                continue;
+            }
+        }
+        if plan.selected.is_empty() {
+            pressure = plan.pressure;
+            break;
+        }
+        let (plan, removed_this_round) = if let Some(publication_barrier) = publication_barrier {
+            // Filesystem scanning and candidate planning are read-only and may
+            // take seconds on a large cache. Only exclude cache hits for the
+            // short destructive commit, then refresh live access and re-plan
+            // under the writer so a hit/publication that raced the scan is
+            // not evicted as stale.
+            let _publication_guard = publication_barrier.blocking_write();
+            refresh_live_access(&mut scanned, artifacts, dep_graph, now);
+            let commit_space = environment.filesystem_space(artifact_dir)?;
+            let commit_plan = plan_maintenance_at_least(
+                policy,
+                kind,
+                now,
+                commit_space,
+                &scanned,
+                pending_write_bytes,
+                retired_bytes,
+                pressure,
+            );
+            let removed = remove_planned_artifacts(
+                artifact_dir,
+                &scanned,
+                &commit_plan,
+                artifacts,
+                artifact_store,
+                index_writer_tx,
+                dep_graph,
+            )?;
+            (commit_plan, removed)
+        } else {
+            let removed = remove_planned_artifacts(
+                artifact_dir,
+                &scanned,
+                &plan,
+                artifacts,
+                artifact_store,
+                index_writer_tx,
+                dep_graph,
+            )?;
+            (plan, removed)
+        };
+        pressure = plan.pressure;
+        if removed_this_round.is_empty() {
+            break;
+        }
+        // Credit only bytes whose last link went with the eviction, captured
+        // from this round's scan before the rescan below replaces it.
+        let freed_by_key: HashMap<&str, u64> = scanned
+            .iter()
+            .map(|artifact| (artifact.key.as_str(), artifact.reclaimable_bytes))
+            .collect();
+        for key in &removed_this_round {
+            let freed = freed_by_key.get(key.as_str()).copied().unwrap_or(0);
+            artifact_bytes_reclaimed = artifact_bytes_reclaimed.saturating_add(freed);
+        }
+        for key in removed_this_round {
+            if plan.expired.contains(&key) {
+                expired_removed.insert(key.clone());
+            }
+            removed.insert(key);
+        }
+        scanned = scan_artifacts(artifact_dir)?;
+        refresh_live_access(&mut scanned, artifacts, dep_graph, now);
+    }
+
+    let usage_after = scanned
+        .iter()
+        .fold(pending_write_bytes, |total, artifact| {
+            total.saturating_add(artifact.allocated_bytes)
+        })
+        .saturating_add(retired_bytes);
+    Ok(DiskMaintenanceReport {
+        kind,
+        pressure,
+        budget_bytes: policy.budget_bytes(initial_space.capacity_bytes),
+        usage_before_bytes: usage_before,
+        usage_after_bytes: usage_after,
+        // Only bytes whose last link was removed: an entry hard-linked into
+        // a build tree still occupies its blocks after eviction (#1659).
+        bytes_reclaimed: artifact_bytes_reclaimed.saturating_add(retired_bytes_reclaimed),
+        artifacts_removed: removed.len(),
+        expired_artifacts_removed: expired_removed.len(),
+        pending_write_bytes,
+        retired_bytes_reclaimed,
+    })
+}
+
+fn full_marker_path(cache_dir: &Path) -> NormalizedPath {
+    cache_dir.join(FULL_MARKER).into()
+}
+
+fn full_maintenance_due(cache_dir: &Path, now: SystemTime) -> bool {
+    let Ok(contents) = std::fs::read_to_string(full_marker_path(cache_dir)) else {
+        return true;
+    };
+    let Ok(last_secs) = contents.trim().parse::<u64>() else {
+        return true;
+    };
+    let now_secs = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    last_secs > now_secs || now_secs - last_secs >= FULL_INTERVAL.as_secs()
+}
+
+fn record_full_maintenance(cache_dir: &Path, now: SystemTime) -> io::Result<()> {
+    std::fs::create_dir_all(cache_dir)?;
+    let marker = full_marker_path(cache_dir);
+    let temp = cache_dir.join(format!("{FULL_MARKER}.{}.tmp", std::process::id()));
+    let now_secs = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    std::fs::write(&temp, format!("{now_secs}\n"))?;
+    match std::fs::rename(&temp, &marker) {
+        Ok(()) => Ok(()),
+        Err(error) if marker.exists() => {
+            std::fs::remove_file(&marker)?;
+            std::fs::rename(&temp, &marker).map_err(|_| error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) async fn maintain_state_disk(
+    state: Arc<SharedState>,
+    policy: MaintenancePolicy,
+    kind: MaintenanceKind,
+    runtime_handle: Option<&kernal_api::async_engine::RuntimeHandle>,
+) -> io::Result<DiskMaintenanceReport> {
+    let _maintenance_guard = state.disk_maintenance.lock().await;
+    if state.shutdown_requested.load(Ordering::Acquire) {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "disk maintenance skipped because daemon shutdown is in progress",
+        ));
+    }
+    let cache_dir = state.cache_dir.clone();
+    let index_writer_tx = state.index_writer_tx.clone();
+    let maintenance_index_writer_tx = index_writer_tx.clone();
+    let pending_write_bytes = state.in_flight_bytes.load(Ordering::Relaxed) as u64;
+    let maintenance_state = Arc::clone(&state);
+    let report = launch_maintenance_blocking(runtime_handle, move || {
+        let dep_graph = maintenance_state.dep_graph.load_full();
+        maintain_disk_artifacts_with_barrier(
+            MaintenancePass {
+                artifact_dir: maintenance_state.artifact_dir.as_path(),
+                artifacts: &maintenance_state.artifacts,
+                artifact_store: &maintenance_state.artifact_store,
+                index_writer_tx: Some(&maintenance_index_writer_tx),
+                dep_graph: &dep_graph,
+                pending_write_bytes,
+                policy,
+                kind,
+                environment: &RealMaintenanceEnvironment,
+                retired_top_level: versioned_top_level(maintenance_state.cache_dir.as_path()),
+            },
+            Some(&maintenance_state.artifact_publication),
+            Some(&maintenance_state.shutdown_requested),
+        )
+    })
+    .await
+    .map_err(io::Error::other)??;
+
+    if report.artifacts_removed > 0
+        && !flush_index_writer(&index_writer_tx, Duration::from_secs(30)).await
+    {
+        return Err(io::Error::other(
+            "artifact-index removals did not flush before the maintenance deadline",
+        ));
+    }
+
+    if kind == MaintenanceKind::Full {
+        record_full_maintenance(cache_dir.as_path(), SystemTime::now())?;
+    }
+    tracing::info!(
+        maintenance_kind = ?report.kind,
+        pressure = ?report.pressure,
+        budget_bytes = report.budget_bytes,
+        usage_before_bytes = report.usage_before_bytes,
+        usage_after_bytes = report.usage_after_bytes,
+        bytes_reclaimed = report.bytes_reclaimed,
+        retired_bytes_reclaimed = report.retired_bytes_reclaimed,
+        artifacts_removed = report.artifacts_removed,
+        expired_artifacts_removed = report.expired_artifacts_removed,
+        pending_write_bytes = report.pending_write_bytes,
+        cache_root = %cache_dir.display(),
+        "disk maintenance pass complete"
+    );
+    Ok(report)
+}
+
+async fn wait_for_artifact_load(state: &SharedState) -> bool {
+    loop {
+        if state.shutdown_requested.load(Ordering::Acquire) {
+            return false;
+        }
+        if state.artifacts_loaded.load(Ordering::Acquire)
+            && state.dep_graph_load_complete.load(Ordering::Acquire)
+        {
+            return true;
+        }
+        kernal_api::async_engine::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn pressure_scan_needed(state: &SharedState, policy: MaintenancePolicy) -> io::Result<bool> {
+    let space = RealMaintenanceEnvironment.filesystem_space(state.artifact_dir.as_path())?;
+    if space.free_bytes < low_space_bytes(space.capacity_bytes) {
+        return Ok(true);
+    }
+    let indexed = state.artifact_store.total_size_bytes();
+    let pending = state.in_flight_bytes.load(Ordering::Relaxed) as u64;
+    // A deliberately early logical gate keeps ordinary five-minute checks
+    // memory-only. Near half-budget we pay for exact allocated-block/FileId
+    // accounting; daily full passes always do the physical scan.
+    Ok(indexed.saturating_add(pending)
+        >= policy.budget_bytes(space.capacity_bytes).saturating_mul(50) / 100)
+}
+
+/// Wait for the next maintenance pass without consuming the daemon's shared
+/// shutdown notification.
+///
+/// The accept loop also waits on `state.shutdown`. Waiting on that same
+/// edge-triggered `Notify` here can both steal a legacy `notify_one()` signal
+/// and miss `notify_waiters()` between checking `shutdown_requested` and
+/// registering the waiter. Polling the durable atomic flag keeps shutdown
+/// bounded without either race.
+pub(super) async fn wait_for_next_pass_or_shutdown(
+    shutdown_requested: &AtomicBool,
+    interval: Duration,
+    poll_interval: Duration,
+) -> bool {
+    let deadline = kernal_api::async_engine::Deadline::after(interval);
+    loop {
+        if shutdown_requested.load(Ordering::Acquire) {
+            return true;
+        }
+        let remaining = deadline.remaining();
+        if remaining.is_zero() {
+            return false;
+        }
+        kernal_api::async_engine::sleep(remaining.min(poll_interval)).await;
+    }
+}
+
+/// Drop daemon-side state for sessions that are over and are never coming
+/// back (#1165 Finding 1).
+///
+/// `SessionManager` has shipped both reapers since it was written, with unit
+/// tests, and **no production caller** — so a long-lived daemon held every
+/// session's `context_keys` and `stats_tracker` for its whole life. Two ways
+/// a session ends without cleanup:
+///
+/// * the client sent `SessionEnd` and simply went idle afterwards
+/// * the client crashed or was killed, so `SessionEnd` never arrived at all
+///
+/// The second is the one that leaks unboundedly in practice: a cancelled
+/// build leaves its whole session behind, and nothing else ever removes it.
+///
+/// Both reapers are conservative by construction — idle-timeout for the
+/// first, process liveness for the second — so this cannot evict a session a
+/// live client is still using.
+fn reap_finished_sessions(state: &SharedState) {
+    reap_finished_sessions_with(state, crate::ipc::is_process_alive);
+}
+
+/// [`reap_finished_sessions`] against an explicit liveness predicate.
+///
+/// The seam exists because "a PID that is reliably dead" is not portable.
+/// `is_process_alive` is `kill(pid, 0) == 0` on unix and `OpenProcess` on
+/// Windows, and PID 0 disagrees between them: `kill(0, 0)` signals the
+/// *caller's own process group* and succeeds, while `OpenProcess(0)` fails.
+/// A test using it passes on Windows and fails on Linux. Spawning a real
+/// process and killing it would swap that for a PID-recycling race.
+///
+/// Injecting the predicate makes the reaping logic deterministic on every
+/// platform and leaves `is_process_alive` — which has its own tests — as the
+/// only thing depending on OS behaviour.
+fn reap_finished_sessions_with(state: &SharedState, is_alive: impl Fn(u32) -> bool) {
+    reap_finished_sessions_with_grace(
+        state,
+        is_alive,
+        crate::daemon_core::depgraph::session::DEAD_CLIENT_REAP_GRACE,
+    );
+}
+
+/// [`reap_finished_sessions_with`] with the dead-owner grace supplied by the
+/// caller, so tests can exercise reclamation without sleeping for it (#1324).
+fn reap_finished_sessions_with_grace(
+    state: &SharedState,
+    is_alive: impl Fn(u32) -> bool,
+    grace: std::time::Duration,
+) {
+    let mut expired = state.sessions.cleanup_expired();
+    let dead = state.sessions.cleanup_dead_pids_idle_for(is_alive, grace);
+    let expired_count = expired.len();
+    let dead_count = dead.len();
+    expired.extend(dead);
+    let tombstones = reap_ended_session_tombstones(state, ENDED_SESSION_TTL);
+    let journals_released = release_reaped_session_journals(state, &expired);
+    if !expired.is_empty() || tombstones > 0 {
+        tracing::info!(
+            expired = expired_count,
+            dead_client = dead_count,
+            journals_released,
+            tombstones,
+            remaining = state.sessions.active_count(),
+            tombstones_remaining = state.ended_sessions.len(),
+            "reaped finished sessions"
+        );
+        // #1165 Finding 1: a `tracing::info!` is lost as soon as the daemon's
+        // stderr goes anywhere unbounded. The durable event is what makes
+        // "this daemon reclaims a session per compile" attributable after the
+        // fact, which is the growth mode the finding is about.
+        crate::core::lifecycle::write_event_in_cache_root(
+            state.cache_dir.as_path(),
+            crate::core::lifecycle::EVENT_SESSIONS_REAPED,
+            serde_json::json!({
+                "expired": expired_count,
+                "dead_client": dead_count,
+                "journals_released": journals_released,
+                "tombstones": tombstones,
+                "remaining": state.sessions.active_count(),
+                "tombstones_remaining": state.ended_sessions.len(),
+            }),
+        );
+    }
+}
+
+/// Reclaim depfile directories left by daemon instances that are gone.
+///
+/// #1165 Finding 6: the startup sweep in `run.rs` bounds growth *across*
+/// daemon lifetimes but not *within* one, and it is on the standalone path
+/// only — an embedded host that never restarts the process never swept at all.
+/// Running it here fixes both, because `spawn_disk_maintenance` is the one
+/// maintenance loop both modes share.
+///
+/// Full passes only: the directories are age-floored at a week, so sweeping
+/// every pressure tick would be scanning for debris that cannot have appeared
+/// since the last scan.
+///
+/// The scan stats every candidate directory and may `remove_dir_all`, so it
+/// runs on the blocking pool rather than an executor worker.
+async fn sweep_stale_depfile_dirs(
+    runtime_handle: Option<&kernal_api::async_engine::RuntimeHandle>,
+) {
+    let cleaned = launch_maintenance_blocking(runtime_handle, || {
+        crate::daemon_core::core::config::cleanup_stale_depfile_dirs(crate::daemon_core::ipc::is_process_alive)
+    })
+    .await;
+    let cleaned = match cleaned {
+        Ok(cleaned) => cleaned,
+        Err(error) => {
+            tracing::warn!(%error, "stale depfile sweep worker failed");
+            return;
+        }
+    };
+    if cleaned > 0 {
+        tracing::info!(cleaned, "swept stale depfile directories");
+        crate::core::lifecycle::write_event(
+            crate::core::lifecycle::EVENT_STALE_DEPFILE_DIRS_SWEPT,
+            serde_json::json!({ "cleaned": cleaned }),
+        );
+    }
+}
+
+/// Reclaim retired sibling `v<VERSION>` cache stores (issue #1659).
+///
+/// Nothing previously reclaimed a store an upgrade left behind except an
+/// explicit `zccache clear`; a daemon that never had that run against it
+/// accumulates one full store per upgrade forever. This runs every pass this
+/// loop takes (`spawn_disk_maintenance`'s body executes immediately on the
+/// first iteration, so that pass doubles as the "once at daemon start"
+/// sweep), independent of the current store's own pressure/full gating below
+/// -- a retired store can hold tens of GB while the live store reports
+/// comfortably under budget.
+///
+/// Only fires when `cache_dir` is itself a real versioned store, i.e. its
+/// final path segment is exactly `v<crate::daemon_core::core::VERSION>`. A cache root
+/// bound straight to a bare directory (every non-versioned test harness in
+/// this crate) has no sibling-version layout to sweep and is left alone --
+/// there is no safe "top level" to infer from a path that was never
+/// `<top>/v<VERSION>` to begin with.
+async fn sweep_retired_version_stores(
+    cache_dir: &Path,
+    runtime_handle: Option<&kernal_api::async_engine::RuntimeHandle>,
+) {
+    let Some((top_level, current)) = versioned_top_level(cache_dir) else {
+        return;
+    };
+
+    // #1673: periodic stamp -- keep the running store's `.last-active`
+    // fresh so a sibling daemon of another version never treats it as idle.
+    if let Err(error) = crate::daemon_core::core::config::touch_store_activity_marker(cache_dir) {
+        tracing::debug!(%error, cache_root = %cache_dir.display(), "failed to stamp store activity marker");
+    }
+    let report = launch_maintenance_blocking(runtime_handle, move || {
+        crate::daemon_core::core::config::sweep_retired_version_stores_in_with_mode(
+            &top_level,
+            &current,
+            RETIRED_STORE_MAX_AGE,
+            SystemTime::now(),
+            crate::daemon_core::core::config::RetiredSweepMode::Routine,
+        )
+    })
+    .await;
+    let report = match report {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(%error, "retired-store sweep worker failed");
+            return;
+        }
+    };
+    if report.stores_removed == 0 && report.files_removed == 0 && report.failed == 0 {
+        return;
+    }
+    tracing::info!(
+        stores_scanned = report.stores_scanned,
+        stores_removed = report.stores_removed,
+        stores_live = report.stores_live,
+        files_removed = report.files_removed,
+        bytes_reclaimed = report.bytes_reclaimed,
+        failed = report.failed,
+        "reclaimed retired zccache version stores"
+    );
+    crate::core::lifecycle::write_event_in_cache_root(
+        cache_dir,
+        crate::core::lifecycle::EVENT_RETIRED_STORES_SWEPT,
+        serde_json::json!({
+            "stores_scanned": report.stores_scanned,
+            "stores_removed": report.stores_removed,
+            "stores_live": report.stores_live,
+            "files_removed": report.files_removed,
+            "bytes_reclaimed": report.bytes_reclaimed,
+            "failed": report.failed,
+        }),
+    );
+}
+
+/// Drop `ended_sessions` entries older than `ttl`. Returns how many went.
+///
+/// Separate from the session reapers above because it ages on the daemon's own
+/// clock rather than on client liveness — a tombstone outlives the client by
+/// definition, so "is the pid alive" says nothing about whether it is still
+/// needed.
+fn reap_ended_session_tombstones(state: &SharedState, ttl: Duration) -> usize {
+    reap_ended_session_tombstones_at(state, ttl, std::time::Instant::now())
+}
+
+/// [`reap_ended_session_tombstones`] against an explicit observation time.
+///
+/// The seam exists so tests can place stamps relative to a base by **adding**
+/// to an `Instant` instead of subtracting from `Instant::now()`. Subtracting
+/// an hour panics when the monotonic epoch is younger than an hour — a fresh
+/// CI runner — which is the same trap `SessionManager::cleanup_expired`
+/// already guards with `checked_sub` ("timeout exceeds uptime; nothing can be
+/// expired"). Addition cannot underflow, so the test states the boundary
+/// directly with no clock arithmetic that can fail.
+fn reap_ended_session_tombstones_at(
+    state: &SharedState,
+    ttl: Duration,
+    now: std::time::Instant,
+) -> usize {
+    let before = state.ended_sessions.len();
+    state
+        .ended_sessions
+        // Saturating: a stamp ahead of `now` yields zero age and is kept,
+        // rather than panicking. That cannot happen from the insert site, but
+        // this runs every maintenance tick for the daemon's life and a panic
+        // here would take the maintenance task down with it.
+        .retain(|_, ended_at| now.saturating_duration_since(*ended_at) < ttl);
+    before.saturating_sub(state.ended_sessions.len())
+}
+
+pub(super) fn spawn_disk_maintenance(
+    state: Arc<SharedState>,
+    policy: MaintenancePolicy,
+    runtime_handle: Option<&kernal_api::async_engine::RuntimeHandle>,
+) -> kernal_api::async_engine::Task<()> {
+    let spawn_handle = runtime_handle.cloned();
+    let runtime_handle = runtime_handle.cloned();
+    let task = async move {
+        if !wait_for_artifact_load(&state).await {
+            return;
+        }
+        loop {
+            if state.shutdown_requested.load(Ordering::Acquire) {
+                break;
+            }
+            // #1659: unconditional, every pass -- a retired store must not
+            // wait behind the current store's own pressure/full gating.
+            sweep_retired_version_stores(state.cache_dir.as_path(), runtime_handle.as_ref()).await;
+            // #1165 Finding 1: reap before the pressure gate, not after the
+            // disk pass. The `Ok(false)` branch below `continue`s when the
+            // cache is under the preflight threshold, so a reap placed after
+            // it would be skipped on exactly the quiet daemons that live
+            // longest and accumulate the most dead sessions.
+            reap_finished_sessions(&state);
+            let kind = if full_maintenance_due(state.cache_dir.as_path(), SystemTime::now()) {
+                MaintenanceKind::Full
+            } else {
+                MaintenanceKind::Pressure
+            };
+            if kind == MaintenanceKind::Full {
+                sweep_stale_depfile_dirs(runtime_handle.as_ref()).await;
+            }
+            if kind == MaintenanceKind::Pressure {
+                match pressure_scan_needed(&state, policy) {
+                    Ok(false) => {
+                        tracing::debug!(
+                            cache_root = %state.cache_dir.display(),
+                            "disk maintenance skipped exact scan below logical preflight threshold"
+                        );
+                        if wait_for_next_pass_or_shutdown(
+                            &state.shutdown_requested,
+                            PRESSURE_INTERVAL,
+                            SHUTDOWN_POLL_INTERVAL,
+                        )
+                        .await
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                    Ok(true) => {}
+                    Err(error) => tracing::warn!(%error, "disk maintenance preflight failed"),
+                }
+            }
+            let outcome =
+                maintain_state_disk(Arc::clone(&state), policy, kind, runtime_handle.as_ref())
+                    .await;
+            super::disk_maintenance_progress::record_pass(
+                &state.disk_maintenance_progress,
+                kind == MaintenanceKind::Full,
+                &outcome,
+            );
+            if let Err(error) = outcome {
+                tracing::warn!(
+                    %error,
+                    maintenance_kind = ?kind,
+                    cache_root = %state.cache_dir.display(),
+                    "disk maintenance pass failed"
+                );
+            }
+            if state.shutdown_requested.load(Ordering::Acquire) {
+                break;
+            }
+            if wait_for_next_pass_or_shutdown(
+                &state.shutdown_requested,
+                PRESSURE_INTERVAL,
+                SHUTDOWN_POLL_INTERVAL,
+            )
+            .await
+            {
+                break;
+            }
+        }
+    };
+    match spawn_handle {
+        Some(handle) => handle.launch(task),
+        None => kernal_api::async_engine::launch(task),
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/disk_maintenance_unit.rs"]
+mod tests;

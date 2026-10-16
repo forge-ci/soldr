@@ -1,0 +1,80 @@
+//! Perf budget tests for the compile journal hot path.
+//!
+//! Issue #459: `JournalEntry::new` + `CompileJournal::log` together used to
+//! cost ~2–4 µs on Windows (SystemTime::now + format_timestamp +
+//! serde_json::to_string) and the client used to wait on that work before
+//! `conn.send` returned. The fix reorders the daemon dispatch loop so the
+//! response is sent first; these tests pin the per-call cost so a future
+//! regression that adds more synchronous work to the hot path is caught.
+//!
+//! Budget is set ~10× looser than typical so transient CI noise doesn't
+//! false-positive — the gate is "did someone accidentally add a syscall
+//! or unbounded allocation per call", not micro-benchmarking.
+
+use std::time::{Duration, Instant};
+
+use super::super::{JournalContext, JournalEntry};
+use super::make_ctx;
+
+/// Building a `JournalEntry` should stay allocation-bounded. The old
+/// implementation paid `SystemTime::now()` + a 24-byte `format!` heap alloc
+/// per call. Any future change that adds a fresh syscall or string
+/// allocation per call would push this past budget.
+#[test]
+fn journal_entry_new_stays_under_budget() {
+    let iterations = 10_000;
+    let start = Instant::now();
+    for _ in 0..iterations {
+        let ctx = make_ctx(vec!["--crate-name", "x", "--crate-type", "lib"]);
+        let _e = JournalEntry::new(ctx, "hit", 0, 1_000_000, None);
+    }
+    let elapsed = start.elapsed();
+    // Budget: 10,000 calls < 100 ms (avg ≤ 10 µs / call). The pre-fix path
+    // measured ~3–4 µs / call on Windows; ~0.3 µs / call on Linux. Setting
+    // the budget here at ~3× the worst-case observed pre-fix cost catches
+    // accidental regressions that add a syscall per call without
+    // false-positiving on transient CI jitter.
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "JournalEntry::new regressed beyond budget: {elapsed:?} for {iterations} iterations \
+         (avg {:?}/call)",
+        elapsed / iterations as u32
+    );
+}
+
+#[test]
+fn env_sanitization_and_serialization_stay_under_budget() {
+    let mut request_env = vec![
+        ("CC".to_string(), "clang".to_string()),
+        ("CARGO_CRATE_NAME".to_string(), "demo".to_string()),
+        ("CARGO_CFG_TARGET_ARCH".to_string(), "x86_64".to_string()),
+        ("RUSTFLAGS".to_string(), "-Cdebuginfo=1".to_string()),
+        ("TARGET".to_string(), "x86_64-unknown-linux-gnu".to_string()),
+        ("GITHUB_TOKEN".to_string(), "ghp_synthetic".to_string()),
+        ("AWS_SECRET_ACCESS_KEY".to_string(), "synthetic".to_string()),
+        ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+    ];
+    request_env
+        .extend((0..32).map(|index| (format!("UNRELATED_{index}"), format!("ordinary-{index}"))));
+
+    let iterations = 2_000;
+    let start = Instant::now();
+    for _ in 0..iterations {
+        let ctx = JournalContext::new(
+            "rustc".to_string(),
+            vec!["--crate-name".to_string(), "demo".to_string()],
+            "/project".to_string(),
+            Some(request_env.clone()),
+            None,
+        );
+        let entry = JournalEntry::new(ctx, "hit", 0, 1_000_000, None);
+        let _json = serde_json::to_vec(&entry).unwrap();
+    }
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(750),
+        "env-present journal path regressed beyond budget: {elapsed:?} for {iterations} \
+         iterations (avg {:?}/call)",
+        elapsed / iterations
+    );
+}

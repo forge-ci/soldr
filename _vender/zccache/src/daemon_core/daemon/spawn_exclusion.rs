@@ -1,0 +1,91 @@
+//! Mutual exclusion between requested-output materialization and child spawn
+//! (zackees/zccache#1562, zackees/zccache#1597, zackees/soldr#3098).
+//!
+//! # The race
+//!
+//! A cache hit or staged miss can materialize a compiler output while holding
+//! a writable descriptor: staged paths use a unique sibling temporary before
+//! renaming it over the requested path, while legacy cache-file delivery can
+//! write its requested path directly. The same daemon process spawns compiler children
+//! continuously, and on POSIX every `fork` duplicates the parent's descriptor
+//! table: a child forked while the copy's descriptor is open inherits that
+//! write descriptor and keeps it until its own `execve` closes it
+//! (`O_CLOEXEC` closes on exec, not on fork).
+//!
+//! `rename(2)` does not change the inode, so after the daemon closes its own
+//! descriptor and publishes the path the inherited copy is still a *writable
+//! descriptor on the published inode*. Cargo hard-links `build-script-build`
+//! to that inode and `execve`s it; `ETXTBSY` is evaluated against the inode,
+//! so the exec fails with `Text file busy` for exactly the child's
+//! fork-to-exec window. Inspecting the daemon's own `/proc/self/fd` after the
+//! rename cannot see the descriptor: it lives in the child's table.
+//!
+//! # The fix
+//!
+//! A process-wide `RwLock<()>`. Every child spawn holds the shared guard for
+//! the duration of the spawn call (the parent returns from `spawn` only after
+//! the child has exec'd or failed, so the shared guard brackets the entire
+//! fork-to-exec window). Materialization holds the exclusive guard from the
+//! moment the sibling temporary is opened for writing until the rename has
+//! published it, so no child can be forked while a materialization descriptor
+//! is open, and no descriptor can be opened while a child is between fork and
+//! exec.
+//!
+//! The critical sections contain no `.await`: the guard is a `std` lock held
+//! across a synchronous spawn or a synchronous copy + rename only.
+
+use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+static SPAWN_MATERIALIZE_LOCK: RwLock<()> = RwLock::new(());
+
+/// Shared guard for one child spawn. Hold it for the spawn call only.
+pub(crate) fn spawn_shared() -> RwLockReadGuard<'static, ()> {
+    SPAWN_MATERIALIZE_LOCK
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Exclusive guard for one materialization copy + publish. Hold it from before
+/// the sibling temporary is opened for writing until after the rename.
+pub(crate) fn materialize_exclusive() -> RwLockWriteGuard<'static, ()> {
+    SPAWN_MATERIALIZE_LOCK
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Longest a publisher waits for a foreign child to exec. A fork-to-exec
+/// window is normally microseconds; this bounds a pathological one.
+const PUBLISH_WRITER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Return only once no process holds the just-published `path` open for
+/// writing (zackees/soldr#3350).
+///
+/// The lock above excludes only spawns that take it. Embedded in soldr's
+/// daemon, zccache shares its process with code that forks under another
+/// lock or none, and such a child inherits the copy's write descriptor
+/// across the rename. Waiting here, after the exclusive guard is released,
+/// covers every spawner. Best effort: a timeout or an unobservable host is
+/// logged, never an error.
+pub(crate) fn await_publishable(path: &std::path::Path) {
+    use crate::daemon_core::platform::fs::writers::{await_no_writers, WriterWait};
+
+    match await_no_writers(path, PUBLISH_WRITER_TIMEOUT) {
+        Ok(WriterWait::Clear { waited }) if !waited.is_zero() => tracing::info!(
+            event = "materialize_awaited_inherited_writer",
+            path = %path.display(),
+            waited_us = waited.as_micros() as u64,
+            "a forked child held the published output open for writing"
+        ),
+        Ok(WriterWait::TimedOut) => tracing::warn!(
+            event = "materialize_inherited_writer_timeout",
+            path = %path.display(),
+            "the published output is still open for writing by another process"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::debug!(
+            event = "materialize_writer_probe_failed",
+            path = %path.display(),
+            %error
+        ),
+    }
+}

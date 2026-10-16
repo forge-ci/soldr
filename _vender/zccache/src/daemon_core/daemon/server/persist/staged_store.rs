@@ -1,0 +1,977 @@
+//! Immutable artifact generations for the staged-output rollout (#1056).
+//!
+//! Opted-in outputs enter private staging; persisted generations use true-COW
+//! reflinks or copies, and `ZCCACHE_STAGED_ARTIFACTS=off` remains the kill switch.
+
+use super::*;
+use serde::{Deserialize, Serialize};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::path::Path;
+
+use crate::daemon_core::core::config::MaterializationMode;
+
+mod maintenance;
+pub(in crate::daemon_core::daemon::server) use maintenance::clear_staged_artifacts;
+#[cfg(test)]
+pub(crate) use maintenance::evict_staged_artifact_keys;
+use maintenance::remove_staged_tree;
+pub(crate) use maintenance::{
+    evict_staged_artifact_keys_if_unchanged, scan_staged_disk_artifacts, StagedDiskArtifact,
+};
+mod materialize;
+pub(in crate::daemon_core::daemon::server) use materialize::{
+    materialization_error, materialization_error_progress, materialize_independent_with_mode,
+    StagedMaterializationStats, StagedSource,
+};
+mod read_guard;
+use read_guard::validate_key;
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) use read_guard::{
+    acquire_staged_materialization_guard_for_cached_path,
+    acquire_staged_materialization_guard_if_present,
+};
+pub(in crate::daemon_core::daemon::server) use read_guard::{
+    acquire_staged_materialization_guard_for_state,
+    acquire_staged_materialization_guard_if_present_for_state, is_staged_artifact_path,
+    is_staged_artifact_root, staged_key_supported, StagedMaterializationGuard,
+    StagedMaterializationLock,
+};
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) use read_guard::{
+    reset_test_shared_lock_acquisitions, test_shared_lock_acquisition_count,
+};
+mod root_safety;
+pub(in crate::daemon_core::daemon::server) use root_safety::validate_staged_artifact_root;
+use root_safety::{
+    is_staged_link_or_reparse, open_store_lock, remove_staged_link_or_reparse, staged_root,
+};
+#[cfg(test)]
+mod fault;
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) use fault::{
+    inject as inject_staged_fault, StagedFaultGuard, StagedFaultPoint,
+};
+#[cfg(test)]
+mod hook;
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) use hook::{StagedHookGuard, StagedHookPoint};
+
+pub(in crate::daemon_core::daemon::server) const STAGED_ARTIFACTS_ENV: &str = "ZCCACHE_STAGED_ARTIFACTS";
+
+// The staged root and store-lock names are owned by `zccache-artifact` and
+// imported rather than redeclared: `zccache warm` runs in the CLI process and
+// locks the same file to exclude this daemon's GC. Two independent string
+// constants would keep compiling while silently ceasing to exclude each other.
+use crate::artifact::staged_lock::{STAGED_ROOT, STORE_LOCK};
+
+const STAGED_MANIFEST_VERSION: u32 = 1;
+const PUBLISH_LOCK: &str = ".publish.lock";
+
+static STAGED_ARTIFACT_TMP_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn write_staged_lifecycle_event(artifact_dir: &Path, event_name: &str, extra: serde_json::Value) {
+    if let Some(cache_root) = artifact_dir.parent() {
+        crate::daemon_core::core::lifecycle::write_event_in_cache_root(cache_root, event_name, extra);
+    } else {
+        crate::daemon_core::core::lifecycle::write_event(event_name, extra);
+    }
+}
+
+fn exclusive_publication_ns(total_ns: u64, hashing_ns: u64) -> u64 {
+    total_ns.saturating_sub(hashing_ns)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::daemon_core::daemon::server) enum StagedPublishFailure {
+    StoreSetup,
+    OutputCopy,
+    OutputDurability,
+    Hash,
+    DurableDigest,
+    Manifest,
+    GenerationPublish,
+    PointerCommit,
+    IndexCommit,
+    /// Two complete, internally valid generations disagree for one key.
+    ///
+    /// Since #1244 this outcome also **evicts** the key: the prior generation
+    /// and its pointer are removed rather than left as the authoritative
+    /// answer. See the conflict branch in `publish_staged_generation`.
+    Conflict,
+}
+
+impl StagedPublishFailure {
+    pub(in crate::daemon_core::daemon::server) const fn id(self) -> &'static str {
+        match self {
+            Self::StoreSetup => "publication",
+            Self::OutputCopy => "publication_output_copy",
+            Self::OutputDurability => "publication_output_durability",
+            Self::Hash => "hashing",
+            Self::DurableDigest => "durable_digest",
+            Self::Manifest => "manifest",
+            Self::GenerationPublish => "generation_publish",
+            Self::PointerCommit => "pointer_commit",
+            Self::IndexCommit => "index_commit",
+            Self::Conflict => "publication_conflict",
+        }
+    }
+
+    pub(in crate::daemon_core::daemon::server) const fn failure(
+        self,
+    ) -> crate::daemon_core::daemon::staged_stats::StagedFailure {
+        use crate::daemon_core::daemon::staged_stats::StagedFailure;
+        match self {
+            Self::StoreSetup => StagedFailure::Publication,
+            Self::OutputCopy => StagedFailure::PublicationOutputCopy,
+            Self::OutputDurability => StagedFailure::PublicationOutputDurability,
+            Self::Hash => StagedFailure::Hashing,
+            Self::DurableDigest => StagedFailure::DurableDigest,
+            Self::Manifest => StagedFailure::Manifest,
+            Self::GenerationPublish => StagedFailure::GenerationPublish,
+            Self::PointerCommit => StagedFailure::PointerCommit,
+            Self::IndexCommit => StagedFailure::IndexCommit,
+            Self::Conflict => StagedFailure::PublicationConflict,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct StagedPublishError {
+    reason: StagedPublishFailure,
+    source: io::Error,
+}
+
+impl std::fmt::Display for StagedPublishError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for StagedPublishError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+fn publish_error(reason: StagedPublishFailure, source: io::Error) -> io::Error {
+    io::Error::new(source.kind(), StagedPublishError { reason, source })
+}
+
+pub(in crate::daemon_core::daemon::server) fn staged_publish_failure(
+    error: &io::Error,
+) -> Option<StagedPublishFailure> {
+    error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<StagedPublishError>())
+        .map(|error| error.reason)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct StagedManifest {
+    version: u32,
+    key_hex: String,
+    generation_hex: String,
+    outputs: Vec<StagedOutput>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct StagedOutput {
+    index: usize,
+    size: u64,
+    digest_hex: String,
+}
+
+pub(in crate::daemon_core::daemon::server) fn staged_artifacts_enabled() -> bool {
+    staged_artifacts_enabled_for(std::env::var(STAGED_ARTIFACTS_ENV).ok().as_deref())
+}
+
+pub(in crate::daemon_core::daemon::server) fn staged_lane_enabled(
+    family: crate::daemon_core::compiler::CompilerFamily,
+) -> bool {
+    staged_lane_enabled_for(std::env::var(STAGED_ARTIFACTS_ENV).ok().as_deref(), family)
+}
+
+fn staged_artifacts_enabled_for(value: Option<&str>) -> bool {
+    value.is_none_or(|value| {
+        !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "off" | "no"
+        )
+    })
+}
+
+fn staged_lane_enabled_for(value: Option<&str>, family: crate::daemon_core::compiler::CompilerFamily) -> bool {
+    let Some(value) = value else {
+        return family == crate::daemon_core::compiler::CompilerFamily::Rustc;
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "all" | "1" | "true" | "yes" | "on" => true,
+        "rust" => family == crate::daemon_core::compiler::CompilerFamily::Rustc,
+        "c" | "cc" | "c-cpp" | "cpp" => matches!(
+            family,
+            crate::daemon_core::compiler::CompilerFamily::Gcc
+                | crate::daemon_core::compiler::CompilerFamily::Clang
+                | crate::daemon_core::compiler::CompilerFamily::Msvc
+        ),
+        _ => false,
+    }
+}
+
+pub(in crate::daemon_core::daemon::server) fn staged_link_lane_enabled() -> bool {
+    staged_link_lane_enabled_for(std::env::var(STAGED_ARTIFACTS_ENV).ok().as_deref())
+}
+
+pub(in crate::daemon_core::daemon::server) fn staged_archive_lane_enabled() -> bool {
+    staged_archive_lane_enabled_for(std::env::var(STAGED_ARTIFACTS_ENV).ok().as_deref())
+}
+
+fn staged_archive_lane_enabled_for(value: Option<&str>) -> bool {
+    let Some(value) = value else {
+        return true;
+    };
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "all" | "1" | "true" | "yes" | "on" | "c" | "cc" | "c-cpp" | "cpp"
+    )
+}
+
+fn staged_link_lane_enabled_for(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "all" | "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+pub(in crate::daemon_core::daemon::server) fn staged_exec_lane_enabled() -> bool {
+    staged_exec_lane_enabled_for(std::env::var(STAGED_ARTIFACTS_ENV).ok().as_deref())
+}
+
+fn staged_exec_lane_enabled_for(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "all" | "1" | "true" | "yes" | "on" | "exec"
+        )
+    })
+}
+
+fn validate_generation(generation_hex: &str) -> io::Result<()> {
+    if generation_hex.len() != 64 || !generation_hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "staged artifact generation is not a blake3 digest",
+        ));
+    }
+    Ok(())
+}
+
+fn pointer_path(artifact_dir: &Path, key_hex: &str) -> NormalizedPath {
+    staged_root(artifact_dir).join(format!("{key_hex}.current"))
+}
+
+fn generation_dir(artifact_dir: &Path, key_hex: &str, generation_hex: &str) -> NormalizedPath {
+    staged_root(artifact_dir).join(key_hex).join(generation_hex)
+}
+
+fn output_path(generation_dir: &Path, index: usize) -> NormalizedPath {
+    generation_dir.join(format!("output-{index}")).into()
+}
+
+fn manifest_path(generation_dir: &Path) -> NormalizedPath {
+    generation_dir.join("manifest.bin").into()
+}
+
+fn temporary_path(path: &Path, suffix: &str) -> NormalizedPath {
+    let nonce = STAGED_ARTIFACT_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(
+        ".{}.{}.{}-{}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id(),
+        nonce,
+        suffix
+    ))
+    .into()
+}
+
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) mod perf_counters;
+
+/// Syncs file *content* only (`fdatasync`/`sync_data`), not metadata: the
+/// staged pipeline never depends on an output or manifest file's own mtime or
+/// permission bits surviving a crash independent of its bytes, so the
+/// cheaper data-only sync suffices (#1774).
+fn sync_file(path: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    perf_counters::record_file_sync();
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?
+        .sync_data()
+}
+
+fn sync_directory(path: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    perf_counters::record_dir_sync();
+    crate::daemon_core::platform::fs::durability::sync_directory(path)
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let temporary = temporary_path(path, "tmp");
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        replace_staged_path(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn replace_staged_path(source: &Path, destination: &Path) -> io::Result<()> {
+    crate::daemon_core::platform::fs::replace::atomic_replace(source, destination)
+}
+
+fn rename_staged_generation(source: &Path, destination: &Path) -> io::Result<()> {
+    crate::daemon_core::platform::fs::replace::rename_without_replace(source, destination)
+}
+
+fn remove_uncommitted_generation(pointer: &Path, generation_hex: &str, generation: &Path) {
+    let pointer_committed = fs::read_to_string(pointer)
+        .ok()
+        .is_some_and(|value| value.trim() == generation_hex);
+    if !pointer_committed {
+        if let Err(error) = remove_staged_tree(generation) {
+            tracing::warn!(
+                path = %generation.display(),
+                %error,
+                "failed to remove staged generation after pointer commit failure"
+            );
+        }
+    }
+}
+
+/// Hashes `path` once and returns its size, hex digest, and raw digest bytes.
+/// The raw bytes let the caller feed the `.cowhash` sidecar writer directly
+/// (see [`write_authoritative_blob_digest_for_precomputed`]) instead of
+/// re-hashing the same file a second time (#1774).
+fn digest_file(path: &Path) -> io::Result<(u64, String, [u8; 32])> {
+    #[cfg(test)]
+    perf_counters::record_hash();
+    let mut file = File::open(path)?;
+    let mut hasher = kernal_api::hash::Blake3Hasher::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    let mut size = 0_u64;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size = size.saturating_add(read as u64);
+    }
+    let finalized = hasher.finalize();
+    let digest = *finalized.as_bytes();
+    Ok((size, finalized.to_hex().to_string(), digest))
+}
+
+fn generation_digest(key_hex: &str, outputs: &[StagedOutput]) -> String {
+    let mut hasher = kernal_api::hash::Blake3Hasher::new();
+    hasher.update(key_hex.as_bytes());
+    for output in outputs {
+        hasher.update(&output.index.to_le_bytes());
+        hasher.update(&output.size.to_le_bytes());
+        hasher.update(output.digest_hex.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn load_manifest(
+    path: &Path,
+    expected_key: &str,
+    expected_generation: &str,
+) -> io::Result<StagedManifest> {
+    let manifest: StagedManifest = bincode::deserialize(&fs::read(path)?).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid staged manifest: {error}"),
+        )
+    })?;
+    if manifest.version != STAGED_MANIFEST_VERSION
+        || manifest.key_hex != expected_key
+        || manifest.generation_hex != expected_generation
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "staged manifest identity/version mismatch",
+        ));
+    }
+    Ok(manifest)
+}
+
+fn validate_staged_generation(
+    artifact_dir: &Path,
+    key_hex: &str,
+    generation_hex: &str,
+) -> io::Result<()> {
+    validate_generation(generation_hex)?;
+    let generation = generation_dir(artifact_dir, key_hex, generation_hex);
+    let manifest = load_manifest(&manifest_path(&generation), key_hex, generation_hex)?;
+    if generation_digest(key_hex, &manifest.outputs) != generation_hex {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "staged generation digest does not match its manifest",
+        ));
+    }
+    let mut seen = vec![false; manifest.outputs.len()];
+    for output in &manifest.outputs {
+        if output.index >= seen.len() || seen[output.index] {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged manifest has a duplicate or invalid output index",
+            ));
+        }
+        seen[output.index] = true;
+        let path = output_path(&generation, output.index);
+        if fs::metadata(&path)?.len() != output.size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged output size does not match its manifest",
+            ));
+        }
+        let (_, digest_hex, _) = digest_file(&path)?;
+        if digest_hex != output.digest_hex {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged output digest does not match its manifest",
+            ));
+        }
+    }
+    if seen.iter().any(|was_seen| !was_seen) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "staged manifest has a missing output index",
+        ));
+    }
+    Ok(())
+}
+
+// Production code always goes through `persist_staged_artifact_paths_with_mode`
+// (an explicit `ZCCACHE_MODE`) or, for in-memory payloads,
+// `persist_staged_artifact_payloads`. This `Auto`-mode convenience wrapper is
+// only reached by tests now that #1774 routes payload publication straight
+// into `persist_staged_generation` instead of through this function.
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) fn persist_staged_artifact_paths(
+    artifact_dir: &Path,
+    key_hex: &str,
+    sources: &[NormalizedPath],
+) -> io::Result<PersistArtifactFileStats> {
+    persist_staged_artifact_paths_with_mode(
+        artifact_dir,
+        key_hex,
+        sources,
+        MaterializationMode::Auto,
+    )
+}
+
+/// [`persist_staged_artifact_paths`] under an explicit `ZCCACHE_MODE`: the
+/// generation copy of each compiler output follows the mode's copy tiers,
+/// so COPY stores bytes the build output does not share (#1683).
+pub(in crate::daemon_core::daemon::server) fn persist_staged_artifact_paths_with_mode(
+    artifact_dir: &Path,
+    key_hex: &str,
+    sources: &[NormalizedPath],
+    mode: MaterializationMode,
+) -> io::Result<PersistArtifactFileStats> {
+    let sources: Vec<StagedSource<'_>> = sources
+        .iter()
+        .map(|source| StagedSource::Path(source.as_path()))
+        .collect();
+    persist_staged_generation(artifact_dir, key_hex, &sources, mode)
+}
+
+fn persist_staged_generation(
+    artifact_dir: &Path,
+    key_hex: &str,
+    sources: &[StagedSource<'_>],
+    mode: MaterializationMode,
+) -> io::Result<PersistArtifactFileStats> {
+    let publish_started = std::time::Instant::now();
+    validate_key(key_hex)?;
+    if sources.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cannot publish an empty staged artifact",
+        ));
+    }
+
+    let root = staged_root(artifact_dir);
+    let store_lock = open_store_lock(&root)
+        .map_err(|error| publish_error(StagedPublishFailure::StoreSetup, error))?;
+    let _store_lock_guard = kernal_api::platform::fs::lock_shared(&store_lock)
+        .map_err(|error| publish_error(StagedPublishFailure::StoreSetup, error))?;
+    #[cfg(test)]
+    hook::pause(artifact_dir, StagedHookPoint::PublicationStoreLocked);
+    let key_root = root.join(key_hex);
+    fs::create_dir_all(&key_root)
+        .map_err(|error| publish_error(StagedPublishFailure::StoreSetup, error))?;
+    let publish_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(key_root.join(PUBLISH_LOCK))
+        .map_err(|error| publish_error(StagedPublishFailure::StoreSetup, error))?;
+    let _publish_lock_guard = kernal_api::platform::fs::lock_exclusive(&publish_lock)
+        .map_err(|error| publish_error(StagedPublishFailure::StoreSetup, error))?;
+    let temporary_generation = key_root.join(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        STAGED_ARTIFACT_TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    #[cfg(test)]
+    fault::inject(artifact_dir, StagedFaultPoint::GenerationCreate)
+        .map_err(|error| publish_error(StagedPublishFailure::StoreSetup, error))?;
+    fs::create_dir(&temporary_generation)
+        .map_err(|error| publish_error(StagedPublishFailure::StoreSetup, error))?;
+
+    let result = (|| {
+        let mut outputs = Vec::with_capacity(sources.len());
+        let mut stats = PersistArtifactFileStats {
+            staged: true,
+            ..PersistArtifactFileStats::default()
+        };
+        for (index, source) in sources.iter().enumerate() {
+            let destination = output_path(&temporary_generation, index);
+            #[cfg(test)]
+            fault::inject(artifact_dir, StagedFaultPoint::OutputCopy(index))
+                .map_err(|error| publish_error(StagedPublishFailure::OutputCopy, error))?;
+            let (reflink, copied_bytes) = source.write_to(&destination, mode).map_err(|error| {
+                publish_error(
+                    StagedPublishFailure::OutputCopy,
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "staged output copy failed: {} -> {}: {error}",
+                            source.describe(),
+                            destination.display()
+                        ),
+                    ),
+                )
+            })?;
+            #[cfg(test)]
+            fault::inject(artifact_dir, StagedFaultPoint::OutputSync(index))
+                .map_err(|error| publish_error(StagedPublishFailure::OutputDurability, error))?;
+            sync_file(&destination).map_err(|error| {
+                publish_error(
+                    StagedPublishFailure::OutputDurability,
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "staged output durability sync failed: {}: {error}",
+                            destination.display()
+                        ),
+                    ),
+                )
+            })?;
+            crate::daemon_core::platform::fs::permissions::seal_cache_blob(&destination).map_err(|error| {
+                publish_error(
+                    StagedPublishFailure::OutputCopy,
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "staged output read-only finalization failed: {}: {error}",
+                            destination.display()
+                        ),
+                    ),
+                )
+            })?;
+            let hash_started = std::time::Instant::now();
+            #[cfg(test)]
+            fault::inject(artifact_dir, StagedFaultPoint::OutputHash(index))
+                .map_err(|error| publish_error(StagedPublishFailure::Hash, error))?;
+            let (size, digest_hex, digest_bytes) = digest_file(&destination).map_err(|error| {
+                publish_error(
+                    StagedPublishFailure::Hash,
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "staged output hash failed: {}: {error}",
+                            destination.display()
+                        ),
+                    ),
+                )
+            })?;
+            stats.staged_hash_ns = stats
+                .staged_hash_ns
+                .saturating_add(hash_started.elapsed().as_nanos() as u64);
+            #[cfg(test)]
+            fault::inject(artifact_dir, StagedFaultPoint::DurableDigest(index))
+                .map_err(|error| publish_error(StagedPublishFailure::DurableDigest, error))?;
+            // #1774: reuse the digest just computed above instead of having
+            // the sidecar writer hash `destination` a second time.
+            write_authoritative_blob_digest_for_precomputed(digest_bytes, &destination)
+                .map(|digest| digest.commit())
+                .map_err(|error| {
+                    publish_error(
+                        StagedPublishFailure::DurableDigest,
+                        io::Error::new(
+                            error.kind(),
+                            format!(
+                                "staged output durable digest failed: {}: {error}",
+                                destination.display()
+                            ),
+                        ),
+                    )
+                })?;
+            outputs.push(StagedOutput {
+                index,
+                size,
+                digest_hex,
+            });
+            if reflink {
+                stats.reflink_count += 1;
+            } else {
+                stats.copy_count += 1;
+                stats.copy_bytes += copied_bytes;
+            }
+        }
+
+        let generation_hex = generation_digest(key_hex, &outputs);
+        validate_generation(&generation_hex)?;
+        let pointer = pointer_path(artifact_dir, key_hex);
+        let mut invalid_generation_to_remove = None;
+        if let Ok(previous_value) = fs::read_to_string(&pointer) {
+            let previous = previous_value.trim();
+            if !previous.is_empty() && previous != generation_hex {
+                if validate_staged_generation(artifact_dir, key_hex, previous).is_ok() {
+                    // #1244: the key has now been *proven* not to determine
+                    // the bytes — two complete, internally valid generations
+                    // disagree. Preserving either one means serving an answer
+                    // we know might be wrong, which is a silent miscompile.
+                    //
+                    // Evict instead, so the next lookup is an honest miss.
+                    // This is the "failure mode is a miss, never a wrong
+                    // answer" invariant stated for the pending-write path.
+                    //
+                    // Removal is best-effort and deliberately non-fatal,
+                    // mirroring the replaced-invalid-generation path below: on
+                    // Windows another session may hold the generation tree
+                    // open mid-materialization, and a sharing violation must
+                    // not turn a detected conflict into a hard publish error.
+                    let mut evicted = true;
+                    let previous_path = generation_dir(artifact_dir, key_hex, previous);
+                    if let Err(error) = remove_staged_tree(&previous_path) {
+                        evicted = false;
+                        tracing::warn!(
+                            path = %previous_path.display(),
+                            %error,
+                            "failed to remove conflicting staged generation"
+                        );
+                    }
+                    if let Err(error) = remove_staged_tree(&pointer) {
+                        evicted = false;
+                        tracing::warn!(
+                            path = %pointer.display(),
+                            %error,
+                            "failed to remove staged pointer for conflicting key"
+                        );
+                    }
+                    write_staged_lifecycle_event(
+                        artifact_dir,
+                        crate::daemon_core::core::lifecycle::EVENT_STAGED_PUBLICATION_CONFLICT,
+                        serde_json::json!({
+                            "cache_key": key_hex,
+                            "existing_generation": previous,
+                            "candidate_generation": generation_hex,
+                            "evicted": evicted,
+                            "elapsed_ns": publish_started.elapsed().as_nanos() as u64,
+                        }),
+                    );
+                    tracing::error!(
+                        event = "staged_publication_conflict",
+                        cache_key = key_hex,
+                        existing_generation = previous,
+                        candidate_generation = generation_hex,
+                        evicted,
+                        "same cache key produced a different complete output generation; evicting the key"
+                    );
+                    return Err(publish_error(
+                        StagedPublishFailure::Conflict,
+                        io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            "same cache key produced different staged output bytes",
+                        ),
+                    ));
+                }
+                write_staged_lifecycle_event(
+                    artifact_dir,
+                    crate::daemon_core::core::lifecycle::EVENT_STAGED_PUBLICATION_REPLACES_INVALID_GENERATION,
+                    serde_json::json!({
+                        "cache_key": key_hex,
+                        "invalid_generation": previous,
+                        "replacement_generation": generation_hex,
+                    }),
+                );
+                if validate_generation(previous).is_ok() {
+                    invalid_generation_to_remove = Some(previous.to_string());
+                }
+            }
+        }
+        let output_count = outputs.len();
+        let final_generation = generation_dir(artifact_dir, key_hex, &generation_hex);
+        let manifest = StagedManifest {
+            version: STAGED_MANIFEST_VERSION,
+            key_hex: key_hex.to_string(),
+            generation_hex: generation_hex.clone(),
+            outputs,
+        };
+        let manifest_bytes = bincode::serialize(&manifest).map_err(|error| {
+            publish_error(
+                StagedPublishFailure::Manifest,
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("staged manifest encode failed: {error}"),
+                ),
+            )
+        })?;
+        let temporary_manifest = manifest_path(&temporary_generation);
+        #[cfg(test)]
+        fault::inject(artifact_dir, StagedFaultPoint::ManifestWrite)
+            .map_err(|error| publish_error(StagedPublishFailure::Manifest, error))?;
+        fs::write(&temporary_manifest, manifest_bytes).map_err(|error| {
+            publish_error(
+                StagedPublishFailure::Manifest,
+                io::Error::new(
+                    error.kind(),
+                    format!("staged manifest write failed: {error}"),
+                ),
+            )
+        })?;
+        #[cfg(test)]
+        fault::inject(artifact_dir, StagedFaultPoint::ManifestSync)
+            .map_err(|error| publish_error(StagedPublishFailure::Manifest, error))?;
+        sync_file(&temporary_manifest).map_err(|error| {
+            publish_error(
+                StagedPublishFailure::Manifest,
+                io::Error::new(
+                    error.kind(),
+                    format!("staged manifest sync failed: {error}"),
+                ),
+            )
+        })?;
+        #[cfg(test)]
+        fault::inject(artifact_dir, StagedFaultPoint::GenerationSync)
+            .map_err(|error| publish_error(StagedPublishFailure::GenerationPublish, error))?;
+        sync_directory(&temporary_generation).map_err(|error| {
+            publish_error(
+                StagedPublishFailure::GenerationPublish,
+                io::Error::new(
+                    error.kind(),
+                    format!("staged generation sync failed: {error}"),
+                ),
+            )
+        })?;
+
+        #[cfg(test)]
+        fault::inject(artifact_dir, StagedFaultPoint::GenerationPublish)
+            .map_err(|error| publish_error(StagedPublishFailure::GenerationPublish, error))?;
+        let mut generation_renamed = false;
+        match rename_staged_generation(&temporary_generation, &final_generation) {
+            Ok(()) => generation_renamed = true,
+            Err(error) if final_generation.exists() => {
+                let _ = error;
+                let _ = fs::remove_dir_all(&temporary_generation);
+            }
+            Err(error) => {
+                return Err(publish_error(
+                    StagedPublishFailure::GenerationPublish,
+                    error,
+                ));
+            }
+        }
+        sync_directory(&key_root).map_err(|error| {
+            publish_error(
+                StagedPublishFailure::GenerationPublish,
+                io::Error::new(
+                    error.kind(),
+                    format!("staged generation parent sync failed: {error}"),
+                ),
+            )
+        })?;
+
+        #[cfg(test)]
+        if let Err(error) = fault::inject(artifact_dir, StagedFaultPoint::PointerCommit) {
+            if generation_renamed {
+                remove_uncommitted_generation(&pointer, &generation_hex, &final_generation);
+            }
+            return Err(publish_error(StagedPublishFailure::PointerCommit, error));
+        }
+        atomic_write(&pointer, generation_hex.as_bytes()).map_err(|error| {
+            if generation_renamed {
+                remove_uncommitted_generation(&pointer, &generation_hex, &final_generation);
+            }
+            publish_error(
+                StagedPublishFailure::PointerCommit,
+                io::Error::new(
+                    error.kind(),
+                    format!("staged generation pointer publish failed: {error}"),
+                ),
+            )
+        })?;
+        if let Some(parent) = pointer.parent() {
+            #[cfg(test)]
+            if let Err(error) = fault::inject(artifact_dir, StagedFaultPoint::PointerSync) {
+                if generation_renamed {
+                    remove_uncommitted_generation(&pointer, &generation_hex, &final_generation);
+                }
+                return Err(publish_error(StagedPublishFailure::PointerCommit, error));
+            }
+            sync_directory(parent).map_err(|error| {
+                if generation_renamed {
+                    remove_uncommitted_generation(&pointer, &generation_hex, &final_generation);
+                }
+                publish_error(
+                    StagedPublishFailure::PointerCommit,
+                    io::Error::new(
+                        error.kind(),
+                        format!("staged pointer parent sync failed: {error}"),
+                    ),
+                )
+            })?;
+        }
+        if let Some(invalid_generation) = invalid_generation_to_remove {
+            let invalid_path = generation_dir(artifact_dir, key_hex, &invalid_generation);
+            if let Err(error) = remove_staged_tree(&invalid_path) {
+                tracing::warn!(
+                    path = %invalid_path.display(),
+                    %error,
+                    "failed to remove replaced invalid staged generation"
+                );
+            }
+        }
+        let total_ns = publish_started.elapsed().as_nanos() as u64;
+        stats.staged_publication_ns = exclusive_publication_ns(total_ns, stats.staged_hash_ns);
+        tracing::info!(
+            event = "staged_publication_complete",
+            cache_key = key_hex,
+            generation = generation_hex,
+            output_count,
+            reflink_count = stats.reflink_count,
+            copy_count = stats.copy_count,
+            copy_bytes = stats.copy_bytes,
+            elapsed_ns = total_ns,
+            digest_ns = stats.staged_hash_ns,
+            publication_ns = stats.staged_publication_ns,
+            "published immutable staged artifact generation"
+        );
+        Ok(stats)
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&temporary_generation);
+    }
+    result
+}
+
+pub(in crate::daemon_core::daemon::server) fn persist_staged_artifact_payloads(
+    artifact_dir: &Path,
+    key_hex: &str,
+    payloads: &[Arc<Vec<u8>>],
+) -> io::Result<PersistArtifactFileStats> {
+    if payloads.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cannot publish an empty staged artifact",
+        ));
+    }
+    // #1774: write each in-memory payload straight into the temporary
+    // generation instead of staging it to a `.staged-payloads-*` scratch
+    // file first and copying it again from there — a payload already held
+    // in memory has nowhere else useful to live before publication.
+    let sources: Vec<StagedSource<'_>> = payloads
+        .iter()
+        .map(|payload| StagedSource::Bytes(payload.as_slice()))
+        .collect();
+    persist_staged_generation(artifact_dir, key_hex, &sources, MaterializationMode::Auto)
+}
+
+#[cfg(test)]
+pub(in crate::daemon_core::daemon::server) fn load_staged_artifact_paths(
+    artifact_dir: &Path,
+    key_hex: &str,
+    expected_sizes: &[u64],
+) -> io::Result<Option<Vec<NormalizedPath>>> {
+    crate::daemon_core::artifact::resolve_staged_artifact_files(artifact_dir, key_hex, expected_sizes)
+}
+
+pub(in crate::daemon_core::daemon::server) fn cleanup_staged_artifact_temps(
+    artifact_dir: &Path,
+) -> io::Result<usize> {
+    let root = staged_root(artifact_dir);
+    if !root.is_dir() {
+        return Ok(0);
+    }
+    let store_lock = open_store_lock(&root)?;
+    let _store_lock_guard = kernal_api::platform::fs::lock_exclusive(&store_lock)?;
+    let entries = fs::read_dir(&root)?;
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file()
+            && path.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                name.starts_with(".") && name != STORE_LOCK
+            })
+        {
+            fs::remove_file(path)?;
+            removed += 1;
+            continue;
+        }
+        if path.is_dir() {
+            let key = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned());
+            let current = key
+                .as_deref()
+                .and_then(|key| {
+                    fs::read_to_string(root.join(format!("{key}.current")).as_path()).ok()
+                })
+                .map(|value| value.trim().to_string());
+            for child in fs::read_dir(&path)?.flatten() {
+                let child_path = child.path();
+                let child_name = child_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let remove = child_name != PUBLISH_LOCK
+                    && (child_name.starts_with(".tmp-")
+                        || (child_path.is_dir()
+                            && current.as_deref() != Some(child_name.as_str())));
+                if remove {
+                    if child_path.is_dir() {
+                        fs::remove_dir_all(child_path)?;
+                    } else {
+                        fs::remove_file(child_path)?;
+                    }
+                    removed += 1;
+                }
+            }
+        }
+    }
+    Ok(removed)
+}
+
+#[cfg(test)]
+#[path = "staged_store_tests.rs"]
+mod tests;

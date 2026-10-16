@@ -22,4 +22,5 @@ mod cli_gc_rustup_purge;
 mod cli_gc_target;
 mod cli_gc_target_subtrees;
 mod cook_auto_gc;
+mod out_dir_cross_worktree;
 mod windows_delete_semantics;

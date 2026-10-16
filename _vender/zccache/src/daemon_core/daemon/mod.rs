@@ -1,0 +1,57 @@
+//! zccache daemon library.
+//!
+//! The daemon maintains in-memory caches, manages the artifact store,
+//! runs the file watcher, and handles IPC requests from CLI/wrappers.
+
+#![allow(clippy::missing_errors_doc)]
+
+pub(crate) mod child_watchdog;
+pub mod compile_journal;
+pub(crate) mod compile_output;
+pub mod crash;
+/// Startup classification / quarantine policy for the persisted depgraph
+/// snapshot (#1157). Gated with `entry` because the standalone daemon is its
+/// only production caller; `test` keeps it available to the server tests that
+/// drive a synthetic restart.
+#[cfg(any(feature = "daemon-entry", test))]
+pub(crate) mod depgraph_load;
+/// Standalone daemon process entry point (issue #997), gated so it only
+/// compiles when a binary that hosts it (`daemon-bin`, or the `cli`/`zccache`
+/// binary via argv[0] dispatch) pulls in clap + tracing-subscriber.
+#[cfg(feature = "daemon-entry")]
+pub mod entry;
+pub mod eviction;
+pub mod fingerprint;
+pub mod jobserver;
+pub mod lifecycle;
+pub mod lineage;
+/// Lock-file ownership guard (#1905). Gated with `test` as well as
+/// `daemon-entry` so its unit tests build in a plain `-p
+/// zccache-daemon-core` test run, while a non-test build without
+/// `daemon-entry` does not carry a dead-code warning.
+#[cfg(any(feature = "daemon-entry", test))]
+pub(crate) mod lock_file_guard;
+/// Bounded opt-in tracing file sink (#1165). Gated with `entry` because it is
+/// a `tracing_subscriber` layer and that dependency is optional — the daemon
+/// library is also built by hosts that install their own subscriber.
+#[cfg(feature = "daemon-entry")]
+pub mod log_sink;
+pub(crate) mod process;
+pub mod server;
+pub mod side_effect;
+/// Process-wide exclusion between staged-output materialization and child
+/// spawn so a forked child cannot inherit a write descriptor on an inode that
+/// is about to be executed (zccache#1562).
+pub(crate) mod spawn_exclusion;
+pub(crate) mod staged_stats;
+/// Post-bind lock-file ownership policy for daemon startup (#1903). Gated the
+/// same way as `depgraph_load`: the standalone daemon entry point is the
+/// production caller, while `test` keeps the degraded arm reachable from a
+/// unit test.
+#[cfg(any(feature = "daemon-entry", test))]
+pub(crate) mod startup_lockfile;
+pub mod stats;
+pub mod trampoline;
+
+pub use server::{DaemonServer, DepGraphSetter, DiskMaintenanceProgress};
+pub use stats::{PhaseProfiler, ProfileSnapshot, StatsCollector};

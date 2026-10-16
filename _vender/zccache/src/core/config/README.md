@@ -1,0 +1,44 @@
+# core::config
+
+Configuration types and cache-root resolution for zccache.
+
+Split into focused submodules (file-size discipline: every source file < 1,000 LOC):
+
+- **`mod.rs`** - Public `Config` struct + `Default` impl, top-level constants
+  (`CACHE_DIR_ENV`, `DAEMON_NAMESPACE_ENV`, `DAEMON_STATE_DIR_ENV`, `DEFAULT_IDLE_TIMEOUT_SECS`,
+  `COLOCATE_ENV`, etc.), and `pub use` re-exports of every public symbol so the
+  facade path `zccache::core::config::<Name>` is preserved.
+- **`resolve.rs`** - Cache-root and daemon-state resolution: `default_cache_dir`,
+  `resolve_cache_root`, `resolve_cache_root_top_level`, `versioned_subdir`,
+  `daemon_state_dir`, `CacheRootSource`, `cache_dir_override`, and the cross-volume colocation
+  logic (`ZCCACHE_COLOCATE`, `volume_root`, `same_volume_root`).
+- **`paths.rs`** - Well-known subpath helpers under the cache root
+  (`artifacts_dir`, `tmp_dir`, `depfile_dir`, `depgraph_dir`, `log_dir`,
+  `crash_dump_dir`, `index_path`, `metadata_path_from_cache_dir`,
+  `symbols_cache_dir`, `cargo_registry_cache_dir`, etc.).
+- **`win_acl.rs`** *(Windows only)* - The Windows half of
+  `paths::ensure_dir_private` (#1172 F1e): reads a directory's DACL as SDDL and,
+  when it is not protected-and-owner-only, writes
+  `D:P(A;OICI;FA;;;<user>)(A;OICI;FA;;;SY)` and verifies it by read-back. This is
+  the access-control boundary on the daemon deploy directory, whose contents the
+  CLI executes. Mirrors `zccache-ipc`'s `transport/pipe_security.rs` (#1272).
+- **`namespace.rs`** - `ZCCACHE_DAEMON_NAMESPACE` parsing
+  (`daemon_namespace`, `daemon_namespace_label`), IPC sanitization
+  (`sanitize_ipc_component`, `sanitize_daemon_namespace`), and the FNV-1a
+  short-hash helper reused by colocation.
+- **`materialization_mode.rs`** - `ZCCACHE_MODE` (#1683): the
+  `MaterializationMode` enum (`AUTO`/`LINK`/`COPY`/`REFLINK`), its grammar, and
+  the only readers of the variable (process env and forwarded client env);
+  tests in `materialization_mode_tests.rs`, including a guard against raw reads.
+- **`test_harness_admission.rs`** - `TestHarnessAdmission` (#1550): the
+  request-scoped `--test` harness admission policy (explicit option, then the
+  request's forwarded `ZCCACHE_CACHE_TEST_BINS`, then the process default) and
+  `MAX_ADMITTED_TEST_HARNESS_BYTES`.
+- **`cleanup.rs`** - Legacy / stale temp-state cleanup
+  (`cleanup_legacy_temp_root_state`, `cleanup_stale_depfile_dirs`).
+- **`tests.rs`** - Unit tests for all of the above (kept here because they
+  exercise private helpers across modules).
+
+See `docs/architecture/runtime.md § Cache root invariants` for the
+`ZCCACHE_CACHE_DIR` contract and issue #761 / #762 (per-daemon-version
+namespacing) for the rationale behind `versioned_subdir()`.

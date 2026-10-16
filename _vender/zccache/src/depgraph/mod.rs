@@ -1,0 +1,50 @@
+//! Dependency graph for include-aware cache invalidation.
+//!
+//! Tracks `#include` relationships between source and header files,
+//! resolves include paths against search directories, and determines
+//! whether a compilation can use a cached artifact.
+
+pub mod args;
+pub mod compile_commands;
+pub mod context;
+pub mod depfile;
+pub mod graph;
+pub mod header_trace;
+pub mod msvc_args;
+pub mod native_cpu;
+pub mod rustc_args;
+pub mod scanner;
+pub mod search_paths;
+pub mod session;
+pub mod show_includes;
+pub mod snapshot;
+pub mod system_includes;
+pub mod watcher_support;
+
+pub use args::{ParsedArgs, UserDepFlags};
+pub use compile_commands::{parse_compile_commands_json, CompileCommand};
+pub use context::{
+    compute_artifact_key, compute_rustc_artifact_key, compute_rustc_verdict_key,
+    fold_rustc_env_deps_into_artifact_key, is_volatile_cargo_env_var, ArtifactKey, CompileContext,
+    ContextKey, RustcCompileContext,
+};
+pub use depfile::{prepare_depfile, prepare_depfile_with_mmd, DepfileError, DepfileStrategy};
+pub use graph::{hash_env_dep_value, CacheVerdict, ContextState, DepGraph, DepGraphStats};
+pub use rustc_args::{parse_rustc_args, ExternCrate, RustcParsedArgs};
+pub use scanner::{IncludeDirective, IncludeKind, ScanResult};
+pub use search_paths::IncludeSearchPaths;
+pub use session::{
+    FinalizedSessionStats, LookupOutcomes, Session, SessionConfig, SessionId, SessionManager,
+    SessionStatsTracker,
+};
+pub use snapshot::{
+    classify_load, depgraph_file_path, inject_save_failures_for_tests, load_from_file,
+    load_from_file_with, quarantine, save_to_file, save_to_file_with, DepGraphLoadOutcome,
+    LoadOptions, SaveOptions, SnapshotError, DEPGRAPH_VERSION, GC_TTL, SNAPSHOT_BUDGET_BYTES,
+};
+pub use system_includes::{
+    discovery_args, discovery_args_c, discovery_args_fast, msvc_system_includes_from_env,
+    parse_cc1_system_include_output, parse_msvc_include_env, parse_system_include_output,
+    SystemIncludeCache, MSVC_INCLUDE_ENV,
+};
+pub use watcher_support::WatchSet;

@@ -1,0 +1,1066 @@
+//! `DaemonServer::run` — the daemon's main loop, plus the file-watcher
+//! pipeline initializer it kicks off.
+//!
+//! Owns startup-side cleanup of legacy state, the four background tasks
+//! (artifact load, memory eviction, disk GC, depgraph save), and the
+//! shutdown drain that persists artifact-store, depgraph, and metadata
+//! caches to disk.
+
+use super::*;
+
+const ACCEPT_STALL_WATCHDOG_INTERVAL: Duration = Duration::from_secs(600);
+const MEMORY_GC_IDLE_GRACE: Duration = Duration::from_millis(250);
+const MEMORY_GC_GENTLE_RETRY: Duration = Duration::from_millis(50);
+const MEMORY_GC_FORCE_AFTER: Duration = Duration::from_secs(5);
+const MEMORY_GC_GENTLE_BATCH: usize = 256;
+/// Startup budget for taking the watcher lock before declaring degradation.
+const WATCHER_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+/// First re-arm attempt after a failed watcher init (issue #1156). Cheap
+/// enough to be always-on, so no config knob is exposed.
+const WATCHER_REARM_INITIAL_DELAY: Duration = Duration::from_secs(60);
+/// Backoff ceiling for watcher re-arm retries.
+const WATCHER_REARM_MAX_DELAY: Duration = Duration::from_secs(600);
+
+enum AcceptWait<T> {
+    Accepted(T),
+    Shutdown,
+}
+
+/// Wait for accept or shutdown while reporting stalls without cancelling
+/// either operation. Windows accept futures own their pending pipe instance,
+/// and `Notify::notified` is not buffered, so both futures must survive every
+/// observational watchdog tick.
+async fn wait_for_accept_or_shutdown<A, S, T>(
+    accept: A,
+    shutdown: S,
+    watchdog_interval: Duration,
+) -> AcceptWait<T>
+where
+    A: std::future::Future<Output = T>,
+    S: std::future::Future<Output = ()>,
+{
+    let mut accept = std::pin::pin!(accept);
+    let mut shutdown = std::pin::pin!(shutdown);
+    loop {
+        let watchdog = kernal_api::async_engine::sleep(watchdog_interval);
+        let mut watchdog = std::pin::pin!(watchdog);
+        match kernal_api::fair_race!((accept.as_mut()), (watchdog.as_mut()), (shutdown.as_mut()),)
+            .await
+        {
+            kernal_api::async_engine::FairRace3::First(result) => {
+                return AcceptWait::Accepted(result);
+            }
+            kernal_api::async_engine::FairRace3::Second(()) => {
+                tracing::warn!(
+                    stall_secs = watchdog_interval.as_secs(),
+                    "daemon accept loop has not accepted a connection within watchdog interval"
+                );
+            }
+            kernal_api::async_engine::FairRace3::Third(()) => return AcceptWait::Shutdown,
+        }
+    }
+}
+
+impl DaemonServer {
+    /// Run the server, accepting connections until shutdown is signaled.
+    ///
+    /// `idle_timeout_secs`: if non-zero, the daemon shuts down after this many
+    /// seconds with no client activity. Pass 0 to disable.
+    pub async fn run(&mut self, idle_timeout_secs: u64) -> Result<(), crate::daemon_core::ipc::IpcError> {
+        let maintenance_policy =
+            MaintenancePolicy::from_env().map_err(crate::daemon_core::ipc::IpcError::Endpoint)?;
+        tracing::info!(
+            persist_workers = self.state.persist_semaphore.available_permits(),
+            "daemon server running"
+        );
+
+        // Background index-writer task: in-memory WAL with timer-driven
+        // flushing. See `run_index_writer` for the design rationale.
+        let mut index_writer_handle: Option<kernal_api::async_engine::Task<()>> = None;
+        if let Some(rx) = self.index_writer_rx.take() {
+            let store = Arc::clone(&self.state.artifact_store);
+            let shutdown = Arc::clone(&self.state.index_writer_shutdown);
+            let runtime = kernal_api::async_engine::RuntimeHandle::current()
+                .expect("daemon run requires an async runtime");
+            index_writer_handle = Some(runtime.launch(run_index_writer(rx, store, shutdown)));
+        }
+
+        let cache_dir = self.state.cache_dir.clone();
+
+        // Migrate legacy blob digests once per cache root. Keep this off the
+        // Tokio runtime thread because the helper hashes files synchronously.
+        // The marker is published only after a successful migration so a
+        // failed attempt remains retryable on the next daemon start.
+        //
+        // The staged-artifact temp sweep that used to live here is now a
+        // member of `MaintenanceSchedule` so the embedded service runs it too
+        // (#1160c).
+        {
+            let cache_dir = cache_dir.clone();
+            let artifact_dir = self.state.artifact_dir.clone();
+            let state = Arc::clone(&self.state);
+            kernal_api::async_engine::launch(async move {
+                if let Err(error) = state.staging.cleanup_abandoned() {
+                    tracing::debug!(%error, "abandoned private staging cleanup skipped");
+                }
+                let marker = cache_dir.join(".legacy-blob-digests-migrated-v1");
+                if marker.exists() {
+                    tracing::debug!(path = %marker.display(), "legacy blob digest migration already complete");
+                    return;
+                }
+
+                let migration_root = artifact_dir;
+                let result = kernal_api::async_engine::launch_blocking(move || {
+                    let migrated = migrate_legacy_blob_digests(&migration_root)?;
+                    use std::io::Write;
+                    let mut marker_file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&marker)?;
+                    marker_file.write_all(b"v1\n")?;
+                    marker_file.sync_all()?;
+                    Ok::<usize, std::io::Error>(migrated)
+                })
+                .await;
+
+                match result {
+                    Ok(Ok(migrated)) => {
+                        tracing::info!(migrated, "legacy blob digest migration complete")
+                    }
+                    Ok(Err(error)) => tracing::warn!(
+                        path = %cache_dir.display(),
+                        "legacy blob digest migration failed: {error}"
+                    ),
+                    Err(error) => {
+                        tracing::warn!("legacy blob digest migration task failed: {error}")
+                    }
+                }
+            }).detach();
+        }
+
+        // Clean up legacy log backup directory (Bug 7).
+        {
+            let legacy_logs = cache_dir.join("logs.bak");
+            if legacy_logs.is_dir() {
+                match std::fs::remove_dir_all(&legacy_logs) {
+                    Ok(()) => tracing::info!("removed legacy logs.bak directory"),
+                    Err(e) => tracing::warn!(
+                        path = %legacy_logs.display(),
+                        "failed to remove legacy logs.bak: {e}"
+                    ),
+                }
+            }
+            // Also remove stale daemon.lock.bak if present.
+            let legacy_lock = cache_dir.join("daemon.lock.bak");
+            let _ = std::fs::remove_file(&legacy_lock);
+        }
+
+        // Legacy temp-root state removal is a standalone-only member of
+        // `MaintenanceSchedule` (see its rationale) and starts below.
+
+        // Clean up stale depfile directories from dead daemon instances.
+        {
+            let cleaned =
+                crate::daemon_core::core::config::cleanup_stale_depfile_dirs(crate::daemon_core::ipc::is_process_alive);
+            if cleaned > 0 {
+                tracing::info!(cleaned, "cleaned stale depfile directories");
+            }
+        }
+
+        self.start_watcher_pipeline().await;
+
+        // Start background artifact loading (non-blocking so daemon responds
+        // immediately — Bug 6 fix).
+        {
+            spawn_artifact_loader(Arc::clone(&self.state), None)
+                .await
+                .detach();
+        }
+
+        // Every periodic loop this daemon owns starts here, from the single
+        // schedule the embedded service also starts (#1160). Nothing periodic
+        // may be hand-spawned in this function any more: a task added here
+        // alone would silently not run inside an embedded host, which is the
+        // exact drift the schedule exists to make impossible.
+        //
+        // The standalone-only members (legacy temp-root cleanup, idle
+        // watchdog, private-daemon owner reaping) carry their rationale in
+        // `MAINTENANCE_TASKS`.
+        let started = MaintenanceSchedule::new(
+            Arc::clone(&self.state),
+            maintenance_policy,
+            ServiceMode::Standalone,
+        )
+        .with_idle_timeout_secs(idle_timeout_secs)
+        .start();
+        tracing::debug!(tasks = ?started.started, "maintenance schedule started");
+        let mut maintenance_handle = started.disk_maintenance;
+        let mut depgraph_save_handle = started.depgraph_save;
+
+        loop {
+            // Keep one accept future alive across watchdog ticks. On Windows,
+            // `Listener::accept` owns a pre-created named-pipe instance while
+            // it waits. Dropping that future at every watchdog interval closes
+            // the pipe underneath a client that won the connect race, yielding
+            // ERROR_NO_DATA / ERROR_BROKEN_PIPE even though the daemon itself
+            // remains healthy. The watchdog is observational only: it must not
+            // cancel and recreate the accept operation.
+            let winner = wait_for_accept_or_shutdown(
+                self.listener.accept(),
+                self.shutdown.notified(),
+                ACCEPT_STALL_WATCHDOG_INTERVAL,
+            )
+            .await;
+            match winner {
+                AcceptWait::Accepted(result) => {
+                    let conn = match result {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::error!("accept failed, continuing: {e}");
+                            continue;
+                        }
+                    };
+                    let state = Arc::clone(&self.state);
+                    kernal_api::async_engine::launch(async move {
+                        if let Err(e) = handle_connection(conn, state).await {
+                            tracing::warn!("connection error: {e}");
+                        }
+                    })
+                    .detach();
+                }
+                AcceptWait::Shutdown => {
+                    self.state.shutdown_requested.store(true, Ordering::Release);
+                    // `shutdown_handle()` exposes the raw Notify for legacy
+                    // tests and Ctrl+C handlers, many of which still call
+                    // notify_one(). Rebroadcast so whichever task observes the
+                    // edge first wakes the rest of the shutdown path.
+                    self.state.shutdown.notify_waiters();
+                    if let Some(handle) = maintenance_handle.take() {
+                        let _ = handle.await;
+                    }
+                    if let Some(handle) = depgraph_save_handle.take() {
+                        let _ = handle.await;
+                    }
+                    tracing::info!("daemon server shutting down");
+                    // Drop the watcher to stop the OS thread and close channels.
+                    // The settle buffer and consumer tasks will exit when their
+                    // input channels close.
+                    match kernal_api::async_engine::timeout(
+                        Duration::from_secs(5),
+                        self.state.watcher.lock(),
+                    )
+                    .await
+                    {
+                        Ok(mut watcher) => {
+                            *watcher = None;
+                            self.state.watcher_active.store(false, Ordering::Release);
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                "timed out acquiring watcher lock during shutdown; proceeding"
+                            );
+                        }
+                    }
+
+                    // Durability drain (#1161): pending persist tasks →
+                    // publication write barrier → index-writer WAL flush ack
+                    // → writer stop → final store flush. Shared with the
+                    // restart-shaped tests so they exercise this exact
+                    // production sequence — see
+                    // `wal::drain_durable_state_for_shutdown` for the full
+                    // ordering rationale and loud-forensics behavior. The
+                    // returned publication write guard stays held so no
+                    // publisher can mutate the cache while the depgraph and
+                    // metadata snapshots below are taken.
+                    let _publication_guard =
+                        drain_durable_state_for_shutdown(&self.state, index_writer_handle.take())
+                            .await;
+
+                    // Save depgraph to disk before exiting, unless nothing
+                    // has mutated it since the last save (zccache#1775) — an
+                    // idle daemon with no compiles has nothing new to
+                    // serialize, fsync, and rename over the existing
+                    // snapshot (or, if there never was one, nothing worth
+                    // writing at all). The serializer and atomic write path
+                    // are synchronous, so run them off the Tokio runtime
+                    // thread.
+                    if self.state.dep_graph.load().take_dirty() {
+                        let start = std::time::Instant::now();
+                        let path = depgraph_file_path_for_cache_dir(&self.state.cache_dir);
+                        let save_state = Arc::clone(&self.state);
+                        let depgraph_save = run_depgraph_save_with(save_state, None, move |dg| {
+                            if let Some(parent) = path.parent() {
+                                std::fs::create_dir_all(parent).ok();
+                            }
+                            let (cold_ctxs, warm_ctxs, stale_ctxs) = dg.state_breakdown();
+                            let ctxs_with_key = dg.contexts_with_artifact_key();
+                            let result = crate::daemon_core::depgraph::save_to_file(dg, &path);
+                            (result, cold_ctxs, warm_ctxs, stale_ctxs, ctxs_with_key)
+                        })
+                        .await;
+                        match depgraph_save {
+                            Ok((Ok(()), cold_ctxs, warm_ctxs, stale_ctxs, ctxs_with_key)) => {
+                                self.state
+                                    .dep_graph_persisted
+                                    .store(true, Ordering::Release);
+                                // State breakdown lets a future warm-side daemon
+                                // explain its cold_skip miss rate: if cold_ctxs
+                                // is high relative to warm_ctxs, the warm side
+                                // will take the cold_skip branch for those keys
+                                // and never consult the artifact_store.
+                                tracing::info!(
+                                    elapsed_ms = start.elapsed().as_millis() as u64,
+                                    cold = cold_ctxs,
+                                    warm = warm_ctxs,
+                                    stale = stale_ctxs,
+                                    with_artifact_key = ctxs_with_key,
+                                    "depgraph saved"
+                                );
+                            }
+                            Ok((Err(e), _, _, _, _)) => tracing::warn!("depgraph save failed: {e}"),
+                            Err(e) => tracing::warn!("depgraph save task join error: {e}"),
+                        }
+                    } else {
+                        tracing::debug!(
+                            "depgraph save skipped at shutdown: no changes since last save"
+                        );
+                    }
+
+                    // Persist the in-memory MetadataCache so the next
+                    // daemon (in particular the warm side of soldr
+                    // save/load) starts with its fast path populated.
+                    // Failure here is a perf regression, not a
+                    // correctness bug — log and move on so shutdown
+                    // never hangs on disk I/O.
+                    //
+                    // Issue #784 phase 2b: gate on `metadata_cache_loaded`.
+                    // The disk load now runs in a background
+                    // `spawn_blocking` after the readiness lockfile, so
+                    // an early shutdown (Ctrl+C before the loader
+                    // finishes) could otherwise save a partial snapshot
+                    // over the on-disk file. Skipping the save when the
+                    // load hasn't completed preserves the existing
+                    // snapshot — the entries that DID land in-memory
+                    // came from in-process compiles whose verified state
+                    // is still on disk in the prior snapshot.
+                    if !self.state.metadata_cache_loaded.load(Ordering::Acquire) {
+                        tracing::debug!(
+                            "metadata cache load still pending at shutdown — skipping save"
+                        );
+                    } else if !self.state.cache_system.metadata().take_dirty() {
+                        // zccache#1775: nothing changed since the last save
+                        // (periodic, or the load itself) — skip the
+                        // serialize + fsync entirely.
+                        tracing::debug!(
+                            "metadata cache save skipped at shutdown: no changes since last save"
+                        );
+                    } else {
+                        let meta_start = std::time::Instant::now();
+                        let metadata_entries = self.state.cache_system.metadata().len();
+                        let state = Arc::clone(&self.state);
+                        let metadata_path = self.state.metadata_path.clone();
+                        let res = kernal_api::async_engine::launch_blocking(move || {
+                            state
+                                .cache_system
+                                .metadata()
+                                .save_to_disk(metadata_path.as_path())
+                        })
+                        .await;
+                        match res {
+                            Ok(Ok(())) => {
+                                if metadata_entries > 0 {
+                                    tracing::info!(
+                                        entries = metadata_entries,
+                                        elapsed_ms = meta_start.elapsed().as_millis() as u64,
+                                        "metadata cache persisted"
+                                    );
+                                }
+                            }
+                            Ok(Err(e)) => tracing::warn!(
+                                path = %self.state.metadata_path.display(),
+                                "metadata cache save failed: {e}"
+                            ),
+                            Err(e) => tracing::warn!(
+                                path = %self.state.metadata_path.display(),
+                                "metadata cache save task join error: {e}"
+                            ),
+                        }
+                    }
+
+                    // Issue #517: persist the compiler-binary hash cache
+                    // so the next daemon does not pay the ~50-60 ms cold
+                    // blake3 over rustc on its first compile.
+                    //
+                    // Issue #784: gate on `compiler_hash_cache_loaded`.
+                    // The disk load now runs in a background
+                    // `spawn_blocking` after the readiness lockfile, so
+                    // an early shutdown (Ctrl+C before the loader
+                    // finishes) could otherwise save a partial snapshot
+                    // over the on-disk file. Skipping the save when the
+                    // load hasn't completed preserves the existing
+                    // snapshot — the in-memory DashMap is still warm
+                    // enough for the in-process compiles that already
+                    // happened.
+                    if !self
+                        .state
+                        .compiler_hash_cache_loaded
+                        .load(Ordering::Acquire)
+                    {
+                        tracing::debug!(
+                            "compiler hash cache load still pending at shutdown — skipping save"
+                        );
+                    } else if !self.state.compiler_hash_cache.take_dirty() {
+                        tracing::debug!(
+                            "compiler hash cache save skipped at shutdown: no changes since last save"
+                        );
+                    } else {
+                        let state = Arc::clone(&self.state);
+                        let compiler_hash_cache_path = self.state.compiler_hash_cache_path.clone();
+                        let res = kernal_api::async_engine::launch_blocking(move || {
+                            state
+                                .compiler_hash_cache
+                                .save_to_disk(compiler_hash_cache_path.as_path())
+                        })
+                        .await;
+                        match res {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                tracing::warn!(
+                                    path = %self.state.compiler_hash_cache_path.display(),
+                                    "compiler hash cache save failed: {e}"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    path = %self.state.compiler_hash_cache_path.display(),
+                                    "compiler hash cache save task join error: {e}"
+                                );
+                            }
+                        }
+                    }
+
+                    // Issue #541: persist the C/C++ system include paths
+                    // so the next daemon does not pay the ~30-50 ms
+                    // `<compiler> -v -E -x c++ NUL` spawn on its first
+                    // C/C++ compile.
+                    //
+                    // Issue #784 phase 2c: gate on `system_includes_loaded`.
+                    // The disk load now runs in a background
+                    // `spawn_blocking` after the readiness lockfile, so
+                    // an early shutdown could otherwise save a partial
+                    // snapshot over the on-disk file. Skipping the save
+                    // when the load hasn't completed preserves the
+                    // existing snapshot — entries that DID land
+                    // in-memory came from in-process compiles whose
+                    // re-probe is cheap.
+                    if !self.state.system_includes_loaded.load(Ordering::Acquire) {
+                        tracing::debug!(
+                            "system include cache load still pending at shutdown — skipping save"
+                        );
+                    } else {
+                        let dirty_includes = {
+                            let mut includes = self.state.system_includes.lock().await;
+                            includes.take_dirty().then(|| includes.clone())
+                        };
+                        if let Some(includes) = dirty_includes {
+                            let system_includes_cache_path =
+                                self.state.system_includes_cache_path.clone();
+                            let res = kernal_api::async_engine::launch_blocking(move || {
+                                includes.save_to_disk(system_includes_cache_path.as_path())
+                            })
+                            .await;
+                            match res {
+                                Ok(Ok(())) => {}
+                                Ok(Err(e)) => {
+                                    tracing::warn!(
+                                        path = %self.state.system_includes_cache_path.display(),
+                                        "system include cache save failed: {e}"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        path = %self.state.system_includes_cache_path.display(),
+                                        "system include cache save task join error: {e}"
+                                    );
+                                }
+                            }
+                        } else {
+                            tracing::debug!(
+                                "system include cache save skipped at shutdown: no changes since last save"
+                            );
+                        }
+                    }
+
+                    // Clean up our own depfile temp directory.
+                    let _ = std::fs::remove_dir_all(&self.state.depfile_tmpdir);
+
+                    // #1162: everything durable is now on disk, so this daemon
+                    // has stopped writing and the next one may claim the root.
+                    // Releasing here rather than on `Drop` is deliberate —
+                    // background holders keep `Arc<SharedState>` alive past
+                    // this point, and a sequential restart must not be refused.
+                    self.state.cache_root_lock.release();
+
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    /// Initialize the file watcher pipeline:
+    /// `NotifyWatcher (OS thread) → SettleBuffer (tokio task) → CacheSystem consumer (tokio task)`
+    async fn start_watcher_pipeline(&self) {
+        if arm_watcher_pipeline(&self.state).await {
+            return;
+        }
+        // Watcher init failed. Without a re-arm this is a lifetime sentence:
+        // both fast hit tiers bail on `watcher_active == false` and every
+        // shared blob is fully re-hashed on every hit, forever, off a single
+        // startup warn line. The common triggers (inotify `max_user_watches`
+        // exhaustion, a momentarily contended watcher lock) are transient, so
+        // retry on a capped backoff until the daemon shuts down (issue #1156).
+        let state = Arc::clone(&self.state);
+        kernal_api::async_engine::launch(async move {
+            let mut delay = WATCHER_REARM_INITIAL_DELAY;
+            let mut attempt = 0_u32;
+            while !state.shutdown_requested.load(Ordering::Acquire) {
+                let winner = {
+                    let sleep = kernal_api::async_engine::sleep(delay);
+                    let shutdown = state.shutdown.notified();
+                    let mut sleep = std::pin::pin!(sleep);
+                    let mut shutdown = std::pin::pin!(shutdown);
+                    kernal_api::fair_race!((sleep.as_mut()), (shutdown.as_mut())).await
+                };
+                match winner {
+                    kernal_api::async_engine::FairRace2::First(()) => {}
+                    kernal_api::async_engine::FairRace2::Second(()) => {
+                        state.shutdown_requested.store(true, Ordering::Release);
+                        state.shutdown.notify_waiters();
+                        return;
+                    }
+                }
+                if state.shutdown_requested.load(Ordering::Acquire) {
+                    return;
+                }
+                attempt += 1;
+                if arm_watcher_pipeline(&state).await {
+                    tracing::info!(
+                        event = "watcher_rearmed",
+                        attempt,
+                        "file watcher re-armed after startup failure — fast hit tiers restored"
+                    );
+                    crate::daemon_core::core::lifecycle::write_event(
+                        crate::daemon_core::core::lifecycle::EVENT_WATCHER_REARMED,
+                        serde_json::json!({ "attempt": attempt }),
+                    );
+                    return;
+                }
+                delay = (delay * 2).min(WATCHER_REARM_MAX_DELAY);
+            }
+        })
+        .detach();
+    }
+}
+
+/// Attempts one full arm of the watcher pipeline. Returns `true` when the
+/// watcher is live and the settle/consumer tasks are running; `false` leaves
+/// the daemon in the degraded (watcher-less) mode with the degradation
+/// recorded loudly.
+pub(super) async fn arm_watcher_pipeline(state: &Arc<SharedState>) -> bool {
+    let ignore = Arc::new(crate::daemon_core::watcher::IgnoreFilter::default());
+    let (watcher, raw_rx) = match NotifyWatcher::new(ignore) {
+        Ok(w) => w,
+        Err(e) => {
+            record_watcher_degradation(state, &format!("watcher init failed: {e}"));
+            return false;
+        }
+    };
+
+    match kernal_api::async_engine::timeout(WATCHER_LOCK_TIMEOUT, state.watcher.lock()).await {
+        Ok(mut watcher_guard) => {
+            *watcher_guard = Some(watcher);
+        }
+        Err(_) => {
+            record_watcher_degradation(state, "timed out acquiring watcher lock");
+            return false;
+        }
+    }
+    set_registry_watcher_available(true);
+    state.watcher_active.store(true, Ordering::Release);
+    start_watcher_tasks(state, raw_rx);
+    tracing::info!("file watcher pipeline started");
+    true
+}
+
+/// Loud-forensics degradation record: a `warn!` plus a durable lifecycle
+/// event plus a monotonic counter surfaced in `zccache status`, so a daemon
+/// running without a watcher is visible without trawling startup logs.
+pub(super) fn record_watcher_degradation(state: &Arc<SharedState>, reason: &str) {
+    set_registry_watcher_available(false);
+    state.watcher_active.store(false, Ordering::Release);
+    let degradations = state.watcher_degradations.fetch_add(1, Ordering::Relaxed) + 1;
+    tracing::warn!(
+        event = "watcher_degraded",
+        reason,
+        degradations,
+        "running without file watcher — fast hit tiers disabled and shared \
+         blobs re-hash on every read; will retry"
+    );
+    crate::daemon_core::core::lifecycle::write_event(
+        crate::daemon_core::core::lifecycle::EVENT_WATCHER_DEGRADED,
+        serde_json::json!({
+            "reason": reason,
+            "degradations": degradations,
+        }),
+    );
+}
+
+/// Spawns the settle buffer and the `CacheSystem` consumer over a freshly
+/// armed watcher's raw event stream.
+pub(super) fn start_watcher_tasks(
+    state: &Arc<SharedState>,
+    raw_rx: kernal_api::async_engine::UnboundedReceiver<crate::daemon_core::watcher::WatchEvent>,
+) {
+    {
+        // Settle buffer: coalesces raw events into batches after a quiet period.
+        let (settled_tx, mut settled_rx) = kernal_api::async_engine::unbounded_channel();
+        let settle = SettleBuffer::default_window();
+        kernal_api::async_engine::launch(async move {
+            settle.run(raw_rx, settled_tx).await;
+        })
+        .detach();
+
+        // Consumer: feeds settled events into CacheSystem for metadata invalidation.
+        let supervised = Arc::clone(state);
+        let state = Arc::clone(state);
+        let consumer = kernal_api::async_engine::launch(async move {
+            while !state.shutdown_requested.load(Ordering::Acquire) {
+                // Race the settled-event recv against the shutdown signal
+                // (issue #974). Without this the loop only re-checks
+                // `shutdown_requested` AFTER `recv()` returns, so if the settle
+                // task neither sends nor drops its sender the consumer parks
+                // forever and ignores shutdown — a shutdown-cleanliness gap.
+                let winner = {
+                    let event = settled_rx.recv();
+                    let shutdown = state.shutdown.notified();
+                    let mut event = std::pin::pin!(event);
+                    let mut shutdown = std::pin::pin!(shutdown);
+                    kernal_api::fair_race!((event.as_mut()), (shutdown.as_mut())).await
+                };
+                let event = match winner {
+                    kernal_api::async_engine::FairRace2::First(event) => event,
+                    kernal_api::async_engine::FairRace2::Second(()) => {
+                        state.shutdown_requested.store(true, Ordering::Release);
+                        // See the accept-loop shutdown branch: consuming a
+                        // single Notify edge here must still wake the loop.
+                        state.shutdown.notify_waiters();
+                        None
+                    }
+                };
+                let Some(event) = event else { break };
+                match event {
+                    SettledEvent::Batch { changed, removed } => {
+                        let count = changed.len() + removed.len();
+                        if count > 0 {
+                            tracing::debug!(
+                                changed = changed.len(),
+                                removed = removed.len(),
+                                "watcher batch applied"
+                            );
+                            // On Windows, notify reports paths with \\?\
+                            // extended-length prefix but the rest of the
+                            // codebase uses plain paths. Strip the prefix
+                            // so journal/metadata lookups match.
+                            let (changed, removed) = {
+                                let strip =
+                                    |paths: Vec<NormalizedPath>| -> Vec<NormalizedPath> {
+                                        paths
+                                            .into_iter()
+                                            .map(|p| {
+                                                NormalizedPath::new(
+                                            crate::daemon_core::platform::fs::path::strip_verbatim_prefix(&p),
+                                        )
+                                            })
+                                            .collect()
+                                    };
+                                (strip(changed), strip(removed))
+                            };
+                            #[cfg(debug_assertions)]
+                            for p in changed.iter().chain(removed.iter()) {
+                                debug_assert!(
+                                    !p.to_string_lossy().starts_with(r"\\?\"),
+                                    "watcher path must not have \\\\?\\ prefix: {}",
+                                    p.display()
+                                );
+                            }
+                            mark_registered_links_suspect(
+                                changed.iter().map(|path| path.as_path()),
+                            );
+                            mark_removed_links_suspect(removed.iter().map(|path| path.as_path()));
+                            state.fingerprint.on_batch(&changed, &removed);
+                            state
+                                .cache_system
+                                .apply_changes_with_removals(changed, removed);
+                        }
+                    }
+                    SettledEvent::Overflow => {
+                        let sweep = mark_changed_registered_links_suspect();
+                        tracing::warn!(
+                            event = "watcher_overflow",
+                            links_unchanged = sweep.unchanged,
+                            links_suspect = sweep.suspect,
+                            "watcher overflow — downgrading all metadata; \
+                             hardlink registry re-verified by stat signature"
+                        );
+                        crate::daemon_core::core::lifecycle::write_event(
+                            crate::daemon_core::core::lifecycle::EVENT_WATCHER_OVERFLOW,
+                            serde_json::json!({
+                                "links_unchanged": sweep.unchanged,
+                                "links_suspect": sweep.suspect,
+                            }),
+                        );
+                        state.cache_system.apply_overflow();
+                    }
+                }
+            }
+            tracing::debug!("watcher consumer task exiting");
+        });
+
+        // #1177 part B: the consumer's handle used to be dropped, so a panic
+        // here killed metadata invalidation silently and the daemon kept
+        // serving fast hits from state nothing was invalidating any more —
+        // stale hits, i.e. a correctness failure, until the next restart.
+        //
+        // It cannot simply be restarted: the task owns `settled_rx`, which a
+        // panic drops, so a fresh loop would have no events to consume and
+        // would look healthy while delivering nothing.
+        //
+        // Instead, fail the way an unarmable watcher already fails (#1156):
+        // clear `watcher_active`, which both fast-hit tiers gate on, and say
+        // so. That converts a silent correctness bug into the documented
+        // degradation the rest of the daemon already handles — slower, but
+        // never wrong.
+        kernal_api::async_engine::launch(async move {
+            let outcome = consumer.await;
+            if supervised.shutdown_requested.load(Ordering::Acquire) {
+                return;
+            }
+            let reason = match &outcome {
+                Err(err) if err.is_panic() => "consumer_panicked",
+                Err(_) => "consumer_cancelled",
+                Ok(()) => "consumer_exited",
+            };
+            supervised.watcher_active.store(false, Ordering::Release);
+            tracing::warn!(
+                event = "watcher_degraded",
+                reason,
+                "watcher consumer stopped before shutdown — metadata invalidation \
+                 is no longer running; both fast hit tiers are disabled so hits \
+                 are re-verified instead of trusted"
+            );
+            crate::daemon_core::core::lifecycle::write_event(
+                crate::daemon_core::core::lifecycle::EVENT_WATCHER_DEGRADED,
+                serde_json::json!({
+                    "reason": reason,
+                    "degradations": ["fast_hit_tiers_disabled", "metadata_invalidation_stopped"],
+                }),
+            );
+        })
+        .detach();
+    }
+}
+
+/// One memory-budget eviction sweep. Driven by the `memory-eviction` member of
+/// [`super::maintenance_schedule::MaintenanceSchedule`] in both service modes.
+pub(super) async fn run_memory_eviction_pass(
+    state: &Arc<SharedState>,
+    budget: u64,
+) -> (u64, usize) {
+    let started = Instant::now();
+    let mut total_freed = 0_u64;
+    let mut total_items = 0_usize;
+    let mut candidate_offset = 0_usize;
+    let plan = {
+        let dep_graph_guard = state.dep_graph.load();
+        let plan = super::super::eviction::plan_eviction_to_budget(
+            budget,
+            &state.cache_system,
+            &dep_graph_guard,
+            &state.fast_hit_cache,
+            &state.artifacts,
+            state.in_flight_bytes.load(Ordering::Relaxed),
+        );
+        drop(dep_graph_guard);
+        plan
+    };
+    let Some(plan) = plan else {
+        return (0, 0);
+    };
+    let mut gentle_finished = false;
+    let mut busy_candidates = Vec::new();
+    let mut protected_paths = std::collections::HashSet::new();
+
+    loop {
+        let active_requests = state.active_cache_requests();
+        if active_requests == 0 || started.elapsed() >= MEMORY_GC_FORCE_AFTER {
+            // Nonblocking metadata removal intentionally leaves orphaned
+            // journal rows. Settle that debt before deciding whether the
+            // original headroom target still requires destructive work.
+            let journal_removed = state.cache_system.cleanup_eviction_journal();
+            total_freed += (journal_removed * super::super::eviction::JOURNAL_ENTRY_BYTES) as u64;
+            total_items += journal_removed;
+
+            let dep_graph_guard = state.dep_graph.load();
+            let current = super::super::eviction::memory_snapshot(
+                &state.cache_system,
+                &dep_graph_guard,
+                &state.fast_hit_cache,
+                &state.artifacts,
+                state.in_flight_bytes.load(Ordering::Relaxed),
+            );
+            drop(dep_graph_guard);
+            if current.total_bytes as u64 <= plan.target_bytes() {
+                return (total_freed, total_items);
+            }
+
+            // Retry lock-busy candidates in blocking mode, preserve only
+            // timestamp-refreshed entries, then replenish from a current
+            // read-only plan until the target is met or every remaining
+            // metadata candidate is protected for this sweep.
+            let mut completion_plan = plan.completion_from(candidate_offset, &busy_candidates);
+            loop {
+                let completion_had_candidates = completion_plan.metadata_candidate_count() > 0;
+                let dep_graph_guard = state.dep_graph.load();
+                let outcome = super::super::eviction::evict_to_budget_with_plan_detailed(
+                    budget,
+                    &state.cache_system,
+                    &dep_graph_guard,
+                    &state.fast_hit_cache,
+                    &state.artifacts,
+                    state.in_flight_bytes.load(Ordering::Relaxed),
+                    &completion_plan,
+                );
+                drop(dep_graph_guard);
+                total_freed += outcome.freed_bytes;
+                total_items += outcome.items_removed;
+                protected_paths.extend(
+                    outcome
+                        .refreshed
+                        .iter()
+                        .map(|candidate| candidate.path().clone()),
+                );
+
+                let dep_graph_guard = state.dep_graph.load();
+                let current = super::super::eviction::memory_snapshot(
+                    &state.cache_system,
+                    &dep_graph_guard,
+                    &state.fast_hit_cache,
+                    &state.artifacts,
+                    state.in_flight_bytes.load(Ordering::Relaxed),
+                );
+                if current.total_bytes as u64 <= plan.target_bytes() {
+                    drop(dep_graph_guard);
+                    return (total_freed, total_items);
+                }
+                let next = super::super::eviction::plan_eviction_to_target_excluding(
+                    plan.target_bytes(),
+                    &state.cache_system,
+                    &dep_graph_guard,
+                    &state.fast_hit_cache,
+                    &state.artifacts,
+                    state.in_flight_bytes.load(Ordering::Relaxed),
+                    &protected_paths,
+                );
+                drop(dep_graph_guard);
+                let Some(next) = next else {
+                    return (total_freed, total_items);
+                };
+                if current.metadata_entries > 0 && next.metadata_candidate_count() == 0 {
+                    return (total_freed, total_items);
+                }
+                if forced_completion_stalled(
+                    outcome.items_removed,
+                    completion_had_candidates,
+                    current.metadata_entries,
+                ) {
+                    // Remaining pressure comes only from non-evictable state
+                    // (for example in-flight persistence bytes, artifact-map
+                    // overhead, or intentionally preserved recent fast hits).
+                    return (total_freed, total_items);
+                }
+                completion_plan = next;
+            }
+        }
+
+        if started.elapsed() < MEMORY_GC_IDLE_GRACE {
+            let winner = {
+                let idle = state.cache_requests_idle.notified();
+                let delay = kernal_api::async_engine::sleep(
+                    MEMORY_GC_IDLE_GRACE.saturating_sub(started.elapsed()),
+                );
+                let mut idle = std::pin::pin!(idle);
+                let mut delay = std::pin::pin!(delay);
+                kernal_api::fair_race!((idle.as_mut()), (delay.as_mut())).await
+            };
+            match winner {
+                kernal_api::async_engine::FairRace2::First(())
+                | kernal_api::async_engine::FairRace2::Second(()) => {}
+            }
+            continue;
+        }
+
+        if !gentle_finished {
+            let outcome = super::super::eviction::try_evict_metadata_plan(
+                &state.cache_system,
+                &plan,
+                candidate_offset,
+                MEMORY_GC_GENTLE_BATCH,
+            );
+            total_freed += outcome.freed_bytes;
+            total_items += outcome.items_removed;
+            busy_candidates.extend(outcome.busy);
+            protected_paths.extend(
+                outcome
+                    .refreshed
+                    .iter()
+                    .map(|candidate| candidate.path().clone()),
+            );
+            candidate_offset = candidate_offset.saturating_add(MEMORY_GC_GENTLE_BATCH);
+
+            let dep_graph_guard = state.dep_graph.load();
+            let current = super::super::eviction::memory_snapshot(
+                &state.cache_system,
+                &dep_graph_guard,
+                &state.fast_hit_cache,
+                &state.artifacts,
+                state.in_flight_bytes.load(Ordering::Relaxed),
+            );
+            drop(dep_graph_guard);
+            gentle_finished = current.total_bytes as u64 <= plan.target_bytes()
+                || candidate_offset >= plan.metadata_candidate_count();
+        }
+
+        let winner = {
+            let idle = state.cache_requests_idle.notified();
+            let delay = kernal_api::async_engine::sleep(MEMORY_GC_GENTLE_RETRY);
+            let mut idle = std::pin::pin!(idle);
+            let mut delay = std::pin::pin!(delay);
+            kernal_api::fair_race!((idle.as_mut()), (delay.as_mut())).await
+        };
+        match winner {
+            kernal_api::async_engine::FairRace2::First(())
+            | kernal_api::async_engine::FairRace2::Second(()) => {}
+        }
+    }
+}
+
+fn forced_completion_stalled(
+    items_removed: usize,
+    completion_had_candidates: bool,
+    metadata_entries: usize,
+) -> bool {
+    items_removed == 0 && !completion_had_candidates && metadata_entries == 0
+}
+
+/// Start index hydration with publication ownership acquired before spawn.
+/// The optional gate is a deterministic test seam for Clear/startup races.
+pub(super) async fn spawn_artifact_loader(
+    state: Arc<SharedState>,
+    start_gate: Option<Arc<Notify>>,
+) -> kernal_api::async_engine::Task<()> {
+    // Acquire before spawning so Clear cannot overtake the startup loader and
+    // then have pre-Clear entries inserted afterward.
+    let publication_guard = Arc::clone(&state.artifact_publication).read_owned().await;
+    kernal_api::async_engine::launch(async move {
+        if let Some(gate) = start_gate {
+            gate.notified().await;
+        }
+        let artifact_dir = state.artifact_dir.clone();
+        let state_ref = Arc::clone(&state);
+        let loaded = kernal_api::async_engine::launch_blocking(move || {
+            let _publication_guard = publication_guard;
+            // Load the in-memory index that `ArtifactStore::open` already
+            // hydrated from the on-disk blob.
+            let entries = state_ref.artifact_store.load_all();
+            if !entries.is_empty() {
+                let count = entries.len();
+                for (key, meta) in entries {
+                    state_ref
+                        .artifacts
+                        .entry(key)
+                        .or_insert_with(|| CachedArtifact::from_index(meta));
+                }
+                count
+            } else {
+                // Migration: legacy `.meta` files predate the current bincode
+                // index blob; populate the live store from them
+                // so the first session after upgrade still has its warm cache.
+                migrate_meta_files(
+                    &artifact_dir,
+                    &state_ref.artifacts,
+                    &state_ref.artifact_store,
+                )
+            }
+        })
+        .await
+        .unwrap_or(0);
+        if loaded > 0 {
+            tracing::info!(loaded, "background artifact loading complete");
+        }
+        state.artifacts_loaded.store(true, Ordering::Release);
+    })
+}
+
+#[cfg(test)]
+mod memory_eviction_controller_tests {
+    use super::forced_completion_stalled;
+
+    #[test]
+    fn in_flight_only_pressure_terminates_after_no_progress() {
+        assert!(forced_completion_stalled(0, false, 0));
+        assert!(!forced_completion_stalled(1, false, 0));
+        assert!(!forced_completion_stalled(0, true, 0));
+        assert!(!forced_completion_stalled(0, false, 1));
+    }
+}
+
+#[cfg(test)]
+mod accept_watchdog_tests {
+    use std::{sync::Arc, time::Duration};
+
+    use super::{wait_for_accept_or_shutdown, AcceptWait};
+    use tokio::sync::{oneshot, Notify};
+
+    #[tokio::test]
+    async fn watchdog_ticks_do_not_cancel_the_pending_accept() {
+        let (accepted_tx, accepted_rx) = oneshot::channel();
+        let waiter = tokio::spawn(wait_for_accept_or_shutdown(
+            async { accepted_rx.await.expect("accept sender remains live") },
+            std::future::pending(),
+            Duration::from_millis(5),
+        ));
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        accepted_tx
+            .send(7_u8)
+            .expect("watchdog must not drop the accept future");
+
+        assert!(matches!(waiter.await.unwrap(), AcceptWait::Accepted(7)));
+    }
+
+    #[tokio::test]
+    async fn watchdog_ticks_do_not_lose_the_shutdown_waiter() {
+        let shutdown = Arc::new(Notify::new());
+        let shutdown_wait = Arc::clone(&shutdown);
+        let waiter = tokio::spawn(wait_for_accept_or_shutdown(
+            std::future::pending::<()>(),
+            async move { shutdown_wait.notified().await },
+            Duration::from_millis(5),
+        ));
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        shutdown.notify_waiters();
+
+        assert!(matches!(waiter.await.unwrap(), AcceptWait::Shutdown));
+    }
+}

@@ -1,0 +1,879 @@
+//! Adversarial planner and reverse-map tests for immutable staged outputs.
+use super::*;
+use tempfile::tempdir;
+
+impl<T> StagedPlanOutcome<T> {
+    fn unwrap(self) -> Option<T> {
+        match self {
+            Self::Enabled(value) => Some(value),
+            Self::Unsupported(_) => None,
+            Self::Error(error) => panic!("planner failed: {:?}: {}", error.reason, error.source),
+        }
+    }
+}
+
+fn staged_tests_enabled() -> bool {
+    std::env::var_os(super::super::staged_store::STAGED_ARTIFACTS_ENV).is_some()
+}
+
+#[test]
+fn rust_plan_rewrites_output_before_spawn() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let output: NormalizedPath = temp.path().join("target/libx.rlib").into();
+    let plan = StagedCompilePlan::rustc(
+        temp.path(),
+        &[
+            "--crate-type=rlib".into(),
+            "-o".into(),
+            output.to_string_lossy().into_owned(),
+        ],
+        &output,
+        std::slice::from_ref(&output),
+        temp.path(),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!plan
+        .rewritten_args
+        .contains(&output.to_string_lossy().into_owned()));
+    assert!(plan.primary_staged().as_path().starts_with(temp.path()));
+    plan.cleanup().unwrap();
+}
+
+#[test]
+fn rust_staging_paths_do_not_change_published_output_bytes() {
+    let Some(rustc) = crate::daemon_core::test_support::find_rustc() else {
+        return;
+    };
+    let temp = tempdir().unwrap();
+    let source = temp.path().join("fixture.rs");
+    std::fs::write(&source, "pub fn answer() -> u32 { 42 }\n").unwrap();
+
+    let build = |label: &str| {
+        let logical_dir = temp.path().join(format!("target-{label}"));
+        let primary: NormalizedPath = logical_dir.join("libfixture-fixed.rlib").into();
+        let expected: Vec<NormalizedPath> = [
+            logical_dir.join("libfixture-fixed.rlib"),
+            logical_dir.join("libfixture-fixed.rmeta"),
+            logical_dir.join("fixture-fixed.d"),
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        let args = vec![
+            "--crate-name".into(),
+            "fixture".into(),
+            "--edition=2021".into(),
+            "--crate-type=rlib".into(),
+            "--emit=dep-info,metadata,link".into(),
+            "-C".into(),
+            "metadata=fixed".into(),
+            "-C".into(),
+            "extra-filename=-fixed".into(),
+            "--out-dir".into(),
+            logical_dir.to_string_lossy().into_owned(),
+            source.to_string_lossy().into_owned(),
+        ];
+        let plan = StagedCompilePlan::rustc(
+            &temp.path().join(format!("staging-{label}")),
+            &args,
+            &primary,
+            &expected,
+            temp.path(),
+        )
+        .unwrap()
+        .unwrap();
+        let output = std::process::Command::new(rustc.as_path())
+            .args(&plan.rewritten_args)
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "rustc failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        plan.rewrite_logical_side_outputs().unwrap();
+        plan
+    };
+
+    let first = build("one path # $");
+    let second = build("two path # $");
+    for first_output in &first.outputs {
+        let name = first_output.staged.file_name().unwrap();
+        let second_output = second
+            .outputs
+            .iter()
+            .find(|output| output.staged.file_name() == Some(name))
+            .unwrap();
+        assert_eq!(
+            std::fs::read(first_output.staged.as_path()).unwrap(),
+            std::fs::read(second_output.staged.as_path()).unwrap(),
+            "staged path changed output bytes for {}",
+            name.to_string_lossy()
+        );
+    }
+    for plan in [&first, &second] {
+        let depfile = plan
+            .outputs
+            .iter()
+            .find(|output| output.role == StagedOutputRole::Depfile)
+            .unwrap()
+            .requested
+            .clone();
+        plan.materialize(MaterializationMode::Auto).unwrap();
+        let depfile_text = std::fs::read_to_string(&depfile).unwrap();
+        assert!(!depfile_text.contains(STAGED_OUTPUT_REMAP_ROOT));
+        let requested_parent = depfile.parent().unwrap().to_string_lossy();
+        let quoted_parent =
+            super::super::staged_paths::quote_make_depfile_path(requested_parent.as_bytes());
+        assert!(
+            depfile_text
+                .as_bytes()
+                .windows(quoted_parent.len())
+                .any(|window| window == quoted_parent),
+            "rustc dep-info must retain a Make-escaped requested target: {depfile_text}"
+        );
+        assert!(
+            !depfile_text.contains(requested_parent.as_ref()),
+            "special requested parent must not be emitted as an unescaped Make token: {depfile_text}"
+        );
+    }
+}
+
+#[test]
+fn explicit_emit_destination_is_staged_and_mapped() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let output: NormalizedPath = temp.path().join("x.rlib").into();
+    let plan = StagedCompilePlan::rustc(
+        temp.path(),
+        &["--emit=link,dep-info=custom.mk".into()],
+        &output,
+        std::slice::from_ref(&output),
+        temp.path(),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(plan.outputs.iter().any(|output| {
+        output.requested.file_name().and_then(|name| name.to_str()) == Some("custom.mk")
+            && output.role == StagedOutputRole::Depfile
+    }));
+    assert!(plan
+        .rewritten_args
+        .iter()
+        .any(|arg| arg.contains("dep-info=") && arg.contains(".compile-")));
+    plan.cleanup().unwrap();
+}
+
+#[test]
+fn logical_depfile_rewrite_failure_is_propagated_before_publication() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("private");
+    std::fs::create_dir_all(&root).unwrap();
+    let requested: NormalizedPath = temp.path().join("requested/deps.mk").into();
+    let staged: NormalizedPath = root.join("deps.mk").into();
+    let original = format!("{}: source.rs\n", staged.display()).into_bytes();
+    std::fs::write(&staged, &original).unwrap();
+    let plan = StagedCompilePlan::for_test(
+        root,
+        vec![StagedOutputPlan {
+            requested,
+            staged: staged.clone(),
+            role: StagedOutputRole::Depfile,
+        }],
+    );
+    let fault = StagedFaultGuard::arm(temp.path(), [StagedFaultPoint::LogicalDepfileRewrite(0)]);
+
+    plan.rewrite_logical_side_outputs()
+        .expect_err("rewrite failure must propagate");
+    assert_eq!(std::fs::read(&staged).unwrap(), original);
+    fault.assert_all_consumed();
+}
+
+#[test]
+fn deferred_materialization_keeps_staged_source_for_durable_publication() {
+    let temp = tempdir().unwrap();
+    let root: NormalizedPath = temp.path().join("private").into();
+    std::fs::create_dir_all(root.as_path()).unwrap();
+    let requested: NormalizedPath = temp.path().join("requested/libfixture.rlib").into();
+    let staged: NormalizedPath = root.join("libfixture.rlib");
+    std::fs::write(staged.as_path(), b"compiled artifact").unwrap();
+    let plan = StagedCompilePlan::for_test(
+        root.clone(),
+        vec![StagedOutputPlan {
+            requested: requested.clone(),
+            staged: staged.clone(),
+            role: StagedOutputRole::Regular,
+        }],
+    );
+
+    plan.materialize_without_cleanup(MaterializationMode::Auto)
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read(requested.as_path()).unwrap(),
+        b"compiled artifact"
+    );
+    assert!(
+        staged.exists(),
+        "publisher must retain access to the staged source"
+    );
+    assert!(
+        root.exists(),
+        "staging root must outlive response materialization"
+    );
+
+    plan.cleanup().unwrap();
+    assert!(
+        !root.exists(),
+        "publisher cleanup must reclaim the private staging root"
+    );
+}
+
+#[test]
+fn observed_output_name_updates_tracked_requested_destination() {
+    let temp = tempdir().unwrap();
+    let root: NormalizedPath = temp.path().join("private").into();
+    std::fs::create_dir_all(root.as_path()).unwrap();
+    let requested: NormalizedPath = temp.path().join("target/wasm_restore").into();
+    let staged: NormalizedPath = root.join("wasm_restore");
+    let observed: NormalizedPath = root.join("wasm_restore.wasm");
+    std::fs::write(observed.as_path(), b"wasm artifact").unwrap();
+    let mut plan = StagedCompilePlan::for_test(
+        root,
+        vec![StagedOutputPlan {
+            requested,
+            staged,
+            role: StagedOutputRole::Regular,
+        }],
+    );
+
+    plan.observe_compiler_output_names().unwrap();
+
+    assert_eq!(
+        plan.requested_output_paths(),
+        vec![NormalizedPath::from(
+            temp.path().join("target/wasm_restore.wasm"),
+        )],
+        "watcher invalidation must target the compiler-observed public filename"
+    );
+    plan.cleanup().unwrap();
+}
+
+#[test]
+fn cc_custom_mf_destination_is_classified_as_a_depfile() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let output: NormalizedPath = temp.path().join("hello.o").into();
+    let depfile: NormalizedPath = temp.path().join("deps.mk").into();
+    let plan = StagedCompilePlan::cc(
+        temp.path(),
+        crate::daemon_core::compiler::CompilerFamily::Clang,
+        &[
+            "-c".into(),
+            "hello.cpp".into(),
+            "-o".into(),
+            output.to_string_lossy().into_owned(),
+            "-MD".into(),
+            "-MF".into(),
+            depfile.to_string_lossy().into_owned(),
+        ],
+        &output,
+        temp.path(),
+        &crate::daemon_core::depgraph::UserDepFlags {
+            has_md: true,
+            mf_path: Some(depfile.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(plan
+        .outputs
+        .iter()
+        .any(|output| { output.requested == depfile && output.role == StagedOutputRole::Depfile }));
+    plan.cleanup().unwrap();
+}
+
+#[test]
+fn cc_plan_rewrites_concatenated_output_flag() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let output: NormalizedPath = temp.path().join("hello.o").into();
+    let plan = StagedCompilePlan::cc(
+        temp.path(),
+        crate::daemon_core::compiler::CompilerFamily::Clang,
+        &["-c".into(), "hello.cpp".into(), "-ohello.o".into()],
+        &output,
+        temp.path(),
+        &crate::daemon_core::depgraph::UserDepFlags::default(),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(plan
+        .rewritten_args
+        .iter()
+        .any(|arg| arg.starts_with("-o") && arg.contains(".compile-")));
+    plan.cleanup().unwrap();
+}
+
+#[test]
+fn cc_plan_stages_user_depfile_without_leaking_private_path() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let output: NormalizedPath = temp.path().join("hello.o").into();
+    let depfile: NormalizedPath = temp.path().join("deps/hello.d").into();
+    let dep_flags = crate::daemon_core::depgraph::UserDepFlags {
+        has_md: true,
+        has_mmd: false,
+        mf_path: Some(depfile.clone()),
+        depfile_to_stdout: false,
+    };
+    let plan = StagedCompilePlan::cc(
+        temp.path(),
+        crate::daemon_core::compiler::CompilerFamily::Clang,
+        &[
+            "-c".into(),
+            "hello.cpp".into(),
+            "-o".into(),
+            "hello.o".into(),
+            "-MD".into(),
+            "-MF".into(),
+            depfile.to_string_lossy().into_owned(),
+        ],
+        &output,
+        temp.path(),
+        &dep_flags,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(plan.outputs.len(), 2);
+    assert!(plan
+        .rewritten_args
+        .windows(2)
+        .any(|args| args[0] == "-MF" && args[1].contains(".compile-")));
+    let rewritten =
+        plan.rewrite_depfile_strategy(crate::daemon_core::depgraph::DepfileStrategy::UserSpecified {
+            path: depfile,
+            augment_system_headers: false,
+        });
+    assert!(matches!(
+        rewritten,
+        crate::daemon_core::depgraph::DepfileStrategy::UserSpecified { path, .. }
+            if path.as_path().starts_with(temp.path())
+    ));
+    plan.cleanup().unwrap();
+}
+
+#[test]
+fn cc_plan_stages_single_precompiled_header_output() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let output: NormalizedPath = temp.path().join("header.pch").into();
+    let plan = StagedCompilePlan::cc(
+        temp.path(),
+        crate::daemon_core::compiler::CompilerFamily::Clang,
+        &[
+            "-x".into(),
+            "c-header".into(),
+            "header.h".into(),
+            "-o".into(),
+            output.to_string_lossy().into_owned(),
+        ],
+        &output,
+        temp.path(),
+        &crate::daemon_core::depgraph::UserDepFlags::default(),
+    )
+    .unwrap()
+    .unwrap();
+    let stage_root = plan
+        .primary_staged()
+        .parent()
+        .and_then(Path::parent)
+        .unwrap();
+    let compile_dir = plan.primary_staged().parent().unwrap();
+    assert_eq!(stage_root, temp.path());
+    assert!(compile_dir
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with(".compile-")));
+    plan.cleanup().unwrap();
+}
+
+#[test]
+fn msvc_plan_rewrites_fo_without_inventing_gcc_flags() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let output: NormalizedPath = temp.path().join("hello.obj").into();
+    let plan = StagedCompilePlan::cc(
+        temp.path(),
+        crate::daemon_core::compiler::CompilerFamily::Msvc,
+        &["/c".into(), "hello.cpp".into(), "/Fo:hello.obj".into()],
+        &output,
+        temp.path(),
+        &crate::daemon_core::depgraph::UserDepFlags::default(),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(plan
+        .rewritten_args
+        .iter()
+        .any(|arg| arg.to_ascii_lowercase().starts_with("/fo")));
+    assert!(!plan.rewritten_args.iter().any(|arg| arg == "-o"));
+    plan.cleanup().unwrap();
+}
+
+#[test]
+fn archive_plan_rewrites_exact_output_token() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let output: NormalizedPath = temp.path().join("libhello.a").into();
+    let plan = StagedCompilePlan::archive(
+        temp.path(),
+        &["rcs".into(), "libhello.a".into(), "hello.o".into()],
+        &output,
+        temp.path(),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(plan
+        .rewritten_args
+        .iter()
+        .any(|arg| arg.contains(".compile-")));
+    plan.cleanup().unwrap();
+}
+
+#[test]
+fn link_plan_rewrites_primary_and_declared_secondary_outputs() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let primary: NormalizedPath = temp.path().join("app.exe").into();
+    let import: NormalizedPath = temp.path().join("app.lib").into();
+    let plan = StagedCompilePlan::link(
+        temp.path(),
+        &[
+            "-o".into(),
+            "app.exe".into(),
+            "-Wl,--out-implib,app.lib".into(),
+        ],
+        &primary,
+        std::slice::from_ref(&import),
+        temp.path(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(plan.outputs.len(), 2);
+    assert!(plan
+        .rewritten_args
+        .iter()
+        .any(|arg| arg.contains(".link-") && arg.contains("app.exe")));
+    assert!(plan
+        .rewritten_args
+        .iter()
+        .any(|arg| arg.contains(".link-") && arg.contains("app.lib")));
+    std::fs::write(
+        plan.primary_staged().parent().unwrap().join("implicit.pdb"),
+        b"debug",
+    )
+    .unwrap();
+    assert_eq!(plan.unexpected_staged_entries().unwrap().len(), 1);
+    plan.cleanup().unwrap();
+}
+
+#[test]
+fn link_plan_rewrites_absolute_output_once_and_ignores_substrings() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let primary: NormalizedPath = temp.path().join("app.exe").into();
+    let absolute = primary.to_string_lossy().into_owned();
+    let plan = StagedCompilePlan::link(
+        temp.path(),
+        &[
+            "-o".into(),
+            absolute,
+            "--trace-symbol=app.exe.helper".into(),
+        ],
+        &primary,
+        &[],
+        temp.path(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        plan.rewritten_args[1],
+        plan.primary_staged().to_string_lossy()
+    );
+    assert_eq!(plan.rewritten_args[2], "--trace-symbol=app.exe.helper");
+    plan.cleanup().unwrap();
+}
+
+#[test]
+fn link_plan_rejects_ambiguous_output_token() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let primary: NormalizedPath = temp.path().join("app.exe").into();
+    let plan = StagedCompilePlan::link(
+        temp.path(),
+        &["-Wl,-Map,app.exe,app.exe".into()],
+        &primary,
+        &[],
+        temp.path(),
+    );
+    assert!(matches!(
+        plan,
+        StagedPlanOutcome::Unsupported(StagedPlanReason::AmbiguousOutputArgument)
+    ));
+}
+
+#[test]
+fn link_plan_stages_explicit_msvc_debug_output_set() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let primary: NormalizedPath = temp.path().join("app.exe").into();
+    let pdb: NormalizedPath = temp.path().join("app.pdb").into();
+    let ilk: NormalizedPath = temp.path().join("app.ilk").into();
+    let map: NormalizedPath = temp.path().join("app.map").into();
+    let args = [
+        format!("/OUT:{}", primary.display()),
+        format!("/PDB:{}", pdb.display()),
+        format!("/ILK:{}", ilk.display()),
+        format!("/MAP:{}", map.display()),
+    ];
+    let plan = StagedCompilePlan::link(temp.path(), &args, &primary, &[pdb, ilk, map], temp.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan.outputs.len(), 4);
+    assert!(plan.rewritten_args.iter().all(|arg| arg.contains(".link-")));
+    plan.cleanup().unwrap();
+}
+
+#[test]
+fn link_plan_redirects_implicit_msvc_side_output_before_spawn() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let primary: NormalizedPath = temp.path().join("app.exe").into();
+    let implicit_pdb: NormalizedPath = temp.path().join("app.pdb").into();
+    let plan = StagedCompilePlan::link(
+        temp.path(),
+        &["/DEBUG".into(), format!("/OUT:{}", primary.display())],
+        &primary,
+        &[implicit_pdb],
+        temp.path(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(plan.outputs.len(), 2);
+    assert!(plan
+        .rewritten_args
+        .iter()
+        .any(|arg| arg.starts_with("/PDB:") && arg.contains(".link-")));
+    plan.cleanup().unwrap();
+}
+
+#[test]
+fn link_plan_rejects_semantic_gnu_map_destination() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let primary: NormalizedPath = temp.path().join("app").into();
+    let semantic_map: NormalizedPath = temp.path().join("%.map").into();
+    let plan = StagedCompilePlan::link(
+        temp.path(),
+        &[
+            "-o".into(),
+            primary.to_string_lossy().into_owned(),
+            format!("-Map={}", semantic_map.display()),
+        ],
+        &primary,
+        &[semantic_map],
+        temp.path(),
+    );
+    assert!(matches!(
+        plan,
+        StagedPlanOutcome::Unsupported(StagedPlanReason::UnsupportedOutputPath)
+    ));
+}
+
+#[test]
+fn link_plan_rejects_unmodeled_output_option_before_spawn() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let primary: NormalizedPath = temp.path().join("app.exe").into();
+    let plan = StagedCompilePlan::link(
+        temp.path(),
+        &[
+            format!("/OUT:{}", primary.display()),
+            "/IDLOUT:generated/app.idl".into(),
+        ],
+        &primary,
+        &[],
+        temp.path(),
+    );
+    assert!(matches!(
+        plan,
+        StagedPlanOutcome::Unsupported(StagedPlanReason::UnmodeledSideOutput)
+    ));
+}
+
+#[test]
+fn implicit_msvc_outputs_receive_explicit_staged_destinations() {
+    let requested = Path::new("bin/app.pgd");
+    let staged = Path::new("staging/app.pgd");
+    assert_eq!(
+        implicit_msvc_output_option(&["/GENPROFILE".into()], requested, staged),
+        Some(format!("/PGD:{}", staged.display()))
+    );
+
+    let requested = Path::new("bin/app.iobj");
+    let staged = Path::new("staging/app.iobj");
+    assert_eq!(
+        implicit_msvc_output_option(&["/LTCG:INCREMENTAL".into()], requested, staged),
+        Some(format!("/LTCGOUT:{}", staged.display()))
+    );
+
+    let requested = Path::new("bin/app.winmd");
+    let staged = Path::new("staging/app.winmd");
+    assert_eq!(
+        implicit_msvc_output_option(&["/WINMD".into()], requested, staged),
+        Some(format!("/WINMDFILE:{}", staged.display()))
+    );
+}
+
+#[test]
+fn planner_reason_ids_are_bounded_and_non_sensitive() {
+    let profiler = crate::daemon_core::daemon::staged_stats::StagedProfiler::new();
+    let mut ids = std::collections::HashSet::new();
+    for reason in StagedPlanReason::ALL {
+        let id = reason.id();
+        assert!(!id.is_empty());
+        assert!(id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_'));
+        assert!(!id.contains('/') && !id.contains('\\') && !id.contains(':'));
+        assert!(ids.insert(id), "duplicate planner reason ID: {id}");
+        profiler.failure(reason.failure());
+    }
+    let failures = profiler.snapshot().failures;
+    for id in ids {
+        assert_eq!(failures[&format!("plan_{id}")], 1);
+    }
+}
+
+#[test]
+fn compile_and_archive_rejections_keep_precise_reasons() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let output: NormalizedPath = temp.path().join("hello.o").into();
+    assert!(matches!(
+        StagedCompilePlan::rustc(
+            temp.path(),
+            &["--emit=link=-".into()],
+            &output,
+            std::slice::from_ref(&output),
+            temp.path(),
+        ),
+        StagedPlanOutcome::Unsupported(StagedPlanReason::OutputToStdout)
+    ));
+    assert!(matches!(
+        StagedCompilePlan::rustc(
+            temp.path(),
+            &["-o".into()],
+            &output,
+            std::slice::from_ref(&output),
+            temp.path(),
+        ),
+        StagedPlanOutcome::Unsupported(StagedPlanReason::MissingOptionValue)
+    ));
+    let duplicate_a: NormalizedPath = temp.path().join("one/same.rlib").into();
+    let duplicate_b: NormalizedPath = temp.path().join("two/same.rlib").into();
+    assert!(matches!(
+        StagedCompilePlan::rustc(
+            temp.path(),
+            &["--out-dir".into(), temp.path().display().to_string()],
+            &duplicate_a,
+            &[duplicate_a.clone(), duplicate_b],
+            temp.path(),
+        ),
+        StagedPlanOutcome::Unsupported(StagedPlanReason::OutputNameCollision)
+    ));
+    assert!(matches!(
+        StagedCompilePlan::cc(
+            temp.path(),
+            crate::daemon_core::compiler::CompilerFamily::Clang,
+            &["-c".into(), "hello.cpp".into(), "-fmodules".into()],
+            &output,
+            temp.path(),
+            &crate::daemon_core::depgraph::UserDepFlags::default(),
+        ),
+        StagedPlanOutcome::Unsupported(StagedPlanReason::UnmodeledSideOutput)
+    ));
+    let executable: NormalizedPath = temp.path().join("hello.exe").into();
+    assert!(matches!(
+        StagedCompilePlan::cc(
+            temp.path(),
+            crate::daemon_core::compiler::CompilerFamily::Clang,
+            &["-o".into(), "hello.exe".into()],
+            &executable,
+            temp.path(),
+            &crate::daemon_core::depgraph::UserDepFlags::default(),
+        ),
+        StagedPlanOutcome::Unsupported(StagedPlanReason::UnsupportedOutputRole)
+    ));
+    assert!(matches!(
+        StagedCompilePlan::cc(
+            temp.path(),
+            crate::daemon_core::compiler::CompilerFamily::Msvc,
+            &["/c".into(), "hello.cpp".into()],
+            &output,
+            temp.path(),
+            &crate::daemon_core::depgraph::UserDepFlags::default(),
+        ),
+        StagedPlanOutcome::Unsupported(StagedPlanReason::MissingRequiredOutputFlag)
+    ));
+    assert!(matches!(
+        StagedCompilePlan::cc(
+            temp.path(),
+            crate::daemon_core::compiler::CompilerFamily::Clang,
+            &["-o".into()],
+            &output,
+            temp.path(),
+            &crate::daemon_core::depgraph::UserDepFlags::default(),
+        ),
+        StagedPlanOutcome::Unsupported(StagedPlanReason::MissingOptionValue)
+    ));
+    let archive: NormalizedPath = temp.path().join("libhello.a").into();
+    assert!(matches!(
+        StagedCompilePlan::archive(
+            temp.path(),
+            &["rcs".into(), "different.a".into()],
+            &archive,
+            temp.path(),
+        ),
+        StagedPlanOutcome::Unsupported(StagedPlanReason::OutputNotInArguments)
+    ));
+}
+
+#[test]
+fn planner_errors_keep_precise_reasons() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let output: NormalizedPath = temp.path().join("hello.rlib").into();
+    let blocked_root = temp.path().join("not-a-directory");
+    std::fs::write(&blocked_root, b"file").unwrap();
+    assert!(matches!(
+        StagedCompilePlan::rustc(
+            &blocked_root,
+            &["-o".into(), "hello.rlib".into()],
+            &output,
+            std::slice::from_ref(&output),
+            temp.path(),
+        ),
+        StagedPlanOutcome::Error(StagedPlanError {
+            reason: StagedPlanReason::StagingDirectoryCreate,
+            ..
+        })
+    ));
+
+    let root_output: NormalizedPath = Path::new(std::path::MAIN_SEPARATOR_STR).into();
+    assert!(matches!(
+        StagedCompilePlan::rustc(
+            temp.path(),
+            &["-o".into(), root_output.to_string_lossy().into_owned()],
+            &root_output,
+            std::slice::from_ref(&root_output),
+            temp.path(),
+        ),
+        StagedPlanOutcome::Error(StagedPlanError {
+            reason: StagedPlanReason::OutputMissingFilename,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn output_fault_stops_partial_salvage_before_completion() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let archive: NormalizedPath = temp.path().join("target/libx.rlib").into();
+    let metadata: NormalizedPath = temp.path().join("target/libx.rmeta").into();
+    let plan = StagedCompilePlan::rustc(
+        temp.path(),
+        &["--out-dir".into(), temp.path().display().to_string()],
+        &archive,
+        &[archive.clone(), metadata.clone()],
+        temp.path(),
+    )
+    .unwrap()
+    .unwrap();
+    for (index, staged) in plan.output_paths().iter().enumerate() {
+        std::fs::write(staged, format!("complete output {index}")).unwrap();
+    }
+    let fault = StagedFaultGuard::arm(temp.path(), [StagedFaultPoint::MaterializeOutput(1)]);
+    let error = plan.materialize(MaterializationMode::Auto).unwrap_err();
+    let progress = materialization_error_progress(&error);
+    assert_eq!(progress.reflink_count + progress.copy_count, 1);
+    assert!(progress.copy_bytes == 0 || progress.copy_bytes == 17);
+    assert_eq!(std::fs::read(&archive).unwrap(), b"complete output 0");
+    assert!(!metadata.exists());
+    fault.assert_all_consumed();
+}
+
+#[test]
+fn link_plan_accepts_case_sensitive_gnu_map_option() {
+    if !staged_tests_enabled() {
+        return;
+    }
+    let temp = tempdir().unwrap();
+    let primary: NormalizedPath = temp.path().join("app").into();
+    let map: NormalizedPath = temp.path().join("app.map").into();
+    let plan = StagedCompilePlan::link(
+        temp.path(),
+        &[
+            "-o".into(),
+            primary.to_string_lossy().into_owned(),
+            "-Map".into(),
+            map.to_string_lossy().into_owned(),
+        ],
+        &primary,
+        &[map],
+        temp.path(),
+    )
+    .unwrap();
+    assert!(plan.is_some());
+}
