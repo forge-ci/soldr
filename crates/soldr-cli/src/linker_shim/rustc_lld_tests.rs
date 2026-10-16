@@ -98,3 +98,99 @@ fn parses_rustc_version_lines() {
     assert_eq!(parse_rustc_version("garbage"), None);
     assert_eq!(parse_rustc_version(""), None);
 }
+
+// -- cargo config files and --config arguments (conservative scan) ----------
+
+mod config_scan {
+    use super::super::config_mentions_lld_policy_for_tests as mentions;
+
+    fn in_dir(dir: &std::path::Path, f: impl FnOnce()) {
+        let _lock = crate::TEST_PROCESS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _home = crate::EnvVarGuard::set("CARGO_HOME", dir.join("no-cargo-home"));
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir).unwrap();
+        f();
+        std::env::set_current_dir(previous).unwrap();
+    }
+
+    fn write_config(dir: &std::path::Path, text: &str) {
+        std::fs::create_dir_all(dir.join(".cargo")).unwrap();
+        std::fs::write(dir.join(".cargo/config.toml"), text).unwrap();
+    }
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_parent_config_with_link_self_contained_is_doubt() {
+        let temp = tempfile::tempdir().unwrap();
+        write_config(
+            temp.path(),
+            "[build]\nrustflags = [\"-C\", \"link-self-contained=no\"]\n",
+        );
+        let child = temp.path().join("a/b");
+        std::fs::create_dir_all(&child).unwrap();
+        in_dir(&child, || assert!(mentions(&[])));
+    }
+
+    #[test]
+    fn linker_features_in_a_config_is_doubt() {
+        let temp = tempfile::tempdir().unwrap();
+        write_config(
+            temp.path(),
+            "[build]\nrustflags = [\"-Clinker-features=-lld\"]\n",
+        );
+        in_dir(temp.path(), || assert!(mentions(&[])));
+    }
+
+    #[test]
+    fn a_config_argument_is_doubt() {
+        let temp = tempfile::tempdir().unwrap();
+        in_dir(temp.path(), || {
+            assert!(mentions(&args(&[
+                "build",
+                "--config",
+                "build.rustflags=['-Clink-self-contained=no']"
+            ])));
+            assert!(mentions(&args(&[
+                "build",
+                "--config=build.rustflags=['-Zlinker-features=-lld']"
+            ])));
+            assert!(!mentions(&args(&["build", "--config", "build.jobs=2"])));
+        });
+    }
+
+    #[test]
+    fn a_manifest_path_directory_config_is_doubt() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("proj");
+        write_config(
+            &project,
+            "[build]\nrustflags = [\"-Clink-self-contained=no\"]\n",
+        );
+        let other = temp.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        in_dir(&other, || {
+            let manifest = project.join("Cargo.toml").to_string_lossy().into_owned();
+            assert!(mentions(&[
+                "build".into(),
+                "--manifest-path".into(),
+                manifest
+            ]));
+            assert!(!mentions(&args(&["build"])));
+        });
+    }
+
+    #[test]
+    fn a_benign_config_leaves_the_shortcut_on() {
+        let temp = tempfile::tempdir().unwrap();
+        write_config(
+            temp.path(),
+            "[build]\njobs = 4\nrustflags = [\"-C\", \"opt-level=2\"]\n",
+        );
+        in_dir(temp.path(), || assert!(!mentions(&[])));
+    }
+}

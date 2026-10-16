@@ -178,6 +178,7 @@ pub(super) async fn apply_linker_override(
     let rustc_lld = crate::linker_shim::rustc_lld::for_command(
         &target,
         command,
+        args,
         injection.rustflags.as_deref(),
     );
     linker::materialize_linker_driver_shim_resolving(paths, &target, &mut injection, rustc_lld)

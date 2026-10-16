@@ -100,6 +100,79 @@ fn option_disables_lld(option: &str) -> bool {
     }
 }
 
+/// Markers whose mere presence in a cargo config makes the answer "doubt".
+const CONFIG_MARKERS: [&str; 2] = ["link-self-contained", "linker-features"];
+
+fn mentions_marker(text: &str) -> bool {
+    CONFIG_MARKERS.iter().any(|marker| text.contains(marker))
+}
+
+/// The directories cargo would start config discovery from: the cwd, plus
+/// the `--manifest-path` / `-C` directory when the args name one.
+fn config_start_dirs(cargo_args: &[String]) -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = std::env::current_dir().into_iter().collect();
+    let mut iter = cargo_args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        let value = match arg.as_str() {
+            "--manifest-path" | "-C" => iter.next().map(String::as_str),
+            _ => arg.strip_prefix("--manifest-path="),
+        };
+        let Some(value) = value else { continue };
+        let path = Path::new(value);
+        let dir = if arg == "-C" {
+            Some(path)
+        } else {
+            path.parent()
+        };
+        if let Some(dir) = dir {
+            let dir = if dir.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                dir
+            };
+            dirs.push(
+                std::env::current_dir().map_or_else(|_| dir.to_path_buf(), |cwd| cwd.join(dir)),
+            );
+        }
+    }
+    dirs
+}
+
+/// Does any cargo config cargo would read for this build, or any `--config`
+/// argument, mention `link-self-contained` or `linker-features`? A plain
+/// substring scan: it can only err toward the old fetch path. An unreadable
+/// file counts as a mention. Reuses the one config-file discovery walk
+/// (`trampoline::discover_cargo_config_files`).
+fn config_mentions_lld_policy(cargo_args: &[String]) -> bool {
+    let mut iter = cargo_args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        let value = if arg == "--config" {
+            iter.next().map(String::as_str)
+        } else {
+            arg.strip_prefix("--config=")
+        };
+        if let Some(value) = value {
+            // `--config` takes KEY=VALUE or a path to a config file.
+            if mentions_marker(value)
+                || (Path::new(value).is_file()
+                    && std::fs::read_to_string(value).map_or(true, |t| mentions_marker(&t)))
+            {
+                return true;
+            }
+        }
+    }
+    config_start_dirs(cargo_args)
+        .iter()
+        .flat_map(|dir| crate::trampoline::discover_cargo_config_files(dir))
+        .any(|file| std::fs::read_to_string(file).map_or(true, |text| mentions_marker(&text)))
+}
+
 /// The active rustc's `(major, minor)`, probed once per process through the
 /// already-resolved rustc. `None` on any failure or timeout.
 fn active_rustc_version() -> Option<(u32, u32)> {
@@ -139,6 +212,7 @@ const RUSTFLAGS_KEYS: [&str; 3] = [
 pub(crate) fn for_command(
     target: &str,
     command: &Command,
+    cargo_args: &[String],
     injection_rustflags: Option<&str>,
 ) -> bool {
     let host = crate::platform::host::facts::triple();
@@ -157,10 +231,17 @@ pub(crate) fn for_command(
         .map(|value: OsString| value.to_string_lossy().into_owned())
         .collect();
     flags.extend(injection_rustflags.map(str::to_string));
-    if flags.iter().any(|flags| opts_out_of_rustc_lld(flags)) {
+    if flags.iter().any(|flags| opts_out_of_rustc_lld(flags))
+        || config_mentions_lld_policy(cargo_args)
+    {
         return false;
     }
     rustc_supplies_lld(target, host, active_rustc_version(), &flags)
+}
+
+#[cfg(test)]
+pub(crate) fn config_mentions_lld_policy_for_tests(args: &[String]) -> bool {
+    config_mentions_lld_policy(args)
 }
 
 #[cfg(test)]

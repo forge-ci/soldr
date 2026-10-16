@@ -818,7 +818,7 @@ pub(crate) use dep_info::parse_dep_info_for_output;
 
 #[path = "trampoline_config.rs"]
 mod config;
-pub(crate) use config::cargo_config_digest;
+pub(crate) use config::{cargo_config_digest, discover_cargo_config_files};
 
 // ---------------------------------------------------------------------------
 // Exec / stat / logging helpers
