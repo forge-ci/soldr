@@ -16,7 +16,7 @@ pub(crate) fn session_debug_enabled() -> bool {
 }
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use interprocess::local_socket::tokio::Stream;
 use prost::Message;
@@ -339,8 +339,14 @@ async fn run_session_compile_async(
         }
     };
 
-    pump_session_output_with_timeout(&mut stream, crate::daemon::client::compile_reply_timeout())
-        .await
+    let mut probe = RelayProbe::new(rustc_argv);
+    probe.on_request_sent();
+    pump_session_output_with_timeout(
+        &mut stream,
+        crate::daemon::client::compile_reply_timeout(),
+        &mut probe,
+    )
+    .await
 }
 
 async fn establish_session(
@@ -700,6 +706,7 @@ fn mark_relayed_output(bytes: &[u8]) -> bool {
 async fn pump_session_output_with_timeout<S>(
     stream: &mut S,
     reply_timeout: std::time::Duration,
+    probe: &mut RelayProbe,
 ) -> Result<SessionCompileOutcome, SessionError>
 where
     S: tokio::io::AsyncRead + Unpin,
@@ -707,7 +714,7 @@ where
     let output_started = Arc::new(AtomicBool::new(false));
     match tokio::time::timeout(
         reply_timeout,
-        pump_session_output(stream, Arc::clone(&output_started)),
+        pump_session_output(stream, Arc::clone(&output_started), probe),
     )
     .await
     {
@@ -736,6 +743,7 @@ where
 async fn pump_session_output<S>(
     stream: &mut S,
     output_seen: Arc<AtomicBool>,
+    probe: &mut RelayProbe,
 ) -> Result<SessionCompileOutcome, SessionError>
 where
     S: tokio::io::AsyncRead + Unpin,
@@ -757,6 +765,7 @@ where
                     let consumed = decoded.consumed;
                     let kind = decoded.frame.kind.clone();
                     buf.drain(..consumed);
+                    probe.on_frame();
                     match kind {
                         Some(session_frame::Kind::Stdout(b)) => {
                             output_started = true;
@@ -766,6 +775,7 @@ where
                                 .await
                                 .map_err(|e| tag(output_started, e))?;
                             mark_relayed_output(&b);
+                            probe.on_output(&b);
                             stdout.flush().await.map_err(|e| tag(output_started, e))?;
                         }
                         Some(session_frame::Kind::Stderr(b)) => {
@@ -776,9 +786,11 @@ where
                                 .await
                                 .map_err(|e| tag(output_started, e))?;
                             mark_relayed_output(&b);
+                            probe.on_output(&b);
                             stderr.flush().await.map_err(|e| tag(output_started, e))?;
                         }
                         Some(session_frame::Kind::Exit(exit)) => {
+                            probe.on_exit();
                             let cache_outcome = exit
                                 .metadata
                                 .get(META_CACHE_OUTCOME)
@@ -809,6 +821,94 @@ where
             ));
         }
         buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+/// Per-invocation relay timing under `SOLDR_PROFILE_STARTUP` (soldr#3800).
+/// Disabled probes do nothing per frame beyond one branch. It only observes
+/// the bytes the pump already forwards; it never alters them.
+struct RelayProbe {
+    enabled: bool,
+    crate_name: String,
+    base: Instant,
+    req_sent: Option<Instant>,
+    req_sent_unix_ms: u128,
+    first_frame_ms: Option<u128>,
+    metadata_frame_ms: Option<u128>,
+}
+
+impl RelayProbe {
+    fn new(rustc_argv: &[String]) -> Self {
+        if !crate::startup_profile::profiling_enabled() {
+            return Self::disabled();
+        }
+        Self {
+            enabled: true,
+            crate_name: crate::startup_profile::crate_name_from_args(rustc_argv)
+                .unwrap_or_default()
+                .to_string(),
+            base: crate::startup_profile::process_start(),
+            req_sent: None,
+            req_sent_unix_ms: 0,
+            first_frame_ms: None,
+            metadata_frame_ms: None,
+        }
+    }
+
+    fn disabled() -> Self {
+        Self {
+            enabled: false,
+            crate_name: String::new(),
+            base: Instant::now(),
+            req_sent: None,
+            req_sent_unix_ms: 0,
+            first_frame_ms: None,
+            metadata_frame_ms: None,
+        }
+    }
+
+    fn ms_since_base(&self, at: Instant) -> u128 {
+        at.saturating_duration_since(self.base).as_millis()
+    }
+
+    fn on_request_sent(&mut self) {
+        if self.enabled {
+            self.req_sent = Some(Instant::now());
+            self.req_sent_unix_ms = crate::startup_profile::unix_ms_now();
+        }
+    }
+
+    fn on_frame(&mut self) {
+        if self.enabled && self.first_frame_ms.is_none() {
+            self.first_frame_ms = Some(self.ms_since_base(Instant::now()));
+        }
+    }
+
+    fn on_output(&mut self, bytes: &[u8]) {
+        if self.enabled
+            && self.metadata_frame_ms.is_none()
+            && crate::startup_profile::contains_metadata_emit(bytes)
+        {
+            self.metadata_frame_ms = Some(self.ms_since_base(Instant::now()));
+        }
+    }
+
+    fn on_exit(&self) {
+        if !self.enabled {
+            return;
+        }
+        let timings = crate::startup_profile::CompileRelayTimings {
+            crate_name: self.crate_name.clone(),
+            req_sent_ms: self.req_sent.map_or(0, |t| self.ms_since_base(t)),
+            first_frame_ms: self.first_frame_ms,
+            metadata_frame_ms: self.metadata_frame_ms,
+            exit_ms: self.ms_since_base(Instant::now()),
+            req_sent_unix_ms: self.req_sent_unix_ms,
+            exit_unix_ms: crate::startup_profile::unix_ms_now(),
+        };
+        crate::startup_profile::emit_line(&crate::startup_profile::format_compile_relay_line(
+            &timings,
+        ));
     }
 }
 

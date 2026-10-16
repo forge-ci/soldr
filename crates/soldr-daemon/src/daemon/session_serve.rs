@@ -59,6 +59,7 @@ where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     let start = read_session_start(&mut io).await?;
+    let recv_unix_ms = soldr_core::startup_profile::unix_ms_now();
 
     #[cfg(debug_assertions)]
     test_pause_after_session_start(&start).await;
@@ -76,6 +77,17 @@ where
         .collect();
     let req = build_compile_request_from(&argv, start.cwd, env);
 
+    if soldr_core::startup_profile::profiling_enabled_in(&req.env) {
+        let crate_name = soldr_core::startup_profile::crate_name_from_args(&req.args)
+            .unwrap_or_default()
+            .to_string();
+        return crate::daemon::compile_profile::scope(
+            crate_name,
+            recv_unix_ms,
+            dispatch_compile_session(compile_service, paths, req, &mut io, event_batcher),
+        )
+        .await;
+    }
     dispatch_compile_session(compile_service, paths, req, &mut io, event_batcher).await
 }
 

@@ -70,7 +70,7 @@ impl WrapperProfile {
             .unwrap_or(false);
         Self {
             enabled,
-            start: enabled.then(Instant::now),
+            start: enabled.then(process_start),
             phases: if enabled {
                 Vec::with_capacity(16)
             } else {
@@ -165,6 +165,156 @@ impl WrapperProfile {
         use std::io::Write;
         let _ = std::io::stderr().lock().write_all(buf.as_bytes());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-invocation compile timing (soldr#3800 PR 1). Same gate as
+// `WrapperProfile`, same `soldr-profile:` stderr prefix, one line per compile.
+// ---------------------------------------------------------------------------
+
+/// Marker rustc's JSON diagnostics carry on the line that announces the
+/// `.rmeta` is ready (`--json=artifacts`).
+const METADATA_EMIT_MARKER: &[u8] = b"\"emit\":\"metadata\"";
+
+/// True iff `SOLDR_PROFILE_STARTUP` is set non-empty in this process.
+pub fn profiling_enabled() -> bool {
+    std::env::var_os(SOLDR_PROFILE_STARTUP_ENV_VAR)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+}
+
+/// True iff a forwarded `(key, value)` environment (a compile request's env)
+/// turns profiling on. The shim forwards its whole environment to the daemon,
+/// so this works against an already-running daemon whose own env is unset.
+pub fn profiling_enabled_in<'a>(env: impl IntoIterator<Item = &'a (String, String)>) -> bool {
+    env.into_iter()
+        .any(|(k, v)| k == SOLDR_PROFILE_STARTUP_ENV_VAR && !v.is_empty())
+}
+
+/// Wall-clock milliseconds since the Unix epoch, for lining shim lines up
+/// with the daemon's.
+pub fn unix_ms_now() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+/// Does `bytes` contain rustc's `"emit":"metadata"` artifact notification?
+/// Read-only scan; callers forward the bytes untouched.
+pub fn contains_metadata_emit(bytes: &[u8]) -> bool {
+    let needle = METADATA_EMIT_MARKER;
+    let Some((&first, rest)) = needle.split_first() else {
+        return true;
+    };
+    let mut from = 0;
+    while let Some(i) = bytes[from..].iter().position(|&b| b == first) {
+        let at = from + i;
+        if bytes[at + 1..].starts_with(rest) {
+            return true;
+        }
+        from = at + 1;
+    }
+    false
+}
+
+/// `--crate-name <name>` / `--crate-name=<name>` from a rustc argv.
+pub fn crate_name_from_args(args: &[String]) -> Option<&str> {
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        if arg == "--crate-name" {
+            return it.next().map(String::as_str);
+        }
+        if let Some(name) = arg.strip_prefix("--crate-name=") {
+            return Some(name);
+        }
+    }
+    None
+}
+
+static PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Earliest `Instant` this process recorded for profiling. `WrapperProfile::new`
+/// seeds it at wrapper entry; a path that never built one falls back to the
+/// first call.
+pub fn process_start() -> Instant {
+    *PROCESS_START.get_or_init(Instant::now)
+}
+
+/// Shim-side timings for one wrapper invocation, all milliseconds since
+/// [`process_start`] unless named `unix_ms`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompileRelayTimings {
+    pub crate_name: String,
+    pub req_sent_ms: u128,
+    pub first_frame_ms: Option<u128>,
+    pub metadata_frame_ms: Option<u128>,
+    pub exit_ms: u128,
+    pub req_sent_unix_ms: u128,
+    pub exit_unix_ms: u128,
+}
+
+/// Render the `compile-relay` line (no trailing newline). A missing first or
+/// metadata frame prints `-` (no metadata line seen: the metadata moment is
+/// then `exit_ms`, which always follows).
+pub fn format_compile_relay_line(t: &CompileRelayTimings) -> String {
+    let opt = |v: Option<u128>| v.map_or_else(|| "-".to_string(), |v| v.to_string());
+    let metadata = t
+        .metadata_frame_ms
+        .map_or_else(|| "-".to_string(), |v| v.to_string());
+    format!(
+        "soldr-profile: compile-relay crate={} req_sent_ms={} first_frame_ms={} \
+         metadata_frame_ms={} exit_ms={} req_sent_unix_ms={} exit_unix_ms={}",
+        if t.crate_name.is_empty() {
+            "-"
+        } else {
+            &t.crate_name
+        },
+        t.req_sent_ms,
+        opt(t.first_frame_ms),
+        metadata,
+        t.exit_ms,
+        t.req_sent_unix_ms,
+        t.exit_unix_ms,
+    )
+}
+
+/// Daemon-side wall-clock marks for one compile (Unix milliseconds).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DaemonCompileTimings {
+    pub crate_name: String,
+    pub recv_unix_ms: u128,
+    pub compile_start_unix_ms: u128,
+    pub compile_end_unix_ms: u128,
+    pub reply_sent_unix_ms: u128,
+}
+
+/// Render the `daemon-compile` line (no trailing newline). zccache takes its
+/// compile permit inside `compile`, so the permit wait is part of
+/// `compile_end - compile_start`, not visible separately from soldr.
+pub fn format_daemon_compile_line(t: &DaemonCompileTimings) -> String {
+    format!(
+        "soldr-profile: daemon-compile crate={} recv_unix_ms={} compile_start_unix_ms={} \
+         compile_end_unix_ms={} reply_sent_unix_ms={}",
+        if t.crate_name.is_empty() {
+            "-"
+        } else {
+            &t.crate_name
+        },
+        t.recv_unix_ms,
+        t.compile_start_unix_ms,
+        t.compile_end_unix_ms,
+        t.reply_sent_unix_ms,
+    )
+}
+
+/// Print one profile line to stderr with a single locked write.
+pub fn emit_line(line: &str) {
+    use std::io::Write;
+    let mut s = String::with_capacity(line.len() + 1);
+    s.push_str(line);
+    s.push('\n');
+    let _ = std::io::stderr().lock().write_all(s.as_bytes());
 }
 
 #[cfg(test)]
@@ -281,5 +431,76 @@ mod tests {
         // No panic, no stderr noise — this is the dominant production
         // path so we lock in that it stays cheap.
         profile.finish("would_have_been_total");
+    }
+
+    #[test]
+    fn metadata_detector_finds_marker_and_ignores_lookalikes() {
+        let hit = br#"{"artifact":"/t/libfoo.rmeta","emit":"metadata"}"#;
+        assert!(contains_metadata_emit(hit));
+        assert!(contains_metadata_emit(br#"x"x"emit":"metadata""#));
+        assert!(!contains_metadata_emit(br#"{"emit":"link"}"#));
+        assert!(!contains_metadata_emit(br#""emit":"metada"#));
+        assert!(!contains_metadata_emit(b""));
+    }
+
+    #[test]
+    fn crate_name_handles_both_spellings() {
+        let a = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            crate_name_from_args(&a(&["--crate-name", "syn", "-C"])),
+            Some("syn")
+        );
+        assert_eq!(
+            crate_name_from_args(&a(&["--crate-name=quote"])),
+            Some("quote")
+        );
+        assert_eq!(crate_name_from_args(&a(&["-C", "x"])), None);
+    }
+
+    #[test]
+    fn env_forwarding_gate() {
+        let on = vec![(SOLDR_PROFILE_STARTUP_ENV_VAR.to_string(), "1".to_string())];
+        let empty = vec![(SOLDR_PROFILE_STARTUP_ENV_VAR.to_string(), String::new())];
+        assert!(profiling_enabled_in(&on));
+        assert!(!profiling_enabled_in(&empty));
+        assert!(!profiling_enabled_in(&[]));
+    }
+
+    #[test]
+    fn relay_line_format() {
+        let mut t = CompileRelayTimings {
+            crate_name: "syn".into(),
+            req_sent_ms: 12,
+            first_frame_ms: Some(40),
+            metadata_frame_ms: Some(41),
+            exit_ms: 42,
+            req_sent_unix_ms: 1000,
+            exit_unix_ms: 1030,
+        };
+        assert_eq!(
+            format_compile_relay_line(&t),
+            "soldr-profile: compile-relay crate=syn req_sent_ms=12 first_frame_ms=40 \
+             metadata_frame_ms=41 exit_ms=42 req_sent_unix_ms=1000 exit_unix_ms=1030"
+        );
+        t.first_frame_ms = None;
+        t.metadata_frame_ms = None;
+        let line = format_compile_relay_line(&t);
+        assert!(line.contains("first_frame_ms=- metadata_frame_ms=- exit_ms=42"));
+    }
+
+    #[test]
+    fn daemon_line_format() {
+        let t = DaemonCompileTimings {
+            crate_name: String::new(),
+            recv_unix_ms: 1,
+            compile_start_unix_ms: 2,
+            compile_end_unix_ms: 3,
+            reply_sent_unix_ms: 4,
+        };
+        assert_eq!(
+            format_daemon_compile_line(&t),
+            "soldr-profile: daemon-compile crate=- recv_unix_ms=1 compile_start_unix_ms=2 \
+             compile_end_unix_ms=3 reply_sent_unix_ms=4"
+        );
     }
 }
