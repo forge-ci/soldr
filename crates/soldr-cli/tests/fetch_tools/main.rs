@@ -9,6 +9,7 @@ mod common;
 
 mod cli_build_from_source;
 mod cli_cc;
+mod cli_cc_cross;
 mod cli_global_upgrade;
 mod cli_maturin;
 mod cli_rust_analyzer;

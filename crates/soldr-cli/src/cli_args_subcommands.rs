@@ -105,7 +105,13 @@ pub(crate) enum ToolchainSubcommand {
     Install,
     /// Install the channel and every declared component / target from
     /// `rust-toolchain.toml`. Stops at the first nonzero rustup exit.
-    Prepare,
+    Prepare {
+        /// Also provision what `soldr cc --target <TARGET>` needs (soldr#3806):
+        /// the managed LLVM and the Apple SDK / xwin MSVC SDK / sysroot, and
+        /// report them. Accepts the same spellings as `soldr cc --target`.
+        #[arg(long, value_name = "TARGET")]
+        target: Option<String>,
+    },
     /// One-shot "make sure this host can build" verb (issue #407
     /// Phase 2): auto-bootstraps `rustup` if missing, runs the same
     /// install + component + target + plugin steps as `prepare`, then
@@ -119,6 +125,10 @@ pub(crate) enum ToolchainSubcommand {
         /// other tooling. See `docs/API.md` for the full schema.
         #[arg(long)]
         json: bool,
+        /// Also provision what `soldr cc --target <TARGET>` needs and report
+        /// it under the additive `build_tools.cross` key (soldr#3806).
+        #[arg(long, value_name = "TARGET")]
+        target: Option<String>,
     },
     /// Write PATH shim files into `--shim-dir` so a child process that
     /// resolves `cargo` / `rustfmt` / `clippy-driver` / `rustc` /

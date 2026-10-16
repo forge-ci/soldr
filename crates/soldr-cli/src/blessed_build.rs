@@ -37,7 +37,7 @@ use std::process::{Command, Stdio};
 
 use crate::core::{SoldrError, SoldrPaths};
 
-mod darwin_arch;
+pub(crate) mod darwin_arch;
 mod links_provider;
 mod lzma_override;
 mod mimalloc_override;

@@ -180,6 +180,7 @@
       "binary": "fetch_tools",
       "modules": [
         "cli_cc",
+        "cli_cc_cross",
         "cli_wheel"
       ],
       "disposition": "target-replay",
@@ -693,6 +694,12 @@
       "source_id": "fetch-tools-target-replay",
       "test_prefix": "cli_cc::",
       "reason": "Compile both direct and CMake projects through the target-native compiler surface."
+    },
+    {
+      "id": "standalone-cross-cc",
+      "source_id": "fetch-tools-target-replay",
+      "test_prefix": "cli_cc_cross::",
+      "reason": "Compile, link and provision the Apple and MSVC cross compiler surface; host-gated to x86_64 Linux like cli_cc (soldr#3806)."
     },
     {
       "id": "wheel-native-host",

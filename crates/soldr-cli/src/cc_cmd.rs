@@ -32,6 +32,11 @@ pub(crate) struct CcArgs {
     #[arg(long, group = "print_tool")]
     pub(crate) print_linker: bool,
 
+    /// Print the target's SDK/sysroot root (Apple SDK, xwin root, ...) instead
+    /// of invoking the compiler
+    #[arg(long, group = "print_tool")]
+    pub(crate) print_sysroot: bool,
+
     /// Arguments forwarded verbatim to the selected compiler
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub(crate) args: Vec<String>,
@@ -44,13 +49,15 @@ pub(crate) enum Language {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct NativeToolchain {
-    cc: PathBuf,
-    cxx: PathBuf,
-    ar: PathBuf,
-    linker: PathBuf,
-    bin_dir: PathBuf,
-    compiler_args: Vec<String>,
+pub(crate) struct NativeToolchain {
+    pub(crate) cc: PathBuf,
+    pub(crate) cxx: PathBuf,
+    pub(crate) ar: PathBuf,
+    pub(crate) linker: PathBuf,
+    pub(crate) bin_dir: PathBuf,
+    /// The SDK / sysroot root, when the target has one.
+    pub(crate) sysroot: Option<PathBuf>,
+    pub(crate) compiler_args: Vec<String>,
 }
 
 pub(crate) async fn run(args: CcArgs, language: Language) -> Result<i32, SoldrError> {
@@ -61,12 +68,20 @@ pub(crate) async fn run(args: CcArgs, language: Language) -> Result<i32, SoldrEr
         )));
     }
 
-    let target = normalize_driver_target(&args.target);
-    let resolved = crate::target_alias::resolve_soldr_target(&target)
-        .map_err(|error| error.into_soldr_error(language.target_surface()))?;
     let paths = SoldrPaths::new()?;
-    let tools = prepare_native_toolchain(&paths, &resolved.rust_triple).await?;
+    let (rust_triple, tools) = prepare_for_target(&paths, &args.target, language).await?;
+    let resolved_triple = rust_triple.as_str();
 
+    if args.print_sysroot {
+        let sysroot = tools.sysroot.as_ref().ok_or_else(|| {
+            SoldrError::Other(format!(
+                "soldr {}: target {resolved_triple} has no SDK/sysroot to print",
+                language.command_name()
+            ))
+        })?;
+        println!("{}", sysroot.display());
+        return Ok(0);
+    }
     if let Some(path) = selected_print_path(&args, &tools) {
         println!("{}", path.display());
         return Ok(0);
@@ -87,18 +102,33 @@ pub(crate) async fn run(args: CcArgs, language: Language) -> Result<i32, SoldrEr
             "soldr {}: failed to start compiler {} for target {}: {error}",
             language.command_name(),
             compiler.display(),
-            resolved.rust_triple
+            resolved_triple
         ))
     })?;
     Ok(status.code().unwrap_or(1))
 }
 
 fn requests_print(args: &CcArgs) -> bool {
-    args.print_cc || args.print_cxx || args.print_ar || args.print_linker
+    args.print_cc || args.print_cxx || args.print_ar || args.print_linker || args.print_sysroot
+}
+
+/// Resolve a user-facing `--target` spelling and prepare the compiler
+/// toolchain `soldr cc` / `soldr c++` (and `toolchain prepare --target`,
+/// soldr#3806) expose for it. Returns the canonical Rust triple too.
+pub(crate) async fn prepare_for_target(
+    paths: &SoldrPaths,
+    target: &str,
+    language: Language,
+) -> Result<(String, NativeToolchain), SoldrError> {
+    let target = normalize_driver_target(target);
+    let resolved = crate::target_alias::resolve_soldr_target(&target)
+        .map_err(|error| error.into_soldr_error(language.target_surface()))?;
+    let tools = prepare_native_toolchain(paths, &resolved.rust_triple).await?;
+    Ok((resolved.rust_triple, tools))
 }
 
 impl Language {
-    fn command_name(self) -> &'static str {
+    pub(crate) fn command_name(self) -> &'static str {
         match self {
             Self::C => "cc",
             Self::Cxx => "c++",
@@ -108,7 +138,7 @@ impl Language {
     /// soldr#3390: the [`crate::target_alias::TargetSurface`] this language's
     /// standalone compiler driver is invoked as, so an `AliasError` renders
     /// with the verb the user actually typed.
-    fn target_surface(self) -> crate::target_alias::TargetSurface {
+    pub(crate) fn target_surface(self) -> crate::target_alias::TargetSurface {
         match self {
             Self::C => crate::target_alias::TargetSurface::Cc,
             Self::Cxx => crate::target_alias::TargetSurface::Cxx,
@@ -130,7 +160,7 @@ fn selected_print_path<'a>(args: &CcArgs, tools: &'a NativeToolchain) -> Option<
     }
 }
 
-async fn prepare_native_toolchain(
+pub(crate) async fn prepare_native_toolchain(
     paths: &SoldrPaths,
     target: &str,
 ) -> Result<NativeToolchain, SoldrError> {
@@ -145,6 +175,7 @@ async fn prepare_native_toolchain(
             ar: toolchain.tool_path("ar"),
             linker: toolchain.tool_path("gcc"),
             bin_dir: toolchain.bin_dir,
+            sysroot: Some(toolchain.sysroot.clone()),
             compiler_args: vec![format!("--sysroot={}", toolchain.sysroot.display())],
         });
     }
@@ -160,6 +191,7 @@ async fn prepare_native_toolchain(
             ar: toolchain.tool_path("ar"),
             linker: toolchain.tool_path("gcc"),
             bin_dir: toolchain.bin_dir,
+            sysroot: Some(toolchain.sysroot.clone()),
             compiler_args: vec![format!("--sysroot={}", toolchain.sysroot.display())],
         });
     }
@@ -175,14 +207,28 @@ async fn prepare_native_toolchain(
             ar: env_path(&env, &format!("AR_{suffix}"))?,
             linker: env_path(&env, &format!("CARGO_TARGET_{upper}_LINKER"))?,
             bin_dir,
+            sysroot: None,
+            compiler_args: Vec::new(),
+        });
+    }
+
+    if crate::cc_clang_cross::handles_target(target) {
+        let cross = crate::cc_clang_cross::prepare(paths, target).await?;
+        return Ok(NativeToolchain {
+            cc: cross.cc,
+            cxx: cross.cxx,
+            ar: cross.ar,
+            linker: cross.linker,
+            bin_dir: cross.bin_dir,
+            sysroot: Some(cross.sysroot),
             compiler_args: Vec::new(),
         });
     }
 
     Err(SoldrError::UnsupportedPlatform(format!(
         "soldr C/C++ does not yet expose a standalone compiler for `{target}`; \
-         the initial soldr#2335 surface supports GNU/Linux, musl/Linux, and \
-         x86_64-pc-windows-gnu targets"
+         supported: GNU/Linux, musl/Linux, x86_64-pc-windows-gnu, \
+         Apple Darwin and MSVC Windows targets"
     )))
 }
 
@@ -247,6 +293,7 @@ mod tests {
             ar: PathBuf::from("/sdk/ar"),
             linker: PathBuf::from("/sdk/linker"),
             bin_dir: PathBuf::from("/sdk"),
+            sysroot: None,
             compiler_args: Vec::new(),
         };
         let args = CcArgs {
@@ -255,6 +302,7 @@ mod tests {
             print_cxx: true,
             print_ar: false,
             print_linker: false,
+            print_sysroot: false,
             args: Vec::new(),
         };
         assert_eq!(
@@ -291,6 +339,7 @@ mod tests {
             print_cxx: false,
             print_ar: false,
             print_linker: false,
+            print_sysroot: false,
             args: vec!["hello.c".to_string()],
         };
         assert!(requests_print(&args));

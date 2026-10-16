@@ -178,6 +178,7 @@ fn render_names_what_was_provisioned() {
             reld: None,
         }),
         cmake: true,
+        cross: None,
         note: None,
     };
     let line = summary.render();

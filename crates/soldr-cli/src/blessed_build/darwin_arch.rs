@@ -33,7 +33,7 @@ const X86_64_MIN_OS: &str = "10.12";
 pub(super) const DEPLOYMENT_TARGET_ENV_VAR: &str = "MACOSX_DEPLOYMENT_TARGET";
 
 /// The `--target=` value to hand clang for `target_triple`.
-pub(super) fn clang_target(target_triple: &str) -> &'static str {
+pub(crate) fn clang_target(target_triple: &str) -> &'static str {
     if target_triple.starts_with("aarch64") {
         "arm64-apple-darwin"
     } else {
@@ -42,7 +42,7 @@ pub(super) fn clang_target(target_triple: &str) -> &'static str {
 }
 
 /// The `-mmacosx-version-min` value for `target_triple`.
-pub(super) fn deployment_target(target_triple: &str) -> String {
+pub(crate) fn deployment_target(target_triple: &str) -> String {
     let default = default_for(target_triple);
     match std::env::var(DEPLOYMENT_TARGET_ENV_VAR) {
         Ok(value) => resolve_override(&value, default),

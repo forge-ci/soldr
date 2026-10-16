@@ -453,8 +453,10 @@ soldr c++ --target linux-x64 main.cpp -o app
 ```
 
 `--target` accepts the regular friendly aliases and Rust triples and defaults
-to `host`. The supported standalone targets are GNU/Linux, musl/Linux, and
-`x86_64-pc-windows-gnu`; unsupported host/target pairs fail explicitly.
+to `host`. The supported standalone targets are GNU/Linux, musl/Linux,
+`x86_64-pc-windows-gnu`, `{aarch64,x86_64}-apple-darwin` and
+`{x86_64,aarch64}-pc-windows-msvc` (soldr#3806); unsupported host/target pairs
+fail explicitly.
 GNU/Linux uses the catalogue's glibc 2.17 sysroot whether the suffix is
 explicit or omitted.
 
@@ -466,8 +468,21 @@ arguments:
 - `--print-cxx`
 - `--print-ar`
 - `--print-linker`
+- `--print-sysroot` (the Apple SDK root, the xwin root for MSVC, the glibc/musl
+  sysroot for Linux; an error for targets without one)
 
-The query output is only the prepared executable path. Invoke the `soldr cc`
+The query output is only the prepared executable (or directory) path. For the
+Apple and MSVC targets the printed compiler and linker driver is a
+content-addressed shim that carries the target, sysroot and linker flags itself
+(managed LLVM `clang` + `ld64.lld` / `lld-link`, the Apple SDK, the xwin CRT and
+Windows SDK), so it works as `CC` / `CMAKE_C_COMPILER` on its own:
+
+```bash
+soldr cc --target aarch64-apple-darwin --print-cc      # .../cc-driver/v1/aarch64-apple-darwin/<digest>/aarch64-apple-darwin-clang
+soldr cc --target x86_64-pc-windows-msvc --print-sysroot
+```
+
+For the other targets invoke the `soldr cc`
 or `soldr c++` wrapper when the target's required sysroot arguments must be
 applied. CMake supports that shape through its `CC` and `CXX` environment
 variables:
@@ -478,6 +493,12 @@ CXX="soldr c++ --target x86_64-linux-gnu.2.17" \
   cmake -S . -B build
 cmake --build build
 ```
+
+`soldr toolchain prepare --target <T>` and `soldr toolchain ensure --target <T>
+--json` provision the same tools ahead of time (soldr#3806). `ensure --json`
+reports them under the additive `build_tools.cross` object
+(`target`, `bin_dir`, `sysroot`, `cc`, `cxx`, `ar`, `linker`); `schema_version`
+stays 1 and the key is absent without `--target`.
 
 ### `soldr wheel` (soldr#2139)
 
