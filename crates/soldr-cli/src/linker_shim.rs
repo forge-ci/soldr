@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::linker::{target_kind, LinkerInjection, TargetKind};
 
+pub(crate) mod rustc_lld;
+
 /// Path-valued override: presence of a path is the legitimate meaning, so this
 /// is deliberately a presence check, not a `core::flag` boolean.
 const LLVM_DIR_ENV_VAR: &str = "SOLDR_LLVM_DIR";
@@ -167,15 +169,24 @@ fn shim_driver_arg<'a>(target: &str, injection: &'a LinkerInjection) -> Option<&
 /// that absolute path, so a host without a system clang gets one clear error
 /// from soldr here rather than `exec: clang: not found` (exit 127) from some
 /// dependency's build script.
+///
+/// `rustc_supplies_lld` (see [`rustc_lld`], soldr#3797) says rustc's own
+/// bundled lld will serve the link, so a system clang without an `lld` is
+/// still a usable driver and nothing is fetched.
 pub async fn materialize_linker_driver_shim_resolving(
     paths: &crate::core::SoldrPaths,
     target: &str,
     injection: &mut LinkerInjection,
+    rustc_supplies_lld: bool,
 ) -> Result<(), SoldrError> {
     let Some(driver_arg) = shim_driver_arg(target, injection) else {
         return materialize_linker_driver_shim(paths, target, injection, None);
     };
-    let clang = resolve_driver_clang(paths, driver_arg_needs_lld(driver_arg)).await?;
+    let clang = resolve_driver_clang(
+        paths,
+        LldNeed::new(driver_arg_needs_lld(driver_arg), rustc_supplies_lld),
+    )
+    .await?;
     let search = std::env::var_os("PATH");
     let on_path = |name: &str| {
         search
@@ -283,9 +294,38 @@ fn lld_reachable(clang: &Path, search: Option<&std::ffi::OsStr>) -> bool {
         })
 }
 
+/// Whether the driver needs an `lld` of its own, and whether rustc supplies
+/// one regardless (soldr#3797).
+#[derive(Clone, Copy)]
+struct LldNeed {
+    needs_lld: bool,
+    rustc_supplies_lld: bool,
+}
+
+impl LldNeed {
+    fn new(needs_lld: bool, rustc_supplies_lld: bool) -> Self {
+        Self {
+            needs_lld,
+            rustc_supplies_lld,
+        }
+    }
+}
+
+/// A system clang is enough unless the driver needs an lld it lacks and
+/// rustc will not supply one.
+fn usable_system_clang(
+    system_clang: Option<&PathBuf>,
+    need: LldNeed,
+    search: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    system_clang
+        .filter(|clang| !need.needs_lld || need.rustc_supplies_lld || lld_reachable(clang, search))
+        .cloned()
+}
+
 async fn resolve_driver_clang(
     paths: &crate::core::SoldrPaths,
-    needs_lld: bool,
+    need: LldNeed,
 ) -> Result<PathBuf, SoldrError> {
     let managed_complete = paths
         .bin
@@ -295,11 +335,7 @@ async fn resolve_driver_clang(
     let system_clang = search
         .as_deref()
         .and_then(|search| crate::exec_cmd::find_on_path("clang", search));
-    // A system clang is enough unless the driver needs an lld it lacks.
-    let usable_system_clang = system_clang
-        .as_ref()
-        .filter(|clang| !needs_lld || lld_reachable(clang, search.as_deref()))
-        .cloned();
+    let usable_system_clang = usable_system_clang(system_clang.as_ref(), need, search.as_deref());
     if managed_complete.is_file() || std::env::var_os(LLVM_DIR_ENV_VAR).is_some() {
         if let Ok(bin) = crate::fetch::ensure_llvm_toolchain(paths).await {
             if let Some(clang) = clang_in(&bin) {
@@ -509,6 +545,29 @@ pub(crate) fn pick_after_managed_for_tests(
     managed: Result<PathBuf, String>,
 ) -> Result<(PathBuf, Option<String>), String> {
     pick_after_managed(system_clang, managed)
+}
+
+#[cfg(test)]
+pub(crate) async fn resolve_driver_clang_for_tests(
+    paths: &crate::core::SoldrPaths,
+    needs_lld: bool,
+    rustc_supplies_lld: bool,
+) -> Result<PathBuf, SoldrError> {
+    resolve_driver_clang(paths, LldNeed::new(needs_lld, rustc_supplies_lld)).await
+}
+
+#[cfg(test)]
+pub(crate) fn usable_system_clang_for_tests(
+    system_clang: Option<&PathBuf>,
+    needs_lld: bool,
+    rustc_supplies_lld: bool,
+    search: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    usable_system_clang(
+        system_clang,
+        LldNeed::new(needs_lld, rustc_supplies_lld),
+        search,
+    )
 }
 
 #[cfg(test)]

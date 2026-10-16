@@ -359,7 +359,9 @@ pub async fn apply_pep517_override(
             .map_err(reld_fetch_error)?;
         inject_resolved_reld(&mut injection, &reld)?;
     }
-    materialize_linker_driver_shim_resolving(paths, target, &mut injection).await?;
+    let rustc_lld =
+        crate::linker_shim::rustc_lld::for_command(target, command, injection.rustflags.as_deref());
+    materialize_linker_driver_shim_resolving(paths, target, &mut injection, rustc_lld).await?;
     let prefix = cargo_target_env_prefix(target);
     let linker_key = format!("CARGO_TARGET_{prefix}_LINKER");
     let rustflags_key = format!("CARGO_TARGET_{prefix}_RUSTFLAGS");
