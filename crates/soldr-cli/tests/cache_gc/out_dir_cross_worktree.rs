@@ -232,6 +232,10 @@ fn crate_outcome(output: &str, crate_name: &str) -> Option<Outcome> {
     // does on GitHub Actions): `gen_dep \x1b[33m[MISS]`. Match on the text.
     let output = strip_ansi(output);
     output.lines().find_map(|line| {
+        // soldr#3823: under GitHub Actions the HIT/MISS tag is colorized on
+        // purpose (`cache_states.rs`), which puts an escape sequence between
+        // the crate name and `[`. Match the visible text.
+        let line = strip_ansi(line);
         let rest = &line[line.find(&tag)? + tag.len()..];
         if rest.starts_with("HIT") {
             Some(Outcome::Hit)
@@ -272,4 +276,35 @@ fn caller_rustup_home() -> std::path::PathBuf {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .expect("test process has a home directory");
     std::path::PathBuf::from(real_home).join(".rustup")
+}
+
+/// `line` without ANSI SGR escape sequences (`ESC [ ... m`).
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[test]
+fn crate_outcome_reads_colorized_and_plain_tags() {
+    let colored = "0.61 soldr[cache] gen_dep \u{1b}[33m[MISS]\u{1b}[0m";
+    assert_eq!(crate_outcome(colored, "gen_dep"), Some(Outcome::Miss));
+    let hit = "soldr[cache] gen_dep \u{1b}[32m[HIT!]\u{1b}[0m";
+    assert_eq!(crate_outcome(hit, "gen_dep"), Some(Outcome::Hit));
+    assert_eq!(
+        crate_outcome("soldr[cache] gen_dep [MISS]", "gen_dep"),
+        Some(Outcome::Miss)
+    );
+    assert_eq!(crate_outcome(colored, "embed_dep"), None);
 }
