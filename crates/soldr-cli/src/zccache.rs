@@ -471,6 +471,66 @@ pub(crate) fn is_sccache_wrapper(wrapper: &std::ffi::OsStr) -> bool {
         .is_some_and(|stem| stem.eq_ignore_ascii_case("sccache"))
 }
 
+/// Which kind of wrapper plan a front door is finalising, for the pre-warm gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrewarmPlanKind {
+    /// Managed embedded zccache (including a custom wrapper that is this soldr).
+    Managed,
+    /// A third-party wrapper such as sccache: no soldr-daemon route is used.
+    Custom,
+    /// `RUSTC_WRAPPER` disabled.
+    Disabled,
+    /// `--no-cache`: the build must not touch the daemon.
+    NoCache,
+}
+
+/// Opt-out env var for the daemon-route pre-warm (soldr#3800). Default on.
+pub(crate) const BROKER_PREWARM_ENV_VAR: &str = "SOLDR_BROKER_PREWARM";
+
+/// Pure gate for the pre-warm: only managed-zccache plans, and only when
+/// `SOLDR_BROKER_PREWARM` is not explicitly off. Uses the canonical
+/// default-on reading (`!is_off_value`, soldr#2740) so an unrecognised value
+/// never silently disables it.
+pub(crate) fn should_prewarm(kind: PrewarmPlanKind, optout_value: Option<&str>) -> bool {
+    kind == PrewarmPlanKind::Managed && !optout_value.is_some_and(crate::core::is_off_value)
+}
+
+/// Hook signature for the actual route acquisition, injectable in tests.
+pub(crate) type PrewarmHook = fn(&str) -> std::io::Result<()>;
+
+fn ensure_route_hook(service_name: &str) -> std::io::Result<()> {
+    crate::session_transport::ensure_broker_route(service_name, std::time::Duration::from_secs(30))
+        .map(drop)
+}
+
+/// Start the daemon route in the background so the first rustc wrappers find it
+/// ready instead of racing the cold launch (soldr#3800). Detached: never joined by
+/// production code, and failure is ignored (logged only under session debug) because
+/// the wrappers acquire the route themselves. The returned handle exists for tests.
+pub(crate) fn spawn_route_prewarm(
+    service_name: &str,
+    hook: PrewarmHook,
+) -> Option<std::thread::JoinHandle<()>> {
+    let service_name = service_name.to_string();
+    std::thread::Builder::new()
+        .name("soldr-route-prewarm".into())
+        .spawn(move || {
+            if let Err(err) = hook(&service_name) {
+                if crate::session_transport::session_debug_enabled() {
+                    eprintln!("soldr: broker route pre-warm failed (ignored): {err}");
+                }
+            }
+        })
+        .ok()
+}
+
+fn prewarm_if_enabled(service_name: &str) {
+    let optout = std::env::var(BROKER_PREWARM_ENV_VAR).ok();
+    if should_prewarm(PrewarmPlanKind::Managed, optout.as_deref()) {
+        drop(spawn_route_prewarm(service_name, ensure_route_hook));
+    }
+}
+
 async fn prepare_zccache_build(
     paths: &SoldrPaths,
 ) -> Result<ManagedZccacheWrapperPlan, SoldrError> {
@@ -520,6 +580,7 @@ async fn prepare_zccache_build(
 
     let wrapper_path = crate::binaries::rustc_wrapper_shim_binary(paths)?;
     let (daemon_path, broker_service_name) = register_broker_daemon_service()?;
+    prewarm_if_enabled(&broker_service_name);
     Ok(ManagedZccacheWrapperPlan {
         session,
         child_env,

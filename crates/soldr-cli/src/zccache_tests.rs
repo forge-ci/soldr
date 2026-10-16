@@ -420,3 +420,36 @@ fn command_lifetime_shutdown_timeout_parser_defaults_and_validates() {
     assert_eq!(parse_shutdown_timeout_seconds("5m").unwrap(), 300);
     assert_eq!(parse_shutdown_timeout_seconds("-1").unwrap(), 300);
 }
+
+#[test]
+fn prewarm_gating_table() {
+    use PrewarmPlanKind::*;
+    for (kind, optout, want) in [
+        (Managed, None, true),
+        (Managed, Some("1"), true),
+        (Managed, Some("garbage"), true),
+        (Managed, Some("0"), false),
+        (Managed, Some("false"), false),
+        (Managed, Some("off"), false),
+        (Custom, None, false),
+        (Disabled, None, false),
+        (NoCache, None, false),
+    ] {
+        assert_eq!(should_prewarm(kind, optout), want, "{kind:?} {optout:?}");
+    }
+}
+
+#[test]
+fn prewarm_error_is_swallowed_and_hook_runs_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn failing(_: &str) -> std::io::Result<()> {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        Err(std::io::Error::other("boom"))
+    }
+    let handle = spawn_route_prewarm("svc", failing).expect("spawn");
+    handle
+        .join()
+        .expect("a failing pre-warm must not panic the thread");
+    assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+}
