@@ -104,11 +104,18 @@ def test_append_result_emits_provision_fields_null_for_other_tools(
 @pytest.fixture
 def bench_modules():
     """Load the bench modules by file path (no sys.path import, so mypy and
-    pylint resolve nothing at import time), keyed by module name."""
+    pylint resolve nothing at import time), keyed by module name.
+
+    The renderer exits at import without Pillow, which the Lint lane does not
+    install, so it is loaded only when Pillow is present; the test that needs
+    it skips otherwise."""
+    names = ["benchmark_models"]
+    if importlib.util.find_spec("PIL") is not None:
+        names.append("render_comparison_bars")
     sys.path.insert(0, str(BENCH))
     try:
         loaded: dict[str, ModuleType] = {}
-        for name in ("benchmark_models", "render_comparison_bars"):
+        for name in names:
             spec = importlib.util.spec_from_file_location(name, BENCH / f"{name}.py")
             assert spec is not None and spec.loader is not None
             module = importlib.util.module_from_spec(spec)
@@ -118,7 +125,7 @@ def bench_modules():
         yield loaded
     finally:
         sys.path.remove(str(BENCH))
-        for name in ("benchmark_models", "render_comparison_bars"):
+        for name in names:
             sys.modules.pop(name, None)
 
 
