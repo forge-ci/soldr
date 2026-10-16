@@ -216,6 +216,9 @@ enum Outcome {
 /// `soldr[cache] <crate> [HIT!]` / `[MISS]` lines; `None` when it never ran.
 fn crate_outcome(output: &str, crate_name: &str) -> Option<Outcome> {
     let tag = format!("soldr[cache] {crate_name} [");
+    // soldr colours the `[HIT]`/`[MISS]` tag when it decides colour is on (it
+    // does on GitHub Actions): `gen_dep \x1b[33m[MISS]`. Match on the text.
+    let output = strip_ansi(output);
     output.lines().find_map(|line| {
         let rest = &line[line.find(&tag)? + tag.len()..];
         if rest.starts_with("HIT") {
@@ -226,4 +229,23 @@ fn crate_outcome(output: &str, crate_name: &str) -> Option<Outcome> {
             None
         }
     })
+}
+
+/// Drop CSI escape sequences (`ESC [ ... <final byte>`), e.g. SGR colour codes.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
