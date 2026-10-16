@@ -31,6 +31,7 @@ pub mod client;
 /// could not hand back to the wrapper. The artifact that distinguishes
 /// "rustc rejected your code" from "soldr lost a finished compile".
 pub mod compile_delivery;
+pub mod compile_profile;
 /// Shared argv → `CompileRequest` parser (soldr#2388 Step 6). One parser for
 /// the `RUSTC_WRAPPER` client (via `soldr_cli::compile_dispatch`) and the
 /// daemon's SESSION codec-bridge, so both convert argv+env+cwd identically.

@@ -213,10 +213,13 @@ fn compile_service_that_never_publishes_is_bounded() {
         .expect("runtime");
     runtime.block_on(async {
         let (mut client, _server) = tokio::io::duplex(64);
-        let err =
-            pump_session_output_with_timeout(&mut client, std::time::Duration::from_millis(20))
-                .await
-                .expect_err("a silent compile service must time out");
+        let err = pump_session_output_with_timeout(
+            &mut client,
+            std::time::Duration::from_millis(20),
+            &mut RelayProbe::disabled(),
+        )
+        .await
+        .expect_err("a silent compile service must time out");
         assert_eq!(err.source.kind(), io::ErrorKind::TimedOut);
         assert!(!err.output_started);
     });
@@ -302,4 +305,27 @@ fn a_broker_that_never_answers_still_fails_at_the_first_response_deadline() {
         assert!(waited >= deadlines.first_response, "{waited:?}");
         assert!(waited < deadlines.route_ceiling, "{waited:?}");
     });
+}
+
+#[test]
+fn relay_probe_records_first_and_metadata_frames_only_when_enabled() {
+    let mut off = RelayProbe::disabled();
+    off.on_frame();
+    off.on_output(br#"{"emit":"metadata"}"#);
+    assert!(off.first_frame_ms.is_none() && off.metadata_frame_ms.is_none());
+
+    let mut on = RelayProbe::disabled();
+    on.enabled = true;
+    on.on_frame();
+    on.on_output(b"warning: unused\n");
+    assert!(on.first_frame_ms.is_some());
+    assert!(on.metadata_frame_ms.is_none());
+    on.on_output(br#"{"artifact":"x.rmeta","emit":"metadata"}"#);
+    let first = on.metadata_frame_ms;
+    assert!(first.is_some());
+    on.on_output(br#"{"emit":"metadata"}"#);
+    assert_eq!(
+        on.metadata_frame_ms, first,
+        "only the first metadata frame counts"
+    );
 }

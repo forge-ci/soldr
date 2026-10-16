@@ -423,9 +423,10 @@ impl SoldrZccacheService {
         // streaming implementation nests a large compile pipeline future;
         // carrying that state inline makes this adapter's callers inherit the
         // full stack footprint even when they only use the buffered API.
-        let zresp = Box::pin(self.inner.compile(zreq))
-            .await
-            .map_err(|e| EmbeddedServiceError::Compile(e.to_string()))?;
+        crate::daemon::compile_profile::mark_compile_start();
+        let zresult = Box::pin(self.inner.compile(zreq)).await;
+        crate::daemon::compile_profile::mark_compile_end();
+        let zresp = zresult.map_err(|e| EmbeddedServiceError::Compile(e.to_string()))?;
         // soldr#3152 step 4: remember this unit's measured memory (zccache
         // 1.13.24 reports it per compile). A cache hit spawned no compiler and
         // reports nothing, which the history ignores.
