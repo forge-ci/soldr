@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -27,12 +28,18 @@ SCRIPTS = Path(__file__).resolve().parents[1] / ".github" / "scripts"
     ["verify_github_release_assets.py", "validate_npm_release_recovery.py"],
 )
 def test_script_imports_release_completeness_when_run_directly(script: str) -> None:
-    result = subprocess.run(
-        [sys.executable, str(SCRIPTS / script), "--help"],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=60,
-    )
-    assert result.returncode == 0, result.stderr
-    assert "usage:" in result.stdout
+    # Temporary files, not pipes (PY-003).
+    with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS / script), "--help"],
+            stdout=out,
+            stderr=err,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        out.seek(0)
+        err.seek(0)
+        stdout, stderr = out.read(), err.read()
+    assert result.returncode == 0, stderr
+    assert "usage:" in stdout
