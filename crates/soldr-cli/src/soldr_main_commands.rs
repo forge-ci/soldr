@@ -41,7 +41,9 @@ async fn run_toolchain_subcommand(subcommand: ToolchainSubcommand) -> Result<(),
     match subcommand {
         ToolchainSubcommand::Install => exit_with(toolchain::run_toolchain_install()),
         ToolchainSubcommand::Prepare { target } => {
-            exit_with(toolchain::run_toolchain_prepare(target.as_deref()))
+            exit_with(crate::toolchain_prepare::run_toolchain_prepare_for_target(
+                target.as_deref(),
+            ))
         }
         ToolchainSubcommand::Ensure { json, target } => {
             exit_with(toolchain_ensure::run_toolchain_ensure(json, target).await)

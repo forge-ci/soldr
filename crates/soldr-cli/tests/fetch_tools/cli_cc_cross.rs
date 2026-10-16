@@ -107,7 +107,11 @@ fn assert_format(path: &Path, format: Format) {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     match format {
         Format::MachO { cputype } => {
-            assert_eq!(&bytes[..4], &[0xcf, 0xfa, 0xed, 0xfe], "not a 64-bit Mach-O");
+            assert_eq!(
+                &bytes[..4],
+                &[0xcf, 0xfa, 0xed, 0xfe],
+                "not a 64-bit Mach-O"
+            );
             assert_eq!(u32_le(&bytes, 4), cputype, "wrong Mach-O cputype");
         }
         Format::Pe { machine } => {
@@ -126,14 +130,12 @@ fn is_apple(target: &str) -> bool {
 
 fn run_case(case: &Case) {
     let target = case.target;
-    for flag in [
-        "--print-cc",
-        "--print-cxx",
-        "--print-ar",
-        "--print-linker",
-    ] {
+    for flag in ["--print-cc", "--print-cxx", "--print-ar", "--print-linker"] {
         let path = print_path(flag, target);
-        assert!(path.is_file(), "{flag} for {target} printed {path:?}, not a file");
+        assert!(
+            path.is_file(),
+            "{flag} for {target} printed {path:?}, not a file"
+        );
     }
     let sysroot = print_path("--print-sysroot", target);
     assert!(
@@ -179,7 +181,12 @@ fn run_case(case: &Case) {
     let cxx = soldr_cc(
         "c++",
         target,
-        &["-c", cxx_src.to_str().unwrap(), "-o", temp.path().join("c.o").to_str().unwrap()],
+        &[
+            "-c",
+            cxx_src.to_str().unwrap(),
+            "-o",
+            temp.path().join("c.o").to_str().unwrap(),
+        ],
     );
     assert_success(&format!("{target}: compile C++"), &cxx);
 
@@ -206,7 +213,11 @@ fn run_case(case: &Case) {
         assert_success(&format!("{target}: compile Objective-C"), &out);
     }
 
-    let exe_name = if is_apple(target) { "hello" } else { "hello.exe" };
+    let exe_name = if is_apple(target) {
+        "hello"
+    } else {
+        "hello.exe"
+    };
     let exe = temp.path().join(exe_name);
     let link = soldr_cc(
         "cc",
@@ -260,9 +271,9 @@ fn toolchain_ensure_target_reports_cross_tools() {
         let cross = &json["build_tools"]["cross"];
         assert_eq!(cross["target"], target, "payload: {json}");
         for key in ["bin_dir", "sysroot", "cc", "cxx", "ar", "linker"] {
-            let value = cross[key].as_str().unwrap_or_else(|| {
-                panic!("build_tools.cross.{key} missing for {target}: {json}")
-            });
+            let value = cross[key]
+                .as_str()
+                .unwrap_or_else(|| panic!("build_tools.cross.{key} missing for {target}: {json}"));
             assert!(Path::new(value).exists(), "{key} {value} does not exist");
         }
         // The reported paths are the ones `soldr cc` prints.

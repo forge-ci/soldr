@@ -23,7 +23,9 @@ fn handles_exactly_the_apple_and_msvc_targets() {
 #[test]
 fn apple_spec_carries_target_and_sdk_and_keeps_lld_link_only() {
     let spec = apple_spec("aarch64-apple-darwin", Path::new("/sdk/MacOSX14.5.sdk"));
-    assert!(spec.common.contains(&"--target=arm64-apple-darwin".to_string()));
+    assert!(spec
+        .common
+        .contains(&"--target=arm64-apple-darwin".to_string()));
     let at = spec.common.iter().position(|a| a == "-isysroot").unwrap();
     assert_eq!(spec.common[at + 1], "/sdk/MacOSX14.5.sdk");
     assert!(!spec.common.iter().any(|a| a.contains("fuse-ld")));
@@ -35,11 +37,18 @@ fn apple_spec_carries_target_and_sdk_and_keeps_lld_link_only() {
 fn msvc_spec_lists_existing_sdk_dirs_only() {
     let tmp = tempfile::tempdir().unwrap();
     let xwin = tmp.path();
-    for dir in ["crt/include", "sdk/include/ucrt", "crt/lib/arm64", "sdk/lib/um/arm64"] {
+    for dir in [
+        "crt/include",
+        "sdk/include/ucrt",
+        "crt/lib/arm64",
+        "sdk/lib/um/arm64",
+    ] {
         std::fs::create_dir_all(xwin.join(dir)).unwrap();
     }
     let spec = msvc_spec("aarch64-pc-windows-msvc", xwin);
-    assert!(spec.common.contains(&"--target=aarch64-pc-windows-msvc".to_string()));
+    assert!(spec
+        .common
+        .contains(&"--target=aarch64-pc-windows-msvc".to_string()));
     let isystems = spec.common.iter().filter(|a| *a == "-isystem").count();
     assert_eq!(isystems, 2, "{:?}", spec.common);
     assert!(!spec.common.iter().any(|a| a.contains("winrt")));

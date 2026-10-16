@@ -208,10 +208,12 @@ fn ensure_steps(
     }
     if let Some(cross) = (steps.cross_tools)()? {
         eprintln!("{}", cross.render());
-        let tools = partial.build_tools.get_or_insert_with(|| BuildToolsSummary {
-            note: Some("native host build tools not provisioned".to_string()),
-            ..BuildToolsSummary::default()
-        });
+        let tools = partial
+            .build_tools
+            .get_or_insert_with(|| BuildToolsSummary {
+                note: Some("native host build tools not provisioned".to_string()),
+                ..BuildToolsSummary::default()
+            });
         tools.provisioned = true;
         tools.cross = Some(cross);
     }

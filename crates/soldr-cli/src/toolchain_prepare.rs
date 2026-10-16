@@ -119,6 +119,19 @@ pub(crate) fn provision_build_tools() -> Result<BuildToolsSummary, SoldrError> {
     })
 }
 
+/// `soldr toolchain prepare [--target <T>]` (soldr#3806): the usual prepare,
+/// then the cc toolchain for `target` when one was requested.
+pub(crate) fn run_toolchain_prepare_for_target(target: Option<&str>) -> Result<i32, SoldrError> {
+    let code = crate::toolchain::run_toolchain_prepare()?;
+    if code != 0 {
+        return Ok(code);
+    }
+    if let Some(target) = target {
+        eprintln!("{}", provision_cross_target(target)?.render());
+    }
+    Ok(0)
+}
+
 /// Provision what `soldr cc --target <target>` needs (soldr#3806): the managed
 /// LLVM plus the Apple SDK / xwin SDK / sysroot, through the same
 /// `cc_cmd::prepare_for_target` the compiler driver runs.

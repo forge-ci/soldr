@@ -31,10 +31,7 @@ pub(crate) struct ClangCross {
 pub(crate) fn handles_target(target: &str) -> bool {
     (target.ends_with("-apple-darwin")
         && (target.starts_with("aarch64-") || target.starts_with("x86_64-")))
-        || matches!(
-            target,
-            "x86_64-pc-windows-msvc" | "aarch64-pc-windows-msvc"
-        )
+        || matches!(target, "x86_64-pc-windows-msvc" | "aarch64-pc-windows-msvc")
 }
 
 /// The flags a target's driver shim carries.

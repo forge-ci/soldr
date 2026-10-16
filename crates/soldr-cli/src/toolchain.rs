@@ -454,20 +454,7 @@ pub(crate) fn run_toolchain_install() -> Result<i32, SoldrError> {
 }
 
 /// Implementation of `soldr toolchain prepare`.
-pub(crate) fn run_toolchain_prepare(target: Option<&str>) -> Result<i32, SoldrError> {
-    let code = run_toolchain_prepare_host()?;
-    if code != 0 {
-        return Ok(code);
-    }
-    // soldr#3806: the compiler toolchain `soldr cc --target` exposes.
-    if let Some(target) = target {
-        let cross = crate::toolchain_prepare::provision_cross_target(target)?;
-        eprintln!("{}", cross.render());
-    }
-    Ok(0)
-}
-
-fn run_toolchain_prepare_host() -> Result<i32, SoldrError> {
+pub(crate) fn run_toolchain_prepare() -> Result<i32, SoldrError> {
     let workspace_root = std::env::current_dir().map_err(SoldrError::from)?;
     // Walk ancestors like rustup/cargo (soldr#3633).
     let manifest = crate::core::read_rust_toolchain_manifest_from_ancestors(&workspace_root)?;
