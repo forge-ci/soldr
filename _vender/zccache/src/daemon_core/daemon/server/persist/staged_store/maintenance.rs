@@ -147,7 +147,19 @@ pub(crate) fn evict_staged_artifact_keys_if_unchanged(
         artifact_dir,
         super::StagedHookPoint::MaintenanceStoreLockPending,
     );
-    let _store_lock_guard = kernal_api::platform::fs::lock_exclusive(&store_lock)?;
+    // Bounded: the caller holds the publication write barrier, and a reader
+    // (`zccache warm`, a stopped process) can hold this lock shared for as
+    // long as it likes. Waiting without a deadline froze every compile's
+    // publication behind maintenance (soldr#3836 audit). A busy store
+    // defers eviction to the next pass instead.
+    let Some(_store_lock_guard) = lock_exclusive_within(&store_lock, MAINTENANCE_STORE_LOCK_DEADLINE)? else {
+        tracing::warn!(
+            root = %root.display(),
+            "staged store lock busy for {:?}; eviction deferred to the next maintenance pass",
+            MAINTENANCE_STORE_LOCK_DEADLINE
+        );
+        return Ok(HashSet::new());
+    };
     let mut removed = HashSet::new();
     for (key, expected_generation) in expected.iter().filter(|(key, _)| staged_key_supported(key)) {
         let pointer = pointer_path(artifact_dir, key);
@@ -178,6 +190,33 @@ pub(crate) fn evict_staged_artifact_keys_if_unchanged(
         removed.insert(key.clone());
     }
     Ok(removed)
+}
+
+const MAINTENANCE_STORE_LOCK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+const CLEAR_STORE_LOCK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Take the exclusive store lock, giving up after `deadline` (backing off
+/// from 1 ms to 50 ms between attempts). `None` means another holder kept it.
+fn lock_exclusive_within(
+    file: &std::fs::File,
+    deadline: std::time::Duration,
+) -> io::Result<Option<kernal_api::platform::fs::FileLock<'_>>> {
+    let started = std::time::Instant::now();
+    let mut backoff = std::time::Duration::from_millis(1);
+    loop {
+        match kernal_api::platform::fs::try_lock_exclusive(file) {
+            Ok(guard) => return Ok(Some(guard)),
+            Err(error) if kernal_api::platform::fs::is_lock_conflict(&error) => {
+                let waited = started.elapsed();
+                if waited >= deadline {
+                    return Ok(None);
+                }
+                std::thread::sleep(backoff.min(deadline - waited));
+                backoff = (backoff * 2).min(std::time::Duration::from_millis(50));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Evicted staged trees awaiting deletion. Not a hex key, so every scanner
@@ -281,7 +320,20 @@ pub(in crate::daemon_core::daemon::server) fn clear_staged_artifacts(artifact_di
         artifact_dir,
         super::StagedHookPoint::MaintenanceStoreLockPending,
     );
-    let _store_lock_guard = kernal_api::platform::fs::lock_exclusive(&store_lock)?;
+    // Bounded for the same reason as eviction (the caller holds the
+    // publication write barrier); Clear waits longer for in-flight hit
+    // deliveries, then fails loudly rather than hanging.
+    let Some(_store_lock_guard) = lock_exclusive_within(&store_lock, CLEAR_STORE_LOCK_DEADLINE)? else {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!(
+                "staged store lock {} still held after {:?} (a `zccache warm` or stopped \
+                 process?); staged artifacts were not cleared",
+                root.join(STORE_LOCK).display(),
+                CLEAR_STORE_LOCK_DEADLINE
+            ),
+        ));
+    };
     // Detach everything under the lock; `sweep_staged_trash` deletes it after
     // the caller releases the publication barrier.
     for entry in fs::read_dir(&root)?.flatten() {

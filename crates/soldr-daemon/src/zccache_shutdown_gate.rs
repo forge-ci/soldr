@@ -10,20 +10,30 @@
 //! for a whole compile, which is legitimately longer than the critical-section
 //! hold limit. The writer is shutdown, which bounds its own drain.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub(crate) struct CompileShutdownGate {
     accepting: Arc<tokio::sync::RwLock<bool>>,
+    /// Set before the drain starts. A fair RwLock queues new readers behind a
+    /// waiting writer, so without this a compile arriving during a long drain
+    /// would hang until shutdown finished instead of being refused (soldr#3836
+    /// audit).
+    closing: Arc<AtomicBool>,
 }
 
 impl CompileShutdownGate {
     pub(crate) async fn enter(&self) -> Option<tokio::sync::OwnedRwLockReadGuard<bool>> {
+        if self.closing.load(Ordering::Acquire) {
+            return None;
+        }
         let guard = Arc::clone(&self.accepting).read_owned().await;
         (*guard).then_some(guard)
     }
 
     pub(crate) async fn close_and_drain(&self) -> tokio::sync::OwnedRwLockWriteGuard<bool> {
+        self.closing.store(true, Ordering::Release);
         let mut guard = Arc::clone(&self.accepting).write_owned().await;
         *guard = false;
         guard
@@ -34,6 +44,7 @@ impl Default for CompileShutdownGate {
     fn default() -> Self {
         Self {
             accepting: Arc::new(tokio::sync::RwLock::new(true)),
+            closing: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -58,6 +69,10 @@ mod tests {
             Poll::Ready(())
         })
         .await;
+        assert!(
+            gate.enter().await.is_none(),
+            "a compile arriving during the drain must be refused, not queued behind it"
+        );
         drop(compile_lease);
         let shutdown_guard = shutdown.await;
         drop(shutdown_guard);

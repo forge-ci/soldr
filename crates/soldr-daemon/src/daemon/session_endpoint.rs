@@ -121,7 +121,24 @@ impl CompileServiceReadiness {
         }
     }
 
+    /// Wait for the embedded service, bounded by [`SERVICE_READY_DEADLINE`]:
+    /// if bringup hangs, every SESSION connection used to park here forever
+    /// while its client gave up (soldr#3836 audit).
     async fn wait(&self) -> io::Result<Arc<SoldrZccacheService>> {
+        match tokio::time::timeout(SERVICE_READY_DEADLINE, self.wait_unbounded()).await {
+            Ok(result) => result,
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "embedded compile service not ready after {}s; inspect `soldr daemon status` \
+                     and `soldr logs paths`",
+                    SERVICE_READY_DEADLINE.as_secs()
+                ),
+            )),
+        }
+    }
+
+    async fn wait_unbounded(&self) -> io::Result<Arc<SoldrZccacheService>> {
         let mut receiver = self.receiver.clone();
         loop {
             if let Some(result) = receiver.borrow().clone() {
@@ -133,6 +150,9 @@ impl CompileServiceReadiness {
         }
     }
 }
+
+/// Matches the client's SESSION setup ceiling (the 120 s route ceiling).
+const SERVICE_READY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
 
 impl CompileServicePublisher {
     pub(crate) fn publish(&self, result: CompileServiceResult) {
