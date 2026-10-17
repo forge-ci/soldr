@@ -81,10 +81,16 @@ fn io_worker(
         }
     };
     let mut stream =
-        match runtime.block_on(DuplexPipeStream::<Bytes>::connect_by_path_with_wait_mode(
-            endpoint.as_str(),
-            interprocess::ConnectWaitMode::Timeout(connect_timeout),
-        )) {
+        match crate::platform::wait::block_on_for(
+            &runtime,
+            DuplexPipeStream::<Bytes>::connect_by_path_with_wait_mode(
+                endpoint.as_str(),
+                interprocess::ConnectWaitMode::Timeout(connect_timeout),
+            ),
+            connect_timeout + crate::platform::wait::PROBE,
+        )
+        .unwrap_or_else(|error| Err(error.into()))
+        {
             Ok(stream) => stream,
             Err(error) => {
                 let _ = startup.send(Err(error));
@@ -95,7 +101,13 @@ fn io_worker(
         return;
     }
 
-    while let Ok(command) = commands.recv() {
+    loop {
+        // Bounded receive; ends when the last command sender is dropped.
+        let command = match crate::platform::wait::recv_for(&commands, std::time::Duration::from_secs(1)) {
+            Ok(command) => command,
+            Err(crate::platform::wait::WaitError::TimedOut(_)) => continue,
+            Err(crate::platform::wait::WaitError::Disconnected) => break,
+        };
         match command {
             IoCommand::Read {
                 len,
@@ -103,7 +115,7 @@ fn io_worker(
                 reply,
             } => {
                 let mut data = vec![0_u8; len];
-                let result = runtime.block_on(async {
+                let result = crate::platform::wait::block_on_for(&runtime, async {
                     tokio::time::timeout(timeout, stream.read(&mut data))
                         .await
                         .map_err(|_| control_timeout("read", timeout))?
@@ -111,7 +123,8 @@ fn io_worker(
                             data.truncate(read);
                             data
                         })
-                });
+                }, timeout + crate::platform::wait::PROBE)
+                .unwrap_or_else(|error| Err(error.into()));
                 let _ = reply.send(result);
             }
             IoCommand::Write {
@@ -119,19 +132,21 @@ fn io_worker(
                 timeout,
                 reply,
             } => {
-                let result = runtime.block_on(async {
+                let result = crate::platform::wait::block_on_for(&runtime, async {
                     tokio::time::timeout(timeout, stream.write(&data))
                         .await
                         .map_err(|_| control_timeout("write", timeout))?
-                });
+                }, timeout + crate::platform::wait::PROBE)
+                .unwrap_or_else(|error| Err(error.into()));
                 let _ = reply.send(result);
             }
             IoCommand::Flush { timeout, reply } => {
-                let result = runtime.block_on(async {
+                let result = crate::platform::wait::block_on_for(&runtime, async {
                     tokio::time::timeout(timeout, stream.flush())
                         .await
                         .map_err(|_| control_timeout("flush", timeout))?
-                });
+                }, timeout + crate::platform::wait::PROBE)
+                .unwrap_or_else(|error| Err(error.into()));
                 let _ = reply.send(result);
             }
         }

@@ -19,9 +19,11 @@ pub fn physical_cores() -> Option<usize> {
 /// which is what we want; `hw.physicalcpu_max` would ignore a
 /// restricted CPU affinity.
 fn detect_cores() -> Option<usize> {
-    let output = std::process::Command::new("/usr/sbin/sysctl")
-        .args(["-n", "hw.physicalcpu"])
-        .output()
+    let output = crate::platform::wait::output_for(
+        std::process::Command::new("/usr/sbin/sysctl")
+        .args(["-n", "hw.physicalcpu"]),
+        crate::platform::wait::PROBE,
+    )
         .ok()?;
     if !output.status.success() {
         return None;
@@ -119,9 +121,11 @@ fn available_bytes(page_counts: [u64; 4], page_size: u64) -> Option<u64> {
 /// `ps` reports `rss` in kB. `None` if the process has exited or the
 /// subprocess could not be run.
 pub fn process_rss_bytes(pid: u32) -> Option<u64> {
-    let output = std::process::Command::new("/bin/ps")
-        .args(["-o", "rss=", "-p", &pid.to_string()])
-        .output()
+    let output = crate::platform::wait::output_for(
+        std::process::Command::new("/bin/ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()]),
+        crate::platform::wait::PROBE,
+    )
         .ok()?;
     if !output.status.success() {
         return None;

@@ -28,8 +28,9 @@ pub fn daemon_stdio(log: Option<&std::fs::File>) -> running_process::DaemonStdio
 }
 
 /// Windows has no exec: spawn and wait, returning the exit status.
+/// The child is the rest of this command, so it gets the whole-command budget.
 pub fn exec_or_status(command: &mut Command) -> io::Result<ExitStatus> {
-    command.status()
+    crate::platform::wait::status_for(command, crate::platform::wait::WHOLE_COMMAND)
 }
 
 /// Test seam for soldr#3098. Windows has no fork-to-exec window in which
