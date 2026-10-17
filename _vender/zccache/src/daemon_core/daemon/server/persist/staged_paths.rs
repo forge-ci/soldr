@@ -246,7 +246,10 @@ pub(in crate::daemon_core::daemon::server) fn rehydrate_rustc_out_dir_depfile(
     // directory with a trailing separator.
     let (old_generated, new_generated) = match generated_name {
         Some(name) => (
-            Path::new(old_out_dir).join(name).to_string_lossy().into_owned(),
+            Path::new(old_out_dir)
+                .join(name)
+                .to_string_lossy()
+                .into_owned(),
             current_out_dir.join(name).to_string_lossy().into_owned(),
         ),
         None => {

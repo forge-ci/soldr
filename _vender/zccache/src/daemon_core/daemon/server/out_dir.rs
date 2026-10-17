@@ -178,8 +178,7 @@ pub(super) fn recorded_root_relative_out_dir(
         .get_rustc_env_deps(context_key)?
         .into_iter()
         .find_map(|(dep, hash)| (dep == "OUT_DIR").then_some(hash))??;
-    (crate::daemon_core::depgraph::hash_env_dep_value(Some(&candidate)) == Some(recorded))
-        .then_some(candidate)
+    (crate::daemon_core::depgraph::hash_env_dep_value(Some(&candidate)) == Some(recorded)).then_some(candidate)
 }
 
 /// `OUT_DIR` relative to the remapped worktree root, or `None` when path
@@ -222,7 +221,13 @@ fn outputs_omit_text(outputs: &[RustcOutputFile], text: &str) -> bool {
         .collect();
     outputs
         .iter()
-        .filter(|output| output.path.as_path().extension().is_none_or(|ext| ext != "d"))
+        .filter(|output| {
+            output
+                .path
+                .as_path()
+                .extension()
+                .is_none_or(|ext| ext != "d")
+        })
         .all(|output| match std::fs::read(output.path.as_path()) {
             Ok(bytes) => finders.iter().all(|finder| finder.find(&bytes).is_none()),
             Err(_) => false,
@@ -736,7 +741,10 @@ mod tests {
     fn remap_env(out_dir: &Path) -> Vec<(String, String)> {
         vec![
             ("ZCCACHE_PATH_REMAP".to_string(), "auto".to_string()),
-            ("OUT_DIR".to_string(), out_dir.to_string_lossy().into_owned()),
+            (
+                "OUT_DIR".to_string(),
+                out_dir.to_string_lossy().into_owned(),
+            ),
         ]
     }
 
@@ -758,7 +766,10 @@ mod tests {
         for name in ["a", "b"] {
             let root = temp.path().join(name);
             let out_dir = root.join("target/debug/build/dep-0123/out");
-            let rmeta = output(&root.join("target/debug/deps/libdep.rmeta"), b"no paths here");
+            let rmeta = output(
+                &root.join("target/debug/deps/libdep.rmeta"),
+                b"no paths here",
+            );
             let depinfo = output(
                 &root.join("target/debug/deps/dep.d"),
                 format!("# env-dep:OUT_DIR={}\n", out_dir.display()).as_bytes(),
@@ -827,10 +838,17 @@ mod tests {
                 outputs,
             )
         };
-        assert_eq!(store(&remap_off, &root, std::slice::from_ref(&rmeta)), physical);
+        assert_eq!(
+            store(&remap_off, &root, std::slice::from_ref(&rmeta)),
+            physical
+        );
         let elsewhere = temp.path().join("elsewhere");
         assert_eq!(
-            store(&remap_env(&out_dir), &elsewhere, std::slice::from_ref(&rmeta)),
+            store(
+                &remap_env(&out_dir),
+                &elsewhere,
+                std::slice::from_ref(&rmeta)
+            ),
             physical
         );
         let missing = RustcOutputFile {
@@ -838,6 +856,9 @@ mod tests {
             path: NormalizedPath::new(root.join("target/libgone.rmeta")),
             size: 0,
         };
-        assert_eq!(store(&remap_env(&out_dir), &root, &[rmeta, missing]), physical);
+        assert_eq!(
+            store(&remap_env(&out_dir), &root, &[rmeta, missing]),
+            physical
+        );
     }
 }

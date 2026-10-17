@@ -190,6 +190,7 @@ kernal-api = { workspace = true, features = [
 # exact version kernal-api declares so the graph holds one mimalloc.
 mimalloc-pprof = { version = "=0.9.4", optional = true }
 memchr = { workspace = true }
+twox-hash = { workspace = true }
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 futures = { workspace = true }

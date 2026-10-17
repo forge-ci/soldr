@@ -236,6 +236,7 @@ pub(super) async fn try_request_cache_hit(probe: RequestCacheHitProbe<'_>) -> Op
         rustc_metadata_compat_outputs: rustc_requested_outputs,
         rustc_archive_hardlink_eligible,
         materialization_mode: state.materialization_mode(client_env),
+        pch_mtime_replay: super::pch_gate::replay_enabled_for(client_env),
         phases: CachedHitPhases::request_cache(request_cache_lookup_ns, cross_root_validate_ns),
     })
     .await
@@ -376,6 +377,7 @@ pub(super) async fn try_fast_hit(probe: FastHitProbe<'_>) -> Option<Response> {
         rustc_archive_hardlink_eligible: is_rustc
             .then(|| crate::daemon_core::compiler::rustc_archive_hardlink_eligible(rustc_args)),
         materialization_mode: state.materialization_mode(client_env),
+        pch_mtime_replay: super::pch_gate::replay_enabled_for(client_env),
         phases: CachedHitPhases {
             parse_args_ns,
             build_context_ns,
@@ -538,6 +540,7 @@ pub(super) async fn try_depgraph_cached_hit(
         rustc_archive_hardlink_eligible: is_rustc
             .then(|| crate::daemon_core::compiler::rustc_archive_hardlink_eligible(rustc_args)),
         materialization_mode: state.materialization_mode(client_env),
+        pch_mtime_replay: super::pch_gate::replay_enabled_for(client_env),
         phases: CachedHitPhases {
             parse_args_ns,
             build_context_ns,

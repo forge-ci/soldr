@@ -3163,6 +3163,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
+
+[[package]]
 name = "typed-path"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3691,7 +3697,7 @@ dependencies = [
 
 [[package]]
 name = "zccache"
-version = "1.15.4"
+version = "1.15.5"
 dependencies = [
  "arc-swap",
  "bincode",
@@ -3717,6 +3723,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "twox-hash",
  "typed-path",
  "uuid",
  "windows-sys 0.61.2",
