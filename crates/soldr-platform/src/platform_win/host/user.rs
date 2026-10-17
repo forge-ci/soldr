@@ -15,9 +15,7 @@ pub fn uid() -> u32 {
 /// Probes a registry read of `HKLM\SECURITY` — only admin processes can
 /// open this key, so a read failure means non-admin.
 pub fn is_elevated() -> bool {
-    Command::new("reg")
-        .args(["query", r"HKLM\SECURITY"])
-        .output()
+    crate::platform::wait::output_for(Command::new("reg").args(["query", r"HKLM\SECURITY"]), crate::platform::wait::PROBE)
         .map(|output| output.status.success())
         .unwrap_or(false)
 }
@@ -48,10 +46,12 @@ pub fn relaunch_elevated(
         exe = exe_quoted,
         args = arg_list,
     );
-    let status = Command::new(powershell)
-        .args(["-NoProfile", "-Command", &script])
-        .status()
-        .map_err(|e| format!("failed to relaunch elevated: {e}"))?;
+    // The elevated child runs the whole relaunched command.
+    let status = crate::platform::wait::status_for(
+        Command::new(powershell).args(["-NoProfile", "-Command", &script]),
+        crate::platform::wait::LONG_CHILD,
+    )
+    .map_err(|e| format!("failed to relaunch elevated: {e}"))?;
     Ok(status.code().unwrap_or(1))
 }
 
