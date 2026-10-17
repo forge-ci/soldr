@@ -10,10 +10,13 @@
 //! - **Critical section** -- [`Mutex::lock`], [`RwLock::read`],
 //!   [`RwLock::write`]. The caller expects the lock promptly and holds it
 //!   briefly. Every wait and every hold is registered with its call site; a
-//!   watchdog aborts the process, printing every registered site, once any of
-//!   them exceeds the hold limit (15 s by default, `SOLDR_LOCK_HOLD_LIMIT_SECS`
-//!   to override). An overrun is a bug -- a deadlock or a guard held across
-//!   blocking work -- and a crash that names the site beats a silent wedge.
+//!   watchdog aborts the process, printing every registered site, once any
+//!   *hold* exceeds the hold limit (15 s by default,
+//!   `SOLDR_LOCK_HOLD_LIMIT_SECS` to override). An overrun hold is a bug -- a
+//!   deadlock or a guard held across blocking work -- and a crash that names
+//!   the site beats a silent wedge. An overdue *wait* is only reported: a
+//!   deadlock always shows up as an overdue hold, while a long wait alone can
+//!   be a queue of brief holds under load, which must not kill the process.
 //! - **Timeout** -- [`Mutex::lock_for`], [`RwLock::read_for`],
 //!   [`RwLock::write_for`]. The caller can legitimately wait and has a
 //!   fallback; the signature makes it handle [`LockTimeout`].
@@ -30,7 +33,8 @@ use std::time::{Duration, Instant};
 const DEFAULT_HOLD_LIMIT: Duration = Duration::from_secs(15);
 const HOLD_LIMIT_ENV: &str = "SOLDR_LOCK_HOLD_LIMIT_SECS";
 
-/// The critical-section budget for any single wait or hold.
+/// The critical-section budget for any single hold (and the report threshold
+/// for any single wait).
 pub fn hold_limit() -> Duration {
     static LIMIT: OnceLock<Duration> = OnceLock::new();
     *LIMIT.get_or_init(|| {
@@ -127,17 +131,41 @@ fn unregister(id: u64) {
     with_registry(|entries| entries.retain(|entry| entry.id != id));
 }
 
-/// Every registered wait and hold, if any one is older than `limit` at `now`.
-/// Pure, so the watchdog's decision is unit-testable.
-fn overdue_report(entries: &[Entry], now: Instant, limit: Duration) -> Option<String> {
-    if !entries
+/// What the watchdog does about the registry at one tick.
+#[derive(Debug, PartialEq, Eq)]
+enum Overdue {
+    /// A hold overran: a deadlock or a guard held across blocking work.
+    Abort(String),
+    /// Only waits overran (each listed id is reported once).
+    Report(Vec<u64>, String),
+}
+
+/// The watchdog's decision for `entries` at `now`, with every registered
+/// site in the report. Waits already in `reported` are not reported again.
+/// Pure, so the decision is unit-testable.
+fn overdue_report(
+    entries: &[Entry],
+    now: Instant,
+    limit: Duration,
+    reported: &[u64],
+) -> Option<Overdue> {
+    let overdue = |entry: &&Entry| now.saturating_duration_since(entry.since) > limit;
+    let hold_overrun = entries
         .iter()
-        .any(|entry| now.saturating_duration_since(entry.since) > limit)
-    {
+        .filter(overdue)
+        .any(|entry| entry.phase == Phase::Holding);
+    let new_waits: Vec<u64> = entries
+        .iter()
+        .filter(overdue)
+        .filter(|entry| entry.phase == Phase::Waiting && !reported.contains(&entry.id))
+        .map(|entry| entry.id)
+        .collect();
+    if !hold_overrun && new_waits.is_empty() {
         return None;
     }
+    let what = if hold_overrun { "hold" } else { "wait" };
     let mut report = format!(
-        "soldr: a lock wait or hold exceeded {}s (critical sections are expected to be brief; \
+        "soldr: a lock {what} exceeded {}s (critical sections are expected to be brief; \
          soldr#3836). Registered sites:",
         limit.as_secs()
     );
@@ -151,7 +179,11 @@ fn overdue_report(entries: &[Entry], now: Instant, limit: Duration) -> Option<St
             entry.thread,
         ));
     }
-    Some(report)
+    Some(if hold_overrun {
+        Overdue::Abort(report)
+    } else {
+        Overdue::Report(new_waits, report)
+    })
 }
 
 fn start_watchdog() {
@@ -161,13 +193,25 @@ fn start_watchdog() {
         // locks still work, just without the overrun backstop.
         let _ = std::thread::Builder::new()
             .name("soldr-lock-watchdog".to_string())
-            .spawn(|| loop {
-                std::thread::sleep(Duration::from_secs(1));
-                let report =
-                    with_registry(|entries| overdue_report(entries, Instant::now(), hold_limit()));
-                if let Some(report) = report {
-                    eprintln!("{report}");
-                    std::process::abort();
+            .spawn(|| {
+                let mut reported: Vec<u64> = Vec::new();
+                loop {
+                    std::thread::sleep(Duration::from_secs(1));
+                    let decision = with_registry(|entries| {
+                        reported.retain(|id| entries.iter().any(|entry| entry.id == *id));
+                        overdue_report(entries, Instant::now(), hold_limit(), &reported)
+                    });
+                    match decision {
+                        Some(Overdue::Abort(report)) => {
+                            eprintln!("{report}");
+                            std::process::abort();
+                        }
+                        Some(Overdue::Report(ids, report)) => {
+                            eprintln!("{report}");
+                            reported.extend(ids);
+                        }
+                        None => {}
+                    }
                 }
             });
     });
