@@ -228,13 +228,15 @@ pub fn cargo_lock_is_tracked(workspace_root: &Path) -> bool {
     if find_git_worktree_root(workspace_root).is_none() {
         return false;
     }
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(workspace_root)
-        .args(["ls-files", "--error-unmatch", "Cargo.lock"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    let status = crate::platform::wait::status_for(
+        Command::new("git")
+            .arg("-C")
+            .arg(workspace_root)
+            .args(["ls-files", "--error-unmatch", "Cargo.lock"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+        crate::platform::wait::PROBE,
+    );
     matches!(status, Ok(s) if s.success())
 }
 
@@ -254,13 +256,15 @@ pub fn cargo_lock_is_gitignored(workspace_root: &Path) -> bool {
     if find_git_worktree_root(workspace_root).is_none() {
         return false;
     }
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(workspace_root)
-        .args(["check-ignore", "-q", "Cargo.lock"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    let status = crate::platform::wait::status_for(
+        Command::new("git")
+            .arg("-C")
+            .arg(workspace_root)
+            .args(["check-ignore", "-q", "Cargo.lock"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+        crate::platform::wait::PROBE,
+    );
     matches!(status, Ok(s) if s.success())
 }
 
@@ -269,12 +273,11 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo_root)
-        .args(args)
-        .output()
-        .ok()?;
+    let out = crate::platform::wait::output_for(
+        Command::new("git").arg("-C").arg(repo_root).args(args),
+        crate::platform::wait::PROBE,
+    )
+    .ok()?;
     if !out.status.success() {
         return None;
     }

@@ -146,21 +146,21 @@ pub(crate) fn gate_linking_compile(rustc_argv: &[String]) -> Result<(), String> 
             let paths = paths.clone();
             let install_dir = install_dir.to_path_buf();
             // A dedicated thread: the caller may already be inside a runtime.
-            std::thread::spawn(move || {
+            let handle = std::thread::spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .map_err(|error| error.to_string())?;
-                runtime
-                    .block_on(crate::fetch::wait_for_managed_llvm(
-                        &paths,
-                        &install_dir,
-                        timeout,
-                    ))
-                    .map_err(|error| error.to_string())
-            })
-            .join()
-            .unwrap_or_else(|_| Err("the LLVM wait thread panicked".to_string()))
+                crate::platform::wait::block_on_for(
+                    &runtime,
+                    crate::fetch::wait_for_managed_llvm(&paths, &install_dir, timeout),
+                    timeout + crate::platform::wait::PROBE,
+                )
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())
+            });
+            crate::platform::wait::join_for(handle, timeout + crate::platform::wait::HELPER_JOIN)
+                .unwrap_or_else(|_| Err("the LLVM wait thread panicked or overran".to_string()))
         },
     )
 }

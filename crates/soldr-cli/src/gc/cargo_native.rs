@@ -197,11 +197,12 @@ pub(super) fn invoke_cargo_native_gc(
         cargo_argv.join(" ")
     );
 
-    let output = command.output().map_err(|e| {
-        SoldrError::Other(format!(
-            "failed to invoke rustup run {toolchain} cargo: {e}"
-        ))
-    })?;
+    let output = crate::platform::wait::output_for(&mut command, crate::platform::wait::LONG_CHILD)
+        .map_err(|e| {
+            SoldrError::Other(format!(
+                "failed to invoke rustup run {toolchain} cargo: {e}"
+            ))
+        })?;
 
     // Stream cargo's output through to the user's terminal.
     use std::io::Write as _;
@@ -249,7 +250,8 @@ fn rustup_run_available_for(toolchain: &str) -> bool {
     let mut command = std::process::Command::new("rustup");
     command.args(["toolchain", "list"]);
     crate::core::suppress_windows_console_window(&mut command);
-    let output = match command.output() {
+    let output = match crate::platform::wait::output_for(&mut command, crate::platform::wait::PROBE)
+    {
         Ok(o) => o,
         Err(_) => return false,
     };

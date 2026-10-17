@@ -506,7 +506,7 @@ impl CacheStateTail {
     pub(crate) fn stop_and_join(mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            let _ = crate::platform::wait::join_for(handle, crate::platform::wait::HELPER_JOIN);
         }
     }
 }

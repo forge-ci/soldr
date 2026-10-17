@@ -115,14 +115,15 @@ pub(crate) async fn run(args: CcArgs, language: Language) -> Result<i32, SoldrEr
     command.env("PATH", path_with_prepend(&tools.bin_dir)?);
     suppress_windows_console_window(&mut command);
 
-    let status = command.status().map_err(|error| {
-        SoldrError::Other(format!(
-            "soldr {}: failed to start compiler {} for target {}: {error}",
-            language.command_name(),
-            compiler.display(),
-            resolved_triple
-        ))
-    })?;
+    let status = crate::platform::wait::status_for(&mut command, crate::platform::wait::LONG_CHILD)
+        .map_err(|error| {
+            SoldrError::Other(format!(
+                "soldr {}: failed to start compiler {} for target {}: {error}",
+                language.command_name(),
+                compiler.display(),
+                resolved_triple
+            ))
+        })?;
     Ok(status.code().unwrap_or(1))
 }
 

@@ -476,7 +476,7 @@ fn run_stage_group(spawner: &impl StageSpawner, stages: &[&Stage]) -> Result<i32
 }
 
 fn wait_one(mut child: Child, stage: &Stage) -> Result<i32, SoldrError> {
-    let status = child.wait()?;
+    let status = crate::platform::wait::wait_for(&mut child, crate::platform::wait::LONG_CHILD)?;
     report_status(stage, &child, status);
     Ok(exit_code(status))
 }
@@ -547,7 +547,7 @@ fn cancel_child(stage: &Stage, child: &mut Child) {
             child.id()
         ),
     }
-    if let Ok(status) = child.wait() {
+    if let Ok(status) = crate::platform::wait::wait_for(child, crate::platform::wait::PROBE) {
         eprintln!(
             "soldr ci-test: stage `{}` (pid {}) canceled with {status}",
             stage.name,

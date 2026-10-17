@@ -545,7 +545,8 @@ fn probe_host_runtime(compiler: &Path) -> Option<bool> {
         let mut command = std::process::Command::new(compiler);
         command.arg(format!("-print-file-name={file}"));
         crate::core::suppress_windows_console_window(&mut command);
-        let output = command.output().ok()?;
+        let output =
+            crate::platform::wait::output_for(&mut command, crate::platform::wait::PROBE).ok()?;
         if !output.status.success() {
             return None;
         }

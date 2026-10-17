@@ -81,7 +81,7 @@ fn gdb_dump(debugger: &Path, pid: u32) -> Result<(), String> {
         )),
         Ok(None) => {
             let _ = child.kill();
-            let _ = child.wait();
+            let _ = soldr_platform::wait::wait_for(&mut child, soldr_platform::wait::PROBE);
             Err(format!(
                 "nextest timeout: gdb failed (timed out after {} seconds); using /proc fallback\n",
                 DIAGNOSTIC_TIMEOUT.as_secs()

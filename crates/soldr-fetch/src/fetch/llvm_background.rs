@@ -226,7 +226,13 @@ fn run_fetch_thread(paths: &SoldrPaths) {
             return;
         }
     };
-    if let Err(error) = runtime.block_on(ensure_llvm_toolchain(paths)) {
+    let outcome = crate::platform::wait::block_on_for(
+        &runtime,
+        ensure_llvm_toolchain(paths),
+        crate::platform::wait::LONG_CHILD,
+    )
+    .unwrap_or_else(|error| Err(SoldrError::Other(format!("timed out: {error}"))));
+    if let Err(error) = outcome {
         eprintln!("soldr: background LLVM fetch failed: {error}");
     }
 }

@@ -214,8 +214,7 @@ fn run(argv: &[std::ffi::OsString]) -> i32 {
     drop(done_tx);
     let (status_tx, status_rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let code = child
-            .wait()
+        let code = soldr_platform::wait::wait_for(&mut child, soldr_platform::wait::LONG_CHILD)
             .map_or(1, |status| test_child::returncode(&status));
         let _ = status_tx.send(code);
     });
@@ -244,7 +243,9 @@ fn run(argv: &[std::ffi::OsString]) -> i32 {
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
-    let returncode = returncode.unwrap_or_else(|| status_rx.recv().unwrap_or(1));
+    let returncode = returncode.unwrap_or_else(|| {
+        soldr_platform::wait::recv_for(&status_rx, soldr_platform::wait::HELPER_JOIN).unwrap_or(1)
+    });
 
     while pumps > 0 {
         termination.poll(pid);

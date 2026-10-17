@@ -200,6 +200,8 @@ where
 /// store write).
 const HOT_PATH_ACK_TIMEOUT: Duration = Duration::from_millis(200);
 
+// Bounded by the enclosing `run_windows_ipc` deadline (soldr#3836).
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
 fn submit_fire_and_forget_windows(
     sock_path: &Path,
     req: &Request,
@@ -265,6 +267,8 @@ fn submit_request_windows_with_timeout(
     )
 }
 
+// Bounded by the enclosing `run_windows_ipc` deadline (soldr#3836).
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
 fn submit_request_windows_with_timeout_and_version(
     sock_path: &Path,
     req: &Request,

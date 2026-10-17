@@ -777,9 +777,12 @@ fn lock_target(target: &Path) -> Result<File, SoldrError> {
         .read(true)
         .write(true)
         .open(&path)?;
-    file.lock_exclusive().map_err(|error| {
-        SoldrError::Other(format!("failed to lock {}: {error}", path.display()))
-    })?;
+    crate::platform::wait::lock_exclusive_announced(
+        &file,
+        crate::platform::wait::LONG_LOCK,
+        "the dylint cook target tree",
+    )
+    .map_err(|error| SoldrError::Other(format!("failed to lock {}: {error}", path.display())))?;
     Ok(file)
 }
 
@@ -794,7 +797,12 @@ fn lock_workspace_source(root: &Path) -> Result<File, SoldrError> {
         .read(true)
         .write(true)
         .open(&path)?;
-    file.lock_exclusive().map_err(|error| {
+    crate::platform::wait::lock_exclusive_announced(
+        &file,
+        crate::platform::wait::LONG_LOCK,
+        "the dylint cook workspace sources",
+    )
+    .map_err(|error| {
         SoldrError::Other(format!(
             "failed to lock workspace sources via {}: {error}",
             path.display()

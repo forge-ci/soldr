@@ -110,21 +110,22 @@ fn fetch_on_thread(crate_name: &str, version: &VersionSpec) -> Result<FetchResul
     let paths = SoldrPaths::new()?;
     let crate_name = crate_name.to_string();
     let version = version.clone();
-    std::thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| {
                 SoldrError::Other(format!("could not create plugin fetch runtime: {e}"))
             })?;
-        runtime.block_on(crate::fetch::fetch_tool_for_host_with_paths(
-            &crate_name,
-            &version,
-            &paths,
-        ))
-    })
-    .join()
-    .map_err(|_| SoldrError::Other("plugin fetch thread panicked".to_string()))?
+        crate::platform::wait::block_on_for(
+            &runtime,
+            crate::fetch::fetch_tool_for_host_with_paths(&crate_name, &version, &paths),
+            crate::platform::wait::LONG_CHILD,
+        )
+        .unwrap_or_else(|error| Err(SoldrError::Other(format!("plugin fetch: {error}"))))
+    });
+    crate::platform::wait::join_for(handle, crate::platform::wait::LONG_CHILD)
+        .map_err(|_| SoldrError::Other("plugin fetch thread panicked or overran".to_string()))?
 }
 
 #[cfg(test)]

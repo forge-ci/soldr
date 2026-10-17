@@ -420,11 +420,14 @@ pub(super) fn run_gc_purge_candidates(
         workers.push(
             builder
                 .spawn(move || loop {
+                    // Bounded, and the queue lock is released between
+                    // attempts so no worker waits on a sibling's receive.
                     let next = {
                         let rx = job_rx.lock();
-                        rx.recv()
+                        crate::platform::wait::recv_for(&rx, std::time::Duration::from_millis(200))
                     };
                     match next {
+                        Err(crate::platform::wait::WaitError::TimedOut(_)) => continue,
                         Ok(candidate) => {
                             let _ = result_tx
                                 .send(crate::cache_lib::gc::delete_candidate_dir(candidate));
@@ -473,9 +476,8 @@ pub(super) fn run_gc_purge_candidates(
     }
 
     for worker in workers {
-        worker
-            .join()
-            .map_err(|_| SoldrError::Other("gc worker panicked".to_string()))?;
+        crate::platform::wait::join_for(worker, crate::platform::wait::LONG_CHILD)
+            .map_err(|_| SoldrError::Other("gc worker panicked or did not finish".to_string()))?;
     }
 
     if !json && selected_count > 0 {

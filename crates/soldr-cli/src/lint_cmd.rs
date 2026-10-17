@@ -572,7 +572,9 @@ fn wait_for_parallel_children(children: &mut [(String, Child)]) -> Result<i32, S
                                     other.id()
                                 ),
                             }
-                            if let Ok(other_status) = other.wait() {
+                            if let Ok(other_status) =
+                                crate::platform::wait::wait_for(other, crate::platform::wait::PROBE)
+                            {
                                 eprintln!(
                                     "soldr: lint deps: `{other_label}` (pid {}) canceled with {other_status}",
                                     other.id()

@@ -266,10 +266,11 @@ fn sdk_from_xcrun() -> Option<PathBuf> {
     if crate::platform::host::facts::os() != crate::platform::host::facts::HostOs::MacOs {
         return None;
     }
-    let out = Command::new("xcrun")
-        .args(["--show-sdk-path"])
-        .output()
-        .ok()?;
+    let out = crate::platform::wait::output_for(
+        Command::new("xcrun").args(["--show-sdk-path"]),
+        crate::platform::wait::PROBE,
+    )
+    .ok()?;
     if !out.status.success() {
         return None;
     }

@@ -325,6 +325,8 @@ fn run_main(raw_args: Vec<String>) -> i32 {
     block_on_exit_code(run_with_args(&raw_args[0], &raw_args[1..]))
 }
 
+// Process-lifetime runtime: this drives the whole CLI command (soldr#3836).
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
 fn block_on_exit_code<F>(future: F) -> i32
 where
     F: std::future::Future<Output = Result<i32, SoldrError>>,

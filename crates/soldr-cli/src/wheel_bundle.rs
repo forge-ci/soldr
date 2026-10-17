@@ -208,10 +208,12 @@ pub(crate) fn stage_requested(wheel: &Path) -> Result<(), SoldrError> {
         // build step, not a recursive chain: mark them with the one-hop
         // self-spawn edge the reentrancy guard sanctions and each child
         // consumes on entry (soldr#2739), as gc and output capture do.
-        let status = std::process::Command::new(&python)
-            .args(&args)
-            .env(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR, "1")
-            .status();
+        let status = crate::platform::wait::status_for(
+            std::process::Command::new(&python)
+                .args(&args)
+                .env(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR, "1"),
+            crate::platform::wait::LONG_CHILD,
+        );
         match status {
             Ok(status) if status.success() => return Ok(()),
             Ok(status) => {

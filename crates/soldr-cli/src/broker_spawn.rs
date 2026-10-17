@@ -706,77 +706,85 @@ fn broker_instance_at(runtime: &tokio::runtime::Runtime, endpoint: &str) -> Opti
 }
 
 fn broker_snapshot_at(runtime: &tokio::runtime::Runtime, endpoint: &str) -> Option<(String, u32)> {
-    runtime.block_on(async {
-        use prost::Message as _;
-        use running_process::broker::protocol::{
-            validate_frame_envelope, AdminReply, AdminRequest, AdminVerb, Frame, FrameKind,
-            ADMIN_PAYLOAD_PROTOCOL,
-        };
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-        let probe = async {
-            let name = crate::session_transport::local_session_name(endpoint)?;
-            let mut stream = crate::platform::ipc::connect::connect_local_socket(name).await?;
-            let request = AdminRequest {
-                verb: AdminVerb::Status as i32,
-                json: true,
-                ..Default::default()
+    crate::platform::wait::block_on_for(
+        runtime,
+        async {
+            use prost::Message as _;
+            use running_process::broker::protocol::{
+                validate_frame_envelope, AdminReply, AdminRequest, AdminVerb, Frame, FrameKind,
+                ADMIN_PAYLOAD_PROTOCOL,
             };
-            let request =
-                Frame::request(ADMIN_PAYLOAD_PROTOCOL, request.encode_to_vec()).with_request_id(1);
-            let bytes = running_process::broker::protocol::encode_framed(&request)
-                .map_err(std::io::Error::other)?;
-            stream.write_all(&bytes).await?;
-            stream.flush().await?;
-            let mut header = [0_u8; 5];
-            stream.read_exact(&mut header).await?;
-            if header[0] != running_process::broker::protocol::ENVELOPE_VERSION {
-                return Err(std::io::Error::other("wrong broker framing version"));
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+            let probe = async {
+                let name = crate::session_transport::local_session_name(endpoint)?;
+                let mut stream = crate::platform::ipc::connect::connect_local_socket(name).await?;
+                let request = AdminRequest {
+                    verb: AdminVerb::Status as i32,
+                    json: true,
+                    ..Default::default()
+                };
+                let request = Frame::request(ADMIN_PAYLOAD_PROTOCOL, request.encode_to_vec())
+                    .with_request_id(1);
+                let bytes = running_process::broker::protocol::encode_framed(&request)
+                    .map_err(std::io::Error::other)?;
+                stream.write_all(&bytes).await?;
+                stream.flush().await?;
+                let mut header = [0_u8; 5];
+                stream.read_exact(&mut header).await?;
+                if header[0] != running_process::broker::protocol::ENVELOPE_VERSION {
+                    return Err(std::io::Error::other("wrong broker framing version"));
+                }
+                let len = u32::from_le_bytes(header[1..].try_into().expect("four bytes")) as usize;
+                if len > running_process::broker::protocol::MAX_FRAME_BYTES {
+                    return Err(std::io::Error::other("oversized readiness reply"));
+                }
+                let mut body = vec![0_u8; len];
+                stream.read_exact(&mut body).await?;
+                let response = Frame::decode(body.as_slice()).map_err(std::io::Error::other)?;
+                validate_frame_envelope(&response, FrameKind::Response, ADMIN_PAYLOAD_PROTOCOL)
+                    .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
+                if response.request_id != request.request_id {
+                    return Err(std::io::Error::other("readiness request id mismatch"));
+                }
+                let reply = AdminReply::decode(response.payload.as_slice())
+                    .map_err(std::io::Error::other)?;
+                if reply.exit_code != 0 {
+                    return Err(std::io::Error::other(format!(
+                        "broker readiness returned exit code {}",
+                        reply.exit_code
+                    )));
+                }
+                let snapshot: serde_json::Value =
+                    serde_json::from_str(&reply.body).map_err(std::io::Error::other)?;
+                let instance = snapshot
+                    .get("broker_instance")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        std::io::Error::other("readiness reply omitted broker_instance")
+                    })?;
+                let pid = snapshot
+                    .get("broker_pid")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|pid| u32::try_from(pid).ok())
+                    .ok_or_else(|| std::io::Error::other("readiness reply omitted broker_pid"))?;
+                Ok((instance, pid))
+            };
+            match tokio::time::timeout(
+                crate::broker_deadlines::BrokerDeadlines::from_env().first_response,
+                probe,
+            )
+            .await
+            {
+                Ok(Ok(instance)) => Some(instance),
+                Ok(Err(_)) | Err(_) => None,
             }
-            let len = u32::from_le_bytes(header[1..].try_into().expect("four bytes")) as usize;
-            if len > running_process::broker::protocol::MAX_FRAME_BYTES {
-                return Err(std::io::Error::other("oversized readiness reply"));
-            }
-            let mut body = vec![0_u8; len];
-            stream.read_exact(&mut body).await?;
-            let response = Frame::decode(body.as_slice()).map_err(std::io::Error::other)?;
-            validate_frame_envelope(&response, FrameKind::Response, ADMIN_PAYLOAD_PROTOCOL)
-                .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
-            if response.request_id != request.request_id {
-                return Err(std::io::Error::other("readiness request id mismatch"));
-            }
-            let reply =
-                AdminReply::decode(response.payload.as_slice()).map_err(std::io::Error::other)?;
-            if reply.exit_code != 0 {
-                return Err(std::io::Error::other(format!(
-                    "broker readiness returned exit code {}",
-                    reply.exit_code
-                )));
-            }
-            let snapshot: serde_json::Value =
-                serde_json::from_str(&reply.body).map_err(std::io::Error::other)?;
-            let instance = snapshot
-                .get("broker_instance")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .ok_or_else(|| std::io::Error::other("readiness reply omitted broker_instance"))?;
-            let pid = snapshot
-                .get("broker_pid")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|pid| u32::try_from(pid).ok())
-                .ok_or_else(|| std::io::Error::other("readiness reply omitted broker_pid"))?;
-            Ok((instance, pid))
-        };
-        match tokio::time::timeout(
-            crate::broker_deadlines::BrokerDeadlines::from_env().first_response,
-            probe,
-        )
-        .await
-        {
-            Ok(Ok(instance)) => Some(instance),
-            Ok(Err(_)) | Err(_) => None,
-        }
-    })
+        },
+        crate::platform::wait::PROBE,
+    )
+    .ok()
+    .flatten()
 }
 
 /// Unlink a stopped broker's admission endpoint. soldr#2549 leaves exactly one

@@ -191,10 +191,11 @@ fn run_defender_command(
     }
     let escaped = path.replace('\'', "''");
     let script = format!("{cmdlet} -ExclusionPath '{escaped}'");
-    let output = Command::new(powershell)
-        .args(["-NoProfile", "-Command", &script])
-        .output()
-        .map_err(|e| format!("failed to invoke PowerShell: {e}"))?;
+    let output = crate::platform::wait::output_for(
+        Command::new(powershell).args(["-NoProfile", "-Command", &script]),
+        crate::platform::wait::PROBE,
+    )
+    .map_err(|e| format!("failed to invoke PowerShell: {e}"))?;
     if output.status.success() {
         Ok(())
     } else {
@@ -227,13 +228,14 @@ pub fn current_exclusion_list(powershell: &Path) -> Vec<String> {
             .map(|s| s.lines().map(str::to_string).collect())
             .unwrap_or_default();
     }
-    let output = Command::new(powershell)
-        .args([
+    let output = crate::platform::wait::output_for(
+        Command::new(powershell).args([
             "-NoProfile",
             "-Command",
             "(Get-MpPreference).ExclusionPath | ForEach-Object { $_ }",
-        ])
-        .output();
+        ]),
+        crate::platform::wait::PROBE,
+    );
     let Ok(output) = output else {
         return Vec::new();
     };

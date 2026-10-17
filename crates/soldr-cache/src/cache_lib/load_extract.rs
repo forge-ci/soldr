@@ -426,7 +426,7 @@ struct ExtractDispatch {
     tx: Option<std::sync::mpsc::SyncSender<ExtractJob>>,
     /// Barrier joined when every worker exits; size = num_workers + 1
     /// (workers + the driver caller).
-    barrier: Arc<std::sync::Barrier>,
+    barrier: Arc<crate::platform::wait::Barrier>,
     /// Guards against waiting on `barrier` twice. A `Barrier` is reusable:
     /// a second wait opens a new generation that only `n_workers + 1`
     /// further arrivals could release, so double-waiting would hang.
@@ -454,7 +454,7 @@ impl ExtractDispatch {
         // memory at ~13 MiB which is negligible.
         let (tx, rx) = sync_channel::<ExtractJob>(64);
         let rx = Arc::new(Mutex::new(rx));
-        let barrier = Arc::new(std::sync::Barrier::new(n_workers + 1));
+        let barrier = Arc::new(crate::platform::wait::Barrier::new(n_workers + 1));
 
         for worker_idx in 0..n_workers {
             let rx = Arc::clone(&rx);
@@ -511,7 +511,7 @@ impl ExtractDispatch {
                         prof.record(worker_idx, us);
                     }
                 }
-                barrier.wait();
+                let _ = barrier.wait_for(crate::platform::wait::HELPER_JOIN);
             });
         }
 
@@ -527,7 +527,8 @@ impl ExtractDispatch {
         job: ExtractJob,
     ) -> std::result::Result<(), std::sync::mpsc::SendError<ExtractJob>> {
         match self.tx.as_ref() {
-            Some(tx) => tx.send(job),
+            Some(tx) => crate::platform::wait::send_for(tx, job, crate::platform::wait::LONG_CHILD)
+                .map_err(|(job, _)| std::sync::mpsc::SendError(job)),
             // Only reachable after shutdown, which the driver never does
             // before its last send. Report it as a send failure rather
             // than panicking so a future refactor degrades loudly but
@@ -546,7 +547,7 @@ impl ExtractDispatch {
         // Dropping the sender is what lets workers observe `Disconnected`
         // and leave their receive loop.
         self.tx = None;
-        self.barrier.wait();
+        let _ = self.barrier.wait_for(crate::platform::wait::LONG_CHILD);
     }
 
     /// Close the channel and block until every worker has exited.

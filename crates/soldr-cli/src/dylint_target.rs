@@ -103,7 +103,11 @@ where
         .write(true)
         .truncate(false)
         .open(home.join(".soldr-dylint-targets.lock"))?;
-    lock.lock_exclusive()?;
+    crate::platform::wait::lock_exclusive_announced(
+        &lock,
+        crate::platform::wait::LONG_LOCK,
+        "the dylint target install",
+    )?;
     let result = ensure_target_locked(home, channel, target, install);
     FileExt::unlock(&lock)?;
     result

@@ -58,6 +58,29 @@ const BANNED: &[(&str, &str, &str)] = &[
     ("lock_api", "RwLock", "write"),
 ];
 
+/// Raw blocking waits with no bound, each with its timeout-only replacement in
+/// `soldr_platform::wait` (or soldr-core's bounded command runners).
+/// `(crate, type-or-module, method, replacement)`.
+const BANNED_WAITS: &[(&str, &str, &str, &str)] = &[
+    ("std", "Receiver", "recv", "wait::recv_for"),
+    ("std", "SyncSender", "send", "wait::send_for"),
+    ("std", "JoinHandle", "join", "wait::join_for"),
+    ("std", "Child", "wait", "wait::wait_for"),
+    ("std", "Child", "wait_with_output", "core::command_output_with_timeout_duration"),
+    ("std", "Command", "output", "wait::output_for (or core::command_output_with_timeout*)"),
+    ("std", "Command", "status", "wait::status_for"),
+    ("std", "File", "lock", "wait::lock_exclusive_for"),
+    ("std", "File", "lock_shared", "wait::lock_shared_for"),
+    ("fs2", "FileExt", "lock_exclusive", "wait::lock_exclusive_for"),
+    ("fs2", "FileExt", "lock_shared", "wait::lock_shared_for"),
+    ("std", "Barrier", "wait", "wait::Barrier::wait_for"),
+    ("tokio", "Runtime", "block_on", "wait::block_on_for"),
+    ("tokio", "Handle", "block_on", "wait::block_on_for"),
+    ("futures_executor", "local_pool", "block_on", "wait::block_on_for"),
+    ("tokio", "Receiver", "blocking_recv", "wait::recv_for on a std channel"),
+    ("tokio", "Sender", "blocking_send", "wait::send_for on a std channel"),
+];
+
 impl<'tcx> LateLintPass<'tcx> for BanRawSyncPrimitive {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
         if !span_is_in_scope(cx, expr.span) {
@@ -111,6 +134,24 @@ impl<'tcx> LateLintPass<'tcx> for BanRawSyncPrimitive {
                     diag.primary_message(message);
                 }),
             );
+            return;
+        }
+        if let Some((krate, ty, method, replacement)) =
+            BANNED_WAITS.iter().find(|(krate, ty, method, _)| {
+                path.first() == Some(&Symbol::intern(krate)) && path_ends_with(&path, &[ty, method])
+            })
+        {
+            let message = format!(
+                "raw `{krate}::..::{ty}::{method}` blocks without a bound; use `{replacement}`, \
+                 which takes a mandatory timeout (soldr#3836)"
+            );
+            cx.opt_span_lint(
+                BAN_RAW_SYNC_PRIMITIVE,
+                Some(expr.span),
+                DiagDecorator(move |diag| {
+                    diag.primary_message(message);
+                }),
+            );
         }
     }
 }
@@ -134,7 +175,8 @@ fn span_is_in_scope(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
         return false;
     }
     let in_crate_src = filename.contains("crates/") && filename.contains("/src/");
-    let is_boundary = filename.ends_with("crates/soldr-platform/src/platform/sync.rs");
+    let is_boundary = filename.ends_with("crates/soldr-platform/src/platform/sync.rs")
+        || filename.ends_with("crates/soldr-platform/src/platform/wait.rs");
     let is_test_only = filename.contains("/tests/")
         || filename.ends_with("_tests.rs")
         || filename.ends_with("/tests.rs");

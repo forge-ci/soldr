@@ -1,5 +1,4 @@
 use crate::core::{suppress_windows_console_window, SoldrError, SoldrPaths};
-use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::{
     ffi::OsStr,
@@ -91,7 +90,8 @@ pub fn maybe_reexec_from_runtime(raw_args: &[String]) -> Result<Option<i32>, Sol
         .env(SELF_SPAWN_EDGE_ENV_VAR, "1")
         .env(ORIGINAL_EXE_ENV_VAR, &current_exe);
     suppress_windows_console_window(&mut command);
-    let status = command.status()?;
+    let status =
+        crate::platform::wait::status_for(&mut command, crate::platform::wait::WHOLE_COMMAND)?;
     Ok(Some(status.code().unwrap_or(1)))
 }
 
@@ -646,7 +646,11 @@ fn lock_runtime_root(runtime_root: &Path) -> Result<File, SoldrError> {
         .create(true)
         .truncate(false)
         .open(lock_path)?;
-    file.lock_exclusive()?;
+    crate::platform::wait::lock_exclusive_announced(
+        &file,
+        crate::platform::wait::LONG_LOCK,
+        "the self-relocation lock",
+    )?;
     Ok(file)
 }
 

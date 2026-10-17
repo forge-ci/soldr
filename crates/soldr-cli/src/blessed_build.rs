@@ -479,11 +479,12 @@ fn ensure_dsymutil_on_path(prep: &mut BlessedPrep) -> Result<(), SoldrError> {
         allow(ban_swallowed_child_stdio)
     )]
     command.stdout(Stdio::null());
-    let status = command.status().map_err(|error| {
-        SoldrError::Other(format!(
-            "unable to provision dsymutil: failed to invoke rustup: {error}"
-        ))
-    })?;
+    let status = crate::platform::wait::status_for(&mut command, crate::platform::wait::LONG_CHILD)
+        .map_err(|error| {
+            SoldrError::Other(format!(
+                "unable to provision dsymutil: failed to invoke rustup: {error}"
+            ))
+        })?;
     if status.success() {
         if let Some(path) = find_dsymutil_in_rustup() {
             if let Some(parent) = path.parent() {
