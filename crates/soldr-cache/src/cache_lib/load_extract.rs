@@ -202,6 +202,11 @@ pub fn load(opts: &LoadOptions<'_>) -> Result<LoadReport> {
             // and workspace source files live on disjoint trees so
             // their I/O doesn't fight.
             if let Some(ws) = opts.workspace {
+                if manifest.files.iter().any(|entry| entry.mtime_ns.is_none()) {
+                    eprintln!(
+                        "soldr hydrate: archive contains legacy millisecond source mtimes; submillisecond precision cannot be recovered, so Cargo may rebuild; save a new archive after rebuilding"
+                    );
+                }
                 let manifest_for_replay = manifest.clone();
                 let ws_owned = replay_workspace_root(ws);
                 let (tx, rx) = std::sync::mpsc::channel();

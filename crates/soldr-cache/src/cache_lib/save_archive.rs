@@ -152,6 +152,7 @@ pub fn save_with_projection(
                             Ok(SourceFile {
                                 path: rel_to_posix(rel),
                                 mtime_ms: mtime_ms(&meta),
+                                mtime_ns: Some(mtime_ns(&meta)),
                                 size: meta.len(),
                                 blake3: hash.to_vec(),
                             })
@@ -332,6 +333,7 @@ pub fn save_delta_with_projection(
                             Ok(SourceFile {
                                 path: rel_to_posix(rel),
                                 mtime_ms: mtime_ms(&meta),
+                                mtime_ns: Some(mtime_ns(&meta)),
                                 size: meta.len(),
                                 blake3: hash.to_vec(),
                             })

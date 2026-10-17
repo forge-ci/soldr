@@ -205,3 +205,8 @@ cmd = "cd /repo && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo
 [task.cache-snapshot-acceptance]
 stack = "cook"
 cmd = "cd /repo && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo nextest run -p soldr-cli --test toolchain_env --run-ignored only --success-output final -E 'test(=cli_save::save_ci_load_preserves_real_warm_rustc_hits)'"
+
+# soldr#3851: source timestamp precision and Cargo build-script freshness.
+[task.source-mtime-fidelity]
+stack = "cook"
+cmd = "cd /repo && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo nextest run -p soldr-cache --lib -E 'test(/^cache_lib::save::/)' && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo nextest run -p soldr-cli --test toolchain_env -E 'test(/^source_mtime_freshness::/)'"
