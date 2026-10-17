@@ -802,12 +802,21 @@ def recovery_filter_suffix() -> str:
     return "".join(f" and not test(={name})" for name in RECOVERY_NATIVE_LINK_TESTS)
 
 
+def _read_recovery_filter() -> list[str]:
+    """Read the lane filter and drop the native-link tests -- the one helper
+    both the list and the run stage use, so they cannot select differently."""
+
+    return [
+        '  FILTER=$(cat "$WORK/filter.txt")',
+        f'  FILTER="($FILTER){recovery_filter_suffix()}"',
+    ]
+
+
 def _stage_nextest_list_selected(partition: str) -> list[str]:
     return [
         "stage_start nextest_list_selected",
         'if [ "$LIST_ALL_OK" -eq 0 ] && [ "$FETCH_FILTER_OK" -eq 0 ]; then',
-        '  FILTER=$(cat "$WORK/filter.txt")',
-        f'  FILTER="($FILTER){recovery_filter_suffix()}"',
+        *_read_recovery_filter(),
         "  # shellcheck disable=SC2086",
         '  "$NEXTEST_BIN" nextest list $REUSE_ARGS \\',
         '    --workspace-remap "$WORK/workspace" \\',
@@ -941,7 +950,7 @@ def _stage_nextest_run(partition: str) -> list[str]:
         *_memory_sampler_function(),
         'if [ "$LIST_SELECTED_OK" -eq 0 ] && [ "$TOOLCHAIN_LINK_OK" -eq 0 ] \\',
         '  && [ "$FETCH_SOLDR_DAEMON_OK" -eq 0 ] && [ "$EXTRACT_FIXTURES_OK" -eq 0 ]; then',
-        '  FILTER=$(cat "$WORK/filter.txt")',
+        *_read_recovery_filter(),
         "  mem_sample",
         "  # The sleep's output is detached so a sampler killed mid-sleep cannot",
         "  # hold this script's stdout pipe open after the suite ends.",

@@ -751,10 +751,11 @@ def test_recovery_filter_drops_native_link_tests_only_in_the_guest() -> None:
         " and not test(=cold_first_compile::bare_test_verb_cold_on_an_explicit_root)"
     )
     script = MODULE.build_guest_script()
-    read = script.index('FILTER=$(cat "$WORK/filter.txt")')
-    wrapped = script.index(f'FILTER="($FILTER){MODULE.recovery_filter_suffix()}"')
-    listed = script.index("--message-format json-pretty", wrapped)
-    assert read < wrapped < listed
+    reads = script.count('FILTER=$(cat "$WORK/filter.txt")')
+    wrapper = f'FILTER="($FILTER){MODULE.recovery_filter_suffix()}"'
+    # Every stage that reads the lane filter (list and run) must apply it.
+    assert reads >= 2
+    assert script.count(wrapper) == reads
     contract = _contract_document()
     assert contract["capabilities"]["system_c_compiler"] is False
     assert contract["capabilities"]["sdk"] is False
