@@ -135,6 +135,17 @@ pub(super) async fn handle_clear(state: &SharedState) -> Response {
         let _ = std::fs::remove_dir_all(cache_root.join("meson-configure"));
     }
 
+    // The staged store was only detached above; delete it now, off the async
+    // runtime and outside the publication barrier.
+    drop(_publication_guard);
+    let artifact_dir = state.artifact_dir.clone();
+    let swept = kernal_api::async_engine::launch_blocking(move || {
+        crate::daemon_core::daemon::server::persist::sweep_v2_trash(&artifact_dir)
+    })
+    .await
+    .unwrap_or(0);
+    on_disk_bytes_freed = on_disk_bytes_freed.saturating_add(swept);
+
     tracing::info!(
         artifacts_removed,
         metadata_cleared,
