@@ -44,11 +44,13 @@ fn project_root() -> NormalizedPath {
 }
 
 fn current_fingerprint(root: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(root)
-        .output()
-        .ok()?;
+    let output = zccache::wait::output_for(
+        Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(root),
+        zccache::wait::PROBE,
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -130,10 +132,11 @@ fn activate_rustup_toolchain(root: &Path) {
 
 /// Check whether a rustup cross-compilation target is installed.
 fn is_target_installed(target: &str) -> bool {
-    Command::new("rustup")
-        .args(["target", "list", "--installed"])
-        .output()
-        .map(|o| {
+    zccache::wait::output_for(
+        Command::new("rustup").args(["target", "list", "--installed"]),
+        zccache::wait::PROBE,
+    )
+    .map(|o| {
             o.status.success()
                 && String::from_utf8_lossy(&o.stdout)
                     .lines()

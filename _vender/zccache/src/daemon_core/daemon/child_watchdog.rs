@@ -380,7 +380,7 @@ async fn watchdog_inner_impl(
         // Their futures must be dropped before the winning handler touches
         // the child, pipe slots, or read buffers again.
         let winner = {
-            let wait = child.wait();
+            let wait = child.wait(); // raw-lock-ok: async, raced against the grace deadline and sample tick
             let stdout_read = read_opt(stdout.as_mut(), &mut sbuf);
             let stderr_read = read_opt(stderr.as_mut(), &mut ebuf);
             let mut wait = std::pin::pin!(wait);

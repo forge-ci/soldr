@@ -135,7 +135,7 @@ impl ZccacheService {
         let mut compile = std::pin::pin!(compile);
 
         let observed = loop {
-            let chunk = receiver.recv();
+            let chunk = receiver.recv(); // raw-lock-ok: async, raced against the compile itself
             let mut chunk = std::pin::pin!(chunk);
             match kernal_api::biased_race!((chunk.as_mut()), (compile.as_mut())).await {
                 kernal_api::async_engine::BiasedRace2::First(chunk) => {

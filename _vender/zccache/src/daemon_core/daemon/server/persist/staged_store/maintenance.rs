@@ -51,7 +51,7 @@ pub(crate) fn scan_staged_disk_artifacts(
         return Ok(Vec::new());
     }
     let store_lock = open_store_lock(&root)?;
-    let _store_lock_guard = kernal_api::platform::fs::lock_shared(&store_lock)?;
+    let _store_lock_guard = crate::wait::lock_shared_for(&store_lock, crate::wait::SHORT_LOCK)?;
     scan_staged_disk_artifacts_locked(artifact_dir, root.as_path())
 }
 
@@ -123,7 +123,7 @@ pub(crate) fn evict_staged_artifact_keys(
         return Ok(0);
     }
     let store_lock = open_store_lock(&root)?;
-    let _store_lock_guard = kernal_api::platform::fs::lock_exclusive(&store_lock)?;
+    let _store_lock_guard = crate::wait::lock_exclusive_for(&store_lock, crate::wait::SHORT_LOCK)?;
     evict_staged_artifact_keys_locked(artifact_dir, root.as_path(), keys)
 }
 

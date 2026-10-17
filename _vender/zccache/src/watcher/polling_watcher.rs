@@ -151,10 +151,10 @@ impl PollingWatcher {
                 )
             })?;
 
-        match ready_rx.recv() {
+        match crate::wait::recv_for(&ready_rx, crate::wait::PROBE) {
             Ok(()) => {}
             Err(_) => {
-                let _ = worker_handle.join();
+                let _ = crate::wait::join_for(worker_handle, crate::wait::HELPER_JOIN);
                 return Err(std::io::Error::other(
                     "watcher worker exited before initialization completed",
                 ));
@@ -216,9 +216,8 @@ impl PollingWatcher {
             .lock()
             .take();
         if let Some(handle) = worker {
-            handle
-                .join()
-                .map_err(|_| std::io::Error::other("watcher worker thread panicked"))?;
+            crate::wait::join_for(handle, crate::wait::HELPER_JOIN)
+                .map_err(|_| std::io::Error::other("watcher worker thread panicked or stalled"))?;
         }
 
         let dispatch = self
@@ -226,9 +225,8 @@ impl PollingWatcher {
             .lock()
             .take();
         if let Some(handle) = dispatch {
-            handle
-                .join()
-                .map_err(|_| std::io::Error::other("watcher dispatch thread panicked"))?;
+            crate::wait::join_for(handle, crate::wait::HELPER_JOIN)
+                .map_err(|_| std::io::Error::other("watcher dispatch thread panicked or stalled"))?;
         }
 
         *self

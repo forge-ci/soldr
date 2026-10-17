@@ -268,7 +268,7 @@ pub(super) async fn run_index_writer(
 
     loop {
         let winner = {
-            let message = rx.recv();
+            let message = rx.recv(); // raw-lock-ok: async, raced against the flush tick and shutdown
             let tick = ticker.tick();
             let shutdown_wait = shutdown.notified();
             let mut message = std::pin::pin!(message);

@@ -14,7 +14,9 @@ pub(super) fn download_explicit_parts(
         .enable_all()
         .build()
         .map_err(|e| format!("failed to create tokio runtime: {e}"))?;
-    runtime.block_on(async move {
+    crate::wait::block_on_for(
+        &runtime,
+        async move {
         let client = reqwest::Client::builder()
             .user_agent(format!("zccache-download/{}", crate::cli_core::core::VERSION))
             .build()
@@ -61,5 +63,8 @@ pub(super) fn download_explicit_parts(
             let _ = tokio::fs::remove_file(&temp_path).await;
         }
         result
-    })
+    },
+        crate::wait::LONG_CHILD,
+    )
+    .map_err(|e| e.to_string())?
 }

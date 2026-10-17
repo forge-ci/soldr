@@ -310,7 +310,7 @@ async fn async_builder_compiler_output_with_effective_priority(
             });
         }
 
-        let wait = session.wait();
+        let wait = session.wait(); // raw-lock-ok: async, raced against output and the stall watchdog
         let event = session.next_output();
         let cpu_tick = cpu_samples.tick();
         let memory_tick = memory_samples.tick();
@@ -687,7 +687,7 @@ pub(super) async fn terminate_session(
 ) -> io::Result<std::process::ExitStatus> {
     let cleanup = async {
         session.kill().await?;
-        session
+        session // raw-lock-ok: async reap right after kill
             .wait()
             .await
             .map(kernal_api::ProcessSessionExit::exit_status)

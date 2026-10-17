@@ -56,6 +56,7 @@ pub(crate) mod process {
                 .stack_size(8 * 1024 * 1024)
                 .spawn(entry)
             {
+                // raw-lock-ok: process-lifetime join of the CLI thread
                 Ok(handle) => handle.join().unwrap_or(std::process::ExitCode::FAILURE),
                 Err(error) => {
                     eprintln!("zccache: failed to start CLI thread: {error}");

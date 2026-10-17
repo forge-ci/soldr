@@ -28,6 +28,8 @@ pub mod symbols;
 pub mod watcher;
 /// Bounded-wait locks: every wait and hold is watched (soldr#3836).
 pub mod sync;
+/// Timeout-only blocking waits (soldr#3836).
+pub mod wait;
 #[cfg(feature = "mimalloc-allocator")]
 pub use mimalloc_pprof;
 /// Issue zccache#926 - durable audit JSONL writer for the embedded service.

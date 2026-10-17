@@ -126,6 +126,7 @@ pub(crate) fn run_async(future: impl std::future::Future<Output = ExitCode>) -> 
         .enable_all()
         .build()
         .expect("failed to create tokio runtime");
+    // raw-lock-ok: process-lifetime runtime driving one whole CLI command
     rt.block_on(future)
 }
 
