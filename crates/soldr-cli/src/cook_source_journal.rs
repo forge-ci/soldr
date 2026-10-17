@@ -57,8 +57,12 @@ impl CookSourceGuard {
         std::fs::create_dir_all(&dir).map_err(|e| io_err("create journal dir", &dir, e))?;
         let (journal, lock_path) = journal_paths(&dir, &root);
         let lock = open_lock(&lock_path)?;
-        lock.lock_exclusive()
-            .map_err(|e| io_err("lock cook journal", &lock_path, e))?;
+        crate::platform::wait::lock_exclusive_announced(
+            &lock,
+            crate::platform::wait::LONG_LOCK,
+            "the cook source journal",
+        )
+        .map_err(|e| io_err("lock cook journal", &lock_path, e))?;
         // We hold the lock, so any journal here was left by a dead cook.
         if journal.exists() {
             recover_journal(&journal)?;

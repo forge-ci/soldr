@@ -239,9 +239,10 @@ fn run_uv(
 ) -> Result<(), SoldrError> {
     let mut command = uv_command(uv, paths);
     command.args(args);
-    let status = command.status().map_err(|e| {
-        SoldrError::Other(format!("{label}: failed to spawn {}: {e}", uv.display()))
-    })?;
+    let status = crate::platform::wait::status_for(&mut command, crate::platform::wait::LONG_CHILD)
+        .map_err(|e| {
+            SoldrError::Other(format!("{label}: failed to spawn {}: {e}", uv.display()))
+        })?;
     if !status.success() {
         return Err(SoldrError::Other(format!(
             "{label} exited with {status} (uv: {})",

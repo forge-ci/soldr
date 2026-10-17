@@ -526,6 +526,9 @@ pub(crate) fn spawn_session_endpoint_servers(
 ///
 /// Blocks until the endpoint is bound so the caller sees bind errors
 /// synchronously.
+// Thread-lifetime runtime: the handoff control plane runs until stop is
+// signalled (soldr#3836).
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
 pub(crate) fn spawn_handoff_control_plane(
     handoff_endpoint: String,
     service: CompileServiceReadiness,
@@ -577,7 +580,7 @@ pub(crate) fn spawn_handoff_control_plane(
                 }
             });
         })?;
-    bound_rx.recv().map_err(|_| {
+    crate::platform::wait::recv_for(&bound_rx, crate::platform::wait::PROBE).map_err(|_| {
         io::Error::other("handoff control plane exited before binding its endpoint")
     })??;
     Ok(HandoffControlPlane { shutdown })

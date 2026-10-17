@@ -148,17 +148,23 @@ where
     T: Send + 'static,
     F: std::future::Future<Output = Result<T, SoldrError>> + Send + 'static,
 {
-    std::thread::spawn(move || -> Result<T, SoldrError> {
+    let handle = std::thread::spawn(move || -> Result<T, SoldrError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| {
                 SoldrError::Other(format!("could not create build-tool runtime: {error}"))
             })?;
-        runtime.block_on(future)
-    })
-    .join()
-    .map_err(|_| SoldrError::Other("build-tool provisioning thread panicked".to_string()))?
+        crate::platform::wait::block_on_for(&runtime, future, crate::platform::wait::LONG_CHILD)
+            .unwrap_or_else(|error| {
+                Err(SoldrError::Other(format!(
+                    "build-tool provisioning: {error}"
+                )))
+            })
+    });
+    crate::platform::wait::join_for(handle, crate::platform::wait::LONG_CHILD).map_err(|_| {
+        SoldrError::Other("build-tool provisioning thread panicked or overran".to_string())
+    })?
 }
 
 /// True when build tools may be provisioned without a `rust-toolchain.toml`

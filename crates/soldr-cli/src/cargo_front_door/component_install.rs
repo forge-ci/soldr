@@ -207,7 +207,7 @@ fn probe_component_installed(probe_binary: &str, channel: Option<&str>) -> bool 
     cmd.args(["which", probe_binary]);
     apply_implicit_toolchain_homes(&mut cmd, None);
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
-    matches!(cmd.status(), Ok(s) if s.success())
+    matches!(crate::platform::wait::status_for(&mut cmd, crate::platform::wait::PROBE), Ok(s) if s.success())
 }
 
 fn run_component_add(component: &str, channel: Option<&str>) -> bool {
@@ -227,7 +227,7 @@ fn run_component_add(component: &str, channel: Option<&str>) -> bool {
     // Let rustup print its install progress so users see what is
     // happening. The notice we emitted on stderr above is the
     // soldr-side framing.
-    matches!(cmd.status(), Ok(s) if s.success())
+    matches!(crate::platform::wait::status_for(&mut cmd, crate::platform::wait::LONG_CHILD), Ok(s) if s.success())
 }
 
 fn emit_install_notice(component: &str, channel: Option<&str>) {

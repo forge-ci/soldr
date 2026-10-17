@@ -20,6 +20,9 @@
 /// about. It also reproduces only in debug, so release-only checks miss it.
 const CLI_STACK_BYTES: usize = 16 * 1024 * 1024;
 
+// Process-lifetime join on the CLI thread: it is the whole command, which
+// may legitimately run indefinitely (`soldr cargo watch`) (soldr#3836).
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
 fn main() -> std::process::ExitCode {
     // Run on a thread we size ourselves rather than the OS-provided main
     // stack. Spawning costs microseconds against a process about to link

@@ -341,7 +341,9 @@ impl PressureMonitor {
         self.stop.store(true, Ordering::Relaxed);
         self.handle
             .take()
-            .and_then(|handle| handle.join().ok())
+            .and_then(|handle| {
+                crate::platform::wait::join_for(handle, crate::platform::wait::HELPER_JOIN).ok()
+            })
             .unwrap_or_default()
     }
 

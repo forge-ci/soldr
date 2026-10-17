@@ -667,9 +667,10 @@ fn uninstall_toolchain(
     command.args(["toolchain", "uninstall", toolchain]);
     command.env(crate::core::RUSTUP_HOME_ENV_VAR, rustup_home);
     crate::core::suppress_windows_console_window(&mut command);
-    let output = command.output().map_err(|err| {
-        format!("failed to spawn `rustup toolchain uninstall {toolchain}`: {err}")
-    })?;
+    let output = crate::platform::wait::output_for(&mut command, crate::platform::wait::LONG_CHILD)
+        .map_err(|err| {
+            format!("failed to spawn `rustup toolchain uninstall {toolchain}`: {err}")
+        })?;
     // Always surface the child's streams — never swallow them. In JSON
     // mode rustup's stdout would land in the payload's stream, so it is
     // forwarded to stderr there instead.

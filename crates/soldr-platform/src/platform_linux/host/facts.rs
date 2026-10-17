@@ -215,7 +215,10 @@ fn classify_linux_libc(
 }
 
 fn probe_ldd_reports_musl() -> bool {
-    let Ok(output) = std::process::Command::new("ldd").arg("--version").output() else {
+    let Ok(output) = crate::platform::wait::output_for(
+        std::process::Command::new("ldd").arg("--version"),
+        crate::platform::wait::PROBE,
+    ) else {
         return false;
     };
     ldd_output_mentions_musl(&output.stdout) || ldd_output_mentions_musl(&output.stderr)

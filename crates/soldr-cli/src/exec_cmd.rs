@@ -89,12 +89,13 @@ pub fn run_exec(args: &[String]) -> Result<i32, SoldrError> {
     }
     suppress_windows_console_window(&mut command);
 
-    let status = command.status().map_err(|e| {
-        SoldrError::Other(format!(
-            "soldr exec: failed to spawn {}: {e}",
-            resolved_cmd.display()
-        ))
-    })?;
+    let status = crate::platform::wait::status_for(&mut command, crate::platform::wait::LONG_CHILD)
+        .map_err(|e| {
+            SoldrError::Other(format!(
+                "soldr exec: failed to spawn {}: {e}",
+                resolved_cmd.display()
+            ))
+        })?;
     Ok(status.code().unwrap_or(127))
 }
 
@@ -169,7 +170,7 @@ fn resolve_rustup_cargo() -> Result<PathBuf, SoldrError> {
     let mut command = Command::new(rustup);
     command.args(["which", "cargo"]);
     suppress_windows_console_window(&mut command);
-    if let Ok(out) = command.output() {
+    if let Ok(out) = crate::platform::wait::output_for(&mut command, crate::platform::wait::PROBE) {
         if out.status.success() {
             let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !path.is_empty() {

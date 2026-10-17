@@ -281,6 +281,9 @@ impl Drop for OpenConnection {
     }
 }
 
+// Process-lifetime join: the broker runs until it is shut down, so this wait
+// is the broker's own lifetime, not a wait on another party (soldr#3836).
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
 pub(crate) fn serve(endpoint: &crate::broker_identity::ResolvedBrokerEndpoint) -> io::Result<()> {
     let endpoint = endpoint.clone();
     std::thread::Builder::new()

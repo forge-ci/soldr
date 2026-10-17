@@ -216,12 +216,13 @@ async fn run(common: LinkerCommon, dialect: Dialect, print_shim: bool) -> Result
     let mut command = Command::new(&linker.program);
     command.args(&linker.args).args(&common.args);
     suppress_windows_console_window(&mut command);
-    let status = command.status().map_err(|error| {
-        SoldrError::Other(format!(
-            "soldr {verb}: failed to start linker {} for target {target}: {error}",
-            linker.program.display()
-        ))
-    })?;
+    let status = crate::platform::wait::status_for(&mut command, crate::platform::wait::LONG_CHILD)
+        .map_err(|error| {
+            SoldrError::Other(format!(
+                "soldr {verb}: failed to start linker {} for target {target}: {error}",
+                linker.program.display()
+            ))
+        })?;
     Ok(status.code().unwrap_or(1))
 }
 
@@ -495,10 +496,11 @@ fn host_tool(name: &str) -> Result<PathBuf, SoldrError> {
 /// rustup's bundled `rust-lld` for the active toolchain.
 fn rust_lld() -> Result<PathBuf, SoldrError> {
     let rustc = crate::binaries::resolve_toolchain_binary("rustc")?;
-    let sysroot = Command::new(&rustc)
-        .args(["--print", "sysroot"])
-        .output()
-        .map_err(|error| SoldrError::Other(format!("--fuse=rust-lld: {error}")))?;
+    let sysroot = crate::platform::wait::output_for(
+        Command::new(&rustc).args(["--print", "sysroot"]),
+        crate::platform::wait::PROBE,
+    )
+    .map_err(|error| SoldrError::Other(format!("--fuse=rust-lld: {error}")))?;
     let sysroot = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim());
     let host = crate::fetch::cmake_tools::current_host_triple();
     let path = sysroot

@@ -30,6 +30,7 @@ interprocess = { version = "2", features = ["tokio"] }
 kernal-api = { version = "=0.1.26", default-features = false, features = ["fs"] }
 running-process = { version = "=4.10.16", default-features = false, features = ["client"] }
 fs2 = { workspace = true }
+wait-timeout = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tar = { workspace = true }

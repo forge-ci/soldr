@@ -112,9 +112,16 @@ pub fn tasklist_snapshot_soldr_daemons() -> Vec<LeakedDaemonInfo> {
     }
     let mut all = Vec::new();
     for name in SOLDR_DAEMON_IMAGE_NAMES {
-        let output = std::process::Command::new("tasklist")
-            .args(["/FI", &format!("IMAGENAME eq {name}"), "/FO", "CSV", "/NH"])
-            .output();
+        let output = crate::platform::wait::output_for(
+            std::process::Command::new("tasklist").args([
+                "/FI",
+                &format!("IMAGENAME eq {name}"),
+                "/FO",
+                "CSV",
+                "/NH",
+            ]),
+            crate::platform::wait::PROBE,
+        );
         let Ok(output) = output else { continue };
         let stdout = String::from_utf8_lossy(&output.stdout);
         all.extend(parse_tasklist_csv(&stdout));

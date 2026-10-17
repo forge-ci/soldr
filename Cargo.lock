@@ -2696,6 +2696,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "wait-timeout",
  "widestring",
  "windows-sys 0.61.2",
 ]

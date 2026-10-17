@@ -350,7 +350,8 @@ fn direct_exec_tool(
     if let Some(profile) = profile {
         profile.finish("before_tool_spawn");
     }
-    let status = command.status()?;
+    let status =
+        crate::platform::wait::status_for(&mut command, crate::platform::wait::LONG_CHILD)?;
 
     let exit_code = status.code().unwrap_or(1);
     // soldr#1974. The child inherits stdio here, so a process that dies at

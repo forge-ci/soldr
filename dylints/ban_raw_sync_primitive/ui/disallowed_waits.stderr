@@ -1,0 +1,40 @@
+error: raw `std::..::Receiver::recv` blocks without a bound; use `wait::recv_for`, which takes a mandatory timeout (soldr#3836)
+  --> $DIR/disallowed_waits.rs:7:13
+   |
+LL |     let _ = rx.recv();
+   |             ^^^^^^^^^
+   |
+   = note: `#[deny(ban_raw_sync_primitive)]` on by default
+
+error: raw `std::..::JoinHandle::join` blocks without a bound; use `wait::join_for`, which takes a mandatory timeout (soldr#3836)
+  --> $DIR/disallowed_waits.rs:9:13
+   |
+LL |     let _ = handle.join();
+   |             ^^^^^^^^^^^^^
+
+error: raw `std::..::Barrier::wait` blocks without a bound; use `wait::Barrier::wait_for`, which takes a mandatory timeout (soldr#3836)
+  --> $DIR/disallowed_waits.rs:11:13
+   |
+LL |     let _ = barrier.wait();
+   |             ^^^^^^^^^^^^^^
+
+error: raw `std::..::Child::wait` blocks without a bound; use `wait::wait_for`, which takes a mandatory timeout (soldr#3836)
+  --> $DIR/disallowed_waits.rs:13:13
+   |
+LL |     let _ = child.wait();
+   |             ^^^^^^^^^^^^
+
+error: raw `std::..::Command::status` blocks without a bound; use `wait::status_for`, which takes a mandatory timeout (soldr#3836)
+  --> $DIR/disallowed_waits.rs:14:13
+   |
+LL |     let _ = std::process::Command::new("true").status();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: raw `std::..::Command::output` blocks without a bound; use `wait::output_for (or core::command_output_with_timeout*)`, which takes a mandatory timeout (soldr#3836)
+  --> $DIR/disallowed_waits.rs:15:13
+   |
+LL |     let _ = std::process::Command::new("true").output();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 6 previous errors
+

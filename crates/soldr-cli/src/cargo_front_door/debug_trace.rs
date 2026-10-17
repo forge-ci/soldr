@@ -543,7 +543,7 @@ impl DescendantObservation {
         }
         std::thread::sleep(std::time::Duration::from_millis(150));
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        let _ = self.pump.join();
+        let _ = crate::platform::wait::join_for(self.pump, crate::platform::wait::HELPER_JOIN);
         emit_descendant_summary(&self.context, &self.started, &self.exited);
     }
 }

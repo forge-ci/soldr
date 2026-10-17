@@ -153,7 +153,7 @@ impl Drop for WaitHeartbeat {
             // Joining bounds the thread's lifetime to the wait it describes,
             // so a heartbeat can never outlive its operation and print about
             // a compile that already finished.
-            let _ = handle.join();
+            let _ = crate::platform::wait::join_for(handle, crate::platform::wait::HELPER_JOIN);
         }
     }
 }

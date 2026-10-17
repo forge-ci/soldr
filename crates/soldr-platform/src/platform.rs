@@ -20,3 +20,4 @@ pub mod host;
 pub mod ipc;
 pub mod process;
 pub mod sync;
+pub mod wait;
