@@ -740,3 +740,21 @@ def test_toolchain_stage_exposes_the_bootstrapped_rustup() -> None:
     assert ensure < homes < link < path
     assert 'CARGO_HOME="$HOME/.soldr/cargo"' in script
     assert 'RUSTUP_HOME="$HOME/.soldr/rustup"' in script
+
+
+def test_recovery_filter_drops_native_link_tests_only_in_the_guest() -> None:
+    """soldr#3846: the guest cannot link a native executable (no cc, no SDK,
+    no managed LLVM for x86_64 macOS), so tests that must link are filtered
+    out of the Recovery replay -- and only there."""
+
+    assert MODULE.recovery_filter_suffix() == (
+        " and not test(=cold_first_compile::bare_test_verb_cold_on_an_explicit_root)"
+    )
+    script = MODULE.build_guest_script()
+    read = script.index('FILTER=$(cat "$WORK/filter.txt")')
+    wrapped = script.index(f'FILTER="($FILTER){MODULE.recovery_filter_suffix()}"')
+    listed = script.index("--message-format json-pretty", wrapped)
+    assert read < wrapped < listed
+    contract = _contract_document()
+    assert contract["capabilities"]["system_c_compiler"] is False
+    assert contract["capabilities"]["sdk"] is False

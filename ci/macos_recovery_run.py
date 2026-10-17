@@ -785,11 +785,29 @@ def _stage_nextest_list_all() -> list[str]:
     ]
 
 
+# Tests that must link a native Mach-O executable. The Recovery guest has no
+# system C compiler, linker or SDK (`system_c_compiler=False`, `sdk=False`
+# in the executor contract), and soldr ships no managed LLVM for an
+# x86_64-macOS host, so a native link cannot succeed there by construction
+# (`linker \`cc\` not found`, soldr#3846). They still run on the real
+# macos-15-intel lane, which has Xcode; only this guest skips them.
+RECOVERY_NATIVE_LINK_TESTS = (
+    "cold_first_compile::bare_test_verb_cold_on_an_explicit_root",
+)
+
+
+def recovery_filter_suffix() -> str:
+    """The nextest filterset clause that drops native-link tests (soldr#3846)."""
+
+    return "".join(f" and not test(={name})" for name in RECOVERY_NATIVE_LINK_TESTS)
+
+
 def _stage_nextest_list_selected(partition: str) -> list[str]:
     return [
         "stage_start nextest_list_selected",
         'if [ "$LIST_ALL_OK" -eq 0 ] && [ "$FETCH_FILTER_OK" -eq 0 ]; then',
         '  FILTER=$(cat "$WORK/filter.txt")',
+        f'  FILTER="($FILTER){recovery_filter_suffix()}"',
         "  # shellcheck disable=SC2086",
         '  "$NEXTEST_BIN" nextest list $REUSE_ARGS \\',
         '    --workspace-remap "$WORK/workspace" \\',
