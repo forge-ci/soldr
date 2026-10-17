@@ -140,9 +140,8 @@ fn route_progress_heartbeat_interval(progress_silence: Duration) -> Duration {
         .min(Duration::from_secs(1))
 }
 
-/// `registry` and `spawn_coordinator` stay raw `std::sync::Mutex`: their type
-/// is fixed by `running_process`'s `HelloRouter` / handoff API, which locks
-/// them itself, so they cannot move behind `soldr_platform::sync` (soldr#3836).
+/// `registry`/`spawn_coordinator` stay raw std mutexes: `running_process` fixes
+/// their type and locks them itself (soldr#3836).
 struct BrokerState {
     instance_id: String,
     loader: CombinedServiceDefinitionLoader,
