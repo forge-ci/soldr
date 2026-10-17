@@ -435,12 +435,11 @@ pub fn plan_for_host(args: &WheelArgs, host: &WheelHost) -> Result<WheelPlan, So
 /// it is the host (soldr#3432). `soldr wheel` re-enters the dispatcher
 /// in-process, so a process-local slot carries the request without an
 /// environment variable that would leak into maturin, cargo and build scripts.
-static HOST_TARGET_PREP: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static HOST_TARGET_PREP: crate::platform::sync::Mutex<Option<String>> =
+    crate::platform::sync::Mutex::new(None);
 
 fn request_host_target_prep(triple: &str) {
-    *HOST_TARGET_PREP
-        .lock()
-        .unwrap_or_else(|error| error.into_inner()) = Some(triple.to_string());
+    *HOST_TARGET_PREP.lock() = Some(triple.to_string());
 }
 
 /// Whether the maturin execution path must run
@@ -448,12 +447,7 @@ fn request_host_target_prep(triple: &str) {
 /// cross target, and for the host target when `soldr wheel` planned a release
 /// `*-linux-gnu` wheel (soldr#3432).
 pub(crate) fn maturin_target_needs_prep(target: &str, host: &str) -> bool {
-    target != host
-        || HOST_TARGET_PREP
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .as_deref()
-            == Some(target)
+    target != host || HOST_TARGET_PREP.lock().as_deref() == Some(target)
 }
 
 /// The abi3-only scope gate, expressed over the PyO3 planner's decision.

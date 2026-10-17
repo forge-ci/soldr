@@ -52,7 +52,7 @@ mod tests {
     fn native_compile_inherits_managed_cmake_and_ninja() {
         let _env = crate::TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _cmake = crate::EnvVarGuard::remove("CMAKE");
         let _generator = crate::EnvVarGuard::remove("CMAKE_GENERATOR");
         let _system = crate::EnvVarGuard::remove(crate::blessed_build::USE_SYSTEM_CMAKE_ENV_VAR);

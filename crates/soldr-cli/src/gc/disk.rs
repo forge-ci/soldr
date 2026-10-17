@@ -324,9 +324,9 @@ fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::platform::sync::Mutex;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct EnvVarGuard {
         key: &'static str,
@@ -413,7 +413,9 @@ mod tests {
 
     #[test]
     fn check_disk_disabled_via_env_var() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _disabled = EnvVarGuard::set(AUTO_PRUNE_ENABLED_ENV_VAR, "0");
         let _free = EnvVarGuard::set(TEST_DISK_FREE_BYTES_ENV_VAR, "0");
         let outcome = check_disk_or_warn_or_block(std::path::Path::new("."));
@@ -422,7 +424,9 @@ mod tests {
 
     #[test]
     fn check_disk_warns_with_custom_threshold() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _enabled = EnvVarGuard::remove(AUTO_PRUNE_ENABLED_ENV_VAR);
         let _warn = EnvVarGuard::set(WARN_FREE_GB_ENV_VAR, "20");
         let _block = EnvVarGuard::set(BLOCK_FREE_GB_ENV_VAR, "5");
@@ -439,7 +443,9 @@ mod tests {
 
     #[test]
     fn check_disk_blocks_with_custom_threshold() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _enabled = EnvVarGuard::remove(AUTO_PRUNE_ENABLED_ENV_VAR);
         let _warn = EnvVarGuard::set(WARN_FREE_GB_ENV_VAR, "20");
         let _block = EnvVarGuard::set(BLOCK_FREE_GB_ENV_VAR, "10");
@@ -456,7 +462,9 @@ mod tests {
 
     #[test]
     fn check_disk_disabled_when_probe_errors() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _enabled = EnvVarGuard::remove(AUTO_PRUNE_ENABLED_ENV_VAR);
         let _free = EnvVarGuard::set(TEST_DISK_FREE_BYTES_ENV_VAR, "error");
         let outcome = check_disk_or_warn_or_block(std::path::Path::new("."));
@@ -465,7 +473,9 @@ mod tests {
 
     #[test]
     fn inverted_thresholds_collapse_to_block_value() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _enabled = EnvVarGuard::remove(AUTO_PRUNE_ENABLED_ENV_VAR);
         // warn=5, block=10 (inverted) — should collapse to a single
         // block-only check at 10 GiB.
@@ -545,7 +555,9 @@ mod tests {
 
     #[test]
     fn a_reclaim_that_frees_enough_lets_the_build_proceed() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // 3 GiB free at the block, 40 GiB once 37 GiB is reclaimed.
         let outcome = block_then_reclaim(
             &format!("{},{}", 3 * BYTES_PER_GIB, 40 * BYTES_PER_GIB),
@@ -559,7 +571,9 @@ mod tests {
 
     #[test]
     fn a_reclaim_that_frees_nothing_still_blocks() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let msg = block_then_reclaim(&(3 * BYTES_PER_GIB).to_string(), 0).expect("must block");
         assert!(msg.contains("soldr gc target --purge"));
         assert!(
@@ -570,7 +584,9 @@ mod tests {
 
     #[test]
     fn a_partial_reclaim_blocks_but_says_it_tried() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Freed 1 GiB, leaving 4 GiB -- still under the 5 GiB bar.
         let msg = block_then_reclaim(
             &format!("{},{}", 3 * BYTES_PER_GIB, 4 * BYTES_PER_GIB),
@@ -589,7 +605,9 @@ mod tests {
     fn a_single_probe_value_still_repeats_for_every_call() {
         // Regression guard for the sequence seam: every pre-existing
         // test passes one value and expects it on every probe.
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_test_disk_probe_cursor();
         let _free = EnvVarGuard::set(
             TEST_DISK_FREE_BYTES_ENV_VAR,

@@ -7,13 +7,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use sha2::Digest;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use url::Url;
 
 use super::catalogue_lookup::MANIFEST_FETCH_TIMEOUT;
 use super::catalogue_model::{AssetTransport, ManifestEntry, Part};
 use crate::core::{SoldrError, SoldrPaths};
+use crate::platform::sync::AsyncMutex as Mutex;
 /// Materialize either catalogue transport through the one blessed asset
 /// streaming boundary.  A part is deliberately one request: catalogue parts
 /// are already immutable content-addressed chunks, so applying the legacy
@@ -266,7 +267,7 @@ impl PartCoordinator {
 
 impl Drop for PartAdmission {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.coordinator.state.try_lock() {
+        if let Some(mut state) = self.coordinator.state.try_lock() {
             state.inflight = state.inflight.saturating_sub(1);
             drop(state);
             self.coordinator.changed.notify_waiters();
@@ -285,7 +286,7 @@ impl Drop for PartWaiter {
         if !self.queued {
             return;
         }
-        if let Ok(mut state) = self.coordinator.state.try_lock() {
+        if let Some(mut state) = self.coordinator.state.try_lock() {
             if let Some(count) = state.pending.get_mut(&self.job) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
@@ -305,7 +306,7 @@ impl Drop for PartWaiter {
 
 impl Drop for PartJob {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.coordinator.state.try_lock() {
+        if let Some(mut state) = self.coordinator.state.try_lock() {
             state.live.remove(&self.id);
             state.jobs.retain(|id| *id != self.id);
             state.pending.remove(&self.id);

@@ -9,9 +9,10 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use crate::core::{CI_TEST_REPORT_PATH_ENV_VAR, CI_TEST_STAGE_ENV_VAR};
+use crate::platform::sync::Mutex;
 static REPORT_APPEND: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Serialize)]
@@ -79,10 +80,7 @@ pub(crate) fn record(report: PreparedReport, cache_outcome: i32) {
     // Compiler replies can now complete concurrently while ci-test overlaps
     // its stable and Dylint branches. Serialize the complete JSONL record, not
     // separate JSON/newline writes, so readers never observe interleaved rows.
-    let _guard = REPORT_APPEND
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = REPORT_APPEND.get_or_init(|| Mutex::new(())).lock();
     let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

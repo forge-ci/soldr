@@ -486,10 +486,10 @@ mod tests {
     use super::*;
     use crate::fetch::known_tools::{lookup_by_crate, CARGO_CHEF_PINNED_VERSION};
     use crate::fetch::MANAGED_CRGX_VERSION;
+    use crate::platform::sync::Mutex;
     use std::ffi::{OsStr, OsString};
-    use std::sync::Mutex;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn synthetic_paths(tmp: &Path) -> SoldrPaths {
         let root = tmp.join("soldr-home");
@@ -530,7 +530,9 @@ mod tests {
 
     #[test]
     fn cargo_install_timeout_is_an_explicit_safety_ceiling() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         {
             let _guard = EnvVarGuard::set(CARGO_INSTALL_TIMEOUT_ENV_VAR, "11");

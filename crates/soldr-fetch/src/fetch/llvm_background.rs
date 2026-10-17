@@ -15,11 +15,12 @@
 
 use super::llvm::{ensure_llvm_toolchain, unsupported_host_error, MANAGED_LLVM_VERSION};
 use crate::core::{SoldrError, SoldrPaths};
+use crate::platform::sync::Mutex;
 use std::collections::HashSet;
 use std::fs::File;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// Seconds a linking compile waits for the background LLVM fetch before it
@@ -203,10 +204,7 @@ pub fn start_background_llvm_fetch(paths: &SoldrPaths) -> Result<PathBuf, SoldrE
     }
     static STARTED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
     let started = STARTED.get_or_init(|| Mutex::new(HashSet::new()));
-    let first = started
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(install_dir.clone());
+    let first = started.lock().insert(install_dir.clone());
     if first {
         let paths = paths.clone();
         std::thread::Builder::new()

@@ -702,7 +702,7 @@ mod tests {
         // later test in the binary.
         let _env = crate::TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _cwd = crate::CwdGuard::enter(&workdir);
         let target = TargetTriple::from_triple("x86_64-unknown-linux-gnu").expect("triple");
         let result = resolve_sources(&paths, &target);

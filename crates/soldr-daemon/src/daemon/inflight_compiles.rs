@@ -24,9 +24,9 @@
 //! sometimes shared outside the machine that produced it, so it must never
 //! carry environment secrets.
 
+use crate::platform::sync::Mutex;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// One compile the daemon is currently holding open, as seen by a breach
@@ -73,9 +73,7 @@ impl Drop for InflightGuard {
         // Poison-proof: this can run during unwind while the process is
         // already in a bad state, and a panic here would only make things
         // worse. Degrade to a stale-but-usable map rather than panic.
-        let mut map = REGISTRY
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut map = REGISTRY.lock();
         map.remove(&self.id);
     }
 }
@@ -95,9 +93,7 @@ pub(crate) fn register(unit_key: Option<String>, crate_name: Option<String>) -> 
     // read on the breach path, i.e. exactly when the process is already
     // unhealthy, and a poisoned mutex must degrade to a stale-but-readable
     // list rather than panic the dump away.
-    let mut map = REGISTRY
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut map = REGISTRY.lock();
     map.insert(id, entry);
     InflightGuard { id }
 }
@@ -106,10 +102,7 @@ pub(crate) fn register(unit_key: Option<String>, crate_name: Option<String>) -> 
 /// a daemon that is busy compiling is never mistaken for an idle one
 /// (soldr#3377).
 pub(crate) fn count() -> usize {
-    REGISTRY
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .len()
+    REGISTRY.lock().len()
 }
 
 /// Snapshot every compile currently registered, oldest first. Never holds
@@ -120,9 +113,7 @@ pub(crate) fn snapshot() -> Vec<InflightCompile> {
     // Poison-proof for the same reason as `register`/`Drop::drop`: the
     // breach path must still get a list even if some other panic already
     // poisoned this mutex.
-    let map = REGISTRY
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let map = REGISTRY.lock();
     map.iter()
         .map(|(&id, entry)| InflightCompile {
             id,
@@ -256,9 +247,7 @@ mod tests {
     #[test]
     fn a_poisoned_registry_still_answers() {
         let poisoned = std::panic::catch_unwind(|| {
-            let _held = REGISTRY
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _held = REGISTRY.lock();
             panic!("deliberately poison the in-flight registry");
         });
         assert!(poisoned.is_err(), "the fixture closure must panic");

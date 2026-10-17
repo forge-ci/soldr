@@ -1,7 +1,8 @@
 //! The last bytes a stream produced, for memory-signature matching.
 
+use soldr_platform::sync::Mutex;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 const TAIL_BYTES: usize = 64 * 1024;
 
@@ -26,18 +27,13 @@ impl OutputTail {
     }
 
     pub fn feed(&self, chunk: &[u8]) {
-        let mut data = self.data.lock().expect("output tail");
+        let mut data = self.data.lock();
         data.extend(chunk);
         let excess = data.len().saturating_sub(self.limit);
         data.drain(..excess);
     }
 
     pub fn bytes(&self) -> Vec<u8> {
-        self.data
-            .lock()
-            .expect("output tail")
-            .iter()
-            .copied()
-            .collect()
+        self.data.lock().iter().copied().collect()
     }
 }

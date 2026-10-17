@@ -41,10 +41,11 @@ use prost::Message as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::sync_channel;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
+use soldr_platform::sync::Mutex;
 use thiserror::Error;
 // soldr#3289: source-mtime replay delegates to zccache's content-verified
 // per-file replay. Only the types are imported; zccache's `replay_one` fn is
@@ -172,7 +173,12 @@ pub const LOAD_WORKERS_ENV: &str = "SOLDR_LOAD_WORKERS";
 /// the parallel cache-file extractor in `load()`.
 pub const DEFAULT_LOAD_WORKERS: usize = 4;
 const REPLAY_WORKER_RECV_TIMEOUT: Duration = Duration::from_secs(60);
-const EXTRACT_WORKER_RECV_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long one extraction worker holds the shared receiver while polling it,
+/// and how long the others wait for it before re-polling. The receiver is
+/// behind a `soldr_platform::sync::Mutex`, whose critical-section watchdog
+/// aborts a hold or wait past 15 s (soldr#3836), so the poll stays short; a
+/// timeout only means the driver is slow and the worker simply polls again.
+const EXTRACT_WORKER_RECV_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Default zstd compression level — matches what setup-soldr's TS impl
 /// has been using (level 3 gives ~0.26 ratio on Rust artifact caches at

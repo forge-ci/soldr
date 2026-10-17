@@ -275,15 +275,15 @@ mod tests {
         // sink captures the emissions so the assertion never touches process
         // stderr. `STOP_POLL` (100 ms) bounds how often the loop can fire, so
         // ~400 ms comfortably yields at least two.
-        let emitted: Arc<std::sync::Mutex<Vec<String>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let emitted: Arc<crate::platform::sync::Mutex<Vec<String>>> =
+            Arc::new(crate::platform::sync::Mutex::new(Vec::new()));
         let sink_target = Arc::clone(&emitted);
         let guard = WaitHeartbeat::start_with_interval_and_sink(
             "unit test",
             Duration::from_secs(1800),
             Some("SOLDR_COMPILE_REPLY_TIMEOUT_SECS"),
             Duration::from_millis(10),
-            move |msg| sink_target.lock().unwrap().push(msg),
+            move |msg| sink_target.lock().push(msg),
         );
         // Poll for the condition instead of sleeping a fixed 400ms: the
         // heartbeat thread fires every ~100ms (STOP_POLL-bounded), and a
@@ -292,18 +292,18 @@ mod tests {
         // in ~200ms; only a genuine stall burns the 5s bound.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
-            if emitted.lock().unwrap().len() >= 2 {
+            if emitted.lock().len() >= 2 {
                 break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
                 "a slow op must emit repeated heartbeats within 5s; got {}",
-                emitted.lock().unwrap().len()
+                emitted.lock().len()
             );
             std::thread::sleep(Duration::from_millis(50));
         }
         drop(guard);
-        let hits = emitted.lock().unwrap();
+        let hits = emitted.lock();
         assert!(
             hits[0].contains("unit test") && hits[0].contains("after"),
             "{}",

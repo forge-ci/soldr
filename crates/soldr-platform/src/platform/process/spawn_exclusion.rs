@@ -37,26 +37,24 @@
 //! in this dependency-leaf crate so the platform spawn primitives can take
 //! it; `soldr_core::spawn_exclusion` re-exports it for everything above.
 
-use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use crate::platform::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 static SPAWN_WRITE_LOCK: RwLock<()> = RwLock::new(());
 
 /// Shared guard for one child spawn. Hold it across the spawn call only --
 /// never across `wait()`.
+#[track_caller]
 pub fn spawn_shared() -> RwLockReadGuard<'static, ()> {
-    SPAWN_WRITE_LOCK
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
+    SPAWN_WRITE_LOCK.read()
 }
 
 /// Exclusive guard for one staged-file write. Hold it from before the file
 /// is opened for writing until after the descriptor is closed; the rename
 /// that publishes it may happen outside the guard (the inode is only busy
 /// while a write descriptor exists).
+#[track_caller]
 pub fn write_exclusive() -> RwLockWriteGuard<'static, ()> {
-    SPAWN_WRITE_LOCK
-        .write()
-        .unwrap_or_else(PoisonError::into_inner)
+    SPAWN_WRITE_LOCK.write()
 }
 
 #[cfg(test)]
@@ -68,13 +66,17 @@ mod tests {
         let a = spawn_shared();
         let b = spawn_shared();
         assert!(
-            SPAWN_WRITE_LOCK.try_write().is_err(),
+            SPAWN_WRITE_LOCK
+                .write_for(std::time::Duration::ZERO)
+                .is_err(),
             "readers block a writer"
         );
         drop((a, b));
         let w = write_exclusive();
         assert!(
-            SPAWN_WRITE_LOCK.try_read().is_err(),
+            SPAWN_WRITE_LOCK
+                .read_for(std::time::Duration::ZERO)
+                .is_err(),
             "a writer blocks readers"
         );
         drop(w);

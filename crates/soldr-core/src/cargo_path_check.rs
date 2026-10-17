@@ -310,7 +310,7 @@ mod tests {
         // this crate precisely so upstream and downstream can share it.
         let _env = crate::test_util::TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prior = std::env::var_os("PATH");
         std::env::set_var("PATH", &bin);
         let found = detect_cargo_on_path();

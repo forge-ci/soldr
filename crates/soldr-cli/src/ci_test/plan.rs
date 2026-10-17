@@ -13,6 +13,7 @@ const DYLINTS: &[&str] = &[
     "ban_platform_cfg_outside_boundary",
     "ban_raw_env_flag",
     "ban_swallowed_child_stdio",
+    "ban_raw_sync_primitive",
 ];
 
 #[expect(clippy::too_many_lines, reason = "baseline, zackees/ci.yml#229")]

@@ -6,6 +6,7 @@ use crate::core::{
     InstallerWatchdogConfig, SoldrError, SoldrPaths, TargetTriple,
 };
 use crate::fetch::VersionSpec;
+use crate::platform::sync::Mutex;
 use crate::{
     REAL_TOOLCHAIN_BINARY_ENV_PREFIX, TEST_CARGO_BIN_ENV_VAR, TEST_RUSTC_BIN_ENV_VAR,
     TEST_RUSTUP_BIN_ENV_VAR,
@@ -13,7 +14,7 @@ use crate::{
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 /// Escape hatch: `SOLDR_TOOLCHAIN_BIN_CACHE=off` disables both the
 /// in-process memo and the on-disk cache for channel-scoped
@@ -137,7 +138,7 @@ fn toolchain_bin_memo_lookup(
     tool: &str,
 ) -> Option<PathBuf> {
     let key = (scope.clone(), channel.to_string(), tool.to_string());
-    let mut memo = toolchain_bin_memo().lock().ok()?;
+    let mut memo = toolchain_bin_memo().lock();
     let candidate = memo.get(&key).cloned()?;
     if candidate.is_file() {
         Some(candidate)
@@ -153,7 +154,8 @@ fn toolchain_bin_memo_store(
     tool: &str,
     path: PathBuf,
 ) {
-    if let Ok(mut memo) = toolchain_bin_memo().lock() {
+    {
+        let mut memo = toolchain_bin_memo().lock();
         memo.insert((scope.clone(), channel.to_string(), tool.to_string()), path);
     }
 }

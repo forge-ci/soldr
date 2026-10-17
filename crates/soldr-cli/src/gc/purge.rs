@@ -11,7 +11,7 @@ use crate::cache::print_json;
 use crate::core::{SoldrError, SoldrPaths};
 use serde::Serialize;
 use std::io::Write;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use super::walks::{walk_cargo_git_checkouts, walk_cargo_registry_src, walk_cargo_target_subtrees};
@@ -19,6 +19,7 @@ use super::{
     GcCandidateOutput, GcListEntryOutput, GcListKindFilter, GC_JSON_SCHEMA_VERSION,
     KIND_CARGO_GIT_CHECKOUTS, KIND_CARGO_REGISTRY_SRC, KIND_CARGO_TARGET, PURGE_SAFETY_DERIVED,
 };
+use crate::platform::sync::Mutex;
 
 #[derive(Serialize)]
 struct GcPurgeRegistrySrcOutput {
@@ -420,7 +421,7 @@ pub(super) fn run_gc_purge_candidates(
             builder
                 .spawn(move || loop {
                     let next = {
-                        let rx = job_rx.lock().expect("gc worker channel poisoned");
+                        let rx = job_rx.lock();
                         rx.recv()
                     };
                     match next {

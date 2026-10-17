@@ -104,7 +104,7 @@ fn apply_from_project_with_config(body: &str) -> std::process::Command {
 /// reld default silently replaced the project's declared linker.
 #[test]
 fn automatic_linker_defers_to_project_target_linker() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let _soldr_linker = EnvVarGuard::remove("SOLDR_LINKER");
     let _build_target = EnvVarGuard::remove("CARGO_BUILD_TARGET");
     let _parent_linker = EnvVarGuard::remove(LINKER_KEY);
@@ -129,7 +129,7 @@ fn automatic_linker_defers_to_project_target_linker() {
 /// rustflags outright rather than merging with them.
 #[test]
 fn automatic_linker_defers_to_project_target_rustflags() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let _soldr_linker = EnvVarGuard::remove("SOLDR_LINKER");
     let _build_target = EnvVarGuard::remove("CARGO_BUILD_TARGET");
     let _parent_linker = EnvVarGuard::remove(LINKER_KEY);
@@ -147,7 +147,7 @@ fn automatic_linker_defers_to_project_target_rustflags() {
 /// other target says nothing about this build, so the default still applies.
 #[test]
 fn automatic_linker_still_injects_for_an_unrelated_target_section() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let _soldr_linker = EnvVarGuard::remove("SOLDR_LINKER");
     let _build_target = EnvVarGuard::remove("CARGO_BUILD_TARGET");
     let _parent_linker = EnvVarGuard::remove(LINKER_KEY);
@@ -167,7 +167,7 @@ fn automatic_linker_still_injects_for_an_unrelated_target_section() {
 /// project's `.cargo/config.toml`.
 #[test]
 fn explicit_linker_request_still_overrides_project_target_config() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let _build_target = EnvVarGuard::remove("CARGO_BUILD_TARGET");
     let _parent_linker = EnvVarGuard::remove(LINKER_KEY);
     let _parent_rustflags = EnvVarGuard::remove(RUSTFLAGS_KEY);
@@ -231,7 +231,7 @@ fn apply_from_project_with_cargo_toml_metadata_linker(reld_bin: &Path) -> std::p
 /// `~/.soldr/config.toml`, not `Cargo.toml` metadata).
 #[test]
 fn cargo_toml_metadata_linker_reld_resolves_absolute_path_end_to_end() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let _soldr_linker = EnvVarGuard::remove("SOLDR_LINKER");
     let _build_target = EnvVarGuard::remove("CARGO_BUILD_TARGET");
     let _parent_linker = EnvVarGuard::remove(LINKER_KEY);
@@ -309,7 +309,7 @@ fn workspace_with_declared_lint(project: &Path) -> std::path::PathBuf {
 /// `CARGO_TARGET_<TRIPLE>_LINKER` over `dylint-link`.
 #[test]
 fn dylint_scope_resolves_through_the_declared_lint_library_config() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let _soldr_linker = EnvVarGuard::remove("SOLDR_LINKER");
     let _build_target = EnvVarGuard::remove("CARGO_BUILD_TARGET");
     let _parent_linker = EnvVarGuard::remove(LINKER_KEY);
@@ -350,7 +350,7 @@ fn dylint_scope_resolves_through_the_declared_lint_library_config() {
 /// real lint crate does, under `[target.'cfg(all())']`.
 #[test]
 fn dylint_scope_never_injects_the_automatic_linker() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let _soldr_linker = EnvVarGuard::remove("SOLDR_LINKER");
     let _build_target = EnvVarGuard::remove("CARGO_BUILD_TARGET");
     let _parent_linker = EnvVarGuard::remove(LINKER_KEY);
@@ -397,7 +397,7 @@ fn dylint_scope_never_injects_the_automatic_linker() {
 /// `SOLDR_LINKER` may inject inside the Dylint scope.
 #[test]
 fn dylint_scope_without_any_declared_config_still_injects_nothing() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let _soldr_linker = EnvVarGuard::remove("SOLDR_LINKER");
     let _build_target = EnvVarGuard::remove("CARGO_BUILD_TARGET");
     let _parent_linker = EnvVarGuard::remove(LINKER_KEY);
@@ -433,7 +433,7 @@ fn dylint_scope_without_any_declared_config_still_injects_nothing() {
 /// keeps working inside the Dylint scope too.
 #[test]
 fn dylint_scope_still_honors_an_explicit_linker_request() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let _build_target = EnvVarGuard::remove("CARGO_BUILD_TARGET");
     let _parent_linker = EnvVarGuard::remove(LINKER_KEY);
     let _parent_rustflags = EnvVarGuard::remove(RUSTFLAGS_KEY);
@@ -471,7 +471,7 @@ fn dylint_scope_still_honors_an_explicit_linker_request() {
 /// ordinary builds.
 #[test]
 fn plain_builds_do_not_read_lint_library_configs() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let _soldr_linker = EnvVarGuard::remove("SOLDR_LINKER");
     let _build_target = EnvVarGuard::remove("CARGO_BUILD_TARGET");
     let _parent_linker = EnvVarGuard::remove(LINKER_KEY);

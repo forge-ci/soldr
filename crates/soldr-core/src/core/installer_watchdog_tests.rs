@@ -221,7 +221,7 @@ fn steady_progress_can_outlast_the_old_deadline() {
 fn captured_manager_lookup_can_wait_past_the_short_command_silence_budget() {
     let _lock = crate::test_util::TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let prior = std::env::var_os(super::super::COMMAND_OUTPUT_TIMEOUT_ENV_VAR);
     std::env::set_var(super::super::COMMAND_OUTPUT_TIMEOUT_ENV_VAR, "1");
     let mut command = delayed_path_command();
@@ -385,7 +385,7 @@ fn safety_ceiling_wins_even_when_work_keeps_progressing() {
 fn shared_safety_ceiling_applies_without_an_explicit_operation_limit() {
     let _lock = crate::test_util::TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous_shared = std::env::var_os(INSTALLER_SAFETY_TIMEOUT_ENV_VAR);
     let previous_explicit = std::env::var_os(TEST_EXPLICIT_CEILING_ENV_VAR);
     unsafe {

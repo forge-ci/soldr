@@ -64,7 +64,7 @@ fn managed_gnu_toolchain_is_exported_for_later_github_steps() {
     }
     let _lock = TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|error| error.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let (target, target_prefix, slug) = if crate::platform::host::facts::arch()
         == crate::platform::host::facts::HostArch::Aarch64
@@ -266,7 +266,7 @@ fn managed_musl_toolchain_is_exported_without_zig_or_host_tools() {
     }
     let _lock = TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|error| error.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let (target, target_prefix, slug) = if crate::platform::host::facts::arch()
         == crate::platform::host::facts::HostArch::Aarch64
@@ -414,7 +414,7 @@ fn managed_musl_toolchain_is_exported_without_zig_or_host_tools() {
 fn managed_openssl_is_exported_only_for_graphs_linking_openssl_sys() {
     let _lock = TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|error| error.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let msvc = "x86_64-pc-windows-msvc";
     let gnu = "x86_64-unknown-linux-gnu";
     let _no_network = EnvVarGuard::set("SOLDR_TEST_NO_NETWORK", "1");
@@ -547,7 +547,7 @@ fn managed_openssl_is_exported_only_for_graphs_linking_openssl_sys() {
 fn exported_encoded_rustflags_keep_caller_target_flags() {
     let _lock = TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|error| error.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let target_key = "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS";
     let _target = EnvVarGuard::set(target_key, "-C link-arg=advapi32.lib");
     let _global = EnvVarGuard::set("RUSTFLAGS", "-Dwarnings");
@@ -641,7 +641,7 @@ fn managed_gnu_target_layers_libuuid_onto_the_sysroot() {
     }
     let _lock = TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|error| error.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (target, target_prefix, slug) = if crate::platform::host::facts::arch()
         == crate::platform::host::facts::HostArch::Aarch64
     {

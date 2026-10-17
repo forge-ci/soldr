@@ -72,9 +72,10 @@
 //! See that variant's docs for why.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::platform::sync::Mutex;
 use running_process::broker::server::BackendRegistry;
 
 /// A PID paired with the process-creation token resolved when it was
@@ -372,7 +373,6 @@ pub(crate) fn record_route_request(
     let key = resolve_requester_key(pid);
     route_owners
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .record_request(service_name, key, Instant::now());
 }
 
@@ -423,7 +423,6 @@ pub(crate) fn defer_busy_candidates(
             DaemonLoad::Idle => {
                 route_owners
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .clear_unanswered_busy_probes(&service_name);
                 reapable.push(service_name);
             }
@@ -432,15 +431,11 @@ pub(crate) fn defer_busy_candidates(
                     "soldr broker: route {service_name} has no live requester but its daemon \
                      has compiles in flight; keeping it (soldr#3815)"
                 );
-                route_owners
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .mark_live(&service_name, now);
+                route_owners.lock().mark_live(&service_name, now);
             }
             DaemonLoad::Unknown => {
                 let unanswered = route_owners
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .note_unanswered_busy_probe(&service_name);
                 if unanswered >= MAX_UNANSWERED_BUSY_PROBES {
                     println!(
@@ -463,13 +458,27 @@ pub(crate) fn defer_busy_candidates(
 }
 
 /// Ask the daemon behind `service_name` whether it has work in flight.
-fn probe_daemon_load(registry: &Mutex<BackendRegistry>, service_name: &str) -> DaemonLoad {
+/// The one place the broker's `BackendRegistry` lock is taken outside
+/// `broker_server`. Its type is fixed by `running_process`, which locks it
+/// itself, so it cannot move behind `soldr_platform::sync` (soldr#3836).
+/// Callers hold it only for an in-memory lookup or prune.
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
+pub(crate) fn lock_registry(
+    registry: &std::sync::Mutex<BackendRegistry>,
+) -> std::sync::MutexGuard<'_, BackendRegistry> {
+    registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn probe_daemon_load(
+    registry: &std::sync::Mutex<BackendRegistry>,
+    service_name: &str,
+) -> DaemonLoad {
     use crate::daemon::client::{status_direct, ClientError};
 
     let endpoint = {
-        let registry = registry
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let registry = lock_registry(registry);
         let found = registry.iter().find_map(|(key, handle)| {
             (key.service_name == service_name).then(|| {
                 crate::daemon::session_endpoint::private_control_endpoint_from_session(
@@ -504,15 +513,13 @@ fn probe_daemon_load(registry: &Mutex<BackendRegistry>, service_name: &str) -> D
 /// process for a corrupted one.
 pub(crate) fn reap_orphaned_routes(
     route_owners: &Mutex<RouteOwnership>,
-    registry: &Mutex<BackendRegistry>,
+    registry: &std::sync::Mutex<BackendRegistry>,
     grace: Duration,
 ) -> Vec<String> {
     use running_process::broker::backend_lifecycle::verify_pid::signal_terminate;
 
     let verdicts = {
-        let mut owners = route_owners
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut owners = route_owners.lock();
         owners.sweep(Instant::now(), grace, requester_is_alive)
     };
     let candidates: Vec<String> = verdicts
@@ -530,9 +537,7 @@ pub(crate) fn reap_orphaned_routes(
         // before signalling: the signal is a syscall on another process
         // and must not be holding the lock every route request needs.
         let daemon_pid: Option<u32> = {
-            let registry = registry
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let registry = lock_registry(registry);
             let found = registry.iter().find_map(|(key, handle)| {
                 (key.service_name == service_name).then_some(handle.daemon_process.pid)
             });
@@ -545,14 +550,9 @@ pub(crate) fn reap_orphaned_routes(
         // registry entry there is nothing left to tear down, and keeping
         // the row would make a long-lived broker accumulate one entry per
         // fixture that ever ran.
-        route_owners
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .forget(&service_name);
+        route_owners.lock().forget(&service_name);
         {
-            let mut registry = registry
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut registry = lock_registry(registry);
             registry.prune_stale();
         }
         reaped.push(service_name);
@@ -665,7 +665,7 @@ fn route_endpoint_dir() -> std::path::PathBuf {
 
 pub(crate) async fn run_route_reaper(
     route_owners: Arc<Mutex<RouteOwnership>>,
-    registry: Arc<Mutex<BackendRegistry>>,
+    registry: Arc<std::sync::Mutex<BackendRegistry>>,
     (shutdown, claim): (
         Arc<crate::daemon::shutdown_signal::ShutdownSignal>,
         Arc<crate::broker_endpoint_owner::EndpointClaim>,
@@ -706,17 +706,9 @@ pub(crate) async fn run_route_reaper(
                 let dead_endpoints = reap_dead_route_endpoints(&route_endpoint_dir());
                 let cache = (!reaped.is_empty() || retry_retired_cache).then(|| {
                     let mut live = BTreeSet::new();
+                    live.extend(sweep_owners.lock().service_names().map(str::to_owned));
                     live.extend(
-                        sweep_owners
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .service_names()
-                            .map(str::to_owned),
-                    );
-                    live.extend(
-                        sweep_registry
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        lock_registry(&sweep_registry)
                             .iter()
                             .map(|(key, _)| key.service_name.clone()),
                     );

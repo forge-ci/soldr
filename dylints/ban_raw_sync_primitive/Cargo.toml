@@ -1,0 +1,29 @@
+[package]
+name = "ban_raw_sync_primitive"
+version = "0.1.0"
+description = "Require soldr_platform::sync bounded-wait locks instead of raw concurrency primitives"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dylint_linting = "6.0.1"
+
+[dev-dependencies]
+dylint_testing = "=6.0.3"
+
+[package.metadata.rust-analyzer]
+rustc_private = true
+
+[workspace]
+
+# cargo-dylint discovers prebuilt libraries in the `release` profile directory.
+# Keep that directory contract without paying shipped-binary optimization costs
+# for a CI-only lint plugin.
+[profile.release]
+opt-level = 0
+lto = false
+codegen-units = 16
+strip = "none"

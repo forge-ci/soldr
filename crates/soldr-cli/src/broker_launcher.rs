@@ -5,6 +5,7 @@
 //! process-local `SOLDR_*` namespace, so the broker must apply that namespace
 //! explicitly when it creates `soldr-daemon`.
 
+use crate::platform::sync::Mutex;
 use running_process::broker::backend_handle::BackendHandle;
 use running_process::broker::protocol::Endpoint;
 use running_process::broker::server::{
@@ -15,7 +16,6 @@ use running_process::broker::server::{
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::Duration;
 
 // A cold embedded-zccache startup can exceed the old 25-second budget on
@@ -59,10 +59,7 @@ impl SoldrBackendLauncher {
     }
 
     pub(crate) fn note_route_deadline(&self, service_name: &str, deadline: std::time::Instant) {
-        let mut deadlines = self
-            .route_deadlines
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut deadlines = self.route_deadlines.lock();
         deadlines
             .entry(service_name.to_string())
             .and_modify(|current| *current = (*current).max(deadline))
@@ -76,7 +73,6 @@ impl SoldrBackendLauncher {
         let deadline = self
             .route_deadlines
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&request.key.service_name)
             .copied();
         if deadline.is_some_and(|value| std::time::Instant::now() >= value) {
@@ -470,11 +466,8 @@ impl SoldrBackendLauncher {
         let mut next_lock_progress = Duration::from_secs(1);
         let mut placed = loop {
             match self.placed_images.try_lock() {
-                Ok(placed) => break placed,
-                Err(std::sync::TryLockError::Poisoned(_)) => {
-                    return Err(BackendLaunchError::AllocatorPoisoned)
-                }
-                Err(std::sync::TryLockError::WouldBlock) => {
+                Some(placed) => break placed,
+                None => {
                     let elapsed = lock_started.elapsed();
                     if elapsed >= next_lock_progress {
                         self.report_progress(

@@ -268,7 +268,8 @@ mod tests {
     fn warning_log_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         // A panicking test must not wedge every later one.
-        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     // soldr#1857 — a dispatched compile that fails *and* says nothing is

@@ -107,7 +107,7 @@ mod config_scan {
     fn in_dir(dir: &std::path::Path, f: impl FnOnce()) {
         let _lock = crate::TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _home = crate::EnvVarGuard::set("CARGO_HOME", dir.join("no-cargo-home"));
         let previous = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir).unwrap();

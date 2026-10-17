@@ -146,7 +146,8 @@ pub fn utc_compact_timestamp(unix_ms: i64) -> String {
 /// pull everything recorded so far (and empty the buffer for the next
 /// build) before serializing the log entry.
 pub mod fetch_timing {
-    use std::sync::{Mutex, OnceLock};
+    use soldr_platform::sync::Mutex;
+    use std::sync::OnceLock;
 
     /// One recorded fetch, timed by the caller.
     #[derive(Debug, Clone)]
@@ -167,19 +168,18 @@ pub mod fetch_timing {
         BUFFER.get_or_init(|| Mutex::new(Vec::new()))
     }
 
-    /// Record a completed fetch. Never panics, even if the mutex was
-    /// poisoned by a prior panicking holder — a poisoned lock still
-    /// carries a usable (possibly inconsistent, but here append-only
-    /// so always safe) `Vec` underneath.
+    /// Record a completed fetch. Never panics: `soldr_platform::sync`
+    /// recovers a poisoned lock, and the `Vec` underneath is append-only so
+    /// always safe to reuse.
     pub fn record(timing: FetchTiming) {
-        let mut guard = buffer().lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = buffer().lock();
         guard.push(timing);
     }
 
     /// Return every timing recorded since the last `drain` (or process
     /// start), in recording order, and empty the buffer.
     pub fn drain() -> Vec<FetchTiming> {
-        let mut guard = buffer().lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = buffer().lock();
         std::mem::take(&mut *guard)
     }
 }

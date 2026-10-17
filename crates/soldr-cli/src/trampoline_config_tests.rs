@@ -72,7 +72,7 @@ impl Drop for EnvGuard {
 
 #[test]
 fn discovers_configs_walking_up_three_levels() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock();
     let (_tmp, manifest_dir, cargo_home) = temp_layout("walk-three-levels");
     let mut env = EnvGuard::new();
     env.set("CARGO_HOME", &cargo_home);
@@ -122,7 +122,7 @@ fn discovers_configs_walking_up_three_levels() {
 
 #[test]
 fn discovers_cargo_home_config() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock();
     let (_tmp, manifest_dir, cargo_home) = temp_layout("cargo-home");
     let mut env = EnvGuard::new();
     env.set("CARGO_HOME", &cargo_home);
@@ -149,7 +149,7 @@ fn discovers_cargo_home_config() {
 
 #[test]
 fn discovers_legacy_config_file_without_extension() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock();
     let (_tmp, manifest_dir, cargo_home) = temp_layout("legacy-name");
     let mut env = EnvGuard::new();
     env.set("CARGO_HOME", &cargo_home);
@@ -181,7 +181,7 @@ fn discovers_legacy_config_file_without_extension() {
 
 #[test]
 fn digest_changes_when_config_content_changes() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock();
     let (_tmp, manifest_dir, cargo_home) = temp_layout("content-change");
     let mut env = EnvGuard::new();
     env.set("CARGO_HOME", &cargo_home);
@@ -208,7 +208,7 @@ fn digest_changes_when_config_content_changes() {
 
 #[test]
 fn digest_changes_when_config_appears() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock();
     let (_tmp, manifest_dir, cargo_home) = temp_layout("appears");
     let mut env = EnvGuard::new();
     env.set("CARGO_HOME", &cargo_home);
@@ -225,7 +225,7 @@ fn digest_changes_when_config_appears() {
 
 #[test]
 fn digest_stable_for_unchanged_inputs() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock();
     let (_tmp, manifest_dir, cargo_home) = temp_layout("stable");
     let mut env = EnvGuard::new();
     env.set("CARGO_HOME", &cargo_home);
@@ -246,7 +246,7 @@ fn digest_stable_for_unchanged_inputs() {
 
 #[test]
 fn digest_with_no_configs_is_well_defined() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock();
     let (_tmp, manifest_dir, cargo_home) = temp_layout("no-configs");
     let mut env = EnvGuard::new();
     env.set("CARGO_HOME", &cargo_home);

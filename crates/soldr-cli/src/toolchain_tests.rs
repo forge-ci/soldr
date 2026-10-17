@@ -426,7 +426,7 @@ mod pin_requirement_tests {
     fn without_opt_out<T>(body: impl FnOnce() -> T) -> T {
         let _lock = crate::TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = std::env::var_os(ALLOW_UNPINNED_ENV_VAR);
         let previous_toolchain = std::env::var_os(RUSTUP_TOOLCHAIN_ENV_VAR);
         std::env::remove_var(ALLOW_UNPINNED_ENV_VAR);
@@ -447,7 +447,7 @@ mod pin_requirement_tests {
     fn unrecognised_allow_unpinned_value_does_not_opt_out() {
         let _lock = crate::TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = std::env::var_os(ALLOW_UNPINNED_ENV_VAR);
         for value in ["disabled", "2", "nope", "", "0", "off"] {
             std::env::set_var(ALLOW_UNPINNED_ENV_VAR, value);
@@ -506,7 +506,7 @@ mod pin_requirement_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let _lock = crate::TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = std::env::var_os(ALLOW_UNPINNED_ENV_VAR);
         std::env::set_var(ALLOW_UNPINNED_ENV_VAR, "1");
         let result = require_toolchain_pin(temp.path());
@@ -530,7 +530,7 @@ mod pin_requirement_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let _lock = crate::TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous_opt_out = std::env::var_os(ALLOW_UNPINNED_ENV_VAR);
         let previous_toolchain = std::env::var_os(RUSTUP_TOOLCHAIN_ENV_VAR);
         std::env::remove_var(ALLOW_UNPINNED_ENV_VAR);
@@ -557,7 +557,7 @@ mod pin_requirement_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let _lock = crate::TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous_opt_out = std::env::var_os(ALLOW_UNPINNED_ENV_VAR);
         let previous_toolchain = std::env::var_os(RUSTUP_TOOLCHAIN_ENV_VAR);
         std::env::remove_var(ALLOW_UNPINNED_ENV_VAR);
@@ -590,7 +590,7 @@ mod pin_requirement_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let _lock = crate::TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = std::env::var_os(ALLOW_UNPINNED_ENV_VAR);
         // Also clear RUSTUP_TOOLCHAIN: it now satisfies the pin on its own, so
         // an ambient one would make these calls succeed and this test would

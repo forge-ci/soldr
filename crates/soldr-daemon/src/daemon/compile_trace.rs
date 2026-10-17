@@ -14,9 +14,10 @@
 //! Loaded by `bench/parse_compile_trace.py` (or any JSONL reader) for
 //! per-phase p50/p99/total analysis.
 
+use crate::platform::sync::Mutex;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static TRACE_FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
@@ -70,7 +71,8 @@ pub fn record(phase: &str, micros: u64, compile_id: &str) {
         escape(compile_id),
         nl = "\n",
     );
-    if let Ok(mut guard) = file_mu.lock() {
+    {
+        let mut guard = file_mu.lock();
         let _ = guard.write_all(line.as_bytes());
     }
 }

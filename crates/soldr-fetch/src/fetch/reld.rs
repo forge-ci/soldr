@@ -165,13 +165,12 @@ mod tests {
     use crate::fetch::trust;
     use sha2::Digest;
     use std::io::Write as _;
-    use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     /// Serialised: these tests mutate process env (`SOLDR_TRUST_MODE`,
     /// `SOLDR_CHECKSUMS_FILE`).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
@@ -236,7 +235,9 @@ mod tests {
     /// additionally require a `SOLDR_CHECKSUMS_FILE` entry for it).
     #[test]
     fn ensure_reld_from_downloads_verifies_and_reuses_without_a_second_fetch() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous_trust_mode = std::env::var_os(trust::TRUST_MODE_ENV_VAR);
         std::env::set_var(trust::TRUST_MODE_ENV_VAR, "strict");
 
@@ -288,7 +289,9 @@ mod tests {
     /// "explicit reld never falls back silently" acceptance criterion.
     #[test]
     fn ensure_reld_from_rejects_a_body_that_does_not_match_the_pin() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let body = b"unexpected content".to_vec();
         let asset = ReleaseAsset {
             triple: "test-fixture",
