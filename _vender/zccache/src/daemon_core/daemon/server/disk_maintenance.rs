@@ -864,6 +864,10 @@ fn maintain_disk_artifacts_with_barrier(
             )?;
             (plan, removed)
         };
+        // The commit only detached the evicted staged trees; delete them now,
+        // outside the publication barrier, and before the next round re-reads
+        // free space.
+        crate::daemon_core::daemon::server::persist::sweep_v2_trash(artifact_dir);
         pressure = plan.pressure;
         if removed_this_round.is_empty() {
             break;

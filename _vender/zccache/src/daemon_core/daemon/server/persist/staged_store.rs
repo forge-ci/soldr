@@ -17,7 +17,8 @@ pub(in crate::daemon_core::daemon::server) use maintenance::clear_staged_artifac
 pub(crate) use maintenance::evict_staged_artifact_keys;
 use maintenance::remove_staged_tree;
 pub(crate) use maintenance::{
-    evict_staged_artifact_keys_if_unchanged, scan_staged_disk_artifacts, StagedDiskArtifact,
+    evict_staged_artifact_keys_if_unchanged, scan_staged_disk_artifacts, sweep_staged_trash,
+    StagedDiskArtifact,
 };
 mod materialize;
 pub(in crate::daemon_core::daemon::server) use materialize::{
