@@ -777,10 +777,30 @@ fn lock_target(target: &Path) -> Result<File, SoldrError> {
         .read(true)
         .write(true)
         .open(&path)?;
-    file.lock_exclusive().map_err(|error| {
+    lock_exclusive_announced(&file, &path, "target tree").map_err(|error| {
         SoldrError::Other(format!("failed to lock {}: {error}", path.display()))
     })?;
     Ok(file)
+}
+
+/// Take a cross-process cook lock, saying so when another cook holds it.
+/// These locks are held for a whole cook, so a wait can be long; it must
+/// never be silent (soldr#3815: degenerate states fail loudly).
+fn lock_exclusive_announced(file: &File, path: &Path, what: &str) -> std::io::Result<()> {
+    if file.try_lock_exclusive().is_ok() {
+        return Ok(());
+    }
+    eprintln!(
+        "soldr dylint cook: waiting for the {what} lock {} -- another cook holds it",
+        path.display()
+    );
+    let started = std::time::Instant::now();
+    file.lock_exclusive()?;
+    eprintln!(
+        "soldr dylint cook: acquired the {what} lock after {:.1}s",
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
 }
 
 fn lock_workspace_source(root: &Path) -> Result<File, SoldrError> {
@@ -794,7 +814,7 @@ fn lock_workspace_source(root: &Path) -> Result<File, SoldrError> {
         .read(true)
         .write(true)
         .open(&path)?;
-    file.lock_exclusive().map_err(|error| {
+    lock_exclusive_announced(&file, &path, "workspace source").map_err(|error| {
         SoldrError::Other(format!(
             "failed to lock workspace sources via {}: {error}",
             path.display()

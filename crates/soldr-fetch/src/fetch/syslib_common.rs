@@ -169,7 +169,14 @@ pub fn acquire_install_lock(lock_dir: &Path, key: &str) -> Result<std::fs::File,
         .create(true)
         .truncate(false)
         .open(&lock_path)?;
-    file.lock_exclusive()?;
+    // Never wait silently: another install can take minutes (soldr#3815).
+    if file.try_lock_exclusive().is_err() {
+        eprintln!(
+            "soldr: waiting for {} -- another soldr process is installing {key}",
+            lock_path.display()
+        );
+        file.lock_exclusive()?;
+    }
     Ok(file)
 }
 
