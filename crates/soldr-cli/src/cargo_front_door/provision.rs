@@ -158,6 +158,10 @@ pub(crate) async fn provision_native_build_tools(
         command.env("CARGO_BUILD_TARGET", target);
     }
 
+    // Linker provisioning is best-effort here: a host with no clang and no
+    // managed LLVM for its platform (a bare macOS x86_64 image -- the release
+    // gate's Recovery guest) must still finish `toolchain prepare/ensure`. A
+    // build that actually needs the linker reports the same error itself.
     match target::apply_linker_override_reporting(
         &mut command,
         &args,
@@ -166,10 +170,11 @@ pub(crate) async fn provision_native_build_tools(
         false,
         crate::linker::FetchMode::Await,
     )
-    .await?
+    .await
     {
-        LinkerOutcome::Skipped(reason) => notes.push(format!("linker: {reason}")),
-        LinkerOutcome::Applied(applied) => {
+        Err(error) => notes.push(format!("linker: not provisioned: {error}")),
+        Ok(LinkerOutcome::Skipped(reason)) => notes.push(format!("linker: {reason}")),
+        Ok(LinkerOutcome::Applied(applied)) => {
             summary.linker = Some(BuildToolsLinker {
                 choice: format!("{:?}", applied.choice).to_ascii_lowercase(),
                 target: applied.target,
