@@ -322,7 +322,7 @@ fn target_has_library_payload(target_directory: &Path) -> bool {
 
 /// Same key predicate as `dylint_cook.rs::semantic_input_hash`
 /// (dylint_cook.rs:617-627), kept identical on purpose -- both markers gate
-/// the same seven lint cdylibs built with `--profile release` through the
+/// the same eight lint cdylibs built with `--profile release` through the
 /// soldr wrapper, so a changed `RUSTFLAGS` (etc.) changes what gets produced
 /// even when no tracked file changed. Takes the pairs as a parameter rather
 /// than reading `std::env::vars()` internally so tests can exercise it with
