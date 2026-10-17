@@ -14,7 +14,6 @@ name = "soldr-nextest-wrapper"
 path = "src/main.rs"
 
 [dependencies]
-fs2 = { workspace = true }
 sha2 = { workspace = true }
 soldr-core = { path = "../soldr-core" }
 soldr-platform = { path = "../soldr-platform" }

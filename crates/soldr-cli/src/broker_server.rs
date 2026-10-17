@@ -140,8 +140,7 @@ fn route_progress_heartbeat_interval(progress_silence: Duration) -> Duration {
         .min(Duration::from_secs(1))
 }
 
-/// `registry`/`spawn_coordinator` stay raw std mutexes: `running_process` fixes
-/// their type and locks them itself (soldr#3836).
+/// `registry`/`spawn_coordinator`: raw std mutexes, typed by running_process (soldr#3836).
 struct BrokerState {
     instance_id: String,
     loader: CombinedServiceDefinitionLoader,
@@ -281,9 +280,7 @@ impl Drop for OpenConnection {
     }
 }
 
-// Process-lifetime join: the broker runs until it is shut down, so this wait
-// is the broker's own lifetime, not a wait on another party (soldr#3836).
-#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))] // broker lifetime
 pub(crate) fn serve(endpoint: &crate::broker_identity::ResolvedBrokerEndpoint) -> io::Result<()> {
     let endpoint = endpoint.clone();
     std::thread::Builder::new()
