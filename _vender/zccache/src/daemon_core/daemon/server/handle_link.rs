@@ -983,6 +983,9 @@ pub(super) async fn handle_link_ephemeral(
                         .take()
                         .expect("link publication acquired an owned guard");
                     let index_writer_tx = state.index_writer_tx.clone();
+                    let demote_state = Arc::clone(state);
+                    let resident_entry = cached.clone();
+                    let demote_key = key_hex.clone();
                     kernal_api::async_engine::launch(async move {
                         #[expect(
                             clippy::expect_used,
@@ -995,15 +998,27 @@ pub(super) async fn handle_link_ephemeral(
                         let written = kernal_api::async_engine::launch_blocking(move || {
                             let _guard = guard;
                             let _publication_guard = publication_guard_for_task;
-                            if persist_artifact_payloads(&artifact_dir, &kh, &payloads).is_ok() {
+                            let persisted =
+                                persist_artifact_payloads(&artifact_dir, &kh, &payloads).is_ok();
+                            if persisted {
                                 let _ = index_writer_tx
                                     .send(IndexWriterCommand::Insert(kh, persist_meta));
                             }
+                            persisted
                         })
                         .detach_on_drop()
                         .await;
-                        if let Err(error) = written {
-                            tracing::warn!(%error, "link artifact persistence task failed to join");
+                        match written {
+                            Ok(true) => demote_to_durable(
+                                &demote_state.artifacts,
+                                &demote_key,
+                                &resident_entry,
+                            ),
+                            Ok(false) => {}
+                            Err(error) => tracing::warn!(
+                                %error,
+                                "link artifact persistence task failed to join"
+                            ),
                         }
                     }).detach();
                     true
@@ -1014,7 +1029,9 @@ pub(super) async fn handle_link_ephemeral(
                 .unwrap_or(0);
 
             if cacheable && publication_guard.is_some() {
-                state.artifacts.insert(key_hex.clone(), cached);
+                // Only the synchronous staged path reaches here (the detached
+                // path took the guard), so the payloads are already durable.
+                state.artifacts.insert(key_hex.clone(), cached.durable());
                 tracing::debug!(%key_hex, "link artifact cached");
             }
             drop(publication_guard);

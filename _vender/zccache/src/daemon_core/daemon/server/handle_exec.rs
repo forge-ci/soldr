@@ -1035,6 +1035,9 @@ async fn store_exec_artifact_inner(
         } else {
             None
         };
+        let resident_entry = cached.clone();
+        let demote_state = Arc::clone(state);
+        let demote_key = key_hex.clone();
         state.artifacts.insert(key_hex.clone(), cached);
         let sem = Arc::clone(&state.persist_semaphore);
         let publication_guard_for_task =
@@ -1051,15 +1054,20 @@ async fn store_exec_artifact_inner(
                 .expect("persist_semaphore is owned by ServerState and never closed");
             let written = kernal_api::async_engine::launch_blocking(move || {
                 let _publication_guard = publication_guard_for_task;
-                if persist_artifact_payloads(&artifact_dir, &key_for_persist, &payloads).is_ok() {
+                let persisted =
+                    persist_artifact_payloads(&artifact_dir, &key_for_persist, &payloads).is_ok();
+                if persisted {
                     let _ = index_writer_tx
                         .send(IndexWriterCommand::Insert(key_for_persist, persist_meta));
                 }
+                persisted
             })
             .detach_on_drop()
             .await;
-            if let Err(error) = written {
-                tracing::warn!(%error, "exec artifact persistence task failed to join");
+            match written {
+                Ok(true) => demote_to_durable(&demote_state.artifacts, &demote_key, &resident_entry),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, "exec artifact persistence task failed to join"),
             }
             if let Some(gate) = completion_gate {
                 gate.persisted.notify_one();
