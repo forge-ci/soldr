@@ -202,8 +202,21 @@ fn staged_artifacts_enabled_for(value: Option<&str>) -> bool {
 }
 
 fn staged_lane_enabled_for(value: Option<&str>, family: crate::daemon_core::compiler::CompilerFamily) -> bool {
+    // Default: Rust and native C/C++ compiles both stage. The compiler writes
+    // into the daemon's private staging directory and the result is published
+    // and delivered by link, so an output never passes through memory. The
+    // old C/C++ default read every object and PCH whole into a resident
+    // buffer (a 2026-10-16 daemon held 16.8 GiB of them). Hit delivery was
+    // already link-safe: native objects and PCH/modules are
+    // `AtomicReplaceOnly` (#1764).
     let Some(value) = value else {
-        return family == crate::daemon_core::compiler::CompilerFamily::Rustc;
+        return matches!(
+            family,
+            crate::daemon_core::compiler::CompilerFamily::Rustc
+                | crate::daemon_core::compiler::CompilerFamily::Gcc
+                | crate::daemon_core::compiler::CompilerFamily::Clang
+                | crate::daemon_core::compiler::CompilerFamily::Msvc
+        );
     };
     match value.trim().to_ascii_lowercase().as_str() {
         "all" | "1" | "true" | "yes" | "on" => true,
