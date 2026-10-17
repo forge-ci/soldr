@@ -230,10 +230,9 @@ fn defender_exclusion_guard_for(cache_dir: &Path) -> DefenderExclusionGuard {
 /// Adapt a soldr [`SourceFile`] manifest entry into the [`MtimeEntry`]
 /// shape zccache's `replay_one` expects.
 ///
-/// `mtime_ns` reproduces the deleted `ms_to_systime` clamp: a negative
-/// `mtime_ms` (never produced by `mtime_ms()` at save time, but not
-/// ruled out by the wire format) maps to `0` (the Unix epoch); an
-/// absurdly large value saturates instead of overflowing.
+/// Prefer the exact nanosecond field. Older manifests fall back to the
+/// legacy millisecond field, saturating multiplication instead of overflowing.
+/// Preserve the historical clamp of negative timestamps to the Unix epoch.
 ///
 /// `blake3` converts the stored 32 raw bytes to zccache's lowercase-hex
 /// form via `ContentHash::to_hex()`. A malformed/short stored hash (never
@@ -244,11 +243,10 @@ fn defender_exclusion_guard_for(cache_dir: &Path) -> DefenderExclusionGuard {
 /// fresh (post-checkout) mtime in place, exactly like every other
 /// failure mode.
 fn source_file_to_mtime_entry(entry: &SourceFile) -> MtimeEntry {
-    let mtime_ns = if entry.mtime_ms < 0 {
-        0
-    } else {
-        entry.mtime_ms.saturating_mul(1_000_000)
-    };
+    let mtime_ns = entry
+        .mtime_ns
+        .unwrap_or_else(|| entry.mtime_ms.saturating_mul(1_000_000))
+        .max(0);
     let blake3 = <[u8; 32]>::try_from(entry.blake3.as_slice())
         .map(|bytes| zccache::hash::ContentHash::from_bytes(bytes).to_hex())
         .unwrap_or_default();
@@ -266,7 +264,32 @@ fn source_file_to_mtime_entry(entry: &SourceFile) -> MtimeEntry {
 /// the module-level comment above for the preserved safety properties.
 fn replay_one(workspace: &Path, entry: &SourceFile) -> ReplayOutcome {
     let mtime_entry = source_file_to_mtime_entry(entry);
-    zccache::fingerprint::mtime_replay::replay_one(workspace, &mtime_entry)
+    let outcome = zccache::fingerprint::mtime_replay::replay_one(workspace, &mtime_entry);
+    if outcome == ReplayOutcome::Applied {
+        // A successful setter can still round on a lower precision filesystem.
+        // Report that limitation instead of promising exact Cargo freshness.
+        let path = workspace.join(&entry.path);
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                if let Some(warning) = source_mtime_precision_warning(
+                    &entry.path, mtime_entry.mtime_ns, mtime_ns(&meta),
+                ) {
+                    eprintln!("{warning}");
+                }
+            }
+            Err(error) => eprintln!(
+                "soldr hydrate: could not verify restored source mtime for {}: {error}; Cargo may rebuild",
+                path.display()
+            ),
+        }
+    }
+    outcome
+}
+
+fn source_mtime_precision_warning(path: &str, expected: i64, actual: i64) -> Option<String> {
+    (expected != actual).then(|| format!(
+        "soldr hydrate: filesystem timestamp precision limitation for {path}: requested {expected} ns, read back {actual} ns; Cargo may rebuild"
+    ))
 }
 
 /// Normalize `workspace` before it is joined against manifest entries'

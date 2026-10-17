@@ -22,3 +22,4 @@ mod rustup_child_exit_guard;
 mod save_auto_defender_exclude;
 mod save_bench;
 mod save_roundtrip;
+mod source_mtime_freshness;

@@ -120,6 +120,9 @@ pub mod proto {
         pub path: ::prost::alloc::string::String,
         #[prost(int64, tag = "2")]
         pub mtime_ms: i64,
+        /// Exact source mtime; absent in archives written before #3851.
+        #[prost(int64, optional, tag = "5")]
+        pub mtime_ns: Option<i64>,
         #[prost(uint64, tag = "3")]
         pub size: u64,
         #[prost(bytes = "vec", tag = "4")]
@@ -322,3 +325,7 @@ mod load_replay_tests;
 #[cfg(test)]
 #[path = "save_archive_mode_tests.rs"]
 mod save_archive_mode_tests;
+
+#[cfg(test)]
+#[path = "source_mtime_tests.rs"]
+mod source_mtime_tests;

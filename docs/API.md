@@ -1238,6 +1238,13 @@ spelling remains a compatibility alias. Intended for CI cache layers
 that need stable Cargo fingerprints across `actions/checkout` runs
 without resorting to mtime-rewrite tricks.
 
+Source timestamps retain nanosecond precision where the filesystem supports it.
+Hydration checks the timestamp after replay and warns when the destination
+filesystem rounds it; Cargo may rebuild in that case. Older archives containing
+only millisecond source timestamps remain readable, with a warning that their
+lost precision cannot be recovered. Rebuild once and save a new archive to
+capture exact timestamps.
+
 ```bash
 soldr save --cache-dir <dir> --workspace <dir> --out cache.tar.zst
 soldr hydrate --archive cache.tar.zst --cache-dir <dir> --workspace <dir>

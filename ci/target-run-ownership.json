@@ -221,10 +221,11 @@
         "cli_save",
         "doctor_standalone_zccache",
         "python_compat_sysroot",
-        "save_bench"
+        "save_bench",
+        "source_mtime_freshness"
       ],
       "disposition": "native-linux-once",
-      "reason": "These modules use temporary files and fake subprocesses for portable archive, compatibility-sysroot, and CLI contracts."
+      "reason": "These modules validate portable archive, compatibility-sysroot, and CLI contracts. Source-mtime freshness launches a real Cargo fixture for the package fingerprint contract and requires the canonical host toolchain."
     },
     {
       "id": "toolchain-target-replay",

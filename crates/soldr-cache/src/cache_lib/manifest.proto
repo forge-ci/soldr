@@ -91,8 +91,8 @@ message SourceFile {
   // Workspace-relative path, forward slashes on every platform.
   string path = 1;
 
-  // mtime in milliseconds since UNIX epoch, matching what Node's
-  // fs.Stats.mtimeMs / Rust's SystemTime exposes after rounding.
+  // Legacy millisecond mtime since UNIX epoch. Retained for older readers;
+  // new readers prefer mtime_ns when present.
   int64 mtime_ms = 2;
 
   // File size in bytes. Cheap rejection signal on replay — if the
@@ -104,15 +104,18 @@ message SourceFile {
   // for the replay decision. (Hash size adds <0.5 KB per 1000 files
   // after zstd — not worth truncating.)
   bytes blake3 = 4;
+
+  // Exact source mtime since UNIX epoch (#3851). Presence distinguishes
+  // an epoch timestamp from an older manifest with millisecond precision.
+  optional int64 mtime_ns = 5;
 }
 
 message CacheFile {
   // Cache-dir-relative path, forward slashes on every platform.
   string path = 1;
 
-  // mtime in nanoseconds since UNIX epoch. Cache artifacts can be more
-  // sensitive than source-file mtime replay, so this keeps the full
-  // Rust/filetime precision instead of the source mtime_ms field.
+  // mtime in nanoseconds since UNIX epoch, preserving the full filesystem
+  // precision just like SourceFile.mtime_ns.
   int64 mtime_ns = 2;
 
   // File size in bytes. Cheap rejection signal for delta comparison.
