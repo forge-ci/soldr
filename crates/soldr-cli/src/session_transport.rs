@@ -368,14 +368,9 @@ fn run_session_compile_for_service(
             .enable_all()
             .build()
             .map_err(SessionError::pre_output)?;
-        // The compile reply is bounded inside; this outer bound only keeps
-        // the facade's every-wait-has-a-timeout guarantee.
-        crate::platform::wait::block_on_for(
-            &runtime,
-            run_session_compile_async(service_name, rustc_argv, cwd, env),
-            crate::platform::wait::LONG_CHILD,
-        )
-        .unwrap_or_else(|error| Err(SessionError::pre_output(error.into())))
+        let compile = run_session_compile_async(service_name, rustc_argv, cwd, env);
+        crate::platform::wait::block_on_for(&runtime, compile, crate::platform::wait::LONG_CHILD)
+            .unwrap_or_else(|error| Err(SessionError::pre_output(error.into())))
     };
 
     // A Cargo wrapper arrives before Soldr constructs its command runtime, but
