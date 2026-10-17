@@ -37,24 +37,32 @@
 //! in this dependency-leaf crate so the platform spawn primitives can take
 //! it; `soldr_core::spawn_exclusion` re-exports it for everything above.
 
-use crate::platform::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+// Raw `std` lock on purpose (soldr#3836): the exclusive side is held across a
+// whole staged-file write, which for a large restored entry on a slow disk can
+// outlast the `sync` critical-section watchdog and must not abort the process.
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
 static SPAWN_WRITE_LOCK: RwLock<()> = RwLock::new(());
 
 /// Shared guard for one child spawn. Hold it across the spawn call only --
 /// never across `wait()`.
-#[track_caller]
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
 pub fn spawn_shared() -> RwLockReadGuard<'static, ()> {
-    SPAWN_WRITE_LOCK.read()
+    SPAWN_WRITE_LOCK
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Exclusive guard for one staged-file write. Hold it from before the file
 /// is opened for writing until after the descriptor is closed; the rename
 /// that publishes it may happen outside the guard (the inode is only busy
 /// while a write descriptor exists).
-#[track_caller]
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
 pub fn write_exclusive() -> RwLockWriteGuard<'static, ()> {
-    SPAWN_WRITE_LOCK.write()
+    SPAWN_WRITE_LOCK
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -66,17 +74,13 @@ mod tests {
         let a = spawn_shared();
         let b = spawn_shared();
         assert!(
-            SPAWN_WRITE_LOCK
-                .write_for(std::time::Duration::ZERO)
-                .is_err(),
+            SPAWN_WRITE_LOCK.try_write().is_err(),
             "readers block a writer"
         );
         drop((a, b));
         let w = write_exclusive();
         assert!(
-            SPAWN_WRITE_LOCK
-                .read_for(std::time::Duration::ZERO)
-                .is_err(),
+            SPAWN_WRITE_LOCK.try_read().is_err(),
             "a writer blocks readers"
         );
         drop(w);

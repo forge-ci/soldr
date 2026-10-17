@@ -24,7 +24,12 @@ use std::time::Duration;
 const DAEMON_ROUTE_READINESS_TIMEOUT: Duration = Duration::from_secs(45);
 
 pub(crate) struct SoldrBackendLauncher {
-    placed_images: Mutex<HashMap<String, PlacedImage>>,
+    /// Raw `std` mutex on purpose: it serializes daemon image verification and
+    /// is held across a whole-file hash and image copy, which on a slow disk
+    /// legitimately outlasts the `soldr_platform::sync` critical-section
+    /// watchdog (it aborted the broker on aarch64 CI). Waiters already poll
+    /// with progress reports (soldr#3836).
+    placed_images: std::sync::Mutex<HashMap<String, PlacedImage>>,
     route_deadlines: Mutex<HashMap<String, std::time::Instant>>,
     progress: tokio::sync::broadcast::Sender<LauncherProgress>,
 }
@@ -49,10 +54,11 @@ struct FileFingerprint {
 }
 
 impl SoldrBackendLauncher {
+    #[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
     pub(crate) fn new() -> Self {
         let (progress, _) = tokio::sync::broadcast::channel(256);
         Self {
-            placed_images: Mutex::new(HashMap::new()),
+            placed_images: std::sync::Mutex::new(HashMap::new()),
             route_deadlines: Mutex::new(HashMap::new()),
             progress,
         }
@@ -450,6 +456,7 @@ impl SoldrBackendLauncher {
         }
     }
 
+    #[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
     #[expect(clippy::too_many_lines, reason = "baseline, zackees/ci.yml#229")]
     fn place_backend_image(
         &self,
@@ -466,8 +473,11 @@ impl SoldrBackendLauncher {
         let mut next_lock_progress = Duration::from_secs(1);
         let mut placed = loop {
             match self.placed_images.try_lock() {
-                Some(placed) => break placed,
-                None => {
+                Ok(placed) => break placed,
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(BackendLaunchError::AllocatorPoisoned)
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
                     let elapsed = lock_started.elapsed();
                     if elapsed >= next_lock_progress {
                         self.report_progress(
