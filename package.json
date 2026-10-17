@@ -1,6 +1,6 @@
 {
   "name": "@zackees/soldr",
-  "version": "0.9.36",
+  "version": "0.9.37",
   "description": "Instant Rust tools and builds from one command.",
   "license": "BSD-3-Clause",
   "homepage": "https://github.com/zackees/soldr",
