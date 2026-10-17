@@ -36,13 +36,41 @@ pub(super) fn with_lifecycle_journal_lock<T>(path: &Path, f: impl FnOnce() -> T)
         .truncate(false)
         .write(true)
         .open(&lock_path)
-        .and_then(|file| file.lock_exclusive().map(|()| file));
+        .and_then(|file| lock_exclusive_within(&file, JOURNAL_LOCK_DEADLINE).map(|()| file));
     if let Err(err) = &guard {
         eprintln!("soldr: lifecycle journal lock unavailable: {err}");
     }
     let result = f();
     drop(guard);
     result
+}
+
+/// The journal lock is shared with every soldr process, and this runs on
+/// daemon worker threads: a stopped process holding it must not stall them.
+/// Past the deadline the caller proceeds unlocked, as it already does when
+/// the lock errors (soldr#3836 audit).
+const JOURNAL_LOCK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn lock_exclusive_within(
+    file: &std::fs::File,
+    deadline: std::time::Duration,
+) -> std::io::Result<()> {
+    let started = std::time::Instant::now();
+    let mut backoff = std::time::Duration::from_millis(1);
+    loop {
+        if file.try_lock_exclusive().is_ok() {
+            return Ok(());
+        }
+        let waited = started.elapsed();
+        if waited >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("held by another process for over {deadline:?}"),
+            ));
+        }
+        std::thread::sleep(backoff.min(deadline - waited));
+        backoff = (backoff * 2).min(std::time::Duration::from_millis(50));
+    }
 }
 
 pub fn rotate_lifecycle_journal(paths: &SoldrPaths) {

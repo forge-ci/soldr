@@ -96,6 +96,7 @@ pub(crate) async fn async_builder_output_with_priority_decision(
         None,
         command_description,
         None,
+        compiler_post_exit_grace(),
     )
     .await;
     (result, decision)
@@ -106,85 +107,21 @@ async fn async_builder_output_with_effective_priority_and_post_exit_grace(
     priority: CompilePriority,
     post_exit_grace: Option<std::time::Duration>,
 ) -> io::Result<Output> {
-    use kernal_api::StreamMode;
-
-    let session = builder
-        .stdin(StreamMode::Null)
-        .stdout(StreamMode::Piped)
-        .stderr(StreamMode::Piped)
-        // The native semantic builder installs the equivalent containment on
-        // every supported host, including the Windows Job Object path.  This
-        // is deliberately not the old Tokio pre-spawn predicate: that
-        // predicate only described which hosts needed a post-spawn shim.
-        .kill_when_owner_dies(kernel_session_kill_when_owner_dies())
-        // Match the former post-spawn helper: privilege denial while raising
-        // priority is diagnostic only and never prevents compilation.
-        .priority_best_effort(kernel_process_priority(priority))
-        // zccache#1562: acquire the shared materialization exclusion on the
-        // actor's native spawning thread and hold it only across fork/exec.
-        // No non-Send guard crosses this caller's await.
-        .spawn_admission(kernel_spawn_admission())
-        .spawn_session(session_options(post_exit_grace))
-        .await?;
-    let drain = async {
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        while let Some(event) = session.next_output().await {
-            match event {
-                ProcessOutputEvent::Chunk(ProcessOutputChunk::Stdout(bytes)) => {
-                    stdout.extend_from_slice(&bytes);
-                }
-                ProcessOutputEvent::Chunk(ProcessOutputChunk::Stderr(bytes)) => {
-                    stderr.extend_from_slice(&bytes);
-                }
-                ProcessOutputEvent::Completion(completion) => {
-                    match completion_outcome(completion) {
-                        SessionCompletion::Eof(_) => {}
-                        SessionCompletion::Abandoned(stream) => {
-                            tracing::warn!(
-                                ?stream,
-                                "child output pipe remained open after post-exit grace"
-                            );
-                        }
-                        SessionCompletion::Error { error, .. } => return Err(error),
-                    }
-                }
-            }
-        }
-        Ok::<_, io::Error>((stdout, stderr))
-    };
-    let mut drain = std::pin::pin!(drain);
-    let wait = session.wait();
-    let mut wait = std::pin::pin!(wait);
-    match kernal_api::fair_race!((drain.as_mut()), (wait.as_mut())).await {
-        kernal_api::async_engine::FairRace2::First(captured) => {
-            let (stdout, stderr) = match captured {
-                Ok(captured) => captured,
-                Err(error) => {
-                    // A reader failure can precede direct-child exit. Do not
-                    // leave that child behind while `join(wait, drain)` waits
-                    // forever for a pipe that will never report completion.
-                    cleanup_failed_session(&session, "output read failure").await;
-                    return Err(error);
-                }
-            };
-            let status = wait.as_mut().await?.exit_status();
-            Ok(Output {
-                status,
-                stdout,
-                stderr,
-            })
-        }
-        kernal_api::async_engine::FairRace2::Second(exit) => {
-            let status = exit?.exit_status();
-            let (stdout, stderr) = drain.await?;
-            Ok(Output {
-                status,
-                stdout,
-                stderr,
-            })
-        }
-    }
+    // Linker, deploy-hook and generic-tool runs share the compiler session
+    // loop, so they get its stall watchdog: a child with no output and no CPU
+    // progress (descendants included) for `ZCCACHE_STALL_WINDOW_MS` is killed
+    // with diagnostics. Before, these runs had no bound at all, and a link
+    // runs while holding its output directory's lock, so one hung linker
+    // blocked every later link into that directory (soldr#3836 audit).
+    async_builder_compiler_output_with_effective_priority(
+        builder,
+        priority,
+        None,
+        "linker/tool".to_string(),
+        None,
+        post_exit_grace,
+    )
+    .await
 }
 
 /// Streaming compiler-session counterpart. Output chunks are forwarded as
@@ -205,6 +142,7 @@ pub(crate) async fn async_builder_output_streaming_with_priority_decision(
         Some(sender),
         command_description,
         None,
+        compiler_post_exit_grace(),
     )
     .await;
     (result, decision)
@@ -225,6 +163,7 @@ pub(crate) async fn async_builder_output_with_priority_stdin(
         sender,
         command_description,
         stdin_bytes,
+        compiler_post_exit_grace(),
     )
     .await
 }
@@ -238,11 +177,11 @@ async fn async_builder_compiler_output_with_effective_priority(
     sender: Option<kernal_api::async_engine::Sender<crate::daemon_core::daemon::compile_output::RawOutputChunk>>,
     command_description: String,
     stdin_bytes: Option<&[u8]>,
+    post_exit_grace: Option<std::time::Duration>,
 ) -> io::Result<Output> {
     use kernal_api::async_engine::{MissedTickBehavior, PeriodicTimer};
     use kernal_api::StreamMode;
 
-    let post_exit_grace = compiler_post_exit_grace();
     let input = stdin_bytes.unwrap_or_default();
     let session = builder
         .stdin(if input.is_empty() {
@@ -513,7 +452,10 @@ pub(super) async fn forward_compiler_session_event(
         }
         ProcessOutputEvent::Completion(completion) => match completion_outcome(completion) {
             SessionCompletion::Eof(stream) => CompilerSessionEvent::StreamEof(stream),
-            SessionCompletion::Abandoned(_) => CompilerSessionEvent::StreamAbandoned,
+            SessionCompletion::Abandoned(stream) => {
+                tracing::warn!(?stream, "child output pipe remained open after post-exit grace");
+                CompilerSessionEvent::StreamAbandoned
+            }
             SessionCompletion::Error { stream, error } => {
                 CompilerSessionEvent::PipeReadError { stream, error }
             }

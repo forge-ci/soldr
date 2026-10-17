@@ -158,11 +158,22 @@ where
             // semaphore. Retaining this opaque guard in the connection task
             // makes both explicit release and transport disconnect release the
             // same permits with no polling or daemon-global lease registry.
-            let resident_capacity = match state
-                .compile_service
-                .acquire_resident_capacity(permits)
-                .await
-            {
+            // The semaphore is FIFO, so a waiting multi-permit request holds
+            // every later single-permit compile behind it. A client sends
+            // nothing until it is granted, so any read completing here means
+            // it hung up (or broke protocol): leave the queue at once rather
+            // than blocking compiles for a request nobody will use (soldr#3836
+            // audit).
+            let acquire = state.compile_service.acquire_resident_capacity(permits);
+            let mut probe = [0_u8; 1];
+            let acquired = tokio::select! {
+                acquired = acquire => acquired,
+                _ = stream.read(&mut probe) => {
+                    tracing::debug!(permits, "resident-capacity client left while queued");
+                    return Ok(());
+                }
+            };
+            let resident_capacity = match acquired {
                 Ok(capacity) => capacity,
                 Err(error) => {
                     let _ = write_frame_async(
