@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::sync::{Mutex, PoisonError};
 
 use rayon::prelude::*;
 use crate::core::NormalizedPath;
@@ -8,6 +7,7 @@ use super::decision::{CacheDecision, RunReason};
 use super::error::Result;
 use super::persist::{self, HashCacheData};
 use super::scan::ScannedFile;
+use crate::sync::Mutex;
 
 /// Compute an aggregate blake3 hash over a sorted list of files.
 ///
@@ -98,7 +98,7 @@ impl HashCache {
         let pending =
             HashCacheData::with_max_mtime(current_hash, "pending", file_count, max_source_mtime);
         persist::write_pending(&self.cache_file, &pending)?;
-        *self.staged.lock().unwrap_or_else(PoisonError::into_inner) = Some(pending);
+        *self.staged.lock() = Some(pending);
 
         Ok(decision)
     }
@@ -126,7 +126,7 @@ impl HashCache {
 
     /// Delete cache and pending files.
     pub fn invalidate(&self) -> Result<()> {
-        *self.staged.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        *self.staged.lock() = None;
         persist::remove_cache(&self.cache_file);
         Ok(())
     }
@@ -138,7 +138,6 @@ impl HashCache {
         let staged = self
             .staged
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .take();
         let claimed = match staged {
             Some(data) => data,
@@ -184,7 +183,7 @@ impl HashCache {
                 // The verified cache entry is this cycle's snapshot, so a later
                 // `mark_*` commits it rather than failing with `NoPendingData`
                 // (#1648). In memory only: the fast path stays write-free.
-                *self.staged.lock().unwrap_or_else(PoisonError::into_inner) = Some(data);
+                *self.staged.lock() = Some(data);
                 Ok(Some(CacheDecision::Skip))
             }
             _ => Ok(None),

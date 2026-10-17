@@ -6,17 +6,17 @@ use super::*;
 
 #[cfg(test)]
 static FAIL_DETACH_REMOVE_PATHS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+    crate::sync::Mutex<std::collections::HashSet<PathBuf>>,
 > = std::sync::OnceLock::new();
 #[cfg(test)]
 static FAIL_DETACH_RENAME_PATHS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+    crate::sync::Mutex<std::collections::HashSet<PathBuf>>,
 > = std::sync::OnceLock::new();
 
 pub(in crate::daemon_core::daemon::server) fn remove_output_file(path: &Path) -> std::io::Result<()> {
     #[cfg(test)]
     if let Ok(mut injected) = FAIL_DETACH_REMOVE_PATHS
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .get_or_init(|| crate::sync::Mutex::new(std::collections::HashSet::new()))
         .lock()
     {
         if injected.remove(path) {
@@ -32,7 +32,7 @@ pub(in crate::daemon_core::daemon::server) fn remove_output_file(path: &Path) ->
 fn rename_detached_output(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(test)]
     if let Ok(mut injected) = FAIL_DETACH_RENAME_PATHS
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .get_or_init(|| crate::sync::Mutex::new(std::collections::HashSet::new()))
         .lock()
     {
         if injected.remove(to) {
@@ -48,18 +48,16 @@ fn rename_detached_output(from: &Path, to: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 pub(in crate::daemon_core::daemon::server) fn fail_detach_remove_for_test(path: &Path) {
     FAIL_DETACH_REMOVE_PATHS
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .get_or_init(|| crate::sync::Mutex::new(std::collections::HashSet::new()))
         .lock()
-        .expect("detach failure injection lock")
         .insert(path.to_path_buf());
 }
 
 #[cfg(test)]
 pub(in crate::daemon_core::daemon::server) fn fail_detach_rename_for_test(path: &Path) {
     FAIL_DETACH_RENAME_PATHS
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .get_or_init(|| crate::sync::Mutex::new(std::collections::HashSet::new()))
         .lock()
-        .expect("detach rename failure injection lock")
         .insert(path.to_path_buf());
 }
 

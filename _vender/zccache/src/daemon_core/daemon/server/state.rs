@@ -222,6 +222,9 @@ pub(super) struct SharedState {
     /// Serializes every depgraph snapshot for this exact cache root. The guard
     /// is acquired only on blocking threads (or the synchronous drop backstop),
     /// never by an async runtime worker.
+    /// Raw `std` mutex on purpose: it is held across a whole depgraph save to
+    /// disk, which can legitimately outlast the `crate::sync` critical-section
+    /// watchdog on a large graph (soldr#3836).
     pub(super) depgraph_persistence: StdMutex<()>,
     /// Shared by publishers and exclusively owned by maintenance/Clear from
     /// cache-file mutation through index/live-map mutation.
@@ -229,6 +232,9 @@ pub(super) struct SharedState {
     /// Reuses one shared OS staged-store lock for all active staged deliveries
     /// in this daemon and cache root. The final lease drop releases it, letting
     /// cross-process maintenance acquire the exclusive lock.
+    /// Raw `std` mutex on purpose: it is held across a shared store `flock`
+    /// that waits behind GC's exclusive lock, which the `crate::sync` watchdog
+    /// must not bound (soldr#3836 follow-up: take the flock outside it).
     pub(super) staged_materialization_lock:
         Arc<StdMutex<std::sync::Weak<StagedMaterializationLock>>>,
     /// Limits concurrent disk persistence tasks to prevent memory pileup
@@ -359,7 +365,7 @@ pub(super) struct SharedState {
     /// mismatch, corrupt header, or unexpected I/O error). The string is
     /// emitted once per session into the per-session log (`last-session.log`)
     /// at `SessionStart` time so the cold fallback is never silent. Issue #320.
-    pub(super) depgraph_load_warning: StdMutex<Option<String>>,
+    pub(super) depgraph_load_warning: crate::sync::Mutex<Option<String>>,
     /// In-flight `Request::GenericToolExec` coalescing map (issue #272).
     ///
     /// Concurrent callers with the same exec cache key share a `Notify` here:

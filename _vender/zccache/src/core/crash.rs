@@ -45,9 +45,9 @@
 
 use super::NormalizedPath;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+use crate::sync::Mutex;
 
 /// How many crash dumps `<cache>/crashes/` keeps (#1165 finding 4).
 ///

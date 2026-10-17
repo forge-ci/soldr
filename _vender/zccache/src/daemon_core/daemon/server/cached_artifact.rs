@@ -123,7 +123,7 @@ pub(crate) struct CachedArtifactInner {
     ///
     /// This lock is independent of the DashMap shard, so one hot artifact
     /// cannot block unrelated keys that happen to hash into the same shard.
-    access: std::sync::Mutex<ArtifactAccess>,
+    access: crate::sync::Mutex<ArtifactAccess>,
 }
 
 impl std::ops::Deref for CachedArtifact {
@@ -154,7 +154,7 @@ impl CachedArtifact {
                 stderr,
                 payloads: OnceLock::from(payloads),
                 _provisional_staged_owner: provisional_staged_owner,
-                access: std::sync::Mutex::new(ArtifactAccess {
+                access: crate::sync::Mutex::new(ArtifactAccess {
                     last_used: now,
                     last_used_wall: std::time::SystemTime::now(),
                     used_in_process: true,
@@ -301,7 +301,7 @@ impl CachedArtifact {
                 stderr,
                 payloads: OnceLock::new(),
                 _provisional_staged_owner: None,
-                access: std::sync::Mutex::new(ArtifactAccess {
+                access: crate::sync::Mutex::new(ArtifactAccess {
                     last_used: std::time::Instant::now(),
                     // Keep durable age in wall-clock form. Reconstructing it as an
                     // Instant fails when the entry predates system uptime on Windows.
@@ -314,10 +314,9 @@ impl CachedArtifact {
         }
     }
 
-    fn access(&self) -> std::sync::MutexGuard<'_, ArtifactAccess> {
+    fn access(&self) -> crate::sync::MutexGuard<'_, ArtifactAccess> {
         self.access
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub(crate) fn access_snapshot(&self) -> ArtifactAccessSnapshot {

@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::cli_core::core::NormalizedPath;
@@ -15,6 +15,7 @@ use crate::cli_core::download_protocol::{Request, Response};
 use dashmap::DashMap;
 use kernal_api::async_engine::CancellationSource;
 use tokio::sync::{watch, Notify, RwLock};
+use crate::sync::Mutex;
 
 #[derive(Clone)]
 struct FileLogger {

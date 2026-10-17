@@ -288,7 +288,7 @@ pub(super) fn apply_verifications(
 type CollectHook = Box<dyn Fn() + Send + Sync>;
 
 #[cfg(test)]
-static COLLECT_HOOK: std::sync::OnceLock<std::sync::Mutex<Option<CollectHook>>> =
+static COLLECT_HOOK: std::sync::OnceLock<crate::sync::Mutex<Option<CollectHook>>> =
     std::sync::OnceLock::new();
 
 #[cfg(test)]
@@ -325,9 +325,8 @@ fn fire_collect_hook() {
 #[cfg(test)]
 pub(super) fn set_collect_hook(f: impl Fn() + Send + Sync + 'static) {
     *COLLECT_HOOK
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .unwrap() = Some(Box::new(f));
+        .get_or_init(|| crate::sync::Mutex::new(None))
+        .lock() = Some(Box::new(f));
 }
 
 /// Let the calling thread's next (and only next) [`collect_verifications`]

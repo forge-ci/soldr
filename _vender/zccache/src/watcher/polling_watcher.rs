@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use kernal_api::platform::fs::{PatternSet, PatternSetBuilder};
 use crate::core::NormalizedPath;
+use crate::sync::Mutex;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FileState {
@@ -168,27 +169,22 @@ impl PollingWatcher {
 
         *self
             .poll_rx
-            .lock()
-            .map_err(|_| std::io::Error::other("watcher receiver lock poisoned"))? = Some(poll_rx);
+            .lock() = Some(poll_rx);
         *self
             .worker_shutdown_tx
-            .lock()
-            .map_err(|_| std::io::Error::other("watcher shutdown lock poisoned"))? =
+            .lock() =
             Some(worker_shutdown_tx);
         *self
             .worker_handle
-            .lock()
-            .map_err(|_| std::io::Error::other("watcher worker lock poisoned"))? =
+            .lock() =
             Some(worker_handle);
         *self
             .dispatch_shutdown_tx
-            .lock()
-            .map_err(|_| std::io::Error::other("watcher dispatch shutdown lock poisoned"))? =
+            .lock() =
             Some(dispatch_shutdown_tx);
         *self
             .dispatch_handle
-            .lock()
-            .map_err(|_| std::io::Error::other("watcher dispatch lock poisoned"))? =
+            .lock() =
             Some(dispatch_handle);
 
         Ok(())
@@ -202,7 +198,6 @@ impl PollingWatcher {
         let worker_shutdown = self
             .worker_shutdown_tx
             .lock()
-            .map_err(|_| std::io::Error::other("watcher shutdown lock poisoned"))?
             .take();
         if let Some(tx) = worker_shutdown {
             let _ = tx.send(());
@@ -211,7 +206,6 @@ impl PollingWatcher {
         let dispatch_shutdown = self
             .dispatch_shutdown_tx
             .lock()
-            .map_err(|_| std::io::Error::other("watcher dispatch shutdown lock poisoned"))?
             .take();
         if let Some(tx) = dispatch_shutdown {
             let _ = tx.send(());
@@ -220,7 +214,6 @@ impl PollingWatcher {
         let worker = self
             .worker_handle
             .lock()
-            .map_err(|_| std::io::Error::other("watcher worker lock poisoned"))?
             .take();
         if let Some(handle) = worker {
             handle
@@ -231,7 +224,6 @@ impl PollingWatcher {
         let dispatch = self
             .dispatch_handle
             .lock()
-            .map_err(|_| std::io::Error::other("watcher dispatch lock poisoned"))?
             .take();
         if let Some(handle) = dispatch {
             handle
@@ -241,8 +233,7 @@ impl PollingWatcher {
 
         *self
             .poll_rx
-            .lock()
-            .map_err(|_| std::io::Error::other("watcher receiver lock poisoned"))? = None;
+            .lock() = None;
 
         Ok(())
     }
@@ -251,8 +242,8 @@ impl PollingWatcher {
     pub fn is_running(&self) -> bool {
         self.worker_handle
             .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(JoinHandle::is_finished))
+            .as_ref()
+            .map(JoinHandle::is_finished)
             .is_some_and(|finished| !finished)
     }
 
@@ -263,8 +254,7 @@ impl PollingWatcher {
     pub fn poll_timeout(&self, timeout: Duration) -> std::io::Result<Option<PollWatchBatch>> {
         let receiver_guard = self
             .poll_rx
-            .lock()
-            .map_err(|_| std::io::Error::other("watcher receiver lock poisoned"))?;
+            .lock();
         let Some(receiver) = receiver_guard.as_ref() else {
             return Ok(None);
         };
@@ -287,7 +277,6 @@ impl PollingWatcher {
     pub fn add_observer(&self, observer: Arc<dyn PollWatchObserver>) -> std::io::Result<()> {
         self.observers
             .lock()
-            .map_err(|_| std::io::Error::other("watcher observers lock poisoned"))?
             .push(observer);
         Ok(())
     }
@@ -327,10 +316,7 @@ fn run_dispatch_loop(
             break;
         }
 
-        let snapshot = match observers.lock() {
-            Ok(guard) => guard.clone(),
-            Err(_) => break,
-        };
+        let snapshot = observers.lock().clone();
         for observer in snapshot {
             observer.on_batch(&batch);
         }

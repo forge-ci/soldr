@@ -2,7 +2,8 @@
 
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+use crate::sync::Mutex;
 
 pub(in crate::daemon_core::daemon::server) const COW_READONLY_ENV: &str = "ZCCACHE_COW_READONLY";
 const CAPS_CACHE_LIMIT: usize = 4096;
@@ -117,8 +118,7 @@ pub(in crate::daemon_core::daemon::server) fn fs_caps_raw(src: &Path, dst: &Path
     record_probe(&key);
     let _insert_guard = CAPS_INSERT_LOCK
         .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .lock();
     if cache().len() >= CAPS_CACHE_LIMIT {
         // Coarse bound on unbounded growth (issue #1042): the cache key
         // includes a normalized destination parent so distinct build-output

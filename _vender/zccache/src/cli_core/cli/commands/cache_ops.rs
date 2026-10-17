@@ -968,7 +968,7 @@ pub(crate) fn snapshot_bytes_walk(
     prune_incremental: bool,
     prune_build_script_out: bool,
 ) -> std::io::Result<u64> {
-    use std::sync::Mutex;
+    use crate::sync::Mutex;
 
     if !target.exists() {
         return Ok(0);
@@ -1025,7 +1025,7 @@ pub(crate) fn snapshot_bytes_walk(
             Err(_) => continue,
         };
         if let Ok(key) = crate::cli_core::platform::fs::identity::file_identity(entry.path()) {
-            let mut seen_guard = seen.lock().unwrap_or_else(|p| p.into_inner());
+            let mut seen_guard = seen.lock();
             if !seen_guard.insert(key) {
                 continue;
             }

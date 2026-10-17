@@ -12,7 +12,7 @@ use crate::daemon_core::core::NormalizedPath;
 #[cfg(test)]
 use std::collections::HashMap;
 #[cfg(test)]
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 #[cfg(test)]
 static TEST_SHARED_LOCK_ACQUISITIONS: OnceLock<Mutex<HashMap<NormalizedPath, u64>>> =
@@ -27,7 +27,6 @@ fn test_shared_lock_acquisitions() -> &'static Mutex<HashMap<NormalizedPath, u64
 pub(in crate::daemon_core::daemon::server) fn reset_test_shared_lock_acquisitions(root: &NormalizedPath) {
     test_shared_lock_acquisitions()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(root.clone(), 0);
 }
 
@@ -35,7 +34,6 @@ pub(in crate::daemon_core::daemon::server) fn reset_test_shared_lock_acquisition
 fn record_test_shared_lock_acquisition(root: &NormalizedPath) {
     if let Some(count) = test_shared_lock_acquisitions()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get_mut(root)
     {
         *count = count.saturating_add(1);
@@ -46,7 +44,6 @@ fn record_test_shared_lock_acquisition(root: &NormalizedPath) {
 pub(in crate::daemon_core::daemon::server) fn test_shared_lock_acquisition_count(root: &NormalizedPath) -> u64 {
     test_shared_lock_acquisitions()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(root)
         .copied()
         .unwrap_or(0)
