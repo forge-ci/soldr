@@ -879,7 +879,10 @@ fn store_single_output(
         }
         stats.persist_enqueue_ns = t_persist_enqueue.elapsed().as_nanos() as u64;
         if written {
-            state.artifacts.insert(artifact_key_hex.to_string(), cached);
+            // The payloads are on disk now; keep only the lazy form resident.
+            state
+                .artifacts
+                .insert(artifact_key_hex.to_string(), cached.durable());
         }
         let latency_ns = compile_start.elapsed().as_nanos() as u64;
         state.stats.record_miss(latency_ns, artifact_bytes);
@@ -902,6 +905,7 @@ fn store_single_output(
     // Publish the in-process payload before handing persistence to the
     // detached task. A failed persist removes this provisional entry, while
     // the typed outcome below prevents the durable index publication.
+    let resident_entry = cached.clone();
     state.artifacts.insert(artifact_key_hex.to_string(), cached);
     let _pending = pending_writes::register(&state.pending_cache_writes, artifact_key_hex);
     let sem = Arc::clone(&state.persist_semaphore);
@@ -987,7 +991,9 @@ fn store_single_output(
                             .count(StagedCounter::PublicationSuccess);
                     }
                 }
-                if !published {
+                if published {
+                    demote_to_durable(&state_ref.artifacts, &completion_key, &resident_entry);
+                } else {
                     // This entry was only provisional while the filesystem
                     // publish ran. Do not retain a lookup row for a failed
                     // persist, or a later hit could point at missing payloads.

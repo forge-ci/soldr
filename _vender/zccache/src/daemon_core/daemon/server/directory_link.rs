@@ -61,7 +61,8 @@ pub(super) fn cache_staged_directory_link(
     let cacheable =
         publish_and_materialize_staged_directory(state, plan, key, cached.meta.clone())?;
     if cacheable {
-        state.artifacts.insert(key.to_string(), cached);
+        // Published synchronously above: keep only the lazy, disk-backed form.
+        state.artifacts.insert(key.to_string(), cached.durable());
         tracing::debug!(%key, "directory artifact cached");
     }
     Ok(())

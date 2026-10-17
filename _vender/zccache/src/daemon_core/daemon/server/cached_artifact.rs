@@ -236,6 +236,32 @@ impl CachedArtifact {
         )
     }
 
+    /// Whether any output is held resident (`CachedPayload::Bytes`).
+    fn holds_resident_bytes(&self) -> bool {
+        self.payloads.get().is_some_and(|payloads| {
+            payloads
+                .iter()
+                .any(|payload| matches!(payload, CachedPayload::Bytes(_)))
+        })
+    }
+
+    /// The disk-backed form of this artifact, for use once its payloads are
+    /// durable: same metadata and access state, payloads resolved lazily from
+    /// the cache files (as after a restart) instead of held in memory.
+    pub(super) fn durable(&self) -> Self {
+        let durable = Self::from_index(self.meta.clone());
+        {
+            let source = self.access();
+            let mut target = durable.access();
+            target.last_used = source.last_used;
+            target.last_used_wall = source.last_used_wall;
+            target.used_in_process = source.used_in_process;
+            target.published_in_process = source.published_in_process;
+            target.last_access_checkpoint = source.last_access_checkpoint;
+        }
+        durable
+    }
+
     pub(super) fn same_instance(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
@@ -332,6 +358,30 @@ impl CachedArtifact {
                 .unwrap_or_default()
                 .as_secs(),
         )
+    }
+}
+
+/// Swap the live entry for `key` to its disk-backed form once its payloads
+/// are durable, so a cold miss's outputs are not held in memory for the
+/// daemon's lifetime.
+///
+/// Every C/C++ miss, link and exec output used to stay resident in the live
+/// map after its persist finished: a 2026-10-16 daemon core held 215 GCC
+/// precompiled headers and ~1,200 object files, 16.8 GiB, until the host ran
+/// short of memory. Only the published instance is replaced, so a newer
+/// entry for the same key is never clobbered.
+pub(super) fn demote_to_durable(
+    artifacts: &DashMap<String, CachedArtifact>,
+    key: &str,
+    published: &CachedArtifact,
+) {
+    if !published.holds_resident_bytes() {
+        return;
+    }
+    if let Some(mut entry) = artifacts.get_mut(key) {
+        if entry.same_instance(published) {
+            *entry = published.durable();
+        }
     }
 }
 
@@ -564,7 +614,8 @@ pub(super) fn migrate_meta_files(
     let count = migrated.len();
     for (stem, cached, meta_path) in migrated {
         store.insert(&stem, &cached.meta);
-        artifacts.insert(stem, cached);
+        // Persisted above: keep only the lazy, disk-backed form resident.
+        artifacts.insert(stem, cached.durable());
         std::fs::remove_file(&meta_path).ok();
     }
 
