@@ -250,8 +250,11 @@ fn staged_archive_lane_enabled_for(value: Option<&str>) -> bool {
     )
 }
 
+// Link and exec outputs stage by default too, like compiles: written into the
+// daemon's staging directory and delivered by link, never read whole into a
+// resident buffer (soldr#3838 groundwork: no file contents in the live map).
 fn staged_link_lane_enabled_for(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
+    value.is_none_or(|value| {
         matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "all" | "1" | "true" | "yes" | "on"
@@ -264,7 +267,7 @@ pub(in crate::daemon_core::daemon::server) fn staged_exec_lane_enabled() -> bool
 }
 
 fn staged_exec_lane_enabled_for(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
+    value.is_none_or(|value| {
         matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "all" | "1" | "true" | "yes" | "on" | "exec"
