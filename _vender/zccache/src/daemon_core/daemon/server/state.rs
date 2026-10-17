@@ -77,8 +77,9 @@ pub(super) struct SharedState {
     /// The scan attributes every changed sibling to one link invocation, so
     /// two managed links must not overlap their snapshot/link/capture windows
     /// in the same directory. Weak values let idle directory locks disappear.
+    // raw-lock-ok: held for a whole link's side-effect capture (long by design).
     pub(super) link_output_locks: DashMap<NormalizedPath, std::sync::Weak<Mutex<()>>>,
-    pub(super) system_includes: Mutex<SystemIncludeCache>,
+    pub(super) system_includes: crate::sync::AsyncMutex<SystemIncludeCache>,
     /// Single-flight gates for system-include discovery, keyed by compiler
     /// path (FastLED/fbuild#1466).
     pub(super) system_include_probes: KeyedLocks,
@@ -108,9 +109,11 @@ pub(super) struct SharedState {
     /// the fallback (correct but slower).
     pub(super) cache_system: CacheSystem,
     /// File watcher for proactive metadata invalidation.
+    // raw-lock-ok: held across recursive OS watch registration; every
+    // acquisition is already wrapped in an explicit timeout (run.rs).
     pub(super) watcher: Mutex<Option<NotifyWatcher>>,
     /// Directories currently being watched (avoid duplicate watches).
-    pub(super) watched_dirs: Mutex<HashSet<NormalizedPath>>,
+    pub(super) watched_dirs: crate::sync::AsyncMutex<HashSet<NormalizedPath>>,
     /// Shutdown signal — shared so request handlers can trigger shutdown.
     pub(super) shutdown: Arc<kernal_api::async_engine::Notify>,
     /// Epoch seconds of last client activity (for idle timeout).
@@ -216,6 +219,7 @@ pub(super) struct SharedState {
     pub(super) in_flight_bytes: AtomicUsize,
     /// Serializes background and host-requested disk-maintenance passes for
     /// this exact cache root.
+    // raw-lock-ok: serializes whole maintenance/clear passes (long by design).
     pub(super) disk_maintenance: Mutex<()>,
     /// Outcome of every pass the background maintenance loop finishes (#1846).
     pub(super) disk_maintenance_progress: tokio::sync::watch::Sender<DiskMaintenanceProgress>,
@@ -228,6 +232,8 @@ pub(super) struct SharedState {
     pub(super) depgraph_persistence: StdMutex<()>,
     /// Shared by publishers and exclusively owned by maintenance/Clear from
     /// cache-file mutation through index/live-map mutation.
+    // raw-lock-ok: publication barrier; readers hold it across a whole
+    // compile publication, Clear/GC write it for their destructive commit.
     pub(super) artifact_publication: Arc<kernal_api::async_engine::RwLock<()>>,
     /// Reuses one shared OS staged-store lock for all active staged deliveries
     /// in this daemon and cache root. The final lease drop releases it, letting

@@ -98,7 +98,7 @@ const PENDING_WRITES_SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration =
 pub(super) async fn drain_durable_state_for_shutdown(
     state: &SharedState,
     index_writer_handle: Option<kernal_api::async_engine::Task<()>>,
-) -> kernal_api::async_engine::RwLockWriteGuard<'_, ()> {
+) -> kernal_api::async_engine::RwLockWriteGuard<'_, ()> { // raw-lock-ok: publication barrier, see state.rs
     // 1. Deferred persist tasks (#799).
     //
     // zccache#1775: this drain is invisible unless it times out, so a long

@@ -603,6 +603,19 @@ impl<T: ?Sized> AsyncMutex<T> {
         }
     }
 
+    /// Critical section from synchronous code (watchdog-bounded wait and
+    /// hold). Must not be called on an async runtime thread.
+    #[track_caller]
+    pub fn blocking_lock(&self) -> AsyncMutexGuard<'_, T> {
+        let ticket = Ticket(register_waiting("AsyncMutex", Location::caller()));
+        let guard = self.inner.blocking_lock();
+        mark_holding(ticket.0);
+        AsyncMutexGuard {
+            guard,
+            _ticket: ticket,
+        }
+    }
+
     /// Timeout flavor.
     #[track_caller]
     pub fn lock_for(

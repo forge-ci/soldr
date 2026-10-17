@@ -23,8 +23,8 @@ pub(super) async fn begin_artifact_publication(
 /// Blocking-worker counterpart to [`begin_artifact_publication`].
 pub(super) fn begin_artifact_publication_blocking(
     state: &SharedState,
-) -> Option<kernal_api::async_engine::RwLockReadGuard<'_, ()>> {
-    let guard = state.artifact_publication.blocking_read();
+) -> Option<kernal_api::async_engine::RwLockReadGuard<'_, ()>> { // raw-lock-ok: publication barrier, see state.rs
+    let guard = state.artifact_publication.blocking_read(); // raw-lock-ok: publication barrier
     if state.shutdown_requested.load(Ordering::Acquire) {
         None
     } else {

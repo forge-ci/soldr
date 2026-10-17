@@ -309,6 +309,14 @@ def checks() -> list[Check]:
             "guards",
             slow=True,
         ),
+        # soldr#3836: vendored zccache is not a workspace member, so the
+        # ban_raw_sync_primitive Dylint never sees it; this scan holds its
+        # production code to the bounded-wait `zccache::sync` locks.
+        Check(
+            "zccache raw-lock boundary",
+            script("check_zccache_raw_locks.py"),
+            "guards",
+        ),
         # Rust compiler validation is centralized in the native host lane.
         # Its single `soldr ci-test` invocation (soldr#2868) leaves this job
         # responsible for non-Rust policy, Python, and JavaScript checks.

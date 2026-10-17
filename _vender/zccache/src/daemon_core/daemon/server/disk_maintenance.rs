@@ -737,6 +737,7 @@ fn maintain_disk_artifacts(pass: MaintenancePass<'_>) -> io::Result<DiskMaintena
 // has queued (zccache#1775). `None` in tests that don't exercise shutdown.
 fn maintain_disk_artifacts_with_barrier(
     pass: MaintenancePass<'_>,
+    // raw-lock-ok: the publication barrier (see state.rs).
     publication_barrier: Option<&Arc<kernal_api::async_engine::RwLock<()>>>,
     shutdown_requested: Option<&AtomicBool>,
 ) -> io::Result<DiskMaintenanceReport> {
@@ -827,6 +828,7 @@ fn maintain_disk_artifacts_with_barrier(
             // short destructive commit, then refresh live access and re-plan
             // under the writer so a hit/publication that raced the scan is
             // not evicted as stale.
+            // raw-lock-ok: the publication barrier's destructive commit (see state.rs).
             let _publication_guard = publication_barrier.blocking_write();
             refresh_live_access(&mut scanned, artifacts, dep_graph, now);
             let commit_space = environment.filesystem_space(artifact_dir)?;
