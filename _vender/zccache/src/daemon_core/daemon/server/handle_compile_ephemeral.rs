@@ -118,6 +118,22 @@ pub(super) async fn run_compiler_direct_with_family(
     tmp_dir: &Path,
     family_hint: crate::daemon_core::compiler::CompilerFamily,
 ) -> Response {
+    // #1952: an uncached compile that loads a PCH needs it repaired too.
+    if matches!(
+        family_hint,
+        crate::daemon_core::compiler::CompilerFamily::Gcc | crate::daemon_core::compiler::CompilerFamily::Clang
+    ) {
+        let force_includes = crate::daemon_core::depgraph::args::parse_gnu_args(args, cwd).force_includes;
+        let root = compile_worktree_root(state, sid, cwd, client_env.as_deref())
+            .unwrap_or_else(|| cwd.into());
+        super::handle_compile::pch_gate::repair_loaded_pch_inputs(
+            state,
+            sid,
+            &force_includes,
+            root.as_path(),
+            client_env.as_deref(),
+        );
+    }
     let _rsp_guard = match crate::daemon_core::compiler::response_file::write_response_file_if_needed(
         args,
         tmp_dir,

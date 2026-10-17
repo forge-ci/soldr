@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.95.0"
 name = "zccache"
-version = "1.15.4"
+version = "1.15.5"
 build = "build.rs"
 autolib = false
 autobins = false
@@ -384,6 +384,14 @@ features = [
 ]
 optional = true
 
+[dependencies.twox-hash]
+version = "2.1"
+features = [
+    "xxhash3_64",
+    "std",
+]
+default-features = false
+
 [dependencies.typed-path]
 version = "=0.12.3"
 default-features = false
@@ -397,7 +405,7 @@ version = "0.2"
 optional = true
 
 [dependencies.zip]
-version = "2"
+version = "9"
 features = ["deflate"]
 optional = true
 default-features = false
@@ -417,7 +425,7 @@ features = [
 ]
 
 [dev-dependencies.zip]
-version = "2"
+version = "9"
 features = ["deflate"]
 default-features = false
 

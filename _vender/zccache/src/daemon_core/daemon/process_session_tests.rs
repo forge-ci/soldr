@@ -405,11 +405,15 @@ async fn descendant_cpu_counts_a_busy_compiler_child_of_a_waiting_driver() {
                 return child.parse::<u32>().unwrap();
             }
             // Check the driver hasn't exited unexpectedly.
-            let mut driver_guard = driver_clone.lock().unwrap();
-            if driver_guard.as_mut().unwrap().try_wait().unwrap().is_some() {
-                panic!("the driver exited before the compiler appeared");
-            }
-            drop(driver_guard);
+            let exited = driver_clone
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_some();
+            assert!(!exited, "the driver exited before the compiler appeared");
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
@@ -427,11 +431,15 @@ async fn descendant_cpu_counts_a_busy_compiler_child_of_a_waiting_driver() {
                 return;
             }
             // Check the driver hasn't exited unexpectedly.
-            let mut driver_guard = driver.lock().unwrap();
-            if driver_guard.as_mut().unwrap().try_wait().unwrap().is_some() {
-                panic!("the driver exited before compiler CPU advanced");
-            }
-            drop(driver_guard);
+            let exited = driver
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_some();
+            assert!(!exited, "the driver exited before compiler CPU advanced");
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
@@ -483,7 +491,7 @@ async fn descendant_cpu_fixture_cleans_up_on_panic() {
 
                 // Wait for the busy compiler child to appear (bounded).
                 let pid = driver.lock().unwrap().as_ref().unwrap().id();
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
                     loop {
                         let children =
                             std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))

@@ -241,6 +241,7 @@ pub(super) async fn handle_compile_request(req: CompileRequest<'_>) -> Response 
     ) = match build_result {
         BuildContextResult::Cc { mut ctx, dep_flags } => {
             dependency_mode.apply_to_cc_context(&mut ctx, &dep_flags);
+            super::pch_gate::salt_pch_key(&mut ctx, source_mode_for_key, cwd, &effective_args);
             DependencyDiscoveryMode::apply_user_depfile_content_to_cc_context(
                 &mut ctx,
                 &dep_flags,
@@ -551,24 +552,8 @@ pub(super) async fn handle_compile_request(req: CompileRequest<'_>) -> Response 
             record_session_stat(&state.sessions, &sid, |t| {
                 t.record_depgraph_hit_artifact_miss();
             });
-            let failure_name = match &failure {
-                CachedHitFailure::VerdictMissing => {
-                    record_miss_reason(miss_reason::NO_ARTIFACT_FOR_KEY);
-                    "verdict_not_found"
-                }
-                CachedHitFailure::CacheBlobMissing(_) => {
-                    record_miss_reason(miss_reason::NO_ARTIFACT_FOR_KEY);
-                    "artifact_not_found"
-                }
-                CachedHitFailure::CacheRead => {
-                    record_miss_reason(miss_reason::NO_ARTIFACT_FOR_KEY);
-                    "artifact_read_failed"
-                }
-                CachedHitFailure::DestinationWrite => {
-                    record_miss_reason(miss_reason::DESTINATION_WRITE_FAILED);
-                    "destination_write_failed"
-                }
-            };
+            let (reason, failure_name) = failure.miss_bucket();
+            record_miss_reason(reason);
             write_session_log(
                 &state.sessions,
                 &sid,
@@ -765,6 +750,9 @@ pub(super) async fn handle_compile_request(req: CompileRequest<'_>) -> Response 
                                     .any(|kind| matches!(kind.as_str(), "lib" | "rlib")),
                             ),
                             materialization_mode: state.materialization_mode(client_env.as_deref()),
+                            pch_mtime_replay: super::pch_gate::replay_enabled_for(
+                                client_env.as_deref(),
+                            ),
                             phases: CachedHitPhases {
                                 parse_args_ns,
                                 build_context_ns,
@@ -808,6 +796,15 @@ pub(super) async fn handle_compile_request(req: CompileRequest<'_>) -> Response 
             source_path.display(),
             output_path.display()
         ),
+    );
+
+    // #1952: a PCH this compile loads must match its recorded inputs.
+    super::pch_gate::repair_loaded_pch_inputs(
+        state,
+        &sid,
+        &ctx.force_includes,
+        default_key_root.as_path(),
+        client_env.as_deref(),
     );
 
     // ── Phase: compiler exec ────────────────────────────────────────

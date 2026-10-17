@@ -9,6 +9,7 @@ mod error_cache;
 mod hit_branches;
 mod miss_profile;
 mod miss_store;
+pub(super) mod pch_gate;
 mod pipeline;
 mod request;
 mod rustc_index;
