@@ -304,7 +304,9 @@ def executor_contract() -> ExecutorContract:
             GuestEnvVar("SOLDR_TARGET_WARN_FREE_GB", "1"),
             GuestEnvVar("SOLDR_TARGET_BLOCK_FREE_GB", "1"),
             GuestEnvVar("RUSTUP_TOOLCHAIN", "channel-from-toolchain-ensure"),
-            GuestEnvVar("PATH", "$WORK/shims:$PATH"),
+            GuestEnvVar("CARGO_HOME", "$HOME/.soldr/cargo"),
+            GuestEnvVar("RUSTUP_HOME", "$HOME/.soldr/rustup"),
+            GuestEnvVar("PATH", "$WORK/shims:$HOME/.soldr/cargo/bin:$PATH"),
         ),
         required_share_files=tuple(REPLAY_SHARE_FILES),
         capabilities=GuestCapabilities(
@@ -639,6 +641,19 @@ def _stage_toolchain() -> list[str]:
         '      record toolchain_ensure pass "channel=$CHANNEL"',
         '      RUSTUP_TOOLCHAIN="$CHANNEL"',
         "      export RUSTUP_TOOLCHAIN",
+        # soldr#3846: the guest has no system rustup. `toolchain ensure`
+        # bootstraps one into soldr's own root (`<root>/cargo/bin`, toolchains
+        # under `<root>/rustup`), which is never on PATH, so every test that
+        # resolves the real toolchain through `rustup` (with an isolated HOME
+        # and no bootstrap allowed) failed with `rustup which cargo: No such
+        # file or directory`. Expose that rustup the way a system install is
+        # exposed on the Linux lanes.
+        # The guest sets no SOLDR_CACHE_DIR, so soldr's root is $HOME/.soldr;
+        # its cargo/bin joins PATH (behind the shims) once `toolchain link`
+        # succeeds below.
+        '      CARGO_HOME="$HOME/.soldr/cargo"',
+        '      RUSTUP_HOME="$HOME/.soldr/rustup"',
+        "      export CARGO_HOME RUSTUP_HOME",
         "      TOOLCHAIN_ENSURE_OK=0",
         "    else",
         '      record toolchain_ensure fail "ensure succeeded but JSON names no channel"',
@@ -658,7 +673,7 @@ def _stage_toolchain() -> list[str]:
         "  TL_RC=$?",
         '  if [ "$TL_RC" -eq 0 ]; then',
         "    record toolchain_link pass",
-        '    PATH="$WORK/shims:$PATH"',
+        '    PATH="$WORK/shims:$HOME/.soldr/cargo/bin:$PATH"',
         "    export PATH",
         "    TOOLCHAIN_LINK_OK=0",
         "  else",
