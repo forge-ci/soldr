@@ -470,6 +470,7 @@ fn ci_test_prescribes_the_ci_dag_and_exactly_one_nextest_test_compilation() {
         "ban_platform_cfg_outside_boundary",
         "ban_raw_env_flag",
         "ban_swallowed_child_stdio",
+        "ban_raw_sync_primitive",
     ];
     let target_root = plan["dylint_target_trees"]["tests"]
         .as_str()
@@ -660,7 +661,7 @@ fn ci_test_preserves_scope_and_exposes_incompatible_overrides_as_domains_or_erro
         .any(|name| name.starts_with("dylint-cook-")));
     assert_eq!(
         find_stage(&compile_only, "dylint-workspace")["depends_on"],
-        serde_json::json!(["dylint-library-ban_swallowed_child_stdio"])
+        serde_json::json!(["dylint-library-ban_raw_sync_primitive"])
     );
     assert!(array(&compile_only, "domains")
         .iter()

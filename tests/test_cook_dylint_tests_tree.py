@@ -44,24 +44,24 @@ def test_lint_roots_finds_only_dirs_with_a_cargo_toml(tmp_path, cook):
     assert roots == [lints_dir / "alpha_lint", lints_dir / "zeta_lint"]
 
 
-def test_lint_roots_on_the_real_repo_returns_exactly_seven_directories(cook):
+def test_lint_roots_on_the_real_repo_returns_exactly_eight_directories(cook):
     roots = cook.lint_roots(REPO_ROOT)
 
-    assert len(roots) == 7
+    assert len(roots) == 8
     assert roots == sorted(roots)
     for root in roots:
         assert (root / "Cargo.toml").is_file()
 
 
 def test_every_lint_crate_resolves_the_same_dependency_closure(cook):
-    """The seven lint crates must pin the same third-party dependency versions.
+    """The lint crates must pin the same third-party dependency versions.
 
-    They are seven separate cargo workspaces with seven separate lockfiles and
+    They are separate cargo workspaces with separate lockfiles and
     nothing keeping them in step, so they drift apart silently as each is
     updated alone. They had: soldr#3159 found twelve shared deps at differing
     versions, `cc` at four of them (1.4.0 / 1.4.1 / 1.4.2 / 1.4.4).
 
-    That costs real build time with no upside. All seven cook into ONE shared
+    That costs real build time with no upside. All of them cook into ONE shared
     `target/dylint/tests` tree, so every divergence makes that tree carry an
     extra copy of the same crate -- four `cc`s, two `thiserror`s -- compiled,
     linked and kept on disk because the lockfiles disagreed by accident.
@@ -71,7 +71,7 @@ def test_every_lint_crate_resolves_the_same_dependency_closure(cook):
     cannot catch drift between the two (CLAUDE.md, agent code-smell rule).
     """
     roots = cook.lint_roots(REPO_ROOT)
-    assert len(roots) == 7
+    assert len(roots) == 8
 
     diverged = cook.diverging_closures(roots)
 
