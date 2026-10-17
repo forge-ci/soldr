@@ -146,7 +146,7 @@ fn channel_scoped_lookup_uses_the_installer_watchdog_not_generic_silence() {
     }
     let _lock = TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().expect("tempdir");
     let manager = root.path().join("fake-manager");
     let resolved = root.path().join("delayed-rustc");
@@ -451,7 +451,7 @@ fn home_origin_strings_are_stable() {
 fn toolchain_bin_cache_scope_keys_on_the_home_the_lookup_runs_under() {
     let _lock = TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().expect("tempdir");
     let managed = root.path().join("rustup");
     std::fs::create_dir_all(&managed).expect("managed rustup home");
@@ -553,7 +553,7 @@ fn managed_toolchain_keeps_its_library_path_and_the_callers_entries() {
     }
     let _lock = TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = SoldrPaths::with_root(temp.path().join("soldr-root"));
     let toolchain = crate::fetch::managed_rustup_home(&paths)

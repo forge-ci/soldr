@@ -497,12 +497,12 @@ where
 #[cfg(test)]
 mod private_session_default_tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::platform::sync::Mutex;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn with_save_profile_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_MUTEX.lock();
         let prev = std::env::var_os(SAVE_PROFILE_ENV);
         match value {
             Some(value) => std::env::set_var(SAVE_PROFILE_ENV, value),

@@ -160,7 +160,7 @@ fn append_env_no_op_when_none() {
 
 #[test]
 fn apply_blessed_prep_env_exports_mingw_and_syslib_env() {
-    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _lock = ENV_LOCK.lock();
     let _flag_globals = scrub_flag_globals();
     let _mingw = EnvVarGuard::remove("MINGW_W64_GCC_ROOT");
     let _pkg_config = EnvVarGuard::remove("PKG_CONFIG_PATH_x86_64-pc-windows-gnu");
@@ -207,7 +207,7 @@ fn apply_blessed_prep_env_exports_mingw_and_syslib_env() {
 
 #[test]
 fn apply_blessed_prep_env_exports_msvc_target_env() {
-    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _lock = ENV_LOCK.lock();
     let _flag_globals = scrub_flag_globals();
     let _cc = EnvVarGuard::remove("CC_x86_64_pc_windows_msvc");
     let _cxx = EnvVarGuard::remove("CXX_x86_64_pc_windows_msvc");
@@ -291,7 +291,7 @@ fn apply_blessed_prep_env_exports_msvc_target_env() {
 
 #[test]
 fn darwin_prepare_exports_blessed_env_for_deferred_cook() {
-    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _lock = ENV_LOCK.lock();
     let _flag_globals = scrub_flag_globals();
     let tmp = tempfile::tempdir().expect("tmpdir");
     let soldr_root = tmp.path().join("soldr-root");
@@ -444,7 +444,7 @@ fn xwin_cache_case_aliases_mixed_case_sdk_files() {
 
 #[test]
 fn rustup_add_target_uses_soldr_managed_rustup_state() {
-    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _lock = ENV_LOCK.lock();
     let tmp = tempfile::tempdir().expect("tmpdir");
     let soldr_root = tmp.path().join("soldr-root");
     let log = tmp.path().join("rustup.log");
@@ -517,7 +517,7 @@ fn rustup_add_target_uses_soldr_managed_rustup_state() {
 
 #[test]
 fn rustup_add_target_scopes_to_pinned_toolchain_channel() {
-    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _lock = ENV_LOCK.lock();
     let tmp = tempfile::tempdir().expect("tmpdir");
     let soldr_root = tmp.path().join("soldr-root");
     let project = tmp.path().join("project");
@@ -560,7 +560,7 @@ fn rustup_add_target_scopes_to_pinned_toolchain_channel() {
 
 #[test]
 fn rustup_target_add_timeout_is_an_explicit_safety_ceiling() {
-    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _lock = ENV_LOCK.lock();
     {
         let _guard = EnvVarGuard::set(RUSTUP_TARGET_ADD_TIMEOUT_ENV_VAR, "19");
         assert_eq!(
@@ -813,7 +813,7 @@ fn fuzzy_case_insensitive_classify() {
 
 #[test]
 fn soldr_workspace_metadata_dogfood() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock();
     // Regression guard: soldr's own workspace `Cargo.toml`
     // declares `[workspace.metadata.soldr].targets` (RFC #914).
     // Every entry must classify cleanly via the fuzzy classifier

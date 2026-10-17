@@ -392,7 +392,7 @@ mod tests {
     fn path_prefix_keeps_the_managed_bin_first() {
         let _env = crate::TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (managed, host, other) = if crate::platform::host::facts::os()
             == crate::platform::host::facts::HostOs::Windows
         {

@@ -34,6 +34,7 @@ def test_required_ci_runs_root_dylint_policy() -> None:
         "ban_platform_cfg_outside_boundary",
         "ban_raw_env_flag",
         "ban_swallowed_child_stdio",
+        "ban_raw_sync_primitive",
     ):
         assert f'"{name}"' in plan
 

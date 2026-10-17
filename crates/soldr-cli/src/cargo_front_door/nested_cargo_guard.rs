@@ -54,10 +54,11 @@
 //! spawn: the post-hoc attach used by the capture modes observes nothing there
 //! and its events carry no parent pid, so the guard is not armed on Windows.
 
+use crate::platform::sync::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::nested_cargo::{
@@ -685,10 +686,8 @@ impl NestedCargoGuard {
         }
     }
 
-    fn state(&self) -> std::sync::MutexGuard<'_, GuardState> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn state(&self) -> crate::platform::sync::MutexGuard<'_, GuardState> {
+        self.state.lock()
     }
 
     /// Whether this guard feeds itself by enumerating children rather than

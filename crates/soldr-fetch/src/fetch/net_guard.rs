@@ -101,14 +101,18 @@ mod tests {
 
     #[test]
     fn unset_allows_the_network() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::remove_var(NO_NETWORK_ENV_VAR);
         assert!(ensure_network_allowed("the catalogue").is_ok());
     }
 
     #[test]
     fn a_truthy_value_refuses_and_names_the_fetch() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var(NO_NETWORK_ENV_VAR, "1");
         let err = ensure_network_allowed("managed zig").expect_err("must refuse");
         let rendered = err.to_string();
@@ -125,7 +129,9 @@ mod tests {
         // guard is actually reached from a constructor -- otherwise the
         // module could be correct and connected to nothing, which is the
         // failure mode a hermeticity guard can least afford.
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var(NO_NETWORK_ENV_VAR, "1");
         let refused = super::super::stream_download::control_http_client("test");
         std::env::remove_var(NO_NETWORK_ENV_VAR);
@@ -138,7 +144,9 @@ mod tests {
 
     #[test]
     fn falsy_spellings_leave_the_network_alone() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for falsy in ["0", "false", "no", "off", ""] {
             std::env::set_var(NO_NETWORK_ENV_VAR, falsy);
             assert!(

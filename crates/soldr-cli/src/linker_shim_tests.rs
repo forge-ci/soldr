@@ -244,7 +244,7 @@ fn no_llvm_fetch_when_rustc_supplies_lld_and_a_system_clang_exists() {
     }
     let _lock = crate::TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().unwrap();
     let clang = fake_system_clang_without_lld(temp.path());
     let _path = crate::EnvVarGuard::set("PATH", clang.parent().unwrap());
@@ -305,7 +305,7 @@ fn the_shim_is_identical_whether_the_fetch_is_pending_or_complete() {
     }
     let _lock = crate::TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().unwrap();
     let empty_path = temp.path().join("empty-path");
     std::fs::create_dir_all(&empty_path).unwrap();

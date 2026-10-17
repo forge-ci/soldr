@@ -604,7 +604,7 @@ mod tests {
         // unrelated failure into a cascade of extra ones.
         let _lock = TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         {
             let _guard = EnvVarGuard::remove(WARN_COUNT_ENV_VAR);

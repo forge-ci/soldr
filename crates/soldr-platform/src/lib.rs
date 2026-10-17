@@ -21,7 +21,7 @@
 use std::cfg_select;
 
 mod platform;
-pub use platform::{executable, fs, host, ipc, process};
+pub use platform::{executable, fs, host, ipc, process, sync};
 
 cfg_select! {
     target_os = "windows" => {

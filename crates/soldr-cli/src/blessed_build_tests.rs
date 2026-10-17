@@ -26,7 +26,7 @@ fn xwin_prep_is_linux_host_only_and_has_no_opt_out() {
     assert!(!should_prepare_xwin_for_target("x86_64-unknown-linux-musl"));
 
     // The removed toggle must stay removed: setting it changes nothing.
-    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_MUTEX.lock();
     let prev = std::env::var_os("SOLDR_USE_LEGACY_XWIN");
     std::env::set_var("SOLDR_USE_LEGACY_XWIN", "1");
     assert_eq!(
@@ -45,7 +45,7 @@ fn native_windows_msvc_gets_no_xwin_prep() {
     if crate::platform::host::facts::os() != HostOs::Windows {
         return;
     }
-    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_MUTEX.lock();
     let prev_sys = std::env::var_os(USE_LEGACY_VENDORED_SYS_ENV_VAR);
     let prev_cmake = std::env::var_os(USE_SYSTEM_CMAKE_ENV_VAR);
 
@@ -83,7 +83,7 @@ fn native_windows_msvc_gets_no_xwin_prep() {
 
 #[test]
 fn linux_targets_get_no_xwin_or_sdk_prep() {
-    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_MUTEX.lock();
     // soldr#1064 Phase B: syslib catalogue overrides may populate
     // prep.env even on linux targets. The invariant we still want to
     // assert is "linux gets no Windows-xwin and no Apple-SDK prep" —
@@ -148,7 +148,7 @@ fn path_prefix_keeps_clang_shim_ahead_of_managed_tools() {
 
 #[test]
 fn dsymutil_override_is_added_to_child_path() {
-    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_MUTEX.lock();
     let tmp = tempfile::tempdir().expect("tmpdir");
     let bin = tmp.path().join("dsymutil");
     std::fs::write(&bin, b"stub").expect("stub");
@@ -219,7 +219,7 @@ fn windows_gnu_requires_supported_mingw_host() {
     if supported {
         return;
     }
-    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_MUTEX.lock();
     let prev_sys = std::env::var_os(USE_LEGACY_VENDORED_SYS_ENV_VAR);
     let prev_cmake = std::env::var_os(USE_SYSTEM_CMAKE_ENV_VAR);
 
@@ -301,7 +301,7 @@ fn cmake_generator_sweep_tolerates_missing_target() {
 
 #[test]
 fn cmake_injection_respects_system_opt_out() {
-    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_MUTEX.lock();
     let tmp = tempfile::tempdir().expect("tmpdir");
     let paths = SoldrPaths::with_root(tmp.path().to_path_buf());
     let mut prep = BlessedPrep::default();
@@ -318,7 +318,7 @@ fn cmake_injection_respects_system_opt_out() {
 
 #[test]
 fn cmake_injection_defers_to_user_cmake_env() {
-    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_MUTEX.lock();
     // A caller-provided CMAKE (or CMAKE_GENERATOR) means the user
     // already decided; the managed injection must stand down
     // entirely — no fetch attempt, no env, no PATH dirs.

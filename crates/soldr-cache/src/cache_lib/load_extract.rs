@@ -323,7 +323,7 @@ pub fn load(opts: &LoadOptions<'_>) -> Result<LoadReport> {
         dispatch.finish()?;
     }
     let workers_drain_us = workers_drain_start.elapsed().as_micros() as u64;
-    if let Some(err) = extract_error.lock().expect("extract_error mutex").take() {
+    if let Some(err) = extract_error.lock().take() {
         return Err(err);
     }
     let cache_files_restored = cache_files_counter.load(Ordering::Relaxed);
@@ -465,7 +465,13 @@ impl ExtractDispatch {
             pool.spawn(move || {
                 loop {
                     let job = {
-                        let guard = rx.lock().expect("extract rx mutex");
+                        // soldr#3836: bounded on both sides -- a waiter gives
+                        // up after one poll interval and loops, and the
+                        // holder polls for at most that long, so a slow
+                        // driver never trips the lock watchdog.
+                        let Ok(guard) = rx.lock_for(EXTRACT_WORKER_RECV_TIMEOUT) else {
+                            continue;
+                        };
                         match guard.recv_timeout(EXTRACT_WORKER_RECV_TIMEOUT) {
                             Ok(j) => j,
                             // Only a closed channel means "no more work".
@@ -485,13 +491,13 @@ impl ExtractDispatch {
                     // jobs without doing more I/O (keeps the driver moving
                     // toward the finish line so we can surface the error
                     // promptly).
-                    if err_slot.lock().expect("err_slot mutex").is_some() {
+                    if err_slot.lock().is_some() {
                         continue;
                     }
                     let is_regular = job.entry_type == tar::EntryType::Regular;
                     let job_start = profile.is_some().then(std::time::Instant::now);
                     if let Err(e) = extract_one(&job) {
-                        let mut slot = err_slot.lock().expect("err_slot mutex");
+                        let mut slot = err_slot.lock();
                         if slot.is_none() {
                             *slot = Some(e);
                         }
@@ -595,13 +601,13 @@ mod extract_test_hooks {
     #[cfg(test)]
     pub(crate) type Hook = Box<dyn Fn(&std::path::Path) + Send + Sync + 'static>;
     #[cfg(test)]
-    pub(crate) static HOOK: std::sync::Mutex<Option<Hook>> = std::sync::Mutex::new(None);
+    pub(crate) static HOOK: crate::platform::sync::Mutex<Option<Hook>> = crate::platform::sync::Mutex::new(None);
 
     #[cfg(test)]
     pub(crate) fn staged_file_open_for_write(staged: &std::path::Path) {
         // The hook runs while the registry lock is held; hooks are
         // test-owned, short, and only ever installed by one test.
-        if let Some(hook) = HOOK.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if let Some(hook) = HOOK.lock().as_ref() {
             hook(staged);
         }
     }

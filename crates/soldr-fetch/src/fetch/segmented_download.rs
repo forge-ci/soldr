@@ -1,10 +1,11 @@
 use super::stream_download::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::core::SoldrError;
+use crate::platform::sync::Mutex;
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
@@ -302,7 +303,7 @@ impl SocketPool {
     /// *who*, then wakes it up. A pool with no PENDING holders (e.g.
     /// Quick, which never has any) is a no-op every tick.
     fn maybe_preempt(&self) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock();
         if inner.waiting == 0 {
             return;
         }
@@ -349,7 +350,7 @@ impl SocketPool {
             tokio::pin!(notified);
             notified.as_mut().enable();
             {
-                let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                let mut inner = self.inner.lock();
                 if inner.used < self.capacity.expect("bounded pool") {
                     inner.used += 1;
                     let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -372,14 +373,14 @@ impl SocketPool {
                 inner.waiting += 1;
             }
             notified.await;
-            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let mut inner = self.inner.lock();
             inner.waiting = inner.waiting.saturating_sub(1);
         }
     }
 
     #[cfg(test)]
     fn available(&self) -> usize {
-        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let inner = self.inner.lock();
         self.capacity
             .map(|capacity| capacity - inner.used)
             .unwrap_or(usize::MAX)
@@ -407,7 +408,7 @@ impl PoolPermit {
             return;
         }
         self.streaming = true;
-        let mut inner = self.pool.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.pool.inner.lock();
         inner.pending.remove(&self.id);
     }
 
@@ -428,7 +429,7 @@ impl Drop for PoolPermit {
         if self.pool.capacity.is_none() {
             return;
         }
-        let mut inner = self.pool.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.pool.inner.lock();
         inner.used = inner.used.saturating_sub(1);
         inner.pending.remove(&self.id);
         drop(inner);

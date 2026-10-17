@@ -78,7 +78,7 @@ fn provisioning_uses_exactly_build_release_args() {
 fn prepare_then_front_door_agree_and_the_build_adds_nothing() {
     let _env = TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|error| error.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let llvm = fake_llvm_bin();
     let _llvm = EnvVarGuard::set("SOLDR_LLVM_DIR", llvm.path());
     let _cmake = EnvVarGuard::set(crate::blessed_build::USE_SYSTEM_CMAKE_ENV_VAR, "1");
@@ -140,7 +140,7 @@ fn prepare_then_front_door_agree_and_the_build_adds_nothing() {
 fn nothing_provisioned_is_reported_explicitly() {
     let _env = TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|error| error.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _cmake = EnvVarGuard::set(crate::blessed_build::USE_SYSTEM_CMAKE_ENV_VAR, "1");
     let _linker = EnvVarGuard::set("SOLDR_LINKER", "default");
     let _build_target = EnvVarGuard::remove("CARGO_BUILD_TARGET");

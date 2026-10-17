@@ -746,7 +746,7 @@ fn dropping_dispatch_without_finish_still_waits_for_workers() {
         "drop must not return until workers have finished writing"
     );
     assert_eq!(counter.load(Ordering::Relaxed), 1, "job should be counted");
-    assert!(err_slot.lock().unwrap().is_none(), "no worker error");
+    assert!(err_slot.lock().is_none(), "no worker error");
 }
 
 // #1548 — purely-lexical symlink-target containment. Runs on every

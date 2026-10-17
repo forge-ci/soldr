@@ -24,13 +24,13 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use running_process::broker::protocol_v2::{service_definition_dir_v2, SERVICE_DEF_V2_EXTENSION};
 use running_process::broker::server::BackendRegistry;
 
 use crate::broker_reaper::RouteOwnership;
+use crate::platform::sync::Mutex;
 
 /// Every soldr daemon service name, and so every route directory and
 /// registration this module may reclaim, starts with this prefix. Anything
@@ -100,20 +100,12 @@ impl DaemonDiskReport {
 /// window keeps it.
 pub(crate) fn sweep_broker_daemon_disk(
     route_owners: &Mutex<RouteOwnership>,
-    registry: &Mutex<BackendRegistry>,
+    registry: &std::sync::Mutex<BackendRegistry>,
 ) -> DaemonDiskReport {
     let mut live = BTreeSet::new();
+    live.extend(route_owners.lock().service_names().map(str::to_owned));
     live.extend(
-        route_owners
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .service_names()
-            .map(str::to_owned),
-    );
-    live.extend(
-        registry
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        crate::broker_reaper::lock_registry(registry)
             .iter()
             .map(|(key, _)| key.service_name.clone()),
     );

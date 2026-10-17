@@ -6,9 +6,10 @@
 //! files and never runs in the rustc-wrapper hot path.
 
 use crate::core::git::CrlfCheckoutSetting;
+use crate::platform::sync::Mutex;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 
 static REPO_RESULTS: LazyLock<Mutex<BTreeMap<PathBuf, Option<CrlfCheckoutSetting>>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
@@ -27,11 +28,7 @@ fn crlf_setting_to_warn_once(repo_root: &Path) -> Option<CrlfCheckoutSetting> {
     let key = repo_root
         .canonicalize()
         .unwrap_or_else(|_| repo_root.to_path_buf());
-    let Ok(mut results) = REPO_RESULTS.lock() else {
-        // A poisoned diagnostic lock must not break the build. Fail open and
-        // emit based on a fresh best-effort probe in that exceptional case.
-        return crate::core::git::crlf_checkout_setting(repo_root);
-    };
+    let mut results = REPO_RESULTS.lock();
     if results.contains_key(&key) {
         return None;
     }

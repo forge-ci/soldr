@@ -414,7 +414,7 @@ mod tests {
             // the env is still ours to restore, so recover rather than cascade.
             let lock = crate::TEST_PROCESS_ENV_LOCK
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             Self {
                 _lock: lock,
                 original: env::var_os("PATH"),
@@ -445,7 +445,7 @@ mod tests {
         fn set(value: &str) -> Self {
             let lock = crate::TEST_PROCESS_ENV_LOCK
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             env::set_var(SHIM_ARGV0_ENV, value);
             Self { _lock: lock }
         }
@@ -507,7 +507,7 @@ mod tests {
     fn shim_argv0_override_is_inert_without_the_env_var() {
         let _lock = crate::TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         env::remove_var(SHIM_ARGV0_ENV);
         // A hardlinked shim -- the overwhelmingly common case -- must be
         // untouched, including argv[0].

@@ -4,6 +4,11 @@
 //! returns. Holding the read side for the entire call therefore makes the
 //! write side a precise drain: shutdown cannot set zccache's shutdown flag
 //! until every compile that was already admitted has finished publishing.
+//!
+//! Deliberately a raw `tokio::sync::RwLock` with owned guards, not a
+//! `soldr_platform::sync` critical section (soldr#3836): a read guard lives
+//! for a whole compile, which is legitimately longer than the critical-section
+//! hold limit. The writer is shutdown, which bounds its own drain.
 
 use std::sync::Arc;
 

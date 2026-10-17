@@ -14,9 +14,9 @@
 //! list: not just what the daemon was holding, but what it was already
 //! doing about it.
 
+use crate::platform::sync::Mutex;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Bound on the "recent" ring. Resolved decisions older than the last 32
@@ -97,9 +97,7 @@ impl KillDecisionGuard {
     /// Mark the decision as having escalated to SIGKILL. Idempotent-safe
     /// to call more than once; only affects entries still pending.
     pub(crate) fn mark_escalated(&self) {
-        let mut map = PENDING
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut map = PENDING.lock();
         if let Some(entry) = map.get_mut(&self.id) {
             entry.escalated_to_sigkill = true;
         }
@@ -116,9 +114,7 @@ impl KillDecisionGuard {
             return;
         }
         self.resolved = true;
-        let mut pending = PENDING
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut pending = PENDING.lock();
         let Some(entry) = pending.remove(&self.id) else {
             return;
         };
@@ -128,9 +124,7 @@ impl KillDecisionGuard {
         decision.resolved_at_ms = Some(unix_millis());
         decision.outcome = Some(outcome.to_string());
 
-        let mut recent = RECENT
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut recent = RECENT.lock();
         recent.push_back(decision);
         while recent.len() > RECENT_CAPACITY {
             recent.pop_front();
@@ -159,9 +153,7 @@ pub(crate) fn record(kind: &str, target_pid: Option<u32>, reason: String) -> Kil
         escalated_to_sigkill: false,
         decided_at_ms: unix_millis(),
     };
-    let mut map = PENDING
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut map = PENDING.lock();
     map.insert(id, entry);
     KillDecisionGuard {
         id,
@@ -174,17 +166,13 @@ pub(crate) fn record(kind: &str, target_pid: Option<u32>, reason: String) -> Kil
 /// returns, well before any caller writes the result to disk.
 pub(crate) fn snapshot() -> KillDecisionsSnapshot {
     let pending = {
-        let map = PENDING
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let map = PENDING.lock();
         map.iter()
             .map(|(&id, entry)| entry.to_pending(id))
             .collect()
     };
     let recent = {
-        let ring = RECENT
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let ring = RECENT.lock();
         ring.iter().cloned().collect()
     };
     KillDecisionsSnapshot { pending, recent }

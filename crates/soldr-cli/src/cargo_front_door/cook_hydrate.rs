@@ -573,12 +573,12 @@ fn has_flag(args: &[String], flag: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::platform::sync::Mutex;
     use tempfile::TempDir;
 
     // Env-mutating tests are serialized — `auto_hydrate_enabled`
     // reads `SOLDR_COOK_AUTO_HYDRATE` from the process environment.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// soldr#3694: `soldr cargo run -- --target foo` passes `--target foo`
     /// to the program; cook hydrate must not scope itself to target `foo`.
@@ -593,7 +593,9 @@ mod tests {
             resolve_target_triple(temp.path(), &args).as_deref(),
             Some("foo")
         );
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_ne!(explicit_target_scope(&args).as_deref(), Some("foo"));
     }
 
@@ -654,7 +656,9 @@ mod tests {
 
     #[test]
     fn env_var_disables_overriding_everything() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = TempDir::new().unwrap();
         std::fs::write(
             dir.path().join("rust-toolchain.toml"),
@@ -672,7 +676,9 @@ mod tests {
 
     #[test]
     fn env_var_enables_overriding_project_disable() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = TempDir::new().unwrap();
         std::fs::write(
             dir.path().join("rust-toolchain.toml"),
@@ -690,7 +696,9 @@ mod tests {
 
     #[test]
     fn rust_toolchain_disable_beats_global_enable() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_env();
         let dir = TempDir::new().unwrap();
         std::fs::write(
@@ -707,7 +715,9 @@ mod tests {
 
     #[test]
     fn no_overrides_means_global_default_wins() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_env();
         let dir = TempDir::new().unwrap();
         let cfg = CookConfig::default();
@@ -839,7 +849,9 @@ mod tests {
 
     #[test]
     fn resolve_target_dir_without_explicit_target_is_the_bare_target_dir() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_target_dir_env();
         let dir = TempDir::new().unwrap();
         let args = [
@@ -857,7 +869,9 @@ mod tests {
     fn resolve_target_dir_appends_the_explicit_target_triple() {
         // Serialized with the CARGO_TARGET_DIR-mutating test below: that one
         // sets a process-global var this assertion depends on being unset.
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_target_dir_env();
         let dir = TempDir::new().unwrap();
         let args = [
@@ -871,7 +885,9 @@ mod tests {
 
     #[test]
     fn resolve_target_dir_accepts_the_equals_spelling() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_target_dir_env();
         let dir = TempDir::new().unwrap();
         let args = [
@@ -884,7 +900,9 @@ mod tests {
 
     #[test]
     fn resolve_target_dir_honours_cargo_target_dir_with_an_explicit_target() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let manifest_dir = TempDir::new().unwrap();
         let target_dir = TempDir::new().unwrap();
         std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
@@ -906,7 +924,9 @@ mod tests {
     // `resolve_cook_target_dir` so soldr#621's short-circuit can never fire.
     #[test]
     fn resolve_target_dir_falls_back_to_the_cook_target_scope_env() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_target_dir_env();
         let dir = TempDir::new().unwrap();
         let args = [
@@ -924,7 +944,9 @@ mod tests {
 
     #[test]
     fn an_explicit_target_argv_beats_the_cook_target_scope_env() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_target_dir_env();
         let dir = TempDir::new().unwrap();
         let args = [
@@ -942,7 +964,9 @@ mod tests {
 
     #[test]
     fn a_blank_cook_target_scope_env_is_ignored() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_target_dir_env();
         let dir = TempDir::new().unwrap();
         let args = ["chef".to_string(), "prepare".to_string()];

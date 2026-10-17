@@ -10,8 +10,9 @@
 //! zccache takes its compile permit inside `compile`, so the permit wait is
 //! part of `compile_end - compile_start`; soldr cannot separate it.
 
+use crate::platform::sync::Mutex;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use soldr_core::startup_profile::{
     emit_line, format_daemon_compile_line, unix_ms_now, DaemonCompileTimings,
@@ -30,14 +31,14 @@ pub(crate) async fn scope<F: Future>(crate_name: String, recv_unix_ms: u128, fut
         ..DaemonCompileTimings::default()
     }));
     let out = CURRENT.scope(Arc::clone(&slot), fut).await;
-    let mut timings = slot.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let mut timings = slot.lock().clone();
     timings.reply_sent_unix_ms = unix_ms_now();
     emit_line(&format_daemon_compile_line(&timings));
     out
 }
 
 fn mark(set: impl FnOnce(&mut DaemonCompileTimings)) {
-    let _ = CURRENT.try_with(|slot| set(&mut slot.lock().unwrap_or_else(|p| p.into_inner())));
+    let _ = CURRENT.try_with(|slot| set(&mut slot.lock()));
 }
 
 pub(crate) fn mark_compile_start() {
@@ -63,7 +64,7 @@ mod tests {
         let seen = scope("syn".to_string(), 7, async {
             mark_compile_start();
             mark_compile_end();
-            CURRENT.with(|s| s.lock().unwrap().clone())
+            CURRENT.with(|s| s.lock().clone())
         })
         .await;
         assert_eq!(seen.crate_name, "syn");

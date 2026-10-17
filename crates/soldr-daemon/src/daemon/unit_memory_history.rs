@@ -15,10 +15,11 @@
 //! Rows live in the shared `state.sqlite3` table `unit_memory_history` as
 //! `[0x01][prost WireUnitMemory]`, like every other persisted row.
 
+use crate::platform::sync::Condvar;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -26,6 +27,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::cache_lib::target_registry::RegistryError;
 use crate::core::wire::{prost_tagged_bytes, proto::WireUnitMemory, REDB_TAG_PROST};
+use crate::platform::sync::Mutex;
 use prost::Message;
 
 /// One unit's last measured peak memory.
@@ -229,19 +231,15 @@ impl UnitMemoryHistory {
 
     /// The unit's last measured peak, if this daemon has one.
     pub fn lookup(&self, unit_key: &str) -> Option<UnitMemory> {
-        self.units
-            .lock()
-            .ok()
-            .and_then(|units| units.get(unit_key).copied())
+        self.units.lock().get(unit_key).copied()
     }
 
     /// [`Self::lookup`] after waiting at most `timeout` for the warm load, so
     /// admission right after a restart sees the trusted history (soldr#3686).
     pub fn lookup_after_load(&self, unit_key: &str, timeout: Duration) -> Option<UnitMemory> {
         let (lock, cvar) = &*self.load_done;
-        if let Ok(done) = lock.lock() {
-            let _ = cvar.wait_timeout_while(done, timeout, |done| !*done);
-        }
+        let done = lock.lock();
+        let _ = cvar.wait_timeout_while(done, timeout, |done| !*done);
         self.lookup(unit_key)
     }
 
@@ -256,7 +254,8 @@ impl UnitMemoryHistory {
             .duration_since(UNIX_EPOCH)
             .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
             .unwrap_or(0);
-        if let Ok(mut units) = self.units.lock() {
+        {
+            let mut units = self.units.lock();
             let samples = units
                 .get(unit_key)
                 .map_or(0, |unit| unit.samples)
@@ -323,7 +322,8 @@ async fn drain(
     let signal = Arc::clone(&load_done);
     let load = tokio::task::spawn_blocking(move || {
         let stored = load_stored(&load_path);
-        if let Ok(mut map) = units.lock() {
+        {
+            let mut map = units.lock();
             merge_loaded(&mut map, stored);
         }
         signal_done(&signal);
@@ -364,9 +364,7 @@ async fn drain(
 }
 
 fn signal_done(signal: &(Mutex<bool>, Condvar)) {
-    if let Ok(mut done) = signal.0.lock() {
-        *done = true;
-    }
+    *signal.0.lock() = true;
     signal.1.notify_all();
 }
 
