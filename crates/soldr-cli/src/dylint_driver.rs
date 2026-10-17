@@ -168,7 +168,7 @@ pub(crate) fn probe_prebuilt_driver(
     let status = match child.wait_timeout(Duration::from_secs(2)) {
         Err(error) => {
             let _ = child.kill();
-            let _ = child.wait();
+            let _ = crate::platform::wait::wait_for(&mut child, crate::platform::wait::PROBE);
             return Err((
                 DriverProbeVerdict::ProbeTimedOut,
                 unavailable_driver_error(
@@ -181,7 +181,7 @@ pub(crate) fn probe_prebuilt_driver(
         Ok(Some(status)) => status,
         Ok(None) => {
             let _ = child.kill();
-            let _ = child.wait();
+            let _ = crate::platform::wait::wait_for(&mut child, crate::platform::wait::PROBE);
             return Err((
                 DriverProbeVerdict::ProbeTimedOut,
                 unavailable_driver_error(

@@ -11,7 +11,7 @@ use crate::cache::print_json;
 use crate::core::{SoldrError, SoldrPaths};
 use serde::Serialize;
 use std::io::Write;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use super::walks::{walk_cargo_git_checkouts, walk_cargo_registry_src, walk_cargo_target_subtrees};
@@ -19,6 +19,7 @@ use super::{
     GcCandidateOutput, GcListEntryOutput, GcListKindFilter, GC_JSON_SCHEMA_VERSION,
     KIND_CARGO_GIT_CHECKOUTS, KIND_CARGO_REGISTRY_SRC, KIND_CARGO_TARGET, PURGE_SAFETY_DERIVED,
 };
+use crate::platform::sync::Mutex;
 
 #[derive(Serialize)]
 struct GcPurgeRegistrySrcOutput {
@@ -419,11 +420,14 @@ pub(super) fn run_gc_purge_candidates(
         workers.push(
             builder
                 .spawn(move || loop {
+                    // Bounded, and the queue lock is released between
+                    // attempts so no worker waits on a sibling's receive.
                     let next = {
-                        let rx = job_rx.lock().expect("gc worker channel poisoned");
-                        rx.recv()
+                        let rx = job_rx.lock();
+                        crate::platform::wait::recv_for(&rx, std::time::Duration::from_millis(200))
                     };
                     match next {
+                        Err(crate::platform::wait::WaitError::TimedOut(_)) => continue,
                         Ok(candidate) => {
                             let _ = result_tx
                                 .send(crate::cache_lib::gc::delete_candidate_dir(candidate));
@@ -472,9 +476,8 @@ pub(super) fn run_gc_purge_candidates(
     }
 
     for worker in workers {
-        worker
-            .join()
-            .map_err(|_| SoldrError::Other("gc worker panicked".to_string()))?;
+        crate::platform::wait::join_for(worker, crate::platform::wait::LONG_CHILD)
+            .map_err(|_| SoldrError::Other("gc worker panicked or did not finish".to_string()))?;
     }
 
     if !json && selected_count > 0 {

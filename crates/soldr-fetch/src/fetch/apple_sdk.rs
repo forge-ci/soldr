@@ -266,10 +266,11 @@ fn sdk_from_xcrun() -> Option<PathBuf> {
     if crate::platform::host::facts::os() != crate::platform::host::facts::HostOs::MacOs {
         return None;
     }
-    let out = Command::new("xcrun")
-        .args(["--show-sdk-path"])
-        .output()
-        .ok()?;
+    let out = crate::platform::wait::output_for(
+        Command::new("xcrun").args(["--show-sdk-path"]),
+        crate::platform::wait::PROBE,
+    )
+    .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -550,9 +551,8 @@ fn validate_archive_path(path: &Path) -> Result<(), SoldrError> {
 mod tests {
     use super::*;
     use std::ffi::{OsStr, OsString};
-    use std::sync::Mutex;
 
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct EnvVarGuard {
         key: &'static str,
@@ -584,7 +584,9 @@ mod tests {
 
     #[test]
     fn env_var_overrides_when_pointing_at_real_dir() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tmpdir");
         let fake_sdk = tmp.path().join("FakeMacOSX.sdk");
         std::fs::create_dir_all(&fake_sdk).expect("mk");
@@ -595,7 +597,9 @@ mod tests {
 
     #[test]
     fn env_var_ignored_when_path_is_missing() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _guard = EnvVarGuard::set(SDKROOT_ENV_VAR, "/definitely/not/a/real/path/3819237");
         let resolved = sdk_from_env_var();
         assert!(
@@ -663,7 +667,9 @@ mod tests {
 
     #[test]
     fn selection_defaults_to_target_specific_14_5_rows() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _shape = EnvVarGuard::remove(APPLE_SDK_SHAPE_ENV_VAR);
         let _version = EnvVarGuard::remove(APPLE_SDK_VERSION_ENV_VAR);
 
@@ -685,7 +691,9 @@ mod tests {
 
     #[test]
     fn sdk_cache_path_includes_version_and_shape() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _shape = EnvVarGuard::remove(APPLE_SDK_SHAPE_ENV_VAR);
         let _version = EnvVarGuard::remove(APPLE_SDK_VERSION_ENV_VAR);
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -708,7 +716,9 @@ mod tests {
 
     #[test]
     fn picker_env_var_behaviour_serial() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _shape = EnvVarGuard::remove(APPLE_SDK_SHAPE_ENV_VAR);
         let _version = EnvVarGuard::remove(APPLE_SDK_VERSION_ENV_VAR);
 
@@ -769,7 +779,9 @@ mod tests {
 
     #[test]
     fn legacy_11_3_auto_keeps_universal2_shape() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _shape = EnvVarGuard::remove(APPLE_SDK_SHAPE_ENV_VAR);
         let _version = EnvVarGuard::set(APPLE_SDK_VERSION_ENV_VAR, "11.3");
 

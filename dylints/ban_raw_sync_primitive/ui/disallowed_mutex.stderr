@@ -1,0 +1,16 @@
+error: raw `std::sync::Mutex` constructed outside the bounded-wait boundary; use `soldr_platform::sync::Mutex` (soldr#3836)
+  --> $DIR/disallowed_mutex.rs:4:17
+   |
+LL |     let mutex = Mutex::new(0);
+   |                 ^^^^^^^^^^
+   |
+   = note: `#[deny(ban_raw_sync_primitive)]` on by default
+
+error: raw `std::sync::Mutex::lock` can wait without a bound; use `soldr_platform::sync` -- `lock()`/`read()`/`write()` for a critical section (watchdog-bounded) or `lock_for`/`read_for`/`write_for` for a timeout (soldr#3836)
+  --> $DIR/disallowed_mutex.rs:5:18
+   |
+LL |     let _guard = mutex.lock();
+   |                  ^^^^^^^^^^^^
+
+error: aborting due to 2 previous errors
+

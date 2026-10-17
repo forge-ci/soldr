@@ -126,6 +126,11 @@ ALLOWLIST: tuple[AllowedSpawns, ...] = (
         "detached self-relocation helper",
     ),
     AllowedSpawns(
+        "crates/soldr-platform/src/platform/wait.rs",
+        2,
+        "the timeout-only output_for/status_for facade (soldr#3836)",
+    ),
+    AllowedSpawns(
         "crates/soldr-cache/src/cache_lib/build_active.rs",
         1,
         "build-activity lease keeper child",

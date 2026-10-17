@@ -1,12 +1,12 @@
 //! Private daemon owner/ref-count state for soldr development isolation.
 
 use crate::daemon_core::protocol::{PrivateDaemonOwnerStatus, PrivateDaemonStatus};
-use kernal_api::async_engine::Mutex;
+use crate::sync::AsyncMutex;
 use std::collections::{BTreeSet, HashMap};
 
 #[derive(Default)]
 pub(super) struct PrivateDaemonLifecycle {
-    state: Mutex<PrivateDaemonState>,
+    state: AsyncMutex<PrivateDaemonState>,
 }
 
 #[derive(Default)]

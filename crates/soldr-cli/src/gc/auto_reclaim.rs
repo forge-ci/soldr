@@ -1,7 +1,8 @@
 fn nightly_toolchain_available() -> bool {
-    let Ok(output) = std::process::Command::new("rustup")
-        .args(["toolchain", "list"])
-        .output()
+    let Ok(output) = crate::platform::wait::output_for(
+        std::process::Command::new("rustup").args(["toolchain", "list"]),
+        crate::platform::wait::PROBE,
+    )
     else {
         return false;
     };

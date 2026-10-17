@@ -136,7 +136,7 @@ impl Drop for EnvVarGuard {
 /// guard's whole lifetime. This type makes restoration safe, not the mutation
 /// atomic. It deliberately does **not** take the lock itself — callers such as
 /// `prepare_cmd`'s `rustup_add_target_scopes_to_pinned_toolchain_channel`
-/// already hold it, and `std::sync::Mutex` is not reentrant, so acquiring it
+/// already hold it, and `crate::platform::sync::Mutex` is not reentrant, so acquiring it
 /// here would deadlock rather than protect anything.
 #[cfg(test)]
 pub(crate) struct CwdGuard {
@@ -169,7 +169,7 @@ mod cwd_guard_tests {
     fn cwd_guard_restores_on_normal_exit() {
         let _env = crate::TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = std::env::current_dir().expect("cwd");
         let tmp = tempfile::tempdir().expect("tempdir");
         {
@@ -186,7 +186,7 @@ mod cwd_guard_tests {
     fn cwd_guard_restores_while_unwinding() {
         let _env = crate::TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = std::env::current_dir().expect("cwd");
         let tmp = tempfile::tempdir().expect("tempdir");
 

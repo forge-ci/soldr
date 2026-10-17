@@ -85,7 +85,7 @@ fn installer_rustup_home() -> Option<PathBuf> {
 fn dylint_child_runs_under_the_home_its_targets_are_provisioned_in() {
     let _lock = TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let fixture = fixture();
     let _root = EnvVarGuard::set(
         crate::core::SOLDR_CACHE_DIR_ENV_VAR,
@@ -125,7 +125,7 @@ fn dylint_child_runs_under_the_home_its_targets_are_provisioned_in() {
 fn ordinary_cargo_child_keeps_the_callers_homes() {
     let _lock = TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let fixture = fixture();
     let _root = EnvVarGuard::set(
         crate::core::SOLDR_CACHE_DIR_ENV_VAR,
@@ -149,7 +149,7 @@ fn ordinary_cargo_child_keeps_the_callers_homes() {
 fn an_explicit_caller_home_is_the_dylint_home() {
     let _lock = TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let fixture = fixture();
     let caller = fixture.managed_rustup.with_file_name("caller-rustup");
     std::fs::create_dir_all(&caller).expect("caller rustup home");

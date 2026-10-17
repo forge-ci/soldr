@@ -142,7 +142,7 @@ fn sample_driver_dir(paths: &SoldrPaths, plan: &DylintToolchainPlan) -> PathBuf 
 
 #[test]
 fn skip_is_refused_when_marker_matches_but_binary_is_absent() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock();
     let _unset = crate::EnvVarGuard::remove("DYLINT_DRIVER_PATH");
     let temp = tempfile::tempdir().unwrap();
     let paths = SoldrPaths::with_root(temp.path().join("soldr"));
@@ -168,7 +168,7 @@ fn skip_is_refused_when_binary_exists_but_fails_the_probe() {
     // interrupted install, or simply not executable) must not satisfy the
     // skip either -- `require_prebuilt_driver`'s `-V` probe is what
     // ultimately gates it, not file presence alone.
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock();
     let _unset = crate::EnvVarGuard::remove("DYLINT_DRIVER_PATH");
     let temp = tempfile::tempdir().unwrap();
     let paths = SoldrPaths::with_root(temp.path().join("soldr"));
@@ -189,7 +189,7 @@ fn skip_is_refused_when_binary_exists_but_fails_the_probe() {
 
 #[test]
 fn skip_is_refused_when_marker_is_absent_even_if_something_is_on_disk() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock();
     let _unset = crate::EnvVarGuard::remove("DYLINT_DRIVER_PATH");
     let temp = tempfile::tempdir().unwrap();
     let paths = SoldrPaths::with_root(temp.path().join("soldr"));
@@ -210,14 +210,14 @@ fn skip_is_refused_when_marker_is_absent_even_if_something_is_on_disk() {
 
 #[test]
 fn fallback_defaults_on_when_unset() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock();
     let _unset = crate::EnvVarGuard::remove(DYLINT_DRIVER_FALLBACK_ENV_VAR);
     assert!(local_driver_build_fallback_enabled());
 }
 
 #[test]
 fn fallback_off_spellings_disable_it() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock();
     for value in ["0", "false", "no", "off", "OFF"] {
         let _set = crate::EnvVarGuard::set(DYLINT_DRIVER_FALLBACK_ENV_VAR, value);
         assert!(
@@ -232,14 +232,14 @@ fn fallback_unrecognised_values_stay_on() {
     // Default-on switches keep an unrecognised value on -- only an
     // explicit off spelling turns them off (env_flag's `is_off_value`
     // contract; see the doc comment on DYLINT_DRIVER_FALLBACK_ENV_VAR).
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock();
     let _set = crate::EnvVarGuard::set(DYLINT_DRIVER_FALLBACK_ENV_VAR, "maybe");
     assert!(local_driver_build_fallback_enabled());
 }
 
 #[test]
 fn fallback_on_spellings_stay_on() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock();
     for value in ["1", "true", "yes", "on"] {
         let _set = crate::EnvVarGuard::set(DYLINT_DRIVER_FALLBACK_ENV_VAR, value);
         assert!(
@@ -255,7 +255,7 @@ fn fallback_on_spellings_stay_on() {
 
 #[test]
 fn strict_trust_mode_refuses_the_local_build_fallback() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock();
     let _set = crate::EnvVarGuard::set(crate::fetch::TRUST_MODE_ENV_VAR, "strict");
 
     let error = refuse_local_build_under_strict_trust()
@@ -270,14 +270,14 @@ fn strict_trust_mode_refuses_the_local_build_fallback() {
 
 #[test]
 fn permissive_trust_mode_permits_the_local_build_fallback() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock();
     let _set = crate::EnvVarGuard::set(crate::fetch::TRUST_MODE_ENV_VAR, "permissive");
     refuse_local_build_under_strict_trust().expect("permissive mode must permit the fallback");
 }
 
 #[test]
 fn absent_trust_mode_defaults_to_permitting_the_local_build_fallback() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock();
     let _unset = crate::EnvVarGuard::remove(crate::fetch::TRUST_MODE_ENV_VAR);
     refuse_local_build_under_strict_trust().expect("default trust mode must permit the fallback");
 }
@@ -378,7 +378,7 @@ fn linux_driver_runtime_path_puts_toolchain_then_nix_then_inherited_loader_paths
     if crate::platform::host::facts::os() != crate::platform::host::facts::HostOs::Linux {
         return;
     }
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock();
     let temp = tempfile::tempdir().unwrap();
     let plan = sample_plan();
     let rustc = fake_rustc_for_driver_runtime(&temp);
@@ -410,7 +410,7 @@ fn linux_driver_runtime_path_ignores_an_empty_nix_loader_path() {
     if crate::platform::host::facts::os() != crate::platform::host::facts::HostOs::Linux {
         return;
     }
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock();
     let temp = tempfile::tempdir().unwrap();
     let plan = sample_plan();
     let rustc = fake_rustc_for_driver_runtime(&temp);
@@ -439,7 +439,7 @@ fn linux_driver_runtime_path_ignores_an_unset_nix_loader_path() {
     if crate::platform::host::facts::os() != crate::platform::host::facts::HostOs::Linux {
         return;
     }
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock();
     let temp = tempfile::tempdir().unwrap();
     let plan = sample_plan();
     let rustc = fake_rustc_for_driver_runtime(&temp);
@@ -491,7 +491,7 @@ fn timed_out_probe_verdict_refuses_the_local_build_fallback() {
 
 #[test]
 fn absent_driver_probes_as_no_usable_driver() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock();
     let _unset = crate::EnvVarGuard::remove("DYLINT_DRIVER_PATH");
     let temp = tempfile::tempdir().unwrap();
     let paths = SoldrPaths::with_root(temp.path().join("soldr"));
@@ -513,7 +513,7 @@ fn hanging_driver_probes_as_timed_out_and_stays_bounded() {
     if crate::platform::host::facts::os() == crate::platform::host::facts::HostOs::Windows {
         return;
     }
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock();
     let _unset = crate::EnvVarGuard::remove("DYLINT_DRIVER_PATH");
     let temp = tempfile::tempdir().unwrap();
     let paths = SoldrPaths::with_root(temp.path().join("soldr"));

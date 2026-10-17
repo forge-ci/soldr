@@ -8,11 +8,13 @@
 pub(crate) fn force_process_group(child: &std::process::Child) {
     match kernal_api::platform::process::force_terminate_process_group(child) {
         Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
-            let _ = std::process::Command::new("taskkill")
-                .args(["/T", "/F", "/PID", &child.id().to_string()])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
+            let _ = crate::wait::status_for(
+                std::process::Command::new("taskkill")
+                    .args(["/T", "/F", "/PID", &child.id().to_string()])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null()),
+                crate::wait::PROBE,
+            );
         }
         // Best-effort: the caller is already on the failure path and reaps
         // the direct child next.

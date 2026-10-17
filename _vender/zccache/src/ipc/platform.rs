@@ -453,10 +453,14 @@ pub(crate) mod ipc {
             .enable_io()
             .build()
             .map_err(|error| io::Error::other(format!("IPC probe runtime failed: {error}")))?;
-        runtime.block_on(async {
-            drop(connect(&endpoint).await?);
-            Ok(())
-        })
+        crate::wait::block_on_for(
+            &runtime,
+            async {
+                drop(connect(&endpoint).await?);
+                Ok(())
+            },
+            crate::wait::PROBE,
+        )?
     }
 
     #[cfg(windows)]

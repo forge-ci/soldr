@@ -207,7 +207,7 @@ impl ArtifactIndex {
 pub struct ArtifactStore {
     path: NormalizedPath,
     entries: DashMap<String, ArtifactIndex>,
-    flush_lock: std::sync::Mutex<()>,
+    flush_lock: crate::sync::Mutex<()>,
     /// Set when a `load_from_disk` found the blob present but unparseable.
     ///
     /// This is the #1157 seam between the two crates. The corrupt arm lives
@@ -269,7 +269,7 @@ impl ArtifactStore {
         Self {
             path: NormalizedPath::new(path),
             entries: DashMap::new(),
-            flush_lock: std::sync::Mutex::new(()),
+            flush_lock: crate::sync::Mutex::new(()),
             started_corrupt: std::sync::atomic::AtomicBool::new(false),
             dirty: std::sync::atomic::AtomicBool::new(false),
         }
@@ -489,8 +489,7 @@ impl ArtifactStore {
     pub fn flush(&self) -> std::io::Result<()> {
         let _flush_guard = self
             .flush_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         // Clear dirty BEFORE taking the snapshot, not after: a mutation that
         // lands concurrently (even mid-snapshot, per the fuzzy-snapshot note
         // below) calls `mark_dirty()` again and correctly leaves the flag set

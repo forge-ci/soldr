@@ -11,12 +11,12 @@ use crate::memory::{
 };
 use crate::tail::OutputTail;
 use crate::write_stderr;
-use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use soldr_platform::process::test_child;
+use soldr_platform::sync::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -179,7 +179,7 @@ fn space_resume(admission_dir: &Path) {
         }
         Err(_) => return,
     };
-    if file.lock_exclusive().is_err() {
+    if soldr_platform::wait::lock_exclusive_for(&file, soldr_platform::wait::LONG_LOCK).is_err() {
         return;
     }
     let since = file
@@ -279,7 +279,7 @@ impl TreeMonitor {
                 return;
             };
             {
-                let mut state = shared.lock().expect("monitor state");
+                let mut state = shared.lock();
                 if sample.rss_bytes > state.peak.rss_bytes {
                     state.peak = sample.clone();
                 }
@@ -304,8 +304,8 @@ impl TreeMonitor {
 
     fn stop(self) -> MonitorState {
         let _ = self.stop.send(());
-        let _ = self.handle.join();
-        std::mem::take(&mut *self.state.lock().expect("monitor state"))
+        let _ = soldr_platform::wait::join_for(self.handle, soldr_platform::wait::HELPER_JOIN);
+        std::mem::take(&mut *self.state.lock())
     }
 }
 

@@ -474,12 +474,12 @@ fn wait_for_tool_child(
         paths,
     }) = pep517
     else {
-        return Ok(command.status()?);
+        return Ok(crate::platform::wait::status_for(command, crate::platform::wait::LONG_CHILD)?);
     };
     if !(state.should_retry() || state.explicit_fast) {
-        return Ok(command.status()?);
+        return Ok(crate::platform::wait::status_for(command, crate::platform::wait::LONG_CHILD)?);
     }
-    let first = command.output()?;
+    let first = crate::platform::wait::output_for(command, crate::platform::wait::LONG_CHILD)?;
     emit_child_output(&first);
     if state.should_retry() && crate::linker::looks_like_linker_failure(&first) {
         eprintln!(
@@ -487,7 +487,7 @@ fn wait_for_tool_child(
             state.candidate.as_deref().unwrap_or("unknown")
         );
         state.clear_injected_env(command);
-        let fallback = command.output()?;
+        let fallback = crate::platform::wait::output_for(command, crate::platform::wait::LONG_CHILD)?;
         emit_child_output(&fallback);
         crate::linker::report_fallback_outcome(
             &fallback,

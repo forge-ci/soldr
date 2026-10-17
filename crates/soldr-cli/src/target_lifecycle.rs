@@ -14,6 +14,7 @@ use crate::prepare_cmd::{classify_target, TargetAbi, TargetOs};
 
 mod gnu_bundle;
 mod musl_bundle;
+use crate::platform::sync::Mutex;
 #[cfg(test)]
 use gnu_bundle::gnu_bundle_host_message;
 use gnu_bundle::{decide_gnu_bundle, GnuBundleDecision};
@@ -74,7 +75,7 @@ pub(crate) struct EnvironmentPlan {
 /// work at all (the host std ships with the toolchain, and on a musl host
 /// rustup cannot provide one — soldr#2614).
 pub(crate) fn provision_target_toolchain(target: &str) -> Result<(), SoldrError> {
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::OnceLock;
     static PROVISIONED: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
 
     let base = crate::target_alias::split_glibc_floor(target).map_or(target, |(base, _)| base);
@@ -82,19 +83,12 @@ pub(crate) fn provision_target_toolchain(target: &str) -> Result<(), SoldrError>
         return Ok(());
     }
     let provisioned = PROVISIONED.get_or_init(|| Mutex::new(BTreeSet::new()));
-    if provisioned
-        .lock()
-        .expect("provisioned-target set poisoned")
-        .contains(base)
-    {
+    if provisioned.lock().contains(base) {
         return Ok(());
     }
     crate::toolchain_readiness::ensure_pinned_toolchain_installed()?;
     crate::prepare_cmd::rustup_add_target(base)?;
-    provisioned
-        .lock()
-        .expect("provisioned-target set poisoned")
-        .insert(base.to_string());
+    provisioned.lock().insert(base.to_string());
     Ok(())
 }
 

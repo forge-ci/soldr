@@ -106,14 +106,16 @@ pub fn os_version() -> Option<String> {
 }
 
 fn registry_os_version() -> Option<String> {
-    let output = std::process::Command::new("reg")
+    let output = crate::platform::wait::output_for(
+        std::process::Command::new("reg")
         .args([
             "query",
             r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
             "/v",
             "CurrentBuildNumber",
-        ])
-        .output()
+        ]),
+        crate::platform::wait::PROBE,
+    )
         .ok()?;
     if !output.status.success() {
         return None;
@@ -127,13 +129,15 @@ fn registry_os_version() -> Option<String> {
 }
 
 fn powershell_os_version() -> Option<String> {
-    let output = std::process::Command::new("powershell")
+    let output = crate::platform::wait::output_for(
+        std::process::Command::new("powershell")
         .args([
             "-NoProfile",
             "-Command",
             "[System.Environment]::OSVersion.Version | Select-Object -Property Major,Minor,Build | ConvertTo-Json -Compress",
-        ])
-        .output()
+        ]),
+        crate::platform::wait::PROBE,
+    )
         .ok()?;
     if !output.status.success() {
         return None;

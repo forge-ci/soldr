@@ -189,10 +189,10 @@ mod tests {
     /// Process-global env-var test mutex — `set_var` is process-wide and
     /// any test that reads or writes `ZCCACHE_PROBE_BYPASS` must hold
     /// this lock to avoid racing with sibling tests.
-    static BYPASS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static BYPASS_ENV_LOCK: crate::sync::Mutex<()> = crate::sync::Mutex::new(());
 
     fn with_bypass_enabled<R>(f: impl FnOnce() -> R) -> R {
-        let _guard = BYPASS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = BYPASS_ENV_LOCK.lock();
         let prev = std::env::var("ZCCACHE_PROBE_BYPASS").ok();
         std::env::set_var("ZCCACHE_PROBE_BYPASS", "1");
         let result = f();
@@ -204,7 +204,7 @@ mod tests {
     }
 
     fn with_bypass_unset<R>(f: impl FnOnce() -> R) -> R {
-        let _guard = BYPASS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = BYPASS_ENV_LOCK.lock();
         let prev = std::env::var("ZCCACHE_PROBE_BYPASS").ok();
         std::env::remove_var("ZCCACHE_PROBE_BYPASS");
         let result = f();

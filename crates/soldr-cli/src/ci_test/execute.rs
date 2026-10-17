@@ -31,7 +31,7 @@ pub(super) use super::executor_contract::{require_dependencies, validate_tail_de
 /// succeeds rather than after Dylint's analysis (soldr#3446). Individual tests
 /// may launch nested compiler fixtures; those and Dylint still share the
 /// daemon's canonical admission gate.
-/// Dylint manifests remain sequential because all seven intentionally share one
+/// Dylint manifests remain sequential because all eight intentionally share one
 /// target tree per domain. After both branches join, doctests and the three
 /// non-compiling policy consumers run together from that completed join.
 ///
@@ -476,7 +476,7 @@ fn run_stage_group(spawner: &impl StageSpawner, stages: &[&Stage]) -> Result<i32
 }
 
 fn wait_one(mut child: Child, stage: &Stage) -> Result<i32, SoldrError> {
-    let status = child.wait()?;
+    let status = crate::platform::wait::wait_for(&mut child, crate::platform::wait::LONG_CHILD)?;
     report_status(stage, &child, status);
     Ok(exit_code(status))
 }
@@ -547,7 +547,7 @@ fn cancel_child(stage: &Stage, child: &mut Child) {
             child.id()
         ),
     }
-    if let Ok(status) = child.wait() {
+    if let Ok(status) = crate::platform::wait::wait_for(child, crate::platform::wait::PROBE) {
         eprintln!(
             "soldr ci-test: stage `{}` (pid {}) canceled with {status}",
             stage.name,
@@ -620,7 +620,7 @@ fn verify_dylint_test_targets(plan: &CiTestPlan) -> Result<(), SoldrError> {
                 String::new()
             };
             return Err(SoldrError::Other(format!(
-                "soldr ci-test: Dylint UI tests created compiler artifacts in {}; all seven tests must share {}. Found:{listing}{more}",
+                "soldr ci-test: Dylint UI tests created compiler artifacts in {}; all eight tests must share {}. Found:{listing}{more}",
                 local_target.display(),
                 shared.display()
             )));

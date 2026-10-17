@@ -55,10 +55,11 @@
 use super::subcommand::first_cargo_subcommand;
 use crate::binaries::rustup_binary;
 use crate::core::{apply_implicit_toolchain_homes, read_rust_toolchain_manifest, SoldrPaths};
+use crate::platform::sync::Mutex;
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 /// Env var that disables the auto-install. Accepts `1`/`true`/`yes`/`on`.
 pub const SOLDR_NO_AUTO_COMPONENT_ENV: &str = "SOLDR_NO_AUTO_COMPONENT";
@@ -152,10 +153,7 @@ pub(crate) fn maybe_install_component_for_subcommand(args: &[String], paths: &So
 
     let memo_id = memo_key(channel.as_deref().unwrap_or(""), row.component);
     {
-        let guard = match memo().lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
+        let guard = memo().lock();
         if guard.contains(&memo_id) {
             return;
         }
@@ -178,10 +176,7 @@ pub(crate) fn maybe_install_component_for_subcommand(args: &[String], paths: &So
 }
 
 fn record_memo(key: String) {
-    let mut guard = match memo().lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
+    let mut guard = memo().lock();
     guard.insert(key);
 }
 
@@ -212,7 +207,7 @@ fn probe_component_installed(probe_binary: &str, channel: Option<&str>) -> bool 
     cmd.args(["which", probe_binary]);
     apply_implicit_toolchain_homes(&mut cmd, None);
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
-    matches!(cmd.status(), Ok(s) if s.success())
+    matches!(crate::platform::wait::status_for(&mut cmd, crate::platform::wait::PROBE), Ok(s) if s.success())
 }
 
 fn run_component_add(component: &str, channel: Option<&str>) -> bool {
@@ -232,7 +227,7 @@ fn run_component_add(component: &str, channel: Option<&str>) -> bool {
     // Let rustup print its install progress so users see what is
     // happening. The notice we emitted on stderr above is the
     // soldr-side framing.
-    matches!(cmd.status(), Ok(s) if s.success())
+    matches!(crate::platform::wait::status_for(&mut cmd, crate::platform::wait::LONG_CHILD), Ok(s) if s.success())
 }
 
 fn emit_install_notice(component: &str, channel: Option<&str>) {

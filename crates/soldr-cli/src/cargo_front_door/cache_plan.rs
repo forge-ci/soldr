@@ -236,11 +236,11 @@ impl CargoCachePlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::sync::Mutex;
     use crate::zccache::{ManagedZccacheWrapperPlan, ZccacheChildEnv};
     use std::ffi::{OsStr, OsString};
-    use std::sync::Mutex;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct EnvGuard {
         key: &'static str,
@@ -307,7 +307,9 @@ mod tests {
 
     #[test]
     fn managed_plan_applies_session_and_path_remap_env() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _native = EnvGuard::set(native_cc::NATIVE_CACHE_ENV_VAR, "0");
         let mut command = std::process::Command::new("cargo");
         let plan = CargoCachePlan {
@@ -362,7 +364,9 @@ mod tests {
 
     #[test]
     fn native_cache_opt_out_leaves_cc_and_cxx_unset() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _native = EnvGuard::set(native_cc::NATIVE_CACHE_ENV_VAR, "0");
         let _cc = EnvGuard::remove("CC");
         let _cxx = EnvGuard::remove("CXX");
@@ -381,7 +385,9 @@ mod tests {
 
     #[test]
     fn native_cache_opt_out_keeps_windows_gnu_cross_compiler_unwrapped() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _native = EnvGuard::set(native_cc::NATIVE_CACHE_ENV_VAR, "0");
         let _cc = EnvGuard::set("CC_x86_64_pc_windows_gnu", "C:\\soldr\\mingw\\bin\\gcc.exe");
         let _cxx = EnvGuard::set(
@@ -485,7 +491,9 @@ mod tests {
 
     #[test]
     fn disabled_wrapper_plan_keeps_windows_gnu_cross_compiler_unwrapped() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _cc = EnvGuard::set("CC_x86_64_pc_windows_gnu", "C:\\soldr\\mingw\\bin\\gcc.exe");
         let _cxx = EnvGuard::set(
             "CXX_x86_64_pc_windows_gnu",

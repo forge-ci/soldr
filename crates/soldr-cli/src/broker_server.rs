@@ -140,6 +140,7 @@ fn route_progress_heartbeat_interval(progress_silence: Duration) -> Duration {
         .min(Duration::from_secs(1))
 }
 
+/// `registry`/`spawn_coordinator`: raw std mutexes, typed by running_process (soldr#3836).
 struct BrokerState {
     instance_id: String,
     loader: CombinedServiceDefinitionLoader,
@@ -153,19 +154,14 @@ struct BrokerState {
     /// Which processes asked for each route, so a route whose requesters are
     /// all gone can be torn down (soldr#3054). Populated from kernel-supplied
     /// peer credentials, never from anything the caller declares.
-    route_owners: Arc<Mutex<crate::broker_reaper::RouteOwnership>>,
+    route_owners: Arc<crate::platform::sync::Mutex<crate::broker_reaper::RouteOwnership>>,
 }
 
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
 impl BrokerState {
     /// No connection open and no route owned (soldr#3193).
     fn is_idle(&self) -> bool {
-        self.connections_open.load(Ordering::Relaxed) == 0
-            && self
-                .route_owners
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .len()
-                == 0
+        self.connections_open.load(Ordering::Relaxed) == 0 && self.route_owners.lock().len() == 0
     }
 
     fn route(
@@ -284,6 +280,7 @@ impl Drop for OpenConnection {
     }
 }
 
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))] // broker lifetime
 pub(crate) fn serve(endpoint: &crate::broker_identity::ResolvedBrokerEndpoint) -> io::Result<()> {
     let endpoint = endpoint.clone();
     std::thread::Builder::new()
@@ -296,6 +293,7 @@ pub(crate) fn serve(endpoint: &crate::broker_identity::ResolvedBrokerEndpoint) -
         .map_err(|_| io::Error::other("broker runtime thread panicked"))?
 }
 
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
 fn serve_on_runtime_thread(
     endpoint: &crate::broker_identity::ResolvedBrokerEndpoint,
 ) -> io::Result<()> {
@@ -344,7 +342,9 @@ fn serve_on_runtime_thread(
         started_at: Instant::now(),
         connections_open: AtomicU64::new(0),
         fd_guard: FdPressureGuard::default(),
-        route_owners: Arc::new(Mutex::new(crate::broker_reaper::RouteOwnership::new())),
+        route_owners: Arc::new(crate::platform::sync::Mutex::new(
+            crate::broker_reaper::RouteOwnership::new(),
+        )),
     });
     bringup.phase(phase::BROKER_STATE);
     let runtime_context = runtime.enter();

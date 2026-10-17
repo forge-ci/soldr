@@ -17,7 +17,8 @@ use std::io::Write;
 use std::process::{Child, Command, ExitStatus};
 
 use super::nested_cargo_guard::{NestedCargoGuard, GUARD_TICK};
-use std::sync::{Mutex, OnceLock};
+use crate::platform::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 pub(crate) const DEBUG_TRACE_ENV_VAR: &str = "SOLDR_DEBUG_TRACE";
@@ -167,7 +168,8 @@ fn sink() -> &'static Option<Mutex<std::fs::File>> {
 fn emit(_context: &str, human: &str, json: &str) {
     eprintln!("soldr debug: [+{}s] {human}", elapsed_secs_display());
     if let Some(file) = sink() {
-        if let Ok(mut file) = file.lock() {
+        {
+            let mut file = file.lock();
             let _ = writeln!(file, "{json}");
         }
     }
@@ -541,7 +543,7 @@ impl DescendantObservation {
         }
         std::thread::sleep(std::time::Duration::from_millis(150));
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        let _ = self.pump.join();
+        let _ = crate::platform::wait::join_for(self.pump, crate::platform::wait::HELPER_JOIN);
         emit_descendant_summary(&self.context, &self.started, &self.exited);
     }
 }

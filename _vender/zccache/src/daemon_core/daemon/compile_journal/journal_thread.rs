@@ -71,7 +71,14 @@ pub(super) fn journal_thread(
     // Reused batch buffer so we don't reallocate every wakeup.
     let mut batch: Vec<JournalMessage> = Vec::with_capacity(JOURNAL_BATCH_CAP);
 
-    while let Ok(msg) = rx.recv() {
+    loop {
+        // Bounded receive: the loop re-checks every second and ends when the
+        // last sender is dropped, exactly as the unbounded receive did.
+        let msg = match crate::wait::recv_for(&rx, std::time::Duration::from_secs(1)) {
+            Ok(msg) => msg,
+            Err(crate::wait::WaitError::TimedOut(_)) => continue,
+            Err(crate::wait::WaitError::Disconnected) => break,
+        };
         batch.push(msg);
         // Drain whatever else is already queued. Bounded by JOURNAL_BATCH_CAP
         // so a runaway producer can't blow up memory in one batch.

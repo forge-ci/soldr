@@ -432,7 +432,9 @@ mod tests {
 
     #[test]
     fn env_var_overrides_when_pointing_at_real_dir() {
-        let _guard = LLVM_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LLVM_DIR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tmpdir");
         let fake_bin = tmp.path().join("hardlinked").join("bin");
         std::fs::create_dir_all(&fake_bin).expect("mk");
@@ -448,7 +450,9 @@ mod tests {
 
     #[test]
     fn env_var_ignored_when_path_is_missing() {
-        let _guard = LLVM_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = LLVM_DIR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prev = std::env::var_os(LLVM_DIR_ENV_VAR);
         std::env::set_var(LLVM_DIR_ENV_VAR, "/definitely/not/a/real/path/29384720");
         let resolved = llvm_dir_from_env_var();

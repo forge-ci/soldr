@@ -465,7 +465,7 @@ fn scrub_cached_fallback_diagnostics_once(
         .read(true)
         .write(true)
         .open(&lock_path)?;
-    fs2::FileExt::lock_exclusive(&lock)?;
+    crate::platform::wait::lock_exclusive_for(&lock, crate::platform::wait::SHORT_LOCK)?;
     if marker.exists() {
         return Ok(FallbackOutputScrub::AlreadyDone);
     }

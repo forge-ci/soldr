@@ -2598,7 +2598,6 @@ dependencies = [
 name = "soldr-core"
 version = "0.9.36"
 dependencies = [
- "fs2",
  "libc",
  "prost",
  "serde",
@@ -2673,7 +2672,6 @@ dependencies = [
 name = "soldr-nextest-wrapper"
 version = "0.9.36"
 dependencies = [
- "fs2",
  "sha2",
  "soldr-core",
  "soldr-platform",
@@ -2696,6 +2694,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "wait-timeout",
  "widestring",
  "windows-sys 0.61.2",
 ]

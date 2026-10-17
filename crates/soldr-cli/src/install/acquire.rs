@@ -233,9 +233,9 @@ pub(super) fn acquire_shallow_clone(
         let mut command = std::process::Command::new("git");
         command.args(&args);
         suppress_windows_console_window(&mut command);
-        let status = command
-            .status()
-            .map_err(|e| SoldrError::Other(format!("install: failed to spawn git: {e}")))?;
+        let status =
+            crate::platform::wait::status_for(&mut command, crate::platform::wait::LONG_CHILD)
+                .map_err(|e| SoldrError::Other(format!("install: failed to spawn git: {e}")))?;
         if !status.success() {
             // Dropping `slot` removes the unpublished staging dir.
             return Err(SoldrError::Other(format!(

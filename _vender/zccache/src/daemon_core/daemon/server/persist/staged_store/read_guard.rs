@@ -12,7 +12,7 @@ use crate::daemon_core::core::NormalizedPath;
 #[cfg(test)]
 use std::collections::HashMap;
 #[cfg(test)]
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 #[cfg(test)]
 static TEST_SHARED_LOCK_ACQUISITIONS: OnceLock<Mutex<HashMap<NormalizedPath, u64>>> =
@@ -27,7 +27,6 @@ fn test_shared_lock_acquisitions() -> &'static Mutex<HashMap<NormalizedPath, u64
 pub(in crate::daemon_core::daemon::server) fn reset_test_shared_lock_acquisitions(root: &NormalizedPath) {
     test_shared_lock_acquisitions()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(root.clone(), 0);
 }
 
@@ -35,7 +34,6 @@ pub(in crate::daemon_core::daemon::server) fn reset_test_shared_lock_acquisition
 fn record_test_shared_lock_acquisition(root: &NormalizedPath) {
     if let Some(count) = test_shared_lock_acquisitions()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get_mut(root)
     {
         *count = count.saturating_add(1);
@@ -46,7 +44,6 @@ fn record_test_shared_lock_acquisition(root: &NormalizedPath) {
 pub(in crate::daemon_core::daemon::server) fn test_shared_lock_acquisition_count(root: &NormalizedPath) -> u64 {
     test_shared_lock_acquisitions()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(root)
         .copied()
         .unwrap_or(0)
@@ -176,7 +173,9 @@ fn acquire_staged_materialization_guard_from(
     wait_started: Instant,
 ) -> io::Result<StagedMaterializationGuard> {
     let root = staged_root(artifact_dir);
-    let store_lock = kernal_api::platform::fs::lock_shared_owned(open_store_lock(&root)?)?;
+    // Bounded: every exclusive holder is itself bounded (maintenance 2 s,
+    // Clear 30 s), so a longer wait means a stuck peer.
+    let store_lock = crate::wait::lock_shared_owned_for(|| open_store_lock(&root), crate::wait::SHORT_LOCK)?;
     #[cfg(test)]
     record_test_shared_lock_acquisition(&root);
     let wait_ns = wait_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
@@ -262,7 +261,9 @@ fn acquire_staged_materialization_guard_for_state_from(
     }
 
     let root = staged_root(artifact_dir);
-    let store_lock = kernal_api::platform::fs::lock_shared_owned(open_store_lock(&root)?)?;
+    // Bounded: every exclusive holder is itself bounded (maintenance 2 s,
+    // Clear 30 s), so a longer wait means a stuck peer.
+    let store_lock = crate::wait::lock_shared_owned_for(|| open_store_lock(&root), crate::wait::SHORT_LOCK)?;
     #[cfg(test)]
     record_test_shared_lock_acquisition(&root);
     let store_lock = Arc::new(StagedMaterializationLock {

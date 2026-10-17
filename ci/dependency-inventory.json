@@ -57,7 +57,6 @@
       "zstd"
     ],
     "soldr-core": [
-      "fs2",
       "libc",
       "prost",
       "serde",
@@ -112,7 +111,6 @@
       "zstd"
     ],
     "soldr-nextest-wrapper": [
-      "fs2",
       "sha2",
       "wait-timeout"
     ],
@@ -127,6 +125,7 @@
       "serde_json",
       "tar",
       "tokio",
+      "wait-timeout",
       "widestring",
       "windows-sys"
     ]

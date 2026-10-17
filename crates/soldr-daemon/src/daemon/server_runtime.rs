@@ -93,6 +93,8 @@ fn maybe_init_tokio_console() {
     }
 }
 
+// Process-lifetime runtime: the daemon's own lifetime (soldr#3836).
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
 pub fn run(opts: ServerOptions) -> Result<(), ServerError> {
     // soldr#3163: start the bringup clock at process entry, before anything
     // that can be slow. The recorder has no log yet -- `SoldrPaths` is not

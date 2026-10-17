@@ -11,8 +11,8 @@ fn staged_rollout_defaults_to_rust_and_native_and_preserves_compatibility_switch
     assert!(staged_lane_enabled_for(None, Gcc));
     assert!(staged_lane_enabled_for(None, Msvc));
     assert!(staged_archive_lane_enabled_for(None));
-    assert!(!staged_link_lane_enabled_for(None));
-    assert!(!staged_exec_lane_enabled_for(None));
+    assert!(staged_link_lane_enabled_for(None));
+    assert!(staged_exec_lane_enabled_for(None));
 
     for disabled in ["", "0", "false", "off", "no", " OFF "] {
         assert!(!staged_artifacts_enabled_for(Some(disabled)));

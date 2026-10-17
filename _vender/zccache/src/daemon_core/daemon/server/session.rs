@@ -92,8 +92,7 @@ pub(super) async fn handle_session_start(
         let warning_opt = {
             let guard = state
                 .depgraph_load_warning
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .lock();
             guard.clone()
         };
         if let Some(warning) = warning_opt {

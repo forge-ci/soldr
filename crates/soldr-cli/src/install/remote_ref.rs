@@ -27,8 +27,7 @@ pub(crate) fn resolve_remote_sha(clone_url: &str, git_ref: &Ref) -> Result<Strin
     // absolute, so a neutral cwd is safe.
     command.current_dir(std::env::temp_dir());
     suppress_windows_console_window(&mut command);
-    let out = command
-        .output()
+    let out = crate::platform::wait::output_for(&mut command, crate::platform::wait::NETWORK_PROBE)
         .map_err(|e| SoldrError::Other(format!("install: failed to spawn git ls-remote: {e}")))?;
     if !out.status.success() {
         return Err(SoldrError::Other(format!(

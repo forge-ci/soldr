@@ -320,7 +320,6 @@ pub fn emit_line(line: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     /// Test-wide lock that serializes the env-var mutations below.
     /// Without it, parallel test execution can clobber
@@ -329,7 +328,7 @@ mod tests {
     /// x64 where `mark_records_phase_when_enabled` flaked with
     /// `phases.len() == 0` instead of `2`. Reproes locally too if
     /// you re-run the suite a few times.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Local RAII guard that sets / restores the profile env var
     /// AND holds `ENV_LOCK` for the lifetime of the guard.
@@ -341,7 +340,9 @@ mod tests {
 
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
-            let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let guard = ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let prior = std::env::var_os(key);
             std::env::set_var(key, value);
             Self {
@@ -352,7 +353,9 @@ mod tests {
         }
 
         fn unset(key: &'static str) -> Self {
-            let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let guard = ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let prior = std::env::var_os(key);
             std::env::remove_var(key);
             Self {

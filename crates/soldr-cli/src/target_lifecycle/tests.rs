@@ -203,7 +203,7 @@ fn encoded_required_flags_preserve_paths_with_spaces() {
 fn applying_target_flags_consumes_higher_precedence_globals() {
     let _lock = crate::TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|error| error.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let target_key = "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS";
     let names = [target_key, "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"];
     let previous = names.map(std::env::var_os);

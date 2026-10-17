@@ -1,0 +1,22 @@
+error: raw `std::sync::RwLock` constructed outside the bounded-wait boundary; use `soldr_platform::sync::RwLock` (soldr#3836)
+  --> $DIR/disallowed_rwlock.rs:4:16
+   |
+LL |     let lock = RwLock::new(0);
+   |                ^^^^^^^^^^^
+   |
+   = note: `#[deny(ban_raw_sync_primitive)]` on by default
+
+error: raw `std::sync::RwLock::read` can wait without a bound; use `soldr_platform::sync` -- `lock()`/`read()`/`write()` for a critical section (watchdog-bounded) or `lock_for`/`read_for`/`write_for` for a timeout (soldr#3836)
+  --> $DIR/disallowed_rwlock.rs:5:17
+   |
+LL |     let _read = lock.read();
+   |                 ^^^^^^^^^^^
+
+error: raw `std::sync::RwLock::try_write` bypasses the bounded-wait boundary; use `soldr_platform::sync` (`try_lock`, or `lock_for`/`read_for`/`write_for` for a timeout) (soldr#3836)
+  --> $DIR/disallowed_rwlock.rs:6:18
+   |
+LL |     let _write = lock.try_write();
+   |                  ^^^^^^^^^^^^^^^^
+
+error: aborting due to 3 previous errors
+

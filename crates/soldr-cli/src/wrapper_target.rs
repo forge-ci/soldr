@@ -132,8 +132,8 @@ pub fn read_build_session_id_env() -> Option<u64> {
 #[cfg(test)]
 mod memo_tests {
     use super::*;
+    use crate::platform::sync::Mutex;
     use std::ffi::OsString;
-    use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -167,7 +167,7 @@ mod memo_tests {
 
     #[test]
     fn memo_returns_false_when_env_unset() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock();
         let _g = EnvGuard::remove(TARGET_REGISTRY_RECORDED_ENV_VAR);
         let temp = tempfile::tempdir().unwrap();
         assert!(!target_registry_memo_matches(temp.path()));
@@ -175,7 +175,7 @@ mod memo_tests {
 
     #[test]
     fn memo_returns_false_when_env_empty() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock();
         let _g = EnvGuard::set(TARGET_REGISTRY_RECORDED_ENV_VAR, "");
         let temp = tempfile::tempdir().unwrap();
         assert!(!target_registry_memo_matches(temp.path()));
@@ -183,7 +183,7 @@ mod memo_tests {
 
     #[test]
     fn memo_matches_exact_path() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock();
         let temp = tempfile::tempdir().unwrap();
         let _g = EnvGuard::set(TARGET_REGISTRY_RECORDED_ENV_VAR, temp.path().as_os_str());
         assert!(target_registry_memo_matches(temp.path()));
@@ -191,7 +191,7 @@ mod memo_tests {
 
     #[test]
     fn memo_rejects_unrelated_path() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock();
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
         let _g = EnvGuard::set(TARGET_REGISTRY_RECORDED_ENV_VAR, a.path().as_os_str());
@@ -202,7 +202,7 @@ mod memo_tests {
     fn memo_matches_via_canonicalization() {
         // Build a path with redundant components (e.g. trailing dot-slash)
         // that canonicalizes to the same dir as the env-var value.
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock();
         let temp = tempfile::tempdir().unwrap();
         let canonical = std::fs::canonicalize(temp.path()).unwrap();
         let _g = EnvGuard::set(TARGET_REGISTRY_RECORDED_ENV_VAR, canonical.as_os_str());

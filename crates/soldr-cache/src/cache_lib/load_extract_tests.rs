@@ -84,9 +84,7 @@ fn restored_file_runs_after_a_fork_during_its_staged_write(spawn_guard: bool) {
     let (opened_tx, opened_rx) = mpsc::channel::<()>();
     let (resume_tx, resume_rx) = mpsc::channel::<()>();
     let resume_rx = std::sync::Mutex::new(resume_rx);
-    *extract_test_hooks::HOOK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(Box::new(move |staged: &Path| {
+    *extract_test_hooks::HOOK.lock() = Some(Box::new(move |staged: &Path| {
         if !staged.to_string_lossy().contains(PROBE_NAME) {
             return;
         }
@@ -138,9 +136,7 @@ fn restored_file_runs_after_a_fork_during_its_staged_write(spawn_guard: bool) {
 
     let report = loader.join().unwrap().expect("load must succeed");
     assert_eq!(report.cache_files_restored, 1);
-    *extract_test_hooks::HOOK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = None;
+    *extract_test_hooks::HOOK.lock() = None;
 
     // The published path exists; the only question is whether some child
     // still holds its inode open for writing.

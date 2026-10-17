@@ -36,7 +36,12 @@ pub(super) fn with_lifecycle_journal_lock<T>(path: &Path, f: impl FnOnce() -> T)
         .truncate(false)
         .write(true)
         .open(&lock_path)
-        .and_then(|file| file.lock_exclusive().map(|()| file));
+        // Bounded: daemon worker threads must not stall behind a stopped
+        // process; past the bound this proceeds unlocked, as on any error.
+        .and_then(|file| {
+            crate::platform::wait::lock_exclusive_for(&file, std::time::Duration::from_secs(2))
+                .map(|()| file)
+        });
     if let Err(err) = &guard {
         eprintln!("soldr: lifecycle journal lock unavailable: {err}");
     }

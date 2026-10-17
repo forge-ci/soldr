@@ -32,9 +32,9 @@
 //! extension the wheel tag describes. Otherwise both are native host builds.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use crate::core::SoldrError;
+use crate::platform::sync::Mutex;
 
 /// The staging helper, byte-for-byte the PEP 517 backend's own module.
 const BUNDLE_BINS_PY: &str = include_str!("../../../src/soldr/_bundle_bins.py");
@@ -140,9 +140,7 @@ pub(crate) fn request_for_workspace(
         pyproject,
         build: build.clone(),
     };
-    *BUNDLE_REQUEST
-        .lock()
-        .unwrap_or_else(|error| error.into_inner()) = Some(request);
+    *BUNDLE_REQUEST.lock() = Some(request);
     Ok(())
 }
 
@@ -186,11 +184,7 @@ fn python_candidates() -> Vec<std::ffi::OsString> {
 /// Run the registered `bundle-bins` staging against `wheel`, if `soldr wheel`
 /// registered one. A no-op for every other maturin invocation.
 pub(crate) fn stage_requested(wheel: &Path) -> Result<(), SoldrError> {
-    let Some(request) = BUNDLE_REQUEST
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone()
-    else {
+    let Some(request) = BUNDLE_REQUEST.lock().clone() else {
         return Ok(());
     };
     let failure = |detail: String| {
@@ -214,10 +208,12 @@ pub(crate) fn stage_requested(wheel: &Path) -> Result<(), SoldrError> {
         // build step, not a recursive chain: mark them with the one-hop
         // self-spawn edge the reentrancy guard sanctions and each child
         // consumes on entry (soldr#2739), as gc and output capture do.
-        let status = std::process::Command::new(&python)
-            .args(&args)
-            .env(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR, "1")
-            .status();
+        let status = crate::platform::wait::status_for(
+            std::process::Command::new(&python)
+                .args(&args)
+                .env(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR, "1"),
+            crate::platform::wait::LONG_CHILD,
+        );
         match status {
             Ok(status) if status.success() => return Ok(()),
             Ok(status) => {

@@ -54,7 +54,8 @@
 //!   marks into it would silence the one case they exist to explain. Do not
 //!   "fix" the asymmetry; it is the point.
 
-use std::sync::{Mutex, OnceLock};
+use crate::platform::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 /// Opt-in switch. Scoped name per the `SOLDR_<SCOPE>_<TRACE|DEBUG>` convention
@@ -160,9 +161,7 @@ pub(crate) fn phase(name: &str) {
     let Some(clock) = clock() else {
         return;
     };
-    let Ok(mut clock) = clock.lock() else {
-        return;
-    };
+    let mut clock = clock.lock();
     let now = Instant::now();
     let phase_ms = now.duration_since(clock.phase_started).as_millis();
     let total_ms = now.duration_since(clock.started).as_millis();

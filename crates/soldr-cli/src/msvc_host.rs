@@ -693,8 +693,8 @@ pub fn vswhere_path() -> PathBuf {
 }
 
 fn run_vswhere_install_path(vswhere: &Path) -> Result<PathBuf, MsvcDetectionError> {
-    let out = std::process::Command::new(vswhere)
-        .args([
+    let out = crate::platform::wait::output_for(
+        std::process::Command::new(vswhere).args([
             "-latest",
             "-products",
             "*",
@@ -705,8 +705,9 @@ fn run_vswhere_install_path(vswhere: &Path) -> Result<PathBuf, MsvcDetectionErro
             "-format",
             "value",
             "-utf8",
-        ])
-        .output()?;
+        ]),
+        crate::platform::wait::PROBE,
+    )?;
     if !out.status.success() {
         return Err(MsvcDetectionError::VswhereFailed(format!(
             "status={:?} stderr={}",

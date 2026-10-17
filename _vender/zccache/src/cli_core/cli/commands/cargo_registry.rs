@@ -234,7 +234,7 @@ pub(crate) fn cmd_cargo_registry_clean() -> ExitCode {
 mod tests {
     use super::*;
     use std::ffi::{OsStr, OsString};
-    use std::sync::Mutex;
+    use crate::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -256,7 +256,7 @@ mod tests {
     }
 
     fn with_env_overrides<F: FnOnce()>(overrides: &[(&'static str, Option<&OsStr>)], f: F) {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _lock = ENV_LOCK.lock();
         let previous = overrides
             .iter()
             .map(|(var, _)| (*var, std::env::var_os(var)))

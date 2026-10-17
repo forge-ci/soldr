@@ -30,8 +30,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
+use crate::platform::sync::Mutex;
 use serde::Deserialize;
 
 /// Who provides a `links` name in the resolved dependency graph.
@@ -105,7 +106,7 @@ pub(crate) fn provider_from_metadata_json(bytes: &[u8], links: &str) -> LinksPro
 pub(crate) fn prime_metadata_for_test(workspace_root: &Path, target: &str, metadata_json: &[u8]) {
     let result = links_map_from_metadata_json(metadata_json);
     let cache = LINKS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = cache.lock().unwrap_or_else(|error| error.into_inner());
+    let mut guard = cache.lock();
     guard.insert(
         (workspace_root.to_path_buf(), target.to_string(), Vec::new()),
         result,
@@ -131,16 +132,17 @@ fn links_map(
         feature_args.to_vec(),
     );
     let cache = LINKS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    // A poisoned lock means some other caller panicked mid-probe. That
-    // is not a reason to mis-link, so fall through to a fresh probe
-    // rather than unwrapping into a panic of our own.
-    if let Ok(guard) = cache.lock() {
+    // The probe runs outside the lock: it spawns `cargo metadata`, which
+    // must never sit inside a watchdog-bounded critical section (soldr#3836).
+    {
+        let guard = cache.lock();
         if let Some(cached) = guard.get(&key) {
             return cached.clone();
         }
     }
     let result = probe_links_map(workspace_root, target, feature_args);
-    if let Ok(mut guard) = cache.lock() {
+    {
+        let mut guard = cache.lock();
         guard.insert(key, result.clone());
     }
     result

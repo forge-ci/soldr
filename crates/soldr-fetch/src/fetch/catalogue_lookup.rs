@@ -71,6 +71,7 @@ use super::catalogue_transport::{
     cache_busted_url, materialize_catalogue_entry, verify_catalogue_asset_sha256,
 };
 use crate::core::{SoldrError, SoldrPaths};
+use crate::platform::sync::Mutex;
 
 /// soldr#988 Phase 2 — default origin of the v1 catalogue document
 /// published by `zackees/soldr-toolchain`. The full URL we fetch is
@@ -271,54 +272,50 @@ pub const MAX_CACHED_CONFIGS: usize = 8;
 /// each leaked a duplicate. `Arc` in a bounded `Vec` means an eviction
 /// actually frees, and the bound is not a function of what callers ask for.
 ///
-/// # Why holding this async mutex across an await is safe
+/// # Single-flight without a lock held across the fetch (soldr#3836)
 ///
-/// [`get_or_fetch_for`] holds the lock across [`fetch_for`]. That is what
-/// makes the fetch single-flight: two concurrent callers on one configuration
-/// produce one request and the second finds a hit. It is sound only because
-/// nothing reachable from `fetch_for` calls back into [`get_or_fetch`] --
-/// neither `fetch_configured_once`, `fetch_v1_index_from`,
-/// `fetch_v2_index_from`, `bind_v2_publication_state`, nor `stream_download`
-/// consults this cache -- so the mutex cannot be re-entered.
+/// Each configuration owns a [`CatalogueSlot`], a `OnceCell` initialised by
+/// whichever caller reaches it first; concurrent callers on one configuration
+/// await that one fetch and the second finds a hit. The cache lock itself is
+/// a `soldr_platform::sync` critical section held only to find or insert the
+/// slot -- never across [`fetch_for`], whose network retries can outlast the
+/// lock watchdog's hold limit. It previously was a `crate::platform::sync::AsyncMutex` held
+/// across the fetch, which serialised distinct configurations behind one
+/// network round trip and would have deadlocked silently on re-entry.
 ///
-/// **That is an invariant a future caller must not break, not an
-/// observation.** Adding a `get_or_fetch` call anywhere under `fetch_for`
-/// would deadlock every catalogue lookup in the process, and a
-/// `tokio::sync::Mutex` reports re-entry as nothing at all: it simply never
-/// wakes. If that call graph ever genuinely needs the cache, this has to
-/// become an explicit per-configuration in-flight state machine rather than a
-/// lock held across the await.
+/// Re-entry is still forbidden for one configuration: nothing reachable from
+/// `fetch_for` may call [`get_or_fetch`] for the configuration it is
+/// fetching, or that caller would await its own cell. Distinct
+/// configurations no longer serialise against each other.
 ///
-/// Distinct configurations serialise against each other too. Acceptable: a
-/// fetch is rare, and there is exactly one configuration in every real run.
 /// Most-recently-used first, so eviction is `truncate` and a hit is a
-/// `remove` + `insert(0)`.
-type CatalogueEntries = Vec<(CatalogueConfig, Arc<ManifestIndex>)>;
+/// `remove` + `insert(0)`. Evicting a slot whose fetch is still in flight is
+/// harmless: its waiters hold their own `Arc` and still receive the result.
+type CatalogueEntries = Vec<(CatalogueConfig, CatalogueSlot)>;
 
-fn promote_cached(
-    entries: &mut CatalogueEntries,
+/// One configuration's catalogue, fetched at most once per residency.
+type CatalogueSlot = Arc<tokio::sync::OnceCell<Arc<ManifestIndex>>>;
+
+fn promote_cached<V: Clone>(
+    entries: &mut Vec<(CatalogueConfig, V)>,
     config: &CatalogueConfig,
-) -> Option<Arc<ManifestIndex>> {
+) -> Option<V> {
     let position = entries.iter().position(|(cached, _)| cached == config)?;
     let hit = entries.remove(position);
-    let index = Arc::clone(&hit.1);
+    let value = hit.1.clone();
     entries.insert(0, hit);
-    Some(index)
+    Some(value)
 }
 
-fn insert_cached(
-    entries: &mut CatalogueEntries,
-    config: CatalogueConfig,
-    index: Arc<ManifestIndex>,
-) {
-    entries.insert(0, (config, index));
+fn insert_cached<V>(entries: &mut Vec<(CatalogueConfig, V)>, config: CatalogueConfig, value: V) {
+    entries.insert(0, (config, value));
     entries.truncate(MAX_CACHED_CONFIGS);
 }
 
-static CATALOGUE_CACHE: OnceLock<tokio::sync::Mutex<CatalogueEntries>> = OnceLock::new();
+static CATALOGUE_CACHE: OnceLock<Mutex<CatalogueEntries>> = OnceLock::new();
 
-fn catalogue_cache() -> &'static tokio::sync::Mutex<CatalogueEntries> {
-    CATALOGUE_CACHE.get_or_init(|| tokio::sync::Mutex::new(Vec::new()))
+fn catalogue_cache() -> &'static Mutex<CatalogueEntries> {
+    CATALOGUE_CACHE.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 /// Number of distinct configurations currently resident.
@@ -328,7 +325,7 @@ fn catalogue_cache() -> &'static tokio::sync::Mutex<CatalogueEntries> {
 /// nobody notices regressing. Production code has no reason to ask.
 #[doc(hidden)]
 pub async fn cached_catalogue_config_count() -> usize {
-    catalogue_cache().lock().await.len()
+    catalogue_cache().lock().len()
 }
 
 /// True when [`MANIFEST_DISABLE_ENV_VAR`] is set to a recognised soldr "on"
@@ -398,18 +395,21 @@ pub async fn get_or_fetch() -> Arc<ManifestIndex> {
 /// snapshotted, so a caller needing the configuration for its own decisions
 /// cannot end up with a second, different one.
 async fn get_or_fetch_for(config: &CatalogueConfig) -> Arc<ManifestIndex> {
-    let mut cache = catalogue_cache().lock().await;
-    if let Some(index) = promote_cached(&mut cache, config) {
-        // Move-to-front: with `MAX_CACHED_CONFIGS` this small, recency is the
-        // only eviction signal worth keeping, and it costs one `Vec` shuffle
-        // on a path that is already holding a lock.
-        return index;
-    }
-    // The lock is deliberately held across this await; see [`CATALOGUE_CACHE`]
-    // for the re-entry invariant that makes it safe.
-    let index = Arc::new(fetch_for(config).await);
-    insert_cached(&mut cache, config.clone(), Arc::clone(&index));
-    index
+    // Move-to-front on a hit: with `MAX_CACHED_CONFIGS` this small, recency
+    // is the only eviction signal worth keeping. The guard drops at the end
+    // of this block, before any await (see [`CatalogueEntries`]).
+    let slot = {
+        let mut cache = catalogue_cache().lock();
+        promote_cached(&mut cache, config).unwrap_or_else(|| {
+            let slot = CatalogueSlot::default();
+            insert_cached(&mut cache, config.clone(), Arc::clone(&slot));
+            slot
+        })
+    };
+    let index = slot
+        .get_or_init(|| async { Arc::new(fetch_for(config).await) })
+        .await;
+    Arc::clone(index)
 }
 
 /// Fetch the catalogue this configuration names, degrading to an empty index.
@@ -684,7 +684,7 @@ fn print_catalogue_error(url: &str, reason: &str, json: bool) {
 // integration test binary"; soldr#2934 consolidated per-file binaries into
 // category targets and made that premise false.
 //
-// The cache unit test below uses a fresh local `CatalogueEntries` value and
+// The cache unit test below uses a fresh local entry list and
 // never touches the process-wide cache.
 
 #[cfg(test)]
@@ -704,7 +704,7 @@ mod lru_tests {
             .iter()
             .map(|_| Arc::new(ManifestIndex::empty()))
             .collect();
-        let mut entries = CatalogueEntries::new();
+        let mut entries: Vec<(CatalogueConfig, Arc<ManifestIndex>)> = Vec::new();
 
         for position in 0..MAX_CACHED_CONFIGS {
             insert_cached(

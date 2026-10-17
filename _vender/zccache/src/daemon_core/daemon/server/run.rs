@@ -641,7 +641,7 @@ pub(super) fn start_watcher_tasks(
                 // task neither sends nor drops its sender the consumer parks
                 // forever and ignores shutdown — a shutdown-cleanliness gap.
                 let winner = {
-                    let event = settled_rx.recv();
+                    let event = settled_rx.recv(); // raw-lock-ok: async, raced against shutdown
                     let shutdown = state.shutdown.notified();
                     let mut event = std::pin::pin!(event);
                     let mut shutdown = std::pin::pin!(shutdown);

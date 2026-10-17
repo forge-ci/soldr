@@ -239,38 +239,42 @@ fn ensure_broker_route_on_runtime(service_name: &str, timeout: Duration) -> io::
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async {
-        tokio::time::timeout(timeout, async {
-            let endpoint = session_socket_path()?;
-            let name = local_session_name(&endpoint)?;
-            let mut stream = connect_broker_with_busy_retry(name).await?;
-            let hello = Hello {
-                client_min_protocol: ENVELOPE_VERSION as u32,
-                client_max_protocol: ENVELOPE_VERSION as u32,
-                service_name: service_name.to_string(),
-                wanted_version:
-                    crate::daemon::backend_handle_adoption::SOLDR_DAEMON_SERVICE_VERSION
-                        .to_string(),
-                client_version: env!("CARGO_PKG_VERSION").to_string(),
-                request_id: format!("soldr-route-{}", std::process::id()),
-                peer_pid: std::process::id(),
-                client_lib_name: "soldr".into(),
-                client_lib_version: env!("CARGO_PKG_VERSION").to_string(),
-                peer_attestation_nonce: crate::broker_server::client_host_attestation(),
-                // Route-only probes never need to transfer their connection.
-                client_capabilities: 0,
-                ..Default::default()
-            };
-            let frame = broker_hello_frame(hello.encode_to_vec());
-            let request_id = frame.request_id;
-            let bytes = encode_framed(&frame).map_err(io::Error::other)?;
-            stream.write_all(&bytes).await?;
-            stream.flush().await?;
-            read_negotiated(&mut stream, request_id).await
-        })
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "broker route start timed out"))?
-    })
+    crate::platform::wait::block_on_for(
+        &runtime,
+        async {
+            tokio::time::timeout(timeout, async {
+                let endpoint = session_socket_path()?;
+                let name = local_session_name(&endpoint)?;
+                let mut stream = connect_broker_with_busy_retry(name).await?;
+                let hello = Hello {
+                    client_min_protocol: ENVELOPE_VERSION as u32,
+                    client_max_protocol: ENVELOPE_VERSION as u32,
+                    service_name: service_name.to_string(),
+                    wanted_version:
+                        crate::daemon::backend_handle_adoption::SOLDR_DAEMON_SERVICE_VERSION
+                            .to_string(),
+                    client_version: env!("CARGO_PKG_VERSION").to_string(),
+                    request_id: format!("soldr-route-{}", std::process::id()),
+                    peer_pid: std::process::id(),
+                    client_lib_name: "soldr".into(),
+                    client_lib_version: env!("CARGO_PKG_VERSION").to_string(),
+                    peer_attestation_nonce: crate::broker_server::client_host_attestation(),
+                    // Route-only probes never need to transfer their connection.
+                    client_capabilities: 0,
+                    ..Default::default()
+                };
+                let frame = broker_hello_frame(hello.encode_to_vec());
+                let request_id = frame.request_id;
+                let bytes = encode_framed(&frame).map_err(io::Error::other)?;
+                stream.write_all(&bytes).await?;
+                stream.flush().await?;
+                read_negotiated(&mut stream, request_id).await
+            })
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "broker route start timed out"))?
+        },
+        timeout + crate::platform::wait::PROBE,
+    )?
 }
 
 /// Resolve the one stable broker endpoint.
@@ -360,16 +364,13 @@ fn run_session_compile_for_service(
     env: Vec<SessionEnvVar>,
 ) -> Result<SessionCompileOutcome, SessionError> {
     let run = || {
-        tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(SessionError::pre_output)?
-            .block_on(run_session_compile_async(
-                service_name,
-                rustc_argv,
-                cwd,
-                env,
-            ))
+            .map_err(SessionError::pre_output)?;
+        let compile = run_session_compile_async(service_name, rustc_argv, cwd, env);
+        crate::platform::wait::block_on_for(&runtime, compile, crate::platform::wait::LONG_CHILD)
+            .unwrap_or_else(|error| Err(SessionError::pre_output(error.into())))
     };
 
     // A Cargo wrapper arrives before Soldr constructs its command runtime, but

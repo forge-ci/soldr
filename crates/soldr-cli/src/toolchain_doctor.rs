@@ -491,10 +491,11 @@ fn find_on_path(cmd: &str) -> Option<PathBuf> {
 /// `None` when the spawn fails, the exit code is non-zero, or stdout is
 /// empty.
 fn read_version<P: AsRef<OsStr>>(bin: P) -> Option<String> {
-    let output = std::process::Command::new(bin.as_ref())
-        .arg("--version")
-        .output()
-        .ok()?;
+    let output = crate::platform::wait::output_for(
+        std::process::Command::new(bin.as_ref()).arg("--version"),
+        crate::platform::wait::PROBE,
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }

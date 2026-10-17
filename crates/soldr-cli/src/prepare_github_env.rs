@@ -105,7 +105,7 @@ mod tests {
     /// same function, so the two surfaces cannot drift.
     #[test]
     fn github_env_file_matches_exported_pairs_exactly() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = ENV_LOCK.lock();
         let saved_path = std::env::var_os("PATH");
 
         let prep = crate::blessed_build::BlessedPrep {

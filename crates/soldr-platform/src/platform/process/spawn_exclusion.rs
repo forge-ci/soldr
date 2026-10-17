@@ -39,10 +39,15 @@
 
 use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+// Raw `std` lock on purpose (soldr#3836): the exclusive side is held across a
+// whole staged-file write, which for a large restored entry on a slow disk can
+// outlast the `sync` critical-section watchdog and must not abort the process.
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
 static SPAWN_WRITE_LOCK: RwLock<()> = RwLock::new(());
 
 /// Shared guard for one child spawn. Hold it across the spawn call only --
 /// never across `wait()`.
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
 pub fn spawn_shared() -> RwLockReadGuard<'static, ()> {
     SPAWN_WRITE_LOCK
         .read()
@@ -53,6 +58,7 @@ pub fn spawn_shared() -> RwLockReadGuard<'static, ()> {
 /// is opened for writing until after the descriptor is closed; the rename
 /// that publishes it may happen outside the guard (the inode is only busy
 /// while a write descriptor exists).
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
 pub fn write_exclusive() -> RwLockWriteGuard<'static, ()> {
     SPAWN_WRITE_LOCK
         .write()

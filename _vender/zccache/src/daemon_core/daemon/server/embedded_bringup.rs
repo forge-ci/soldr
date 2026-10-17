@@ -167,15 +167,14 @@ pub(super) async fn load_persisted_caches(
 /// tests never hold each other's loads. The wait is capped so a test that
 /// forgets to release cannot hang the suite.
 #[cfg(test)]
-pub(super) static TEST_DEPGRAPH_LOAD_HOLDS: std::sync::Mutex<Vec<std::path::PathBuf>> =
-    std::sync::Mutex::new(Vec::new());
+pub(super) static TEST_DEPGRAPH_LOAD_HOLDS: crate::sync::Mutex<Vec<std::path::PathBuf>> =
+    crate::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
 fn wait_while_test_holds_load(depgraph_path: &Path) {
     let held = || {
         TEST_DEPGRAPH_LOAD_HOLDS
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .any(|root| depgraph_path.starts_with(root))
     };
@@ -215,8 +214,7 @@ pub(super) fn spawn_depgraph_load(
             if let Some(warning) = warning {
                 let mut guard = state
                     .depgraph_load_warning
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    .lock();
                 *guard = Some(warning);
             }
             contexts

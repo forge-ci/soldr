@@ -59,10 +59,11 @@
 use crate::cache_lib::state_store::open_state_db;
 use crate::daemon::db::{Event, EventKind};
 use crate::daemon::wire::{self, prost_tagged_bytes};
+use crate::platform::sync::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
@@ -271,10 +272,7 @@ impl EventBatcher {
         let Some(session_id) = event.session_id else {
             return;
         };
-        let mut map = self
-            .aggregates
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut map = self.aggregates.lock();
         match event.kind {
             EventKind::SessionStart => {
                 // Session observed from birth: the aggregate is
@@ -311,20 +309,14 @@ impl EventBatcher {
     /// [`crate::daemon::db::aggregate_session`]. The entry is removed
     /// either way; the session is over.
     pub fn take_session_aggregate(&self, session_id: u64) -> Option<SessionAggregate> {
-        let mut map = self
-            .aggregates
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut map = self.aggregates.lock();
         map.remove(&session_id).filter(|agg| agg.complete)
     }
 
     /// Put a consumed aggregate back when finalization could not be persisted.
     /// This keeps a later retry lossless.
     pub fn restore_session_aggregate(&self, session_id: u64, aggregate: SessionAggregate) {
-        let mut map = self
-            .aggregates
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut map = self.aggregates.lock();
         map.insert(session_id, aggregate);
     }
 

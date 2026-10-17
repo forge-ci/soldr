@@ -75,7 +75,7 @@ fn configured_lint_crate_clippy_ensures_managed_dylint_link() {
     if !shell_fixtures_supported() {
         return;
     }
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let _lock = ENV_LOCK.lock();
     let _toolchain_env = EnvVarGuard::remove(crate::dylint_toolchain::TOOLCHAIN_ENV_VAR);
     let _build_target = EnvVarGuard::remove("CARGO_BUILD_TARGET");
     let _force_managed = EnvVarGuard::remove(FORCE_MANAGED_CARGO_SUBCOMMANDS_ENV_VAR);
@@ -122,7 +122,7 @@ fn ordinary_crate_clippy_needs_no_dylint_bootstrap() {
     if !shell_fixtures_supported() {
         return;
     }
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let _lock = ENV_LOCK.lock();
     let _toolchain_env = EnvVarGuard::remove(crate::dylint_toolchain::TOOLCHAIN_ENV_VAR);
     let _build_target = EnvVarGuard::remove("CARGO_BUILD_TARGET");
     let _force_managed = EnvVarGuard::remove(FORCE_MANAGED_CARGO_SUBCOMMANDS_ENV_VAR);
@@ -165,7 +165,7 @@ fn absolute_linker_config_gains_no_dylint_ensure() {
     if !shell_fixtures_supported() {
         return;
     }
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let _lock = ENV_LOCK.lock();
     let _toolchain_env = EnvVarGuard::remove(crate::dylint_toolchain::TOOLCHAIN_ENV_VAR);
     let _build_target = EnvVarGuard::remove("CARGO_BUILD_TARGET");
     let _force_managed = EnvVarGuard::remove(FORCE_MANAGED_CARGO_SUBCOMMANDS_ENV_VAR);
@@ -208,7 +208,7 @@ fn path_provided_dylint_link_wins_and_fetches_nothing() {
     if !shell_fixtures_supported() {
         return;
     }
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let _lock = ENV_LOCK.lock();
     let _toolchain_env = EnvVarGuard::remove(crate::dylint_toolchain::TOOLCHAIN_ENV_VAR);
     let _build_target = EnvVarGuard::remove("CARGO_BUILD_TARGET");
     let _force_managed = EnvVarGuard::remove(FORCE_MANAGED_CARGO_SUBCOMMANDS_ENV_VAR);
@@ -251,7 +251,7 @@ fn cargo_dylint_still_ensures_the_managed_dylint_link() {
     if !shell_fixtures_supported() {
         return;
     }
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let _lock = ENV_LOCK.lock();
     let _toolchain_env = EnvVarGuard::remove(crate::dylint_toolchain::TOOLCHAIN_ENV_VAR);
     let _build_target = EnvVarGuard::remove("CARGO_BUILD_TARGET");
     let _force_managed = EnvVarGuard::remove(FORCE_MANAGED_CARGO_SUBCOMMANDS_ENV_VAR);

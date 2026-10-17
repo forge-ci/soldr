@@ -27,7 +27,7 @@ fn restore(name: &str, previous: Option<String>) {
 // `SOLDR_JOBS=N` export would have populated.
 #[test]
 fn jobs_flag_publishes_the_env_var_the_resolver_reads() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let name = soldr_core::core::jobs::SOLDR_JOBS_ENV_VAR;
     let previous = std::env::var(name).ok();
     std::env::remove_var(name);
@@ -49,7 +49,7 @@ fn jobs_flag_publishes_the_env_var_the_resolver_reads() {
 // decision point that could disagree with it.
 #[test]
 fn timestamp_lines_flag_publishes_the_env_var() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let name = crate::cargo_front_door::timestamp_tee::TIMESTAMP_LINES_ENV_VAR;
     let previous = std::env::var(name).ok();
 
@@ -93,7 +93,7 @@ fn published_timestamp_values_round_trip_through_the_resolver() {
 
 #[test]
 fn no_timestamp_lines_flag_leaves_the_env_var_alone() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let name = crate::cargo_front_door::timestamp_tee::TIMESTAMP_LINES_ENV_VAR;
     let previous = std::env::var(name).ok();
     std::env::set_var(name, "0");
@@ -113,7 +113,7 @@ fn no_timestamp_lines_flag_leaves_the_env_var_alone() {
 // door's `cache_states::enabled()` reads, and its absence leaves it untouched.
 #[test]
 fn no_cache_states_flag_publishes_the_env_var() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let name = crate::cargo_front_door::cache_states::NO_CACHE_STATES_ENV_VAR;
     let previous = std::env::var(name).ok();
 
@@ -178,7 +178,7 @@ fn the_two_timestamp_flags_conflict() {
 // winning over "the user did not pass --jobs".
 #[test]
 fn no_jobs_flag_leaves_the_env_var_alone() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let name = soldr_core::core::jobs::SOLDR_JOBS_ENV_VAR;
     let previous = std::env::var(name).ok();
     std::env::set_var(name, "9");
@@ -207,7 +207,7 @@ fn jobs_flag_is_accepted_after_the_subcommand() {
 // `debug_trace::enabled()` reads so nested soldr invocations inherit it.
 #[test]
 fn debug_flag_publishes_the_env_var() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let name = crate::cargo_front_door::debug_trace::DEBUG_TRACE_ENV_VAR;
     let previous = std::env::var(name).ok();
 
@@ -259,7 +259,7 @@ fn debug_flag_must_precede_the_cargo_passthrough() {
 // zccache documents, rather than becoming a second decision point.
 #[test]
 fn zccache_mode_flag_publishes_the_env_var_the_resolver_reads() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let name = soldr_core::core::materialization_mode::SOLDR_ZCCACHE_MODE_ENV_VAR;
     let previous = std::env::var(name).ok();
 

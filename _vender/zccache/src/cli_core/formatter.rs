@@ -322,7 +322,7 @@ mod tests {
     }
     use super::*;
 
-    static CWD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static CWD_TEST_LOCK: crate::sync::Mutex<()> = crate::sync::Mutex::new(());
 
     struct CwdRestore(Option<std::path::PathBuf>);
 
@@ -337,8 +337,7 @@ mod tests {
     #[test]
     fn public_runner_controls_child_and_preserves_exact_exit_code() {
         let _lock = CWD_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .lock();
         let _cwd_restore = CwdRestore(std::env::current_dir().ok());
         let root = tempfile::tempdir().unwrap();
         let rustfmt = root.path().join("rustfmt-test-bin");
@@ -370,8 +369,7 @@ mod tests {
     #[test]
     fn recursive_invocation_never_uses_root_only_marker() {
         let _lock = CWD_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .lock();
         let _cwd_restore = CwdRestore(std::env::current_dir().ok());
         let root = tempfile::tempdir().unwrap();
         let rustfmt = root.path().join("rustfmt-test-bin");
@@ -413,8 +411,7 @@ mod tests {
     #[test]
     fn explicit_skip_children_can_use_content_marker() {
         let _lock = CWD_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .lock();
         let _cwd_restore = CwdRestore(std::env::current_dir().ok());
         let root = tempfile::tempdir().unwrap();
         let rustfmt = root.path().join("rustfmt-test-bin");

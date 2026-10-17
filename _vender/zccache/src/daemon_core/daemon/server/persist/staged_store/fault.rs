@@ -3,7 +3,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+use crate::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::daemon_core::daemon::server) enum StagedFaultPoint {
@@ -52,7 +53,6 @@ impl StagedFaultGuard {
         let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
         active()
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
             .push(ActiveFaults {
                 token,
                 scope: scope.to_path_buf(),
@@ -62,7 +62,7 @@ impl StagedFaultGuard {
     }
 
     pub(in crate::daemon_core::daemon::server) fn assert_all_consumed(&self) {
-        let active = active().lock().unwrap_or_else(|error| error.into_inner());
+        let active = active().lock();
         let pending = active
             .iter()
             .find(|faults| faults.token == self.token)
@@ -78,7 +78,6 @@ impl Drop for StagedFaultGuard {
     fn drop(&mut self) {
         active()
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
             .retain(|faults| faults.token != self.token);
     }
 }
@@ -87,7 +86,7 @@ pub(in crate::daemon_core::daemon::server) fn inject(
     scope_path: &Path,
     point: StagedFaultPoint,
 ) -> io::Result<()> {
-    let mut active = active().lock().unwrap_or_else(|error| error.into_inner());
+    let mut active = active().lock();
     for faults in active.iter_mut() {
         if !scope_path.starts_with(&faults.scope) {
             continue;

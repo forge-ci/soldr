@@ -248,7 +248,7 @@ fn cargo_metadata_probe_captures_child_stdout() {
         // cannot execute it and there is no .cmd fixture for it.
         return;
     }
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let _lock = ENV_LOCK.lock();
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     let cargo = workspace.path().join("fake-cargo");
     let metadata = serde_json::json!({

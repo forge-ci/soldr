@@ -323,7 +323,7 @@ pub fn load(opts: &LoadOptions<'_>) -> Result<LoadReport> {
         dispatch.finish()?;
     }
     let workers_drain_us = workers_drain_start.elapsed().as_micros() as u64;
-    if let Some(err) = extract_error.lock().expect("extract_error mutex").take() {
+    if let Some(err) = extract_error.lock().take() {
         return Err(err);
     }
     let cache_files_restored = cache_files_counter.load(Ordering::Relaxed);
@@ -426,7 +426,7 @@ struct ExtractDispatch {
     tx: Option<std::sync::mpsc::SyncSender<ExtractJob>>,
     /// Barrier joined when every worker exits; size = num_workers + 1
     /// (workers + the driver caller).
-    barrier: Arc<std::sync::Barrier>,
+    barrier: Arc<crate::platform::wait::Barrier>,
     /// Guards against waiting on `barrier` twice. A `Barrier` is reusable:
     /// a second wait opens a new generation that only `n_workers + 1`
     /// further arrivals could release, so double-waiting would hang.
@@ -454,7 +454,7 @@ impl ExtractDispatch {
         // memory at ~13 MiB which is negligible.
         let (tx, rx) = sync_channel::<ExtractJob>(64);
         let rx = Arc::new(Mutex::new(rx));
-        let barrier = Arc::new(std::sync::Barrier::new(n_workers + 1));
+        let barrier = Arc::new(crate::platform::wait::Barrier::new(n_workers + 1));
 
         for worker_idx in 0..n_workers {
             let rx = Arc::clone(&rx);
@@ -465,7 +465,13 @@ impl ExtractDispatch {
             pool.spawn(move || {
                 loop {
                     let job = {
-                        let guard = rx.lock().expect("extract rx mutex");
+                        // soldr#3836: bounded on both sides -- a waiter gives
+                        // up after one poll interval and loops, and the
+                        // holder polls for at most that long, so a slow
+                        // driver never trips the lock watchdog.
+                        let Ok(guard) = rx.lock_for(EXTRACT_WORKER_RECV_TIMEOUT) else {
+                            continue;
+                        };
                         match guard.recv_timeout(EXTRACT_WORKER_RECV_TIMEOUT) {
                             Ok(j) => j,
                             // Only a closed channel means "no more work".
@@ -485,13 +491,13 @@ impl ExtractDispatch {
                     // jobs without doing more I/O (keeps the driver moving
                     // toward the finish line so we can surface the error
                     // promptly).
-                    if err_slot.lock().expect("err_slot mutex").is_some() {
+                    if err_slot.lock().is_some() {
                         continue;
                     }
                     let is_regular = job.entry_type == tar::EntryType::Regular;
                     let job_start = profile.is_some().then(std::time::Instant::now);
                     if let Err(e) = extract_one(&job) {
-                        let mut slot = err_slot.lock().expect("err_slot mutex");
+                        let mut slot = err_slot.lock();
                         if slot.is_none() {
                             *slot = Some(e);
                         }
@@ -505,7 +511,7 @@ impl ExtractDispatch {
                         prof.record(worker_idx, us);
                     }
                 }
-                barrier.wait();
+                let _ = barrier.wait_for(crate::platform::wait::HELPER_JOIN);
             });
         }
 
@@ -521,7 +527,8 @@ impl ExtractDispatch {
         job: ExtractJob,
     ) -> std::result::Result<(), std::sync::mpsc::SendError<ExtractJob>> {
         match self.tx.as_ref() {
-            Some(tx) => tx.send(job),
+            Some(tx) => crate::platform::wait::send_for(tx, job, crate::platform::wait::LONG_CHILD)
+                .map_err(|(job, _)| std::sync::mpsc::SendError(job)),
             // Only reachable after shutdown, which the driver never does
             // before its last send. Report it as a send failure rather
             // than panicking so a future refactor degrades loudly but
@@ -540,7 +547,7 @@ impl ExtractDispatch {
         // Dropping the sender is what lets workers observe `Disconnected`
         // and leave their receive loop.
         self.tx = None;
-        self.barrier.wait();
+        let _ = self.barrier.wait_for(crate::platform::wait::LONG_CHILD);
     }
 
     /// Close the channel and block until every worker has exited.
@@ -595,13 +602,13 @@ mod extract_test_hooks {
     #[cfg(test)]
     pub(crate) type Hook = Box<dyn Fn(&std::path::Path) + Send + Sync + 'static>;
     #[cfg(test)]
-    pub(crate) static HOOK: std::sync::Mutex<Option<Hook>> = std::sync::Mutex::new(None);
+    pub(crate) static HOOK: crate::platform::sync::Mutex<Option<Hook>> = crate::platform::sync::Mutex::new(None);
 
     #[cfg(test)]
     pub(crate) fn staged_file_open_for_write(staged: &std::path::Path) {
         // The hook runs while the registry lock is held; hooks are
         // test-owned, short, and only ever installed by one test.
-        if let Some(hook) = HOOK.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if let Some(hook) = HOOK.lock().as_ref() {
             hook(staged);
         }
     }

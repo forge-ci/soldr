@@ -17,7 +17,7 @@
 //! succeeds should still show them. Replay only adds a second copy where it is
 //! needed, next to the error.
 
-use std::sync::Mutex;
+use soldr_platform::sync::Mutex;
 use std::sync::OnceLock;
 
 /// Upper bound on retained warnings.
@@ -45,10 +45,10 @@ pub fn warn(message: impl Into<String>) {
 
 /// Retain a warning that was printed by other means.
 ///
-/// Poisoning is recovered rather than propagated: losing the record is a
-/// degraded diagnostic, but panicking here would turn a warning into a crash.
+/// Poisoning is recovered by `soldr_platform::sync` rather than propagated:
+/// panicking here would turn a warning into a crash.
 pub fn record(message: impl Into<String>) {
-    let mut guard = store().lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = store().lock();
     if guard.len() >= MAX_RETAINED {
         return;
     }
@@ -57,12 +57,12 @@ pub fn record(message: impl Into<String>) {
 
 /// Everything retained so far, oldest first.
 pub fn recorded() -> Vec<String> {
-    store().lock().unwrap_or_else(|e| e.into_inner()).clone()
+    store().lock().clone()
 }
 
 /// Drop every retained warning. Exists for tests, which share one process.
 pub fn clear() {
-    store().lock().unwrap_or_else(|e| e.into_inner()).clear();
+    store().lock().clear();
 }
 
 /// The block to append to a failure report, or `None` when nothing was warned.
@@ -97,10 +97,12 @@ mod tests {
     /// rather than the shared env barrier: per soldr#1896 a module guarding a
     /// resource nobody else touches keeps its own lock, and this is not an
     /// environment variable.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn fresh() -> std::sync::MutexGuard<'static, ()> {
-        let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear();
         guard
     }

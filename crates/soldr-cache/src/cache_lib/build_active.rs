@@ -92,7 +92,7 @@ impl BuildRootLease {
         // A maintenance pass already owns the root exclusively. Builds are
         // correctness-critical, so wait for that bounded pass to finish
         // instead of failing an otherwise valid cargo invocation.
-        FileExt::lock_shared(&file)?;
+        crate::platform::wait::lock_shared_for(&file, crate::platform::wait::LONG_LOCK)?;
         Ok(Self { file })
     }
 }

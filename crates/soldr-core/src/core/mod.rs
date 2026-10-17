@@ -359,9 +359,12 @@ fn join_pipe_reader(
     pipe_name: &str,
 ) -> Result<Vec<u8>, SoldrError> {
     match reader {
-        Some(handle) => handle
-            .join()
-            .map_err(|_| SoldrError::Other(format!("{pipe_name} reader panicked for {context}")))?
+        Some(handle) => crate::platform::wait::join_for(handle, crate::platform::wait::HELPER_JOIN)
+            .map_err(|_| {
+                SoldrError::Other(format!(
+                    "{pipe_name} reader panicked or stalled for {context}"
+                ))
+            })?
             .map_err(|err| {
                 SoldrError::Other(format!("failed to read {pipe_name} from {context}: {err}"))
             }),
@@ -573,7 +576,9 @@ mod tests {
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
             static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-            let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let lock = LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let previous = std::env::var(key).ok();
             std::env::set_var(key, value);
             Self {

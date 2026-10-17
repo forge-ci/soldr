@@ -27,7 +27,7 @@ pub(crate) async fn run_cargo_front_door(
     cache_states::stop_tail(session.cache_state_tail.take());
     // soldr#1843: BuildSessionStart must land before any BuildSessionEnd below.
     if let Some(publish) = session.publish.take() {
-        let _ = publish.join();
+        let _ = crate::platform::wait::join_for(publish, crate::platform::wait::HELPER_JOIN);
     }
     match cargo_run_result {
         Ok(outcome) => complete_cargo_run(outcome, &prepared, session, &setup, normalized),

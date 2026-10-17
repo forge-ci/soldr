@@ -96,7 +96,7 @@ fn maturin_xwin_policy_prefers_blessed_toolchain_unless_overridden() {
 
 #[test]
 fn prepend_path_dirs_preserves_declared_priority() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let shim = tmp.path().join("clang-shim");
     let llvm = tmp.path().join("llvm").join("bin");
@@ -155,7 +155,7 @@ fn gc_cli_parses_summary_and_purge_modes() {
 
 #[test]
 fn self_relocate_gate_targets_managed_cacheable_cargo_builds() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock();
     let _wrapper = EnvVarGuard::remove(RUSTC_WRAPPER_OVERRIDE_ENV_VAR);
 
     assert!(should_self_relocate_for_invocation(&[

@@ -112,9 +112,16 @@ pub fn tasklist_snapshot_soldr_daemons() -> Vec<LeakedDaemonInfo> {
     }
     let mut all = Vec::new();
     for name in SOLDR_DAEMON_IMAGE_NAMES {
-        let output = std::process::Command::new("tasklist")
-            .args(["/FI", &format!("IMAGENAME eq {name}"), "/FO", "CSV", "/NH"])
-            .output();
+        let output = crate::platform::wait::output_for(
+            std::process::Command::new("tasklist").args([
+                "/FI",
+                &format!("IMAGENAME eq {name}"),
+                "/FO",
+                "CSV",
+                "/NH",
+            ]),
+            crate::platform::wait::PROBE,
+        );
         let Ok(output) = output else { continue };
         let stdout = String::from_utf8_lossy(&output.stdout);
         all.extend(parse_tasklist_csv(&stdout));
@@ -158,6 +165,12 @@ pub fn format_leaked_daemons(daemons: &[LeakedDaemonInfo]) -> Option<String> {
 /// Deliberately not `#[cfg(test)]`: that attribute applies when *this* crate
 /// is under test, so a gated static would vanish for every downstream crate
 /// that needs it. The rest of this module is un-gated for the same reason.
+///
+/// Deliberately a raw `std::sync::Mutex`: tests hold it for their whole body,
+/// which the `soldr_platform::sync` critical-section watchdog (15 s) must not
+/// bound, and every acquisition happens in test-harness builds, outside
+/// `ban_raw_sync_primitive`'s scope (soldr#3836).
+#[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
 pub static TEST_PROCESS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]

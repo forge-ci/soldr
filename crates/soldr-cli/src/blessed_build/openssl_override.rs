@@ -248,7 +248,7 @@ mod tests {
     fn injects_only_when_openssl_sys_provides_links_openssl() {
         let _lock = TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _no_network = EnvVarGuard::set("SOLDR_TEST_NO_NETWORK", "1");
         let _inputs = clear_openssl_inputs(MSVC_INPUTS);
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -315,7 +315,7 @@ mod tests {
     fn unavailable_sysroot_logs_and_continues() {
         let _lock = TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _no_network = EnvVarGuard::set("SOLDR_TEST_NO_NETWORK", "1");
         let _inputs = clear_openssl_inputs([
             "AARCH64_PC_WINDOWS_MSVC_OPENSSL_DIR",
@@ -352,7 +352,7 @@ mod tests {
     fn a_caller_chosen_openssl_wins() {
         let _lock = TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _no_network = EnvVarGuard::set("SOLDR_TEST_NO_NETWORK", "1");
         let _inputs = clear_openssl_inputs(MSVC_INPUTS);
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -373,7 +373,7 @@ mod tests {
     fn prepare_exports_managed_openssl_unless_legacy_vendored_sys_opt_out() {
         let _lock = TEST_PROCESS_ENV_LOCK
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let triple = "x86_64-unknown-linux-gnu";
         let _no_network = EnvVarGuard::set("SOLDR_TEST_NO_NETWORK", "1");
         let _cmake = EnvVarGuard::set(super::super::USE_SYSTEM_CMAKE_ENV_VAR, "1");

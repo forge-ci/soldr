@@ -379,10 +379,10 @@ fn resolve_runtime_rustc(start_dir: Option<&Path>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{ffi::OsString, fs, sync::Mutex};
+    use std::{ffi::OsString, fs};
     use tempfile::tempdir;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct EnvVarGuard {
         key: &'static str,
@@ -494,7 +494,7 @@ mod tests {
     fn lock_env() -> std::sync::MutexGuard<'static, ()> {
         ENV_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! process-local `SOLDR_*` namespace, so the broker must apply that namespace
 //! explicitly when it creates `soldr-daemon`.
 
+use crate::platform::sync::Mutex;
 use running_process::broker::backend_handle::BackendHandle;
 use running_process::broker::protocol::Endpoint;
 use running_process::broker::server::{
@@ -15,7 +16,6 @@ use running_process::broker::server::{
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::Duration;
 
 // A cold embedded-zccache startup can exceed the old 25-second budget on
@@ -24,7 +24,12 @@ use std::time::Duration;
 const DAEMON_ROUTE_READINESS_TIMEOUT: Duration = Duration::from_secs(45);
 
 pub(crate) struct SoldrBackendLauncher {
-    placed_images: Mutex<HashMap<String, PlacedImage>>,
+    /// Raw `std` mutex on purpose: it serializes daemon image verification and
+    /// is held across a whole-file hash and image copy, which on a slow disk
+    /// legitimately outlasts the `soldr_platform::sync` critical-section
+    /// watchdog (it aborted the broker on aarch64 CI). Waiters already poll
+    /// with progress reports (soldr#3836).
+    placed_images: std::sync::Mutex<HashMap<String, PlacedImage>>,
     route_deadlines: Mutex<HashMap<String, std::time::Instant>>,
     progress: tokio::sync::broadcast::Sender<LauncherProgress>,
 }
@@ -49,20 +54,18 @@ struct FileFingerprint {
 }
 
 impl SoldrBackendLauncher {
+    #[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
     pub(crate) fn new() -> Self {
         let (progress, _) = tokio::sync::broadcast::channel(256);
         Self {
-            placed_images: Mutex::new(HashMap::new()),
+            placed_images: std::sync::Mutex::new(HashMap::new()),
             route_deadlines: Mutex::new(HashMap::new()),
             progress,
         }
     }
 
     pub(crate) fn note_route_deadline(&self, service_name: &str, deadline: std::time::Instant) {
-        let mut deadlines = self
-            .route_deadlines
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut deadlines = self.route_deadlines.lock();
         deadlines
             .entry(service_name.to_string())
             .and_modify(|current| *current = (*current).max(deadline))
@@ -76,7 +79,6 @@ impl SoldrBackendLauncher {
         let deadline = self
             .route_deadlines
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&request.key.service_name)
             .copied();
         if deadline.is_some_and(|value| std::time::Instant::now() >= value) {
@@ -454,6 +456,7 @@ impl SoldrBackendLauncher {
         }
     }
 
+    #[cfg_attr(dylint_lib = "ban_raw_sync_primitive", allow(ban_raw_sync_primitive))]
     #[expect(clippy::too_many_lines, reason = "baseline, zackees/ci.yml#229")]
     fn place_backend_image(
         &self,

@@ -745,6 +745,27 @@ fn smoke_command(
     command
 }
 
+/// A `--version`/`--help` probe that cannot finish in this long is broken
+/// (a hang, or a binary waiting on stdin); it is evicted like any failure.
+const SMOKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Run one smoke probe with stdin closed under a wall-clock deadline; a raw
+/// `.output()` here could hang the fetch forever (soldr#3836 audit).
+fn smoke_output(
+    binary_path: &std::path::Path,
+    cache_name: &str,
+    target: &TargetTriple,
+    arg: &str,
+) -> Result<std::process::Output, SoldrError> {
+    let mut command = smoke_command(binary_path, cache_name, target, arg);
+    command.stdin(std::process::Stdio::null());
+    crate::core::command_output_with_timeout_duration(
+        &mut command,
+        &format!("smoke test {cache_name} {arg}"),
+        SMOKE_TIMEOUT,
+    )
+}
+
 /// Validate an installed tool binary and evict it when it cannot execute.
 ///
 /// soldr#936: probe a freshly-extracted binary with `--version` (falling back
@@ -768,7 +789,7 @@ pub fn smoke_test_or_evict(
         )));
     }
 
-    let output = smoke_command(binary_path, cache_name, target, "--version").output();
+    let output = smoke_output(binary_path, cache_name, target, "--version");
 
     let evict = |reason: &str| {
         eprintln!(
@@ -785,8 +806,7 @@ pub fn smoke_test_or_evict(
             // --version cleanly. Fall through to --help as the
             // second-chance probe before evicting.
             let help_argument = smoke_help_argument(cache_name);
-            let help_ok = smoke_command(binary_path, cache_name, target, help_argument)
-                .output()
+            let help_ok = smoke_output(binary_path, cache_name, target, help_argument)
                 .map(|help| {
                     help.status.success()
                         || (cache_name == "dylint-link"

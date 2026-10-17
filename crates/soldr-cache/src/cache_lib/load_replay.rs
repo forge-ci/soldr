@@ -32,9 +32,7 @@ impl ExtractProfile {
         // Defensive: rayon promises a stable index in `[0, n_workers)`,
         // but a future re-architecture might break that — fail soft.
         if let Some(slot) = self.per_worker_latencies.get(worker_idx) {
-            if let Ok(mut v) = slot.lock() {
-                v.push(latency_us);
-            }
+            slot.lock().push(latency_us);
         }
     }
 
@@ -42,7 +40,7 @@ impl ExtractProfile {
         let mut all_us: Vec<u64> = Vec::new();
         let mut per_worker_counts = Vec::with_capacity(self.per_worker_latencies.len());
         for slot in &self.per_worker_latencies {
-            let v = slot.lock().expect("profile slot mutex");
+            let v = slot.lock();
             per_worker_counts.push(v.len());
             all_us.extend_from_slice(&v);
         }

@@ -75,6 +75,10 @@ pub(crate) fn evict_v2_artifact_keys(
     staged_store::evict_staged_artifact_keys(artifact_dir, keys)
 }
 
+pub(crate) fn sweep_v2_trash(artifact_dir: &Path) -> u64 {
+    staged_store::sweep_staged_trash(artifact_dir)
+}
+
 pub(crate) fn evict_v2_artifact_keys_if_unchanged(
     artifact_dir: &Path,
     expected: &std::collections::HashMap<String, Option<String>>,

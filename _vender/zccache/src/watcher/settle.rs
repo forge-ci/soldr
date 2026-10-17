@@ -119,7 +119,7 @@ impl SettleBuffer {
                     }
                     break;
                 }
-                match kernal_api::async_engine::timeout(wait, rx.recv()).await {
+                match kernal_api::async_engine::timeout(wait, rx.recv()).await { // raw-lock-ok: inside timeout
                     Ok(Some(WatchEvent::Overflow | WatchEvent::Error(_))) => {
                         pending.clear();
                         let _ = tx.send(SettledEvent::Overflow);

@@ -426,7 +426,6 @@ fn requesters_gone_but_daemon_busy_is_not_reaped() {
     let later = start + DEFAULT_GRACE * 2;
     let candidates: Vec<String> = table
         .lock()
-        .unwrap()
         .sweep(later, DEFAULT_GRACE, |_| false)
         .into_iter()
         .filter_map(|(n, v)| (v == RouteVerdict::Reap).then_some(n))
@@ -440,12 +439,10 @@ fn requesters_gone_but_daemon_busy_is_not_reaped() {
     // only once a full idle window has passed.
     let soon = table
         .lock()
-        .unwrap()
         .sweep(later + Duration::from_secs(1), DEFAULT_GRACE, |_| false);
     assert_eq!(soon[0].1, RouteVerdict::Draining);
     let idle_window = table
         .lock()
-        .unwrap()
         .sweep(later + DEFAULT_GRACE, DEFAULT_GRACE, |_| false);
     assert_eq!(idle_window[0].1, RouteVerdict::Reap);
 }
@@ -456,7 +453,6 @@ fn requesters_gone_daemon_idle_grace_elapsed_is_reaped() {
     let (table, start) = reap_candidate_table();
     let verdict = table
         .lock()
-        .unwrap()
         .sweep(start + DEFAULT_GRACE, DEFAULT_GRACE, |_| false);
     assert_eq!(verdict[0].1, RouteVerdict::Reap);
     let reapable = defer_busy_candidates(
@@ -478,7 +474,7 @@ fn busy_query_failure_is_not_reaped_and_is_retried_next_sweep() {
         DaemonLoad::Unknown
     });
     assert!(reapable.is_empty());
-    let again = table.lock().unwrap().sweep(at, DEFAULT_GRACE, |_| false);
+    let again = table.lock().sweep(at, DEFAULT_GRACE, |_| false);
     assert_eq!(again[0].1, RouteVerdict::Reap);
 }
 
@@ -525,7 +521,6 @@ fn a_new_request_resets_the_unanswered_streak() {
     }
     table
         .lock()
-        .unwrap()
         .record_request("soldr-daemon-a", identified(2, 2), at);
     assert!(defer_busy_candidates(&table, route(), at, |_| DaemonLoad::Unknown).is_empty());
 }

@@ -19,19 +19,23 @@ pub(super) fn acquire_fetch_lock(request: &ResolvedFetchRequest) -> Result<Fetch
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|e| e.to_string())?;
+    let open = || {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+    };
     let lock = match request.wait_mode {
-        WaitMode::Block => {
-            kernal_api::platform::fs::lock_exclusive_owned(file).map_err(|e| e.to_string())?
+        // Another fetch can hold this across a whole download: bounded by the
+        // long-lock budget rather than unbounded (soldr#3836).
+        WaitMode::Block => crate::wait::lock_exclusive_owned_for(open, crate::wait::LONG_LOCK)
+            .map_err(|e| e.to_string())?,
+        WaitMode::NoWait => {
+            kernal_api::platform::fs::try_lock_exclusive_owned(open().map_err(|e| e.to_string())?)
+                .map_err(|_| "locked".to_string())?
         }
-        WaitMode::NoWait => kernal_api::platform::fs::try_lock_exclusive_owned(file)
-            .map_err(|_| "locked".to_string())?,
     };
     Ok(FetchLock { _lock: lock })
 }

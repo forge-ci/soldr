@@ -445,9 +445,12 @@ pub(super) fn lock_driver_build(driver_dir: &Path) -> Result<File, SoldrError> {
         .read(true)
         .write(true)
         .open(&path)?;
-    file.lock_exclusive().map_err(|error| {
-        SoldrError::Other(format!("failed to lock {}: {error}", path.display()))
-    })?;
+    crate::platform::wait::lock_exclusive_announced(
+        &file,
+        crate::platform::wait::LONG_LOCK,
+        "the local dylint-driver build",
+    )
+    .map_err(|error| SoldrError::Other(format!("failed to lock {}: {error}", path.display())))?;
     Ok(file)
 }
 

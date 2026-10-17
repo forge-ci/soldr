@@ -4,7 +4,7 @@ use super::*;
 fn disabled_values_are_recognized() {
     let _lock = crate::TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for value in ["0", "false", "no", "off", "", "  "] {
         let _guard = crate::EnvVarGuard::set(DEBUG_TRACE_ENV_VAR, value);
         assert!(!enabled(), "{value:?} must not enable tracing");
@@ -17,7 +17,7 @@ fn disabled_values_are_recognized() {
 fn truthy_values_enable_tracing() {
     let _lock = crate::TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for value in ["1", "true", "on", "yes"] {
         let _guard = crate::EnvVarGuard::set(DEBUG_TRACE_ENV_VAR, value);
         assert!(enabled(), "{value:?} must enable tracing");
@@ -49,7 +49,7 @@ fn rendered_argv_joins_program_and_args() {
 fn spawn_traced_without_the_flag_only_spawns() {
     let _lock = crate::TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _guard = crate::EnvVarGuard::remove(DEBUG_TRACE_ENV_VAR);
     let mut command =
         if crate::platform::host::facts::os() == crate::platform::host::facts::HostOs::Windows {
@@ -83,7 +83,7 @@ fn observed_spawn_round_trips_non_unicode_argv() {
     }
     let _lock = crate::TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _guard = crate::EnvVarGuard::set(DEBUG_TRACE_ENV_VAR, "1");
 
     let dir = std::env::temp_dir().join(format!(
@@ -152,7 +152,7 @@ fn observed_spawn_round_trips_non_unicode_env() {
     }
     let _lock = crate::TEST_PROCESS_ENV_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _guard = crate::EnvVarGuard::set(DEBUG_TRACE_ENV_VAR, "1");
 
     let dir = std::env::temp_dir().join(format!(

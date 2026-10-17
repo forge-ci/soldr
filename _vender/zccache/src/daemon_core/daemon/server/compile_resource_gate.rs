@@ -14,6 +14,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 
+// raw-lock-ok: compile resource admission; owned guards live for a whole compile.
 use kernal_api::async_engine::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use crate::daemon_core::compiler::CompilerFamily;

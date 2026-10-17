@@ -534,7 +534,11 @@ pub(crate) fn target_config_value_in_files(
 
 fn pep517_fallback_key(target: &str, injection: &LinkerInjection) -> Option<String> {
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| OsStr::new("rustc").to_os_string());
-    let rustc_identity = Command::new(&rustc).arg("-vV").output().ok()?;
+    let rustc_identity = crate::platform::wait::output_for(
+        Command::new(&rustc).arg("-vV"),
+        crate::platform::wait::PROBE,
+    )
+    .ok()?;
     if !rustc_identity.status.success() {
         return None;
     }
@@ -626,7 +630,7 @@ fn linker_candidate_identity(injection: &LinkerInjection) -> Vec<u8> {
         let mut command = Command::new(&candidate);
         command.arg("--version");
         suppress_windows_console_window(&mut command);
-        match command.output() {
+        match crate::platform::wait::output_for(&mut command, crate::platform::wait::PROBE) {
             Ok(output) => {
                 identity.extend_from_slice(&output.stdout);
                 identity.extend_from_slice(&output.stderr);
@@ -683,7 +687,7 @@ pub fn record_pep517_fallback(paths: &SoldrPaths, key: Option<&str>) -> Result<(
         .append(true)
         .read(true)
         .open(path)?;
-    file.lock_exclusive()?;
+    crate::platform::wait::lock_exclusive_for(&file, crate::platform::wait::SHORT_LOCK)?;
     file.seek(SeekFrom::Start(0))?;
     let mut existing = String::new();
     file.read_to_string(&mut existing)?;
