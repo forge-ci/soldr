@@ -2,6 +2,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use crate::sync::{Mutex, MutexGuard};
 
 /// Errors from the GitHub Actions cache client.
 #[derive(Error, Debug)]
@@ -239,7 +240,7 @@ impl GhaCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::OnceLock;
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -255,7 +256,7 @@ mod tests {
     impl EnvGuard {
         fn new() -> Self {
             Self {
-                _lock: env_lock().lock().unwrap(),
+                _lock: env_lock().lock(),
                 old_cache_url: std::env::var("ACTIONS_CACHE_URL").ok(),
                 old_runtime_token: std::env::var("ACTIONS_RUNTIME_TOKEN").ok(),
             }

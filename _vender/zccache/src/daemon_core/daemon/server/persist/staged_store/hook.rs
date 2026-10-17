@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+use crate::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::daemon_core::daemon::server) enum StagedHookPoint {
@@ -44,7 +45,6 @@ impl StagedHookGuard {
         let (resume, resume_rx) = mpsc::sync_channel(1);
         active()
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
             .push(ActiveHook {
                 token,
                 scope: scope.to_path_buf(),
@@ -76,7 +76,6 @@ impl Drop for StagedHookGuard {
     fn drop(&mut self) {
         active()
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
             .retain(|hook| hook.token != self.token);
         let _ = self.resume.try_send(());
     }
@@ -84,7 +83,7 @@ impl Drop for StagedHookGuard {
 
 pub(in crate::daemon_core::daemon::server) fn pause(scope_path: &Path, point: StagedHookPoint) {
     let hook = {
-        let mut active = active().lock().unwrap_or_else(|error| error.into_inner());
+        let mut active = active().lock();
         let Some(index) = active
             .iter()
             .position(|hook| scope_path.starts_with(&hook.scope) && hook.point == point)

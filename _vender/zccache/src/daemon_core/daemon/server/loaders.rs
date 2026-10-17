@@ -130,8 +130,7 @@ impl DepGraphSetter {
             let mut guard = self
                 .state
                 .depgraph_load_warning
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .lock();
             *guard = Some(warning);
         }
         self.state

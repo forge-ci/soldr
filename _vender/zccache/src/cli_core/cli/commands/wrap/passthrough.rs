@@ -7,7 +7,7 @@ use super::super::util::exit_code_from_i32;
 use super::tool_resolution::resolve_compiler_path;
 
 #[cfg(test)]
-pub(super) static CWD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(super) static CWD_TEST_LOCK: crate::sync::Mutex<()> = crate::sync::Mutex::new(());
 
 /// Release the wrapper's own CWD handle on the build dir before spawning
 /// a child, while keeping the child's CWD pointing at the original
@@ -132,7 +132,7 @@ mod tests {
     /// dir after the helper returns.
     #[test]
     fn run_passthrough_releases_wrapper_cwd() {
-        let _guard = CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = CWD_TEST_LOCK.lock();
         let original_cwd = std::env::current_dir().ok();
         let build_dir = tempfile::tempdir().unwrap();
         let canonical_build_dir = std::fs::canonicalize(build_dir.path()).unwrap();
@@ -166,7 +166,7 @@ mod tests {
     /// actually ran.
     #[test]
     fn run_passthrough_spawns_the_child_in_the_supplied_cwd() {
-        let _guard = CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = CWD_TEST_LOCK.lock();
         let original_cwd = std::env::current_dir().ok();
         let build_dir = tempfile::tempdir().unwrap();
         let canonical_build_dir = std::fs::canonicalize(build_dir.path()).unwrap();
@@ -216,7 +216,7 @@ mod tests {
     /// rationale as `run_passthrough`.
     #[test]
     fn direct_rustfmt_policy_releases_wrapper_cwd() {
-        let _guard = CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = CWD_TEST_LOCK.lock();
         let original_cwd = std::env::current_dir().ok();
         let build_dir = tempfile::tempdir().unwrap();
         let canonical_build_dir = std::fs::canonicalize(build_dir.path()).unwrap();

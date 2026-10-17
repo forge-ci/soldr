@@ -2,8 +2,8 @@
 //! per published output, and a bounded fsync budget per publication.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::thread::ThreadId;
+use crate::sync::Mutex;
 
 static HASH_CALLS: AtomicU64 = AtomicU64::new(0);
 static FILE_SYNCS: AtomicU64 = AtomicU64::new(0);
@@ -19,31 +19,27 @@ static ACTIVE_THREAD: Mutex<Option<ThreadId>> = Mutex::new(None);
 /// threads; tests that don't take this guard are themselves unaffected,
 /// since only the guard holder's thread is ever counted.
 pub(in crate::daemon_core::daemon::server) struct CounterGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: crate::sync::MutexGuard<'static, ()>,
 }
 
 impl Drop for CounterGuard {
     fn drop(&mut self) {
         *ACTIVE_THREAD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = None;
+            .lock() = None;
     }
 }
 
 pub(in crate::daemon_core::daemon::server) fn guard() -> CounterGuard {
     let lock = COUNTER_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+        .lock();
     *ACTIVE_THREAD
-        .lock()
-        .unwrap_or_else(|error| error.into_inner()) = Some(std::thread::current().id());
+        .lock() = Some(std::thread::current().id());
     CounterGuard { _lock: lock }
 }
 
 fn on_active_thread() -> bool {
     *ACTIVE_THREAD
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
         == Some(std::thread::current().id())
 }
 

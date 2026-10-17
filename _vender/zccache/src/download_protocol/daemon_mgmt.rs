@@ -2,6 +2,7 @@
 //! the download daemon binary (lock-file helpers, default endpoint, etc.).
 
 use crate::core::NormalizedPath;
+use crate::sync::{Mutex, MutexGuard};
 
 /// Return the default IPC endpoint for the download daemon.
 pub fn default_endpoint() -> String {
@@ -66,7 +67,7 @@ pub fn read_lock_file_pid() -> Option<u32> {
 mod tests {
     use super::*;
     use std::ffi::OsString;
-    use std::sync::{Mutex, MutexGuard};
+    
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -77,7 +78,7 @@ mod tests {
 
     impl EnvGuard {
         fn set_cache_dir(value: &std::path::Path) -> Self {
-            let lock = ENV_LOCK.lock().unwrap();
+            let lock = ENV_LOCK.lock();
             let previous = std::env::var_os(crate::core::config::CACHE_DIR_ENV);
             std::env::set_var(crate::core::config::CACHE_DIR_ENV, value);
             Self {

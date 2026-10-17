@@ -333,7 +333,7 @@ pub(super) fn new_shared_state(
             dep_graph_persisted: AtomicBool::new(false),
             dep_graph_load_complete: AtomicBool::new(true),
             dep_graph_load_notify: Arc::new(Notify::new()),
-            depgraph_load_warning: StdMutex::new(None),
+            depgraph_load_warning: crate::sync::Mutex::new(None),
             in_flight_exec: DashMap::new(),
             pending_cache_writes: DashMap::new(),
             exec_store,
@@ -420,8 +420,7 @@ impl DaemonServer {
         let mut guard = self
             .state
             .depgraph_load_warning
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         *guard = Some(warning);
     }
 

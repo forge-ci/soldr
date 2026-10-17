@@ -8,9 +8,10 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use crate::core::NormalizedPath;
+use crate::sync::Mutex;
 
 const TIME_MACROS: [&[u8]; 3] = [b"__DATE__", b"__TIME__", b"__TIMESTAMP__"];
 
@@ -79,11 +80,7 @@ pub(super) fn find_time_macro_use(
 /// Emit the once-per-translation-unit diagnostic for a cache bypass.
 pub(super) fn warn_time_macro_uncacheable(found: &TimeMacroUse) {
     let warned = WARNED_TRANSLATION_UNITS.get_or_init(|| Mutex::new(HashSet::new()));
-    let Ok(mut warned) = warned.lock() else {
-        // Poisoning a diagnostic-only mutex must not change compilation
-        // correctness.  The cache bypass already happened.
-        return;
-    };
+    let mut warned = warned.lock();
     if !warned.insert(found.source_file.clone()) {
         return;
     }

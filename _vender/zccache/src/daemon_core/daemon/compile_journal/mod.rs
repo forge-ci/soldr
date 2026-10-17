@@ -20,7 +20,7 @@ use std::cell::Cell;
 use std::fs;
 use std::future::Future;
 use std::path::Path;
-use std::sync::{mpsc, Mutex};
+use std::sync::mpsc;
 use std::time::SystemTime;
 
 use crate::daemon_core::core::NormalizedPath;
@@ -42,6 +42,7 @@ pub use env::{sanitize_journal_env, SanitizedJournalEnv};
 pub use outcome::{extract_outcome, termination_signal};
 
 use journal_thread::{journal_thread, JournalMessage};
+use crate::sync::Mutex;
 
 /// Closed enum of `miss_reason` values written to the compile journal.
 ///
@@ -570,7 +571,8 @@ impl CompileJournal {
             // Serialize on the caller's thread (async task).
             match serde_json::to_string(entry) {
                 Ok(line) => {
-                    if let Ok(tx) = tx.lock() {
+                    {
+        let tx = tx.lock();
                         let _ = tx.send(JournalMessage::Entry {
                             line,
                             session_path: session_path.map(Into::into),
@@ -588,7 +590,8 @@ impl CompileJournal {
     /// so the background thread can release the file.
     pub fn close_session(&self, path: &Path) {
         if let Some(tx) = &self.sender {
-            if let Ok(tx) = tx.lock() {
+            {
+        let tx = tx.lock();
                 let _ = tx.send(JournalMessage::CloseSession { path: path.into() });
             }
         }

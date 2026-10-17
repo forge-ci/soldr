@@ -30,7 +30,7 @@ const CACHE_ROOT_WRITER_LOCK_FILE: &str = ".writer.lock";
 /// the crash backstop.
 #[derive(Debug)]
 pub struct CacheRootWriterLock {
-    lock: std::sync::Mutex<Option<kernal_api::platform::fs::OwnedFileLock>>,
+    lock: crate::sync::Mutex<Option<kernal_api::platform::fs::OwnedFileLock>>,
 }
 
 impl CacheRootWriterLock {
@@ -80,7 +80,7 @@ impl CacheRootWriterLock {
             tracing::debug!(%error, cache_root = %cache_dir.display(), "failed to stamp store activity marker");
         }
         Ok(Self {
-            lock: std::sync::Mutex::new(Some(lock)),
+            lock: crate::sync::Mutex::new(Some(lock)),
         })
     }
 
@@ -93,8 +93,7 @@ impl CacheRootWriterLock {
     pub fn release(&self) {
         let mut guard = self
             .lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .lock();
         if let Some(lock) = guard.take() {
             // Dropping releases; `unlock` would too, but the handle is not
             // wanted back here.
