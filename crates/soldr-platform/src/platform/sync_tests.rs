@@ -15,7 +15,7 @@ fn entry(id: u64, phase: Phase, age: Duration, now: Instant) -> Entry {
 fn nothing_overdue_reports_nothing() {
     let now = Instant::now();
     let entries = [entry(1, Phase::Holding, Duration::from_secs(2), now)];
-    assert!(overdue_report(&entries, now, Duration::from_secs(15)).is_none());
+    assert!(overdue_report(&entries, now, Duration::from_secs(15), &[]).is_none());
 }
 
 /// soldr#3836: an overrun must name every registered site, including the
@@ -27,17 +27,32 @@ fn an_overdue_hold_names_every_registered_site() {
         entry(1, Phase::Holding, Duration::from_secs(20), now),
         entry(2, Phase::Waiting, Duration::from_secs(3), now),
     ];
-    let report = overdue_report(&entries, now, Duration::from_secs(15)).expect("overdue");
+    let Some(Overdue::Abort(report)) = overdue_report(&entries, now, Duration::from_secs(15), &[])
+    else {
+        panic!("an overdue hold must abort");
+    };
     assert!(report.contains("Holding Mutex for 20."), "{report}");
     assert!(report.contains("Waiting Mutex for 3."), "{report}");
     assert!(report.contains("sync_tests.rs"), "{report}");
 }
 
+/// A long wait alone can be a queue of brief holds under load; a deadlock
+/// always shows up as an overdue hold. So a wait is reported, once, and never
+/// aborts the process by itself.
 #[test]
-fn an_overdue_wait_is_reported_too() {
+fn an_overdue_wait_is_reported_once_and_does_not_abort() {
     let now = Instant::now();
-    let entries = [entry(1, Phase::Waiting, Duration::from_secs(16), now)];
-    assert!(overdue_report(&entries, now, Duration::from_secs(15)).is_some());
+    let entries = [
+        entry(1, Phase::Waiting, Duration::from_secs(16), now),
+        entry(2, Phase::Holding, Duration::from_secs(1), now),
+    ];
+    let limit = Duration::from_secs(15);
+    let Some(Overdue::Report(ids, report)) = overdue_report(&entries, now, limit, &[]) else {
+        panic!("an overdue wait must be reported, not abort");
+    };
+    assert_eq!(ids, vec![1]);
+    assert!(report.contains("lock wait exceeded"), "{report}");
+    assert!(overdue_report(&entries, now, limit, &ids).is_none());
 }
 
 #[test]
