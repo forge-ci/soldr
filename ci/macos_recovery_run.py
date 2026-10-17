@@ -304,7 +304,9 @@ def executor_contract() -> ExecutorContract:
             GuestEnvVar("SOLDR_TARGET_WARN_FREE_GB", "1"),
             GuestEnvVar("SOLDR_TARGET_BLOCK_FREE_GB", "1"),
             GuestEnvVar("RUSTUP_TOOLCHAIN", "channel-from-toolchain-ensure"),
-            GuestEnvVar("PATH", "$WORK/shims:$PATH"),
+            GuestEnvVar("CARGO_HOME", "$HOME/.soldr/cargo"),
+            GuestEnvVar("RUSTUP_HOME", "$HOME/.soldr/rustup"),
+            GuestEnvVar("PATH", "$WORK/shims:$HOME/.soldr/cargo/bin:$PATH"),
         ),
         required_share_files=tuple(REPLAY_SHARE_FILES),
         capabilities=GuestCapabilities(
@@ -639,6 +641,19 @@ def _stage_toolchain() -> list[str]:
         '      record toolchain_ensure pass "channel=$CHANNEL"',
         '      RUSTUP_TOOLCHAIN="$CHANNEL"',
         "      export RUSTUP_TOOLCHAIN",
+        # soldr#3846: the guest has no system rustup. `toolchain ensure`
+        # bootstraps one into soldr's own root (`<root>/cargo/bin`, toolchains
+        # under `<root>/rustup`), which is never on PATH, so every test that
+        # resolves the real toolchain through `rustup` (with an isolated HOME
+        # and no bootstrap allowed) failed with `rustup which cargo: No such
+        # file or directory`. Expose that rustup the way a system install is
+        # exposed on the Linux lanes.
+        # The guest sets no SOLDR_CACHE_DIR, so soldr's root is $HOME/.soldr;
+        # its cargo/bin joins PATH (behind the shims) once `toolchain link`
+        # succeeds below.
+        '      CARGO_HOME="$HOME/.soldr/cargo"',
+        '      RUSTUP_HOME="$HOME/.soldr/rustup"',
+        "      export CARGO_HOME RUSTUP_HOME",
         "      TOOLCHAIN_ENSURE_OK=0",
         "    else",
         '      record toolchain_ensure fail "ensure succeeded but JSON names no channel"',
@@ -658,7 +673,7 @@ def _stage_toolchain() -> list[str]:
         "  TL_RC=$?",
         '  if [ "$TL_RC" -eq 0 ]; then',
         "    record toolchain_link pass",
-        '    PATH="$WORK/shims:$PATH"',
+        '    PATH="$WORK/shims:$HOME/.soldr/cargo/bin:$PATH"',
         "    export PATH",
         "    TOOLCHAIN_LINK_OK=0",
         "  else",
@@ -770,11 +785,38 @@ def _stage_nextest_list_all() -> list[str]:
     ]
 
 
+# Tests that must link a native Mach-O executable. The Recovery guest has no
+# system C compiler, linker or SDK (`system_c_compiler=False`, `sdk=False`
+# in the executor contract), and soldr ships no managed LLVM for an
+# x86_64-macOS host, so a native link cannot succeed there by construction
+# (`linker \`cc\` not found`, soldr#3846). They still run on the real
+# macos-15-intel lane, which has Xcode; only this guest skips them.
+RECOVERY_NATIVE_LINK_TESTS = (
+    "cold_first_compile::bare_test_verb_cold_on_an_explicit_root",
+)
+
+
+def recovery_filter_suffix() -> str:
+    """The nextest filterset clause that drops native-link tests (soldr#3846)."""
+
+    return "".join(f" and not test(={name})" for name in RECOVERY_NATIVE_LINK_TESTS)
+
+
+def _read_recovery_filter() -> list[str]:
+    """Read the lane filter and drop the native-link tests -- the one helper
+    both the list and the run stage use, so they cannot select differently."""
+
+    return [
+        '  FILTER=$(cat "$WORK/filter.txt")',
+        f'  FILTER="($FILTER){recovery_filter_suffix()}"',
+    ]
+
+
 def _stage_nextest_list_selected(partition: str) -> list[str]:
     return [
         "stage_start nextest_list_selected",
         'if [ "$LIST_ALL_OK" -eq 0 ] && [ "$FETCH_FILTER_OK" -eq 0 ]; then',
-        '  FILTER=$(cat "$WORK/filter.txt")',
+        *_read_recovery_filter(),
         "  # shellcheck disable=SC2086",
         '  "$NEXTEST_BIN" nextest list $REUSE_ARGS \\',
         '    --workspace-remap "$WORK/workspace" \\',
@@ -908,7 +950,7 @@ def _stage_nextest_run(partition: str) -> list[str]:
         *_memory_sampler_function(),
         'if [ "$LIST_SELECTED_OK" -eq 0 ] && [ "$TOOLCHAIN_LINK_OK" -eq 0 ] \\',
         '  && [ "$FETCH_SOLDR_DAEMON_OK" -eq 0 ] && [ "$EXTRACT_FIXTURES_OK" -eq 0 ]; then',
-        '  FILTER=$(cat "$WORK/filter.txt")',
+        *_read_recovery_filter(),
         "  mem_sample",
         "  # The sleep's output is detached so a sampler killed mid-sleep cannot",
         "  # hold this script's stdout pipe open after the suite ends.",

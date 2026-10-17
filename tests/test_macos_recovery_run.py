@@ -351,7 +351,9 @@ def test_executor_contract_owns_every_3084_handoff_edge() -> None:
         "SOLDR_TARGET_WARN_FREE_GB": "1",
         "SOLDR_TARGET_BLOCK_FREE_GB": "1",
         "RUSTUP_TOOLCHAIN": "channel-from-toolchain-ensure",
-        "PATH": "$WORK/shims:$PATH",
+        "CARGO_HOME": "$HOME/.soldr/cargo",
+        "RUSTUP_HOME": "$HOME/.soldr/rustup",
+        "PATH": "$WORK/shims:$HOME/.soldr/cargo/bin:$PATH",
     }
     assert set(contract["required_share_files"]) == set(MODULE.REPLAY_SHARE_FILES)
     assert contract["capabilities"] == {
@@ -723,3 +725,37 @@ def test_guest_phase_timing_runs_under_posix_sh(tmp_path: Path) -> None:
         "toolchain\tstart\t100\t",
         "toolchain\tend\t105\t5",
     ]
+
+
+def test_toolchain_stage_exposes_the_bootstrapped_rustup() -> None:
+    """soldr#3846: the guest has no system rustup; after `toolchain ensure`
+    the rustup soldr bootstrapped into its own root must be reachable by the
+    tests: its homes are exported after ensure, and its cargo/bin joins PATH
+    behind the shims once `toolchain link` succeeds."""
+    script = "\n".join(MODULE._stage_toolchain())
+    ensure = script.index("toolchain ensure --json")
+    homes = script.index("export CARGO_HOME RUSTUP_HOME")
+    link = script.index("toolchain link --shim-dir")
+    path = script.index('PATH="$WORK/shims:$HOME/.soldr/cargo/bin:$PATH"')
+    assert ensure < homes < link < path
+    assert 'CARGO_HOME="$HOME/.soldr/cargo"' in script
+    assert 'RUSTUP_HOME="$HOME/.soldr/rustup"' in script
+
+
+def test_recovery_filter_drops_native_link_tests_only_in_the_guest() -> None:
+    """soldr#3846: the guest cannot link a native executable (no cc, no SDK,
+    no managed LLVM for x86_64 macOS), so tests that must link are filtered
+    out of the Recovery replay -- and only there."""
+
+    assert MODULE.recovery_filter_suffix() == (
+        " and not test(=cold_first_compile::bare_test_verb_cold_on_an_explicit_root)"
+    )
+    script = MODULE.build_guest_script()
+    reads = script.count('FILTER=$(cat "$WORK/filter.txt")')
+    wrapper = f'FILTER="($FILTER){MODULE.recovery_filter_suffix()}"'
+    # Every stage that reads the lane filter (list and run) must apply it.
+    assert reads >= 2
+    assert script.count(wrapper) == reads
+    contract = _contract_document()
+    assert contract["capabilities"]["system_c_compiler"] is False
+    assert contract["capabilities"]["sdk"] is False
