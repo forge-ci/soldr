@@ -61,7 +61,9 @@ def is_test_file(rel: str) -> bool:
 
 def production_text(text: str) -> str:
     """Drop a trailing inline `#[cfg(test)] mod ...` block."""
-    match = re.search(r"^#\[cfg\(test\)\]\s*\n\s*(?:pub(?:\([^)]*\))?\s+)?mod\s", text, re.M)
+    match = re.search(
+        r"^#\[cfg\(test\)\]\s*\n\s*(?:pub(?:\([^)]*\))?\s+)?mod\s", text, re.M
+    )
     return text[: match.start()] if match else text
 
 
