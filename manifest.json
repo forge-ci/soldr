@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-10-16T03:36:22Z",
-  "git_sha": "0f538adf202d082db576cc4ce07f173c4184b32c",
+  "generated_at": "2026-10-17T03:36:59Z",
+  "git_sha": "c23fc8892edbaa02e506bb84d4c8322815a6e850",
   "branch": "benchmark-stats",
   "repository": "zackees/soldr",
   "artifacts": {
@@ -27,7 +27,7 @@
         "ts": "ISO-8601 UTC timestamp of the run",
         "sha": "git sha of the main-commit being measured",
         "canaries": "object mapping canary name -> wall-time milliseconds",
-        "comparison": "array of compact README comparison rows: benchmark, fixture, scenario_key, tool, wall_ms, cache_bytes"
+        "comparison": "array of compact README comparison rows: benchmark, fixture, scenario_key, tool, wall_ms, cache_bytes, provision_ms, provision_bytes (the last two null except soldr cold, soldr#3802)"
       }
     },
     "index_html": {
