@@ -17,6 +17,8 @@ fn test_compile(ws: &Path, target: &Path) -> String {
             "test",
             "--offline",
             "--locked",
+            // CI forces ANSI colors; this fixture inspects Cargo's text.
+            "--color=never",
             "--no-run",
             "-vv",
         ])
@@ -86,7 +88,11 @@ fn default_build_script_stays_fresh_after_full_and_base_delta_restore() {
         return;
     }
     test_compile(&ws, &target);
-    assert!(test_compile(&ws, &target).contains("Fresh mtime-freshness-fixture"));
+    let baseline = test_compile(&ws, &target);
+    assert!(
+        baseline.contains("Fresh mtime-freshness-fixture"),
+        "{baseline}"
+    );
 
     let base_archive = root.path().join("base.tar.zst");
     save(&SaveOptions {
