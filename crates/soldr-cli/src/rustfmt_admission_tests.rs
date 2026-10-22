@@ -284,3 +284,103 @@ fn config_path_value_is_not_captured_as_a_source_file() {
 
     assert!(snapshot.files.is_empty());
 }
+
+mod daemon_start {
+    use super::super::{acquire_starting_daemon, lease_unavailable_message};
+    use crate::daemon::client::ClientError;
+    use std::cell::Cell;
+
+    /// soldr#3855 RED->GREEN: with no daemon running, the first request
+    /// reports `NotRunning`; the controller must start the daemon and get
+    /// the lease on the retry instead of formatting without admission.
+    #[test]
+    fn not_running_starts_daemon_then_acquires() {
+        let attempts = Cell::new(0);
+        let starts = Cell::new(0);
+        let lease = acquire_starting_daemon(
+            || {
+                attempts.set(attempts.get() + 1);
+                if starts.get() == 0 {
+                    Err(ClientError::NotRunning)
+                } else {
+                    Ok("lease")
+                }
+            },
+            || {
+                starts.set(starts.get() + 1);
+                Ok(())
+            },
+        );
+        assert_eq!(lease, Ok("lease"));
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(starts.get(), 1);
+    }
+
+    #[test]
+    fn running_daemon_is_used_without_a_start() {
+        let starts = Cell::new(0);
+        let lease = acquire_starting_daemon(
+            || Ok::<_, ClientError>(7),
+            || {
+                starts.set(starts.get() + 1);
+                Ok(())
+            },
+        );
+        assert_eq!(lease, Ok(7));
+        assert_eq!(starts.get(), 0);
+    }
+
+    #[test]
+    fn failed_start_reports_the_cause() {
+        let attempts = Cell::new(0);
+        let lease = acquire_starting_daemon(
+            || {
+                attempts.set(attempts.get() + 1);
+                Err::<(), _>(ClientError::NotRunning)
+            },
+            || Err("broker unreachable".to_string()),
+        );
+        let reason = lease.unwrap_err();
+        assert!(
+            reason.contains("starting one failed: broker unreachable"),
+            "{reason}"
+        );
+        assert_eq!(attempts.get(), 1, "no retry after a failed start");
+    }
+
+    #[test]
+    fn retry_failure_after_start_is_reported() {
+        let reason = acquire_starting_daemon(|| Err::<(), _>(ClientError::NotRunning), || Ok(()))
+            .unwrap_err();
+        assert!(reason.contains("started soldr-daemon but"), "{reason}");
+    }
+
+    /// A daemon that answers with a fault is not a missing daemon: starting
+    /// another would not help and must not be attempted.
+    #[test]
+    fn other_errors_never_start_a_daemon() {
+        let starts = Cell::new(0);
+        let reason = acquire_starting_daemon(
+            || Err::<(), _>(ClientError::Protocol("refused".to_string())),
+            || {
+                starts.set(starts.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(starts.get(), 0);
+        assert!(reason.contains("refused"), "{reason}");
+    }
+
+    #[test]
+    fn unavailable_message_names_recovery_and_continuation() {
+        let plain = lease_unavailable_message("why", false);
+        assert!(plain.contains("ERROR"));
+        assert!(plain.contains("why"));
+        assert!(plain.contains("WITHOUT daemon admission protection"));
+        assert!(plain.contains("soldr daemon stop && soldr daemon start"));
+        assert!(plain.contains("soldr logs paths"));
+        assert!(!plain.contains('\x1b'));
+        assert!(lease_unavailable_message("why", true).starts_with("\x1b[1;31m"));
+    }
+}

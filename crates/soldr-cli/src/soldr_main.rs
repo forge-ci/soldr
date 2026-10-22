@@ -204,6 +204,11 @@ pub fn run() -> std::process::ExitCode {
             Some(multicall::MulticallDispatch::Exit(code)) => guarded_exit(code),
             Some(multicall::MulticallDispatch::ExitCode(code)) => return code,
             Some(multicall::MulticallDispatch::SoldrArgs(args)) => {
+                // soldr#3855: a shim-dispatched command (e.g. the `rustfmt`
+                // shim cargo fmt launches) talks to the daemon too. Without
+                // the broker connector it dialed the private daemon endpoint
+                // and always saw NotRunning, even with a live daemon.
+                let _ = crate::broker_control_transport::install();
                 guarded_exit(block_on_exit_code(run_with_args("soldr", &args)));
             }
             None => {}
