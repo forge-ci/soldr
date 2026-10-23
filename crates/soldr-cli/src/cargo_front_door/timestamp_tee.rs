@@ -23,6 +23,15 @@
 //! bare CR, and stamping each redraw is what makes a slow download
 //! legible. A CRLF pair stamps once, not twice.
 //!
+//! # Diagnostic lines stay byte-exact (soldr#3850)
+//!
+//! A line that opens a rustc/cargo diagnostic (`error:`, `error[E..]:`,
+//! `warning:`, `note:`, `help:`, or an indented ` --> ` location) is
+//! relayed without a prefix, so `grep '^error'` and IDE problem matchers
+//! still match when stderr is piped. Deciding needs only the first few
+//! visible bytes, so the tee holds back at most a short line head (ANSI
+//! colour escapes skipped) and never stalls a progress redraw.
+//!
 //! # What must NOT be stamped
 //!
 //! Only the copy going to the user's terminal. The bytes forwarded on
@@ -86,6 +95,87 @@ pub(crate) struct TimestampedTee<W: Write> {
     at_line_start: bool,
     /// Suppresses a second stamp for the newline of a CRLF pair.
     last_was_cr: bool,
+    /// Line-head bytes held back until [`classify_line_head`] decides
+    /// whether the line is a diagnostic.
+    pending: Vec<u8>,
+    holding: bool,
+}
+
+/// Longest line head held back before giving up and stamping.
+const MAX_PENDING: usize = 64;
+
+/// Visible words that open a rustc/cargo diagnostic line; each must be
+/// followed by `:` or `[` to count.
+const DIAGNOSTIC_WORDS: [&str; 4] = ["error", "warning", "note", "help"];
+
+#[derive(Debug, PartialEq, Eq)]
+enum LineHead {
+    Undecided,
+    Diagnostic,
+    Ordinary,
+}
+
+/// Visible text of `head` with ANSI CSI escapes removed, or `None` when
+/// the head ends inside an escape.
+fn visible_text(head: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(head.len());
+    let mut i = 0;
+    while i < head.len() {
+        if head[i] == 0x1b {
+            if i + 1 >= head.len() {
+                return None;
+            }
+            if head[i + 1] != b'[' {
+                i += 2;
+                continue;
+            }
+            let mut j = i + 2;
+            while j < head.len() && !(0x40..=0x7e).contains(&head[j]) {
+                j += 1;
+            }
+            if j >= head.len() {
+                return None;
+            }
+            i = j + 1;
+            continue;
+        }
+        out.push(head[i]);
+        i += 1;
+    }
+    Some(out)
+}
+
+fn classify_line_head(head: &[u8]) -> LineHead {
+    let Some(text) = visible_text(head) else {
+        return LineHead::Undecided;
+    };
+    let rest = text.trim_ascii_start();
+    if rest.len() != text.len() {
+        // Indented: only a ` --> file:line` location is a diagnostic.
+        return if rest.starts_with(b"-->") {
+            LineHead::Diagnostic
+        } else if b"-->".starts_with(rest) {
+            LineHead::Undecided
+        } else {
+            LineHead::Ordinary
+        };
+    }
+    let mut undecided = text.is_empty();
+    for word in DIAGNOSTIC_WORDS {
+        let word = word.as_bytes();
+        if text.len() > word.len() && text.starts_with(word) {
+            if matches!(text[word.len()], b':' | b'[') {
+                return LineHead::Diagnostic;
+            }
+        } else if word.starts_with(&text) {
+            undecided = true;
+        }
+    }
+    if undecided {
+        LineHead::Undecided
+    } else {
+        LineHead::Ordinary
+    }
 }
 
 impl<W: Write> TimestampedTee<W> {
@@ -95,7 +185,21 @@ impl<W: Write> TimestampedTee<W> {
             t0,
             at_line_start: true,
             last_was_cr: false,
+            pending: Vec::new(),
+            holding: false,
         }
+    }
+
+    /// Emits the held line head, stamped unless it is a diagnostic.
+    fn release(&mut self, diagnostic: bool) -> std::io::Result<()> {
+        if !diagnostic {
+            let prefix = self.prefix();
+            self.inner.write_all(prefix.as_bytes())?;
+        }
+        self.inner.write_all(&self.pending)?;
+        self.pending.clear();
+        self.holding = false;
+        Ok(())
     }
 
     fn prefix(&self) -> String {
@@ -109,10 +213,27 @@ impl<W: Write> Write for TimestampedTee<W> {
             let is_lf = byte == LF;
             let is_cr = byte == CR;
             if self.at_line_start && !(is_lf && self.last_was_cr) {
-                let prefix = self.prefix();
-                self.inner.write_all(prefix.as_bytes())?;
+                self.holding = true;
             }
-            self.inner.write_all(&[byte])?;
+            if self.holding {
+                self.pending.push(byte);
+                let head = if is_lf || is_cr {
+                    let body = &self.pending[..self.pending.len() - 1];
+                    match classify_line_head(body) {
+                        LineHead::Undecided => LineHead::Ordinary,
+                        decided => decided,
+                    }
+                } else if self.pending.len() >= MAX_PENDING {
+                    LineHead::Ordinary
+                } else {
+                    classify_line_head(&self.pending)
+                };
+                if head != LineHead::Undecided {
+                    self.release(head == LineHead::Diagnostic)?;
+                }
+            } else {
+                self.inner.write_all(&[byte])?;
+            }
 
             // A CRLF pair is one terminator: the CR sets the flag, and
             // the newline must not draw a second prefix on the way to
@@ -125,6 +246,17 @@ impl<W: Write> Write for TimestampedTee<W> {
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
+    }
+}
+
+impl<W: Write> Drop for TimestampedTee<W> {
+    /// A line head still held at end of stream is an ordinary partial
+    /// line; it must reach the terminal, not vanish.
+    fn drop(&mut self) {
+        if self.holding {
+            let _ = self.release(false);
+            let _ = self.inner.flush();
+        }
     }
 }
 
@@ -236,6 +368,55 @@ mod tests {
     fn trailing_partial_line_is_stamped_once() {
         let text = stamped(&[b"partial"]);
         assert_eq!(shape(&text), "<T> partial");
+    }
+
+    #[test]
+    fn diagnostic_lines_stay_unprefixed_for_line_anchored_filters() {
+        // soldr#3850: `grep '^error'` on piped output must still match.
+        let text = stamped(&[
+            b"   Compiling demo v0.1.0\n",
+            b"error[E0308]: mismatched types\n",
+            b" --> src/lib.rs:1:5\n",
+            b"warning: unused\nnote: x\nhelp: y\n",
+            b"error: could not compile `demo`\n",
+        ]);
+        assert_eq!(
+            shape(&text),
+            "<T>    Compiling demo v0.1.0\n\
+             error[E0308]: mismatched types\n \
+             --> src/lib.rs:1:5\n\
+             warning: unused\nnote: x\nhelp: y\n\
+             error: could not compile `demo`\n",
+        );
+    }
+
+    #[test]
+    fn diagnostic_detection_survives_split_writes_and_colour() {
+        let text = stamped(&[
+            b"er",
+            b"ror: boom\n",
+            b"\x1b[1m\x1b[31merr",
+            b"or\x1b[0m: red\n",
+        ]);
+        assert_eq!(
+            shape(&text),
+            "error: boom\n\u{1b}[1m\u{1b}[31merror\u{1b}[0m: red\n"
+        );
+    }
+
+    #[test]
+    fn diagnostic_lookalikes_are_still_stamped() {
+        let text = stamped(&[b"errors everywhere\nhelper\nerror\n   |\n"]);
+        assert_eq!(
+            shape(&text),
+            "<T> errors everywhere\n<T> helper\n<T> error\n<T>    |\n"
+        );
+    }
+
+    #[test]
+    fn a_held_partial_line_is_emitted_on_drop() {
+        let text = stamped(&[b"err"]);
+        assert_eq!(shape(&text), "<T> err");
     }
 
     #[test]
