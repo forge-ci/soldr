@@ -258,8 +258,11 @@ store away at the end of every run, so the lane's only per-unit cache was cold
 every time. An `actions/cache` step now persists it:
 
 - **Path is selected positively**: `…/cache/zccache/daemon-state` — the
-  embedded service's object store
-  (`daemon-state/embedded-v1/v<VERSION>/`). The compile journals
+  embedded service's object stores, one per daemon generation
+  (`daemon-state/embedded-v1-<route>/v<VERSION>/`, soldr#3568). The route
+  follows the daemon image hash, so each commit's source daemon is a new
+  generation; it adopts the largest idle sibling store on first start
+  (`zccache_embedded_adopt.rs`). Without that, this restore served 0 hits. The compile journals
   (`cache/zccache/history/`) and session logs (`cache/zccache/logs/`) are
   siblings *outside* that directory and stay run-scoped, shipped by the
   build-logs artifact. Do not switch this to `cache/zccache` plus `!…/history`
