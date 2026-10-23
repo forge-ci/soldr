@@ -51,3 +51,11 @@ skip = [
     # while the proc-macro ecosystem moves to syn 3.
     { name = "syn" },
 ]
+
+# ---- rustls feature guard (soldr#3785) -----------------------------------
+# RUSTSEC-2026-0348: rustls's RFC 8879 certificate decompression can allocate
+# up to 1 GiB before the server is authenticated. soldr enables neither
+# compression feature (only `ring`, `std`, `tls12`); this keeps it that way.
+[[bans.features]]
+crate = "rustls"
+deny = ["brotli", "zlib"]
