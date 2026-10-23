@@ -27,46 +27,51 @@ pub(crate) fn adopt_sibling_store(
         return Ok(());
     };
     crate::cache_lib::path_safety::validate_owned_directory(&paths.root, parent)?;
-    let Some(sibling) = largest_sibling_store(parent, stable_root)? else {
-        return Ok(());
-    };
-    let version_root = sibling.join(zccache::core::config::versioned_subdir());
-    let Ok(lock) = zccache::core::cache_root_lock::CacheRootWriterLock::acquire(&version_root)
-    else {
-        return Ok(()); // A live daemon owns it.
-    };
-    // Windows refuses to rename a directory with an open handle inside; retry
-    // after releasing. A daemon that claims the store in between holds its own
-    // handle there, so the retry then fails the same way and adopts nothing.
-    let renamed = std::fs::rename(&sibling, stable_root).or_else(|_| {
-        lock.release();
-        std::fs::rename(&sibling, stable_root)
-    });
-    drop(lock);
-    match renamed {
-        Ok(()) => tracing::info!(
-            from = %sibling.display(),
-            to = %stable_root.display(),
-            "adopted an idle sibling generation's embedded zccache store"
-        ),
-        Err(error) => tracing::debug!(
-            %error,
-            from = %sibling.display(),
-            "could not adopt a sibling generation's embedded zccache store"
-        ),
+    for sibling in sibling_stores_largest_first(parent, stable_root)? {
+        let version_root = sibling.join(zccache::core::config::versioned_subdir());
+        let Ok(lock) = zccache::core::cache_root_lock::CacheRootWriterLock::acquire(&version_root)
+        else {
+            continue; // A live daemon owns it; try the next largest.
+        };
+        // Windows refuses to rename a directory with an open handle inside;
+        // retry after releasing. A daemon that claims the store in between
+        // holds its own handle there, so the retry then fails the same way.
+        let renamed = std::fs::rename(&sibling, stable_root).or_else(|_| {
+            lock.release();
+            std::fs::rename(&sibling, stable_root)
+        });
+        drop(lock);
+        match renamed {
+            Ok(()) => {
+                tracing::info!(
+                    from = %sibling.display(),
+                    to = %stable_root.display(),
+                    "adopted an idle sibling generation's embedded zccache store"
+                );
+                return Ok(());
+            }
+            Err(error) => tracing::debug!(
+                %error,
+                from = %sibling.display(),
+                "could not adopt a sibling generation's embedded zccache store"
+            ),
+        }
     }
     Ok(())
 }
 
-/// The sibling generation store with the largest artifact index for this
-/// zccache version: the one with the most to offer. Size, not age, because a
-/// store just created by another generation is the newest and the emptiest.
-fn largest_sibling_store(
+/// Sibling generation stores for this zccache version, largest artifact index
+/// first: the most to offer. Size, not age, because a store just created by
+/// another generation is the newest and the emptiest. Every candidate is
+/// returned, not just the largest: in CI the largest is often the bootstrap
+/// soldr's own store, still held by its live daemon, while the previous
+/// commit's idle store sits right behind it (soldr#3882).
+fn sibling_stores_largest_first(
     parent: &std::path::Path,
     stable_root: &std::path::Path,
-) -> std::io::Result<Option<std::path::PathBuf>> {
+) -> std::io::Result<Vec<std::path::PathBuf>> {
     let version = zccache::core::config::versioned_subdir();
-    let mut best: Option<(u64, std::path::PathBuf)> = None;
+    let mut stores = Vec::new();
     for entry in std::fs::read_dir(parent)? {
         let path = entry?.path();
         let is_generation = path
@@ -85,11 +90,10 @@ fn largest_sibling_store(
         let Ok(index) = std::fs::metadata(path.join(&version).join("index.bin")) else {
             continue;
         };
-        if best.as_ref().is_none_or(|(size, _)| index.len() > *size) {
-            best = Some((index.len(), path));
-        }
+        stores.push((index.len(), path));
     }
-    Ok(best.map(|(_, path)| path))
+    stores.sort_by_key(|(size, _)| std::cmp::Reverse(*size));
+    Ok(stores.into_iter().map(|(_, path)| path).collect())
 }
 
 #[cfg(test)]
@@ -141,6 +145,27 @@ mod tests {
         adopt_sibling_store(&paths, &current).unwrap();
         assert!(!current.exists());
         assert!(live.exists());
+    }
+
+    #[test]
+    fn a_live_largest_store_does_not_block_adopting_the_next_idle_one() {
+        let (_temp, paths, parent) = fixture();
+        let live = store(&parent, "embedded-v1-soldr-daemon-bootstrap", 900);
+        store(&parent, "embedded-v1-soldr-daemon-previous", 500);
+        let version = zccache::core::config::versioned_subdir();
+        let _held =
+            zccache::core::cache_root_lock::CacheRootWriterLock::acquire(&live.join(&version))
+                .unwrap();
+        let current = parent.join("embedded-v1-soldr-daemon-new");
+        adopt_sibling_store(&paths, &current).unwrap();
+        assert_eq!(
+            std::fs::metadata(current.join(&version).join("index.bin"))
+                .unwrap()
+                .len(),
+            500
+        );
+        assert!(live.exists());
+        assert!(!parent.join("embedded-v1-soldr-daemon-previous").exists());
     }
 
     #[test]
