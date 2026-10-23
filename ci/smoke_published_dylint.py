@@ -203,12 +203,16 @@ def run(
         output = "\n".join(
             part
             for part in (
-                exc.stdout.decode(errors="replace").strip()
-                if isinstance(exc.stdout, bytes)
-                else (exc.stdout or "").strip(),
-                exc.stderr.decode(errors="replace").strip()
-                if isinstance(exc.stderr, bytes)
-                else (exc.stderr or "").strip(),
+                (
+                    exc.stdout.decode(errors="replace").strip()
+                    if isinstance(exc.stdout, bytes)
+                    else (exc.stdout or "").strip()
+                ),
+                (
+                    exc.stderr.decode(errors="replace").strip()
+                    if isinstance(exc.stderr, bytes)
+                    else (exc.stderr or "").strip()
+                ),
             )
             if part
         )
@@ -365,6 +369,68 @@ def smoke(*, version: str, repo_root: Path, venv: Path, state_root: Path) -> Non
     run(["uv", "venv", "--clear", str(venv)], env=env, cwd=repo_root, timeout=300)
     install_published(venv=venv, version=version, env=env, cwd=repo_root)
     soldr = published_console_script(venv)
+    try:
+        _exercise(
+            soldr,
+            version=version,
+            expected_channel=expected_channel,
+            env=env,
+            repo_root=repo_root,
+            state_root=state_root,
+        )
+    finally:
+        stop_private_services(soldr, env=env, cwd=repo_root)
+
+
+def teardown_commands(soldr: Path) -> list[list[str]]:
+    """Stop the daemon route, then the broker, the smoke started (soldr#3868)."""
+
+    return [[str(soldr), "daemon", "stop"], [str(soldr), "broker", "stop"]]
+
+
+def stop_private_services(soldr: Path, *, env: Mapping[str, str], cwd: Path) -> None:
+    """Best-effort: never leave this probe's private broker/daemon running.
+
+    soldr#3868: a passing run left both alive under the private HOME. On an
+    ephemeral runner that is only waste, but a lingering child that inherited
+    the step's handles is a candidate for a Windows wait beyond every phase
+    bound. A failed stop is reported, never raised: teardown must not mask the
+    probe's own verdict.
+    """
+
+    for command in teardown_commands(soldr):
+        try:
+            completed = run_captured(
+                command,
+                cwd=cwd,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"teardown {' '.join(command[1:])} failed: {exc}", file=sys.stderr)
+            continue
+        if completed.returncode:
+            print(
+                f"teardown {' '.join(command[1:])} exited {completed.returncode}: "
+                f"{(completed.stderr or completed.stdout).strip()}",
+                file=sys.stderr,
+            )
+
+
+def _exercise(
+    soldr: Path,
+    *,
+    version: str,
+    expected_channel: str,
+    env: Mapping[str, str],
+    repo_root: Path,
+    state_root: Path,
+) -> None:
+    """Version, prepare and probe checks against the installed binary."""
+
     observed_version = installed_version(soldr, env=env, cwd=repo_root)
     if observed_version != version:
         raise PublishedDylintSmokeError(
