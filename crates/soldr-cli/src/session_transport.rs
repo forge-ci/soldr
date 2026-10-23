@@ -422,12 +422,9 @@ async fn run_session_compile_async(
 
     let mut probe = RelayProbe::new(rustc_argv);
     probe.on_request_sent();
-    pump_session_output_with_timeout(
-        &mut stream,
-        crate::daemon::client::compile_reply_timeout(),
-        &mut probe,
-    )
-    .await
+    let reply_timeout = crate::daemon::client::compile_reply_timeout();
+    let pump = pump_session_output_with_timeout(&mut stream, reply_timeout, &mut probe);
+    crate::compile_stall_watch::await_compile_reply(pump).await
 }
 
 async fn establish_session(
