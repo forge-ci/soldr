@@ -523,6 +523,10 @@ include!("server_dispatch.rs");
 include!("server_compile.rs");
 
 #[cfg(test)]
+#[path = "server_dispatch_hangup_tests.rs"]
+mod dispatch_hangup_tests;
+
+#[cfg(test)]
 mod lifetime_tests {
     use super::*;
 

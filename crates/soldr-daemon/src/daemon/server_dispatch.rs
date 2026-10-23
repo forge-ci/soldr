@@ -1,5 +1,3 @@
-#[expect(clippy::cognitive_complexity, reason = "baseline, zackees/ci.yml#229")]
-#[expect(clippy::too_many_lines, reason = "baseline, zackees/ci.yml#229")]
 async fn handle_connection<S>(
     mut stream: S,
     mut control: ControlContext,
@@ -91,6 +89,52 @@ where
     ) {
         let _ = write_frame_async(&mut stream, &Response::Ack).await;
     }
+    if !request_is_cancel_safe(&req) {
+        return dispatch_request(req, &mut control, peer, &mut stream).await;
+    }
+    // soldr#3839: a read-only request whose client hangs up is abandoned
+    // instead of holding its task and socket until a wedged handler returns.
+    // Clients never write after the request frame (they never half-close), so
+    // any read completing here -- EOF or stray bytes -- ends the request.
+    let (mut reader, writer) = tokio::io::split(stream);
+    let mut writer = tokio::io::join(tokio::io::empty(), writer);
+    let mut probe = [0_u8; 1];
+    tokio::select! {
+        result = dispatch_request(req, &mut control, peer, &mut writer) => result,
+        _ = reader.read(&mut probe) => {
+            tracing::debug!("soldr-daemon: client hung up; abandoning read-only request");
+            Ok(())
+        }
+    }
+}
+
+/// Requests that only read daemon state, so dropping their handler when the
+/// client hangs up loses nothing (soldr#3839). Mutating, fire-and-forget and
+/// lease requests always run to completion.
+fn request_is_cancel_safe(req: &Request) -> bool {
+    matches!(
+        req,
+        Request::ListTargetRegistry
+            | Request::Status
+            | Request::CompileStats
+            | Request::BuildLogInputs { .. }
+            | Request::ListBuilds { .. }
+            | Request::ListSlowBuilds { .. }
+    )
+}
+
+#[expect(clippy::cognitive_complexity, reason = "baseline, zackees/ci.yml#229")]
+#[expect(clippy::too_many_lines, reason = "baseline, zackees/ci.yml#229")]
+async fn dispatch_request<S>(
+    req: Request,
+    control: &mut ControlContext,
+    peer: crate::daemon::ipc_peer::PeerIdentity,
+    mut stream: &mut S,
+) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncReadExt;
     let Some(state) = control.state().await else {
         return Ok(());
     };
