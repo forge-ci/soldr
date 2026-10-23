@@ -31,7 +31,9 @@ fn lock_lacks_package(subcommand: Option<&str>, manifest_dir: &Path, package_nam
         .ancestors()
         .find(|dir| dir.join("Cargo.lock").is_file())
     else {
-        return false;
+        // soldr#3831: with no lock yet, a lone manifest that declares no
+        // dependencies at all cannot pull any package in.
+        return manifest_declares_no_dependencies(&manifest_dir.join("Cargo.toml"));
     };
     let lock = lock_dir.join("Cargo.lock");
     let Ok(text) = std::fs::read_to_string(&lock) else {
@@ -82,6 +84,32 @@ fn manifests_to_check(manifest_dir: &Path, lock_dir: &Path) -> Option<Vec<PathBu
     out.dedup();
     out.retain(|path| path.is_file());
     Some(out)
+}
+
+/// A non-workspace manifest with no dependency table anywhere, including
+/// `[target.*]` sections. Anything unreadable or unparsable is not proof.
+fn manifest_declares_no_dependencies(manifest: &Path) -> bool {
+    let Some(value) = std::fs::read_to_string(manifest)
+        .ok()
+        .and_then(|text| text.parse::<toml::Value>().ok())
+    else {
+        return false;
+    };
+    let empty = |table: &toml::Value, key: &str| {
+        table
+            .get(key)
+            .is_none_or(|deps| deps.as_table().is_some_and(toml::map::Map::is_empty))
+    };
+    let workspace_members = value
+        .get("workspace")
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(toml::Value::as_array)
+        .is_some_and(|members| !members.is_empty());
+    !workspace_members
+        && value.get("target").is_none()
+        && ["dependencies", "dev-dependencies", "build-dependencies"]
+            .iter()
+            .all(|key| empty(&value, key))
 }
 
 fn lock_has_package(text: &str, package_name: &str) -> bool {
@@ -178,8 +206,13 @@ mod tests {
     }
 
     #[test]
-    fn no_lock_is_not_proof() {
+    fn no_lock_with_dependencies_is_not_proof() {
         let tmp = project(None);
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"x\"\n[dependencies]\nserde = \"1\"\n",
+        )
+        .unwrap();
         assert!(!lockfile_lacks_package(
             &args(&["build"]),
             tmp.path(),
