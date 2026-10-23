@@ -13,13 +13,49 @@
 //! can claim the store mid-move. The store is content-addressed and every
 //! entry is keyed by its compiler identity, so reusing it across soldr images
 //! is as safe as one generation reusing its own store across restarts.
+//!
+//! Only a store of the same image *lineage* is adopted: one created by a
+//! daemon whose image came from the same source path. CI runs two soldrs
+//! against one root -- the released bootstrap and the source build -- and
+//! adopting by size alone let the source daemon take the bootstrap's store
+//! each run: the bootstrap then started empty, and the source daemon served
+//! the bootstrap's contexts, so both lanes missed every unit (soldr#3882).
 
 use super::*;
+
+/// The daemon image's source path, set by the broker's service definition.
+pub const SOLDR_DAEMON_IMAGE_SOURCE_ENV_VAR: &str = "SOLDR_DAEMON_IMAGE_SOURCE";
+
+/// Store-root file naming the lineage that created the store.
+const LINEAGE_FILE: &str = "image-source";
+
+/// Record this daemon's lineage in its store, so a later generation of the
+/// same lineage can adopt it. Best effort: a missing marker only means the
+/// store is never adopted.
+pub(crate) fn record_lineage(stable_root: &std::path::Path, lineage: Option<&str>) {
+    let Some(lineage) = lineage else {
+        return;
+    };
+    let marker = stable_root.join(LINEAGE_FILE);
+    if std::fs::read_to_string(&marker).is_ok_and(|current| current == lineage) {
+        return;
+    }
+    if let Err(error) = std::fs::write(&marker, lineage) {
+        eprintln!(
+            "soldr-daemon: could not record store lineage at {}: {error}",
+            marker.display()
+        );
+    }
+}
 
 pub(crate) fn adopt_sibling_store(
     paths: &SoldrPaths,
     stable_root: &std::path::Path,
+    lineage: Option<&str>,
 ) -> Result<(), EmbeddedServiceError> {
+    let Some(lineage) = lineage else {
+        return Ok(());
+    };
     if stable_root.exists() {
         return Ok(());
     }
@@ -27,7 +63,7 @@ pub(crate) fn adopt_sibling_store(
         return Ok(());
     };
     crate::cache_lib::path_safety::validate_owned_directory(&paths.root, parent)?;
-    for sibling in sibling_stores_largest_first(parent, stable_root)? {
+    for sibling in sibling_stores_largest_first(parent, stable_root, lineage)? {
         let version_root = sibling.join(zccache::core::config::versioned_subdir());
         let Ok(lock) = zccache::core::cache_root_lock::CacheRootWriterLock::acquire(&version_root)
         else {
@@ -72,7 +108,7 @@ pub(crate) fn adopt_sibling_store(
     Ok(())
 }
 
-/// Sibling generation stores for this zccache version, largest artifact index
+/// Same-lineage sibling generation stores for this zccache version, largest artifact index
 /// first: the most to offer. Size, not age, because a store just created by
 /// another generation is the newest and the emptiest. Every candidate is
 /// returned, not just the largest: in CI the largest is often the bootstrap
@@ -81,6 +117,7 @@ pub(crate) fn adopt_sibling_store(
 fn sibling_stores_largest_first(
     parent: &std::path::Path,
     stable_root: &std::path::Path,
+    lineage: &str,
 ) -> std::io::Result<Vec<std::path::PathBuf>> {
     let version = zccache::core::config::versioned_subdir();
     let mut stores = Vec::new();
@@ -99,6 +136,13 @@ fn sibling_stores_largest_first(
         if !metadata.is_dir() || crate::cache_lib::path_safety::is_link_or_reparse(&metadata) {
             continue;
         }
+        if std::fs::read_to_string(path.join(LINEAGE_FILE))
+            .ok()
+            .as_deref()
+            != Some(lineage)
+        {
+            continue;
+        }
         let Ok(index) = std::fs::metadata(path.join(&version).join("index.bin")) else {
             continue;
         };
@@ -112,11 +156,23 @@ fn sibling_stores_largest_first(
 mod tests {
     use super::*;
 
+    const LINEAGE: &str = "/ci/soldr-source-driver/debug/soldr";
+
     fn store(parent: &std::path::Path, name: &str, index_bytes: usize) -> std::path::PathBuf {
+        lineage_store(parent, name, index_bytes, LINEAGE)
+    }
+
+    fn lineage_store(
+        parent: &std::path::Path,
+        name: &str,
+        index_bytes: usize,
+        lineage: &str,
+    ) -> std::path::PathBuf {
         let root = parent.join(name);
         let version = root.join(zccache::core::config::versioned_subdir());
         std::fs::create_dir_all(&version).unwrap();
         std::fs::write(version.join("index.bin"), vec![0_u8; index_bytes]).unwrap();
+        record_lineage(&root, Some(lineage));
         root
     }
 
@@ -134,7 +190,7 @@ mod tests {
         store(&parent, "embedded-v1-soldr-daemon-old", 900);
         store(&parent, "embedded-v1-soldr-daemon-bootstrap", 10);
         let current = parent.join("embedded-v1-soldr-daemon-new");
-        adopt_sibling_store(&paths, &current).unwrap();
+        adopt_sibling_store(&paths, &current, Some(LINEAGE)).unwrap();
         let version = zccache::core::config::versioned_subdir();
         assert_eq!(
             std::fs::metadata(current.join(&version).join("index.bin"))
@@ -154,7 +210,7 @@ mod tests {
         let _held =
             zccache::core::cache_root_lock::CacheRootWriterLock::acquire(&version_root).unwrap();
         let current = parent.join("embedded-v1-soldr-daemon-new");
-        adopt_sibling_store(&paths, &current).unwrap();
+        adopt_sibling_store(&paths, &current, Some(LINEAGE)).unwrap();
         assert!(!current.exists());
         assert!(live.exists());
     }
@@ -169,7 +225,7 @@ mod tests {
             zccache::core::cache_root_lock::CacheRootWriterLock::acquire(&live.join(&version))
                 .unwrap();
         let current = parent.join("embedded-v1-soldr-daemon-new");
-        adopt_sibling_store(&paths, &current).unwrap();
+        adopt_sibling_store(&paths, &current, Some(LINEAGE)).unwrap();
         assert_eq!(
             std::fs::metadata(current.join(&version).join("index.bin"))
                 .unwrap()
@@ -181,11 +237,44 @@ mod tests {
     }
 
     #[test]
+    fn another_lineages_store_is_never_adopted() {
+        let (_temp, paths, parent) = fixture();
+        let bootstrap = lineage_store(
+            &parent,
+            "embedded-v1-soldr-daemon-bootstrap",
+            900,
+            "/ci/setup-soldr/bin/soldr",
+        );
+        let previous = store(&parent, "embedded-v1-soldr-daemon-previous", 500);
+        let current = parent.join("embedded-v1-soldr-daemon-new");
+        adopt_sibling_store(&paths, &current, Some(LINEAGE)).unwrap();
+        let version = zccache::core::config::versioned_subdir();
+        assert_eq!(
+            std::fs::metadata(current.join(&version).join("index.bin"))
+                .unwrap()
+                .len(),
+            500
+        );
+        assert!(bootstrap.exists());
+        assert!(!previous.exists());
+    }
+
+    #[test]
+    fn a_daemon_without_a_lineage_adopts_nothing() {
+        let (_temp, paths, parent) = fixture();
+        let old = store(&parent, "embedded-v1-soldr-daemon-old", 900);
+        let current = parent.join("embedded-v1-soldr-daemon-new");
+        adopt_sibling_store(&paths, &current, None).unwrap();
+        assert!(!current.exists());
+        assert!(old.exists());
+    }
+
+    #[test]
     fn an_existing_store_is_kept() {
         let (_temp, paths, parent) = fixture();
         store(&parent, "embedded-v1-soldr-daemon-old", 900);
         let current = store(&parent, "embedded-v1-soldr-daemon-new", 5);
-        adopt_sibling_store(&paths, &current).unwrap();
+        adopt_sibling_store(&paths, &current, Some(LINEAGE)).unwrap();
         assert!(parent.join("embedded-v1-soldr-daemon-old").exists());
         let version = zccache::core::config::versioned_subdir();
         assert_eq!(

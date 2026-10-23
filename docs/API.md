@@ -2814,6 +2814,7 @@ Commands:
 | `SOLDR_DAEMON_TOKIO_CONSOLE_PUBLISH_INTERVAL_MS` | Diagnostic: tokio-console publish interval in milliseconds when the console is enabled. | built-in interval |
 | `SOLDR_DAEMON_TOKIO_CONSOLE_RECORD_PATH` | Diagnostic: file path where tokio-console events are recorded when the console is enabled. | unset |
 | `SOLDR_BROKER_SERVICE` | Internal: route service name handed from broker to daemon. | set by broker |
+| `SOLDR_DAEMON_IMAGE_SOURCE` | Internal: the daemon image's source path, recorded in its compiler store so a later generation of the same lineage can adopt it (soldr#3882). | set by broker |
 | `SOLDR_DAEMON_CONTROL_ENDPOINT_PATH` | Internal: control-socket/pipe path handed from broker to daemon. | set by broker |
 | `SOLDR_SESSION_ENDPOINT_PATH` | Internal: SESSION socket/pipe path handed from broker to daemon. | set by broker |
 | `SOLDR_INTERNAL_DAEMON_EXE` | Internal: path to the staged daemon executable used by the launcher. | set by soldr |
