@@ -594,6 +594,7 @@ fn prepare_embedded_cache_root(
     cache_root: &std::path::Path,
 ) -> Result<(), EmbeddedServiceError> {
     migrate_legacy_cache_root(paths, daemon_identity, cache_root)?;
+    adopt::adopt_sibling_store(paths, cache_root)?;
     std::fs::create_dir_all(cache_root)?;
     crate::cache_lib::path_safety::validate_owned_directory(&paths.root, cache_root)?;
     let version_root = cache_root.join(zccache::core::config::versioned_subdir());
@@ -601,6 +602,9 @@ fn prepare_embedded_cache_root(
     crate::cache_lib::path_safety::validate_owned_directory(&paths.root, &version_root)?;
     Ok(())
 }
+
+#[path = "zccache_embedded_adopt.rs"]
+mod adopt;
 
 #[path = "zccache_disk_limits.rs"]
 mod disk_limits;
