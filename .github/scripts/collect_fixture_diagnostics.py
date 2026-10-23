@@ -48,7 +48,16 @@ from pathlib import Path
 # Fixture root name prefixes, matched against the *directory name* directly
 # under a scanned root. `unique_temp_dir("rss-breach-home")` in the fixture
 # produces `soldr-rss-breach-home-<nanos>`.
-DEFAULT_PREFIXES = ("soldr-rss-",)
+#
+# soldr#3831: the cold-start fixtures (`cold_first_compile.rs`
+# `cold-{home,root}-*`, `cli_exec.rs` `exec-cargo-zccache-shims`) stop their
+# processes but keep their roots, so their bring-up timings are collectable.
+DEFAULT_PREFIXES = (
+    "soldr-rss-",
+    "soldr-cold-home-",
+    "soldr-cold-root-",
+    "soldr-exec-cargo-zccache-shims-",
+)
 
 # The complete set of files worth uploading, by exact base name. Everything
 # else under a fixture root is cache, source or a build artifact.
@@ -72,6 +81,8 @@ COLLECTED_NAMES = frozenset(
         # Broker, under the HOME-anchored running-process directory.
         "broker-spawn.log",
         "broker-bringup.jsonl",
+        # Per-phase daemon cold-start timings (soldr#3163, soldr#3831).
+        "daemon-bringup.jsonl",
         # memory-breach-<ms>-<pid>/ dump contents (soldr#3057).
         "summary.json",
         "mimalloc-stats.json",

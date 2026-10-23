@@ -101,6 +101,30 @@ class CollectFixtureDiagnosticsTests(unittest.TestCase):
             self.assertEqual(list(out.rglob("heap.pprof")), [])
             self.assertEqual(list(out.rglob("unrelated-dir")), [])
 
+    def test_cold_start_fixture_bringup_timings_are_collected(self) -> None:
+        # soldr#3831: cold-start roots and their per-phase bring-up records.
+        with tempfile.TemporaryDirectory() as raw:
+            temp = Path(raw) / "scan"
+            root = temp / "soldr-cold-root-cargo-default-1-2-3"
+            home = temp / "soldr-cold-home-cargo-default-1-2-3"
+            write(root / "cache" / "soldr-daemon" / "daemon-bringup.jsonl", "{}\n")
+            write(home / ".config" / "running-process" / "broker-bringup.jsonl", "{}\n")
+            write(temp / "soldr-cold-crate-x-1" / "daemon-bringup.jsonl", "{}\n")
+            out = Path(raw) / "out"
+            index = collector.collect(
+                output=out, roots=[temp], prefixes=collector.DEFAULT_PREFIXES
+            )
+            copied = sorted(entry.path.replace("\\", "/") for entry in index.copied)
+            self.assertEqual(
+                copied,
+                [
+                    "soldr-cold-home-cargo-default-1-2-3/.config/running-process/"
+                    "broker-bringup.jsonl",
+                    "soldr-cold-root-cargo-default-1-2-3/cache/soldr-daemon/"
+                    "daemon-bringup.jsonl",
+                ],
+            )
+
     def test_index_is_written_even_when_nothing_matches(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             empty = Path(raw) / "empty"
