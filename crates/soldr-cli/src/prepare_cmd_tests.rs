@@ -335,6 +335,9 @@ fn darwin_prepare_exports_blessed_env_for_deferred_cook() {
 
     let _root = EnvVarGuard::set(crate::core::SOLDR_CACHE_DIR_ENV_VAR, &soldr_root);
     let _rustup = EnvVarGuard::set(crate::TEST_RUSTUP_BIN_ENV_VAR, &fake_rustup);
+    // soldr#3793: the fake rustup installs nothing, so keep the post-add
+    // rust-std file check off the real managed home.
+    let _rh = EnvVarGuard::set("RUSTUP_HOME", fake_rustup.with_file_name("rustup-home"));
     let _zig = EnvVarGuard::set("ZIG", &fake_zig);
     let _sdkroot = EnvVarGuard::set("SDKROOT", &sdk);
     let _llvm = EnvVarGuard::set("SOLDR_LLVM_DIR", &llvm_bin);
@@ -473,6 +476,9 @@ fn rustup_add_target_uses_soldr_managed_rustup_state() {
     );
 
     let _rustup = EnvVarGuard::set(crate::TEST_RUSTUP_BIN_ENV_VAR, &fake_rustup);
+    // soldr#3793: the fake rustup installs nothing, so keep the post-add
+    // rust-std file check off the real managed home.
+    let _rh = EnvVarGuard::set("RUSTUP_HOME", fake_rustup.with_file_name("rustup-home"));
     let _root = EnvVarGuard::set(crate::core::SOLDR_CACHE_DIR_ENV_VAR, &soldr_root);
     let _log = EnvVarGuard::set("SOLDR_RUSTUP_LOG", &log);
     let _cargo_home = EnvVarGuard::remove(crate::core::CARGO_HOME_ENV_VAR);
@@ -546,6 +552,9 @@ fn rustup_add_target_scopes_to_pinned_toolchain_channel() {
 
     let _cwd_guard = CwdGuard::enter(&project);
     let _rustup = EnvVarGuard::set(crate::TEST_RUSTUP_BIN_ENV_VAR, &fake_rustup);
+    // soldr#3793: the fake rustup installs nothing, so keep the post-add
+    // rust-std file check off the real managed home.
+    let _rh = EnvVarGuard::set("RUSTUP_HOME", fake_rustup.with_file_name("rustup-home"));
     let _root = EnvVarGuard::set(crate::core::SOLDR_CACHE_DIR_ENV_VAR, &soldr_root);
     let _log = EnvVarGuard::set("SOLDR_RUSTUP_LOG", &log);
 

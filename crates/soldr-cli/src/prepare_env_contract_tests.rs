@@ -110,6 +110,9 @@ fn managed_gnu_toolchain_is_exported_for_later_github_steps() {
     write_executable(&fake_rustup, "#!/bin/sh\nexit 0\n");
 
     let _rustup = EnvVarGuard::set(crate::TEST_RUSTUP_BIN_ENV_VAR, &fake_rustup);
+    // soldr#3793: the fake rustup installs nothing, so keep the post-add
+    // rust-std file check off the real managed home.
+    let _rh = EnvVarGuard::set("RUSTUP_HOME", fake_rustup.with_file_name("rustup-home"));
     // soldr#2874: this fixture seeds a FAKE bundle and asserts the env
     // contract, so it must reach the catalogue path on every host. Both
     // branches above are deliberately a cross, and on a native ARM64 runner
@@ -310,6 +313,9 @@ fn managed_musl_toolchain_is_exported_without_zig_or_host_tools() {
     write_executable(&fake_rustup, "#!/bin/sh\nexit 0\n");
 
     let _rustup = EnvVarGuard::set(crate::TEST_RUSTUP_BIN_ENV_VAR, &fake_rustup);
+    // soldr#3793: the fake rustup installs nothing, so keep the post-add
+    // rust-std file check off the real managed home.
+    let _rh = EnvVarGuard::set("RUSTUP_HOME", fake_rustup.with_file_name("rustup-home"));
     let _no_network = EnvVarGuard::set("SOLDR_TEST_NO_NETWORK", "1");
     let _legacy_sys = EnvVarGuard::set(crate::blessed_build::USE_LEGACY_VENDORED_SYS_ENV_VAR, "1");
     let _system_cmake = EnvVarGuard::set(crate::blessed_build::USE_SYSTEM_CMAKE_ENV_VAR, "1");
@@ -664,6 +670,9 @@ fn managed_gnu_target_layers_libuuid_onto_the_sysroot() {
     let fake_rustup = dir.path().join("rustup");
     write_executable(&fake_rustup, "#!/bin/sh\nexit 0\n");
     let _rustup = EnvVarGuard::set(crate::TEST_RUSTUP_BIN_ENV_VAR, &fake_rustup);
+    // soldr#3793: the fake rustup installs nothing, so keep the post-add
+    // rust-std file check off the real managed home.
+    let _rh = EnvVarGuard::set("RUSTUP_HOME", fake_rustup.with_file_name("rustup-home"));
     let _cross_guard = EnvVarGuard::set("SOLDR_WINDOWS_LINUX_CROSS_GUARD", "off");
     let _no_network = EnvVarGuard::set("SOLDR_TEST_NO_NETWORK", "1");
     let _legacy_sys = EnvVarGuard::set(crate::blessed_build::USE_LEGACY_VENDORED_SYS_ENV_VAR, "1");

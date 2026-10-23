@@ -921,19 +921,22 @@ pub(crate) fn rustup_add_target(triple: &str) -> Result<(), SoldrError> {
     let rustup = crate::binaries::rustup_binary();
     let mut command = std::process::Command::new(rustup);
     command.args(["target", "add", triple]);
-    if let Some(channel) = pinned_toolchain_channel()? {
-        command.args(["--toolchain", &channel]);
+    let channel = pinned_toolchain_channel()?;
+    if let Some(channel) = channel.as_deref() {
+        command.args(["--toolchain", channel]);
     }
     command.env(
         crate::core::CARGO_HOME_ENV_VAR,
         std::env::var_os(crate::core::CARGO_HOME_ENV_VAR)
             .unwrap_or_else(|| crate::fetch::managed_cargo_home(&paths).into_os_string()),
     );
-    command.env(
-        crate::core::RUSTUP_HOME_ENV_VAR,
-        std::env::var_os(crate::core::RUSTUP_HOME_ENV_VAR)
-            .unwrap_or_else(|| crate::fetch::managed_rustup_home(&paths).into_os_string()),
-    );
+    let caller_home =
+        std::env::var_os(crate::core::RUSTUP_HOME_ENV_VAR).filter(|home| !home.is_empty());
+    let caller_selected_home = caller_home.is_some();
+    let rustup_home = caller_home
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| crate::fetch::managed_rustup_home(&paths));
+    command.env(crate::core::RUSTUP_HOME_ENV_VAR, &rustup_home);
     crate::core::suppress_windows_console_window(&mut command);
     let status = run_rustup_target_add(&mut command, triple)?;
     if !status.success() {
@@ -941,6 +944,21 @@ pub(crate) fn rustup_add_target(triple: &str) -> Result<(), SoldrError> {
             "rustup target add {triple} exited with {}",
             status
         )));
+    }
+    // soldr#3793: "up to date" is rustup's claim; check the files.
+    let channel = channel.or_else(|| {
+        std::env::var(crate::toolchain::RUSTUP_TOOLCHAIN_ENV_VAR)
+            .ok()
+            .filter(|value| !value.is_empty())
+    });
+    if let Some(channel) = channel {
+        crate::toolchain_std_libs::verify_added_target_std(
+            &rustup_home,
+            &channel,
+            triple,
+            caller_selected_home,
+            &mut |triple| crate::toolchain_std_libs::reinstall_rust_std(&channel, triple),
+        )?;
     }
     Ok(())
 }
