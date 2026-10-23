@@ -61,8 +61,37 @@ pub(crate) fn soldr_binary_source() -> Result<PathBuf, SoldrError> {
 /// before `main` and before any logging. Shims dodge that with a trampoline;
 /// the broker's stable image is a byte-for-byte copy, so it must not silently
 /// become a binary that cannot start.
+/// [`soldr_core::self_relocate::exe_has_loader_path_reference`], remembered per
+/// image content (soldr#3831).
+///
+/// The check parses the whole binary, which for a debug build is a 150 MB read
+/// on every fresh soldr root -- the dominant cost of a cold broker route on CI.
+/// The verdict depends only on the bytes, so it is keyed on the image's blake3,
+/// which the machine-scoped image-hash memo already serves without a read. Any
+/// memo failure falls back to the direct check.
+pub(crate) fn has_loader_path_reference(source: &Path) -> bool {
+    let dir = crate::daemon::image_hash::machine_scoped_cache_dir(&std::env::temp_dir());
+    let Ok(digest) = crate::daemon::image_hash::cached_blake3_hex(&dir, source) else {
+        return soldr_core::self_relocate::exe_has_loader_path_reference(source);
+    };
+    let entry = dir.join(format!("{digest}.loader-path"));
+    match std::fs::read(&entry).as_deref() {
+        Ok(b"1") => return true,
+        Ok(b"0") => return false,
+        _ => {}
+    }
+    let verdict = soldr_core::self_relocate::exe_has_loader_path_reference(source);
+    let temporary = entry.with_extension(format!("loader-path.{}", std::process::id()));
+    if std::fs::write(&temporary, if verdict { b"1" } else { b"0" }).is_ok()
+        && std::fs::rename(&temporary, &entry).is_err()
+    {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    verdict
+}
+
 pub(crate) fn require_relocatable(source: &Path, destination_role: &str) -> Result<(), String> {
-    if soldr_core::self_relocate::exe_has_loader_path_reference(source) {
+    if has_loader_path_reference(source) {
         return Err(format!(
             "{} names its shared libraries relative to its own location ($ORIGIN or \
              @loader_path), so a copy staged as {destination_role} could not load them. This \
@@ -133,9 +162,8 @@ pub(crate) fn materialize_executable(
     // overwrote a correct trampoline with a hardlink, so the same path
     // could look right and then break. An opt-in guard makes every new
     // writer a fresh chance to reintroduce the bug; this makes the safe
-    // behaviour the default and costs one header read on the memo-miss
-    // path only.
-    if soldr_core::self_relocate::exe_has_loader_path_reference(source) {
+    // behaviour the default; the verdict is memoized per image content.
+    if has_loader_path_reference(source) {
         return materialize_trampoline(source, target);
     }
     // Regression for #1831: these shims are large copies on installations
@@ -554,6 +582,27 @@ mod tests {
         let plain = tmp.path().join("plain");
         std::fs::write(&plain, b"#!/bin/sh\n").unwrap();
         assert!(require_relocatable(&plain, "the stable broker image").is_ok());
+    }
+
+    /// soldr#3831: the verdict is remembered per image content, so a fresh
+    /// root does not reparse the whole binary.
+    #[test]
+    fn loader_path_verdict_is_memoized_by_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let elf = origin_runpath_elf_source(&tmp);
+        let dir = crate::daemon::image_hash::machine_scoped_cache_dir(&std::env::temp_dir());
+        let digest = crate::daemon::image_hash::cached_blake3_hex(&dir, &elf).unwrap();
+        let entry = dir.join(format!("{digest}.loader-path"));
+        let _ = std::fs::remove_file(&entry);
+
+        assert!(has_loader_path_reference(&elf));
+        assert_eq!(std::fs::read(&entry).unwrap(), b"1");
+
+        // A recorded verdict is served without reparsing: flip it and the
+        // answer follows the memo, proving the read was skipped.
+        std::fs::write(&entry, b"0").unwrap();
+        assert!(!has_loader_path_reference(&elf));
+        let _ = std::fs::remove_file(&entry);
     }
 
     #[test]
