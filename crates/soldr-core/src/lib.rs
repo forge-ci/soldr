@@ -25,6 +25,7 @@ pub mod defender;
 pub mod defender_probe;
 pub(crate) mod elf_origin;
 pub mod fuzzy_match;
+pub(crate) mod macho_loader_path;
 pub mod self_relocate;
 pub mod startup_profile;
 /// Shared test-support helpers (leaked-daemon diagnostic, process-env lock).

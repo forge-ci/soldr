@@ -15,7 +15,7 @@ use running_process::broker::server::{
     BACKEND_ENV_SERVICE_VERSION, BACKEND_ENV_TRACEPARENT, BACKEND_ENV_TRACESTATE,
 };
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 // A cold embedded-zccache startup can exceed the old 25-second budget on
@@ -528,12 +528,7 @@ impl SoldrBackendLauncher {
         );
         let mut last_hash_progress = std::time::Instant::now();
         let source_hash = crate::daemon::image_hash::cached_blake3_hex_with_progress(
-            // soldr#2521 B1: machine-scoped memo so isolated roots share hits.
-            &crate::daemon::image_hash::machine_scoped_cache_dir(
-                &crate::daemon::service_definition::broker_owned_paths()
-                    .cache
-                    .join("image-hash"),
-            ),
+            &image_hash_memo_dir(),
             source_binary,
             |completed, total| {
                 if last_hash_progress.elapsed() >= Duration::from_millis(500) || completed >= total
@@ -581,9 +576,10 @@ impl SoldrBackendLauncher {
             "placing the verified daemon image in the broker-owned runtime",
         );
         let mut last_placement_progress = std::time::Instant::now();
-        let path = crate::self_relocate::ensure_daemon_relocated_for_route_with_progress(
+        let path = crate::self_relocate::ensure_daemon_relocated_for_route_with_digest(
             &image_paths,
             source_binary,
+            memoized_image_digest,
             |operation, completed, total| {
                 if last_placement_progress.elapsed() >= Duration::from_millis(500)
                     || completed >= total
@@ -775,6 +771,31 @@ fn prune_route_claim_after_probe_failure(
         .unwrap_or(false);
     }
     false
+}
+
+/// soldr#2521 B1: machine-scoped image-hash memo so isolated roots share hits.
+fn image_hash_memo_dir() -> std::path::PathBuf {
+    crate::daemon::image_hash::machine_scoped_cache_dir(
+        &crate::daemon::service_definition::broker_owned_paths()
+            .cache
+            .join("image-hash"),
+    )
+}
+
+/// Placement identity from the same memo that verified the source image, so
+/// placing it does not re-read the whole file (soldr#3831). A hard-linked
+/// placed copy shares the source's inode and therefore its memo entry.
+fn memoized_image_digest(
+    path: &Path,
+    stage: &'static str,
+    progress: &mut dyn FnMut(&'static str, u64, u64),
+) -> Result<String, crate::core::SoldrError> {
+    crate::daemon::image_hash::cached_blake3_hex_with_progress(
+        &image_hash_memo_dir(),
+        path,
+        |completed, total| progress(stage, completed, total),
+    )
+    .map_err(crate::core::SoldrError::Io)
 }
 
 #[cfg(test)]

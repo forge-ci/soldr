@@ -861,3 +861,37 @@ fn staging_falls_back_to_a_byte_copy_when_the_link_cannot_be_made() {
         "the fallback must report copy progress"
     );
 }
+
+// soldr#3831: a caller-supplied digest keys the placement and verifies the
+// placed copy, so the image is never re-read with SHA-256.
+#[test]
+fn route_placement_uses_the_supplied_digest() {
+    fn fixed_digest(
+        _: &Path,
+        _: &'static str,
+        _: &mut dyn FnMut(&'static str, u64, u64),
+    ) -> Result<String, SoldrError> {
+        Ok("d".repeat(64))
+    }
+    let temp = TempDir::new().expect("tempdir");
+    let daemon = temp.path().join("soldr-daemon");
+    fs::write(&daemon, b"daemon-bin").expect("write daemon");
+    let paths = SoldrPaths::with_root(temp.path().join("route-a"));
+
+    let mut stages = Vec::new();
+    let placed = ensure_daemon_relocated_for_route_with_digest(
+        &paths,
+        &daemon,
+        fixed_digest,
+        |stage, _, _| stages.push(stage),
+    )
+    .expect("place route daemon");
+    assert!(!stages.contains(&"source-hash"), "{stages:?}");
+    let dir_name = placed.parent().and_then(Path::file_name).unwrap();
+    assert!(dir_name.to_string_lossy().ends_with(&"d".repeat(64)));
+
+    let reused =
+        ensure_daemon_relocated_for_route_with_digest(&paths, &daemon, fixed_digest, |_, _, _| {})
+            .expect("reuse placed daemon");
+    assert_eq!(reused, placed);
+}
