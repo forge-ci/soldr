@@ -416,7 +416,8 @@ mod pin_requirement_tests {
     // at or above the working directory, instead of silently resolving rustc
     // from PATH.
 
-    /// Clear *both* ways a build can be considered pinned or excused.
+    /// Turn the strict pin guard on (soldr#3887: it is off by default) and
+    /// clear the other way a build can be considered pinned.
     ///
     /// `RUSTUP_TOOLCHAIN` has to be cleared too now that it counts as a pin:
     /// otherwise `unpinned_workspace_is_refused` and friends pass or fail
@@ -429,7 +430,7 @@ mod pin_requirement_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = std::env::var_os(ALLOW_UNPINNED_ENV_VAR);
         let previous_toolchain = std::env::var_os(RUSTUP_TOOLCHAIN_ENV_VAR);
-        std::env::remove_var(ALLOW_UNPINNED_ENV_VAR);
+        std::env::set_var(ALLOW_UNPINNED_ENV_VAR, "0");
         std::env::remove_var(RUSTUP_TOOLCHAIN_ENV_VAR);
         let out = body();
         match previous_toolchain {
@@ -444,25 +445,32 @@ mod pin_requirement_tests {
     }
 
     #[test]
-    fn unrecognised_allow_unpinned_value_does_not_opt_out() {
+    fn unpinned_is_allowed_unless_explicitly_turned_off() {
+        // soldr#3887: unpinned is the default. Only the explicit off spellings
+        // restore the soldr#1766 guard; absent, empty, and unrecognised values
+        // must not refuse a build in a workspace with no rust-toolchain.toml.
         let _lock = crate::TEST_PROCESS_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = std::env::var_os(ALLOW_UNPINNED_ENV_VAR);
-        for value in ["disabled", "2", "nope", "", "0", "off"] {
+        std::env::remove_var(ALLOW_UNPINNED_ENV_VAR);
+        let absent = unpinned_allowed();
+        let mut outcomes = Vec::new();
+        for value in ["1", "true", "YES", "on", "", "disabled", "2"] {
             std::env::set_var(ALLOW_UNPINNED_ENV_VAR, value);
-            assert!(
-                !unpinned_allowed(),
-                "{value:?} must not opt out of the pin guard"
-            );
+            outcomes.push((value, true, unpinned_allowed()));
         }
-        for value in ["1", "true", "YES", "on"] {
+        for value in ["0", "false", "NO", "off"] {
             std::env::set_var(ALLOW_UNPINNED_ENV_VAR, value);
-            assert!(unpinned_allowed(), "{value:?} must opt out");
+            outcomes.push((value, false, unpinned_allowed()));
         }
         match previous {
             Some(value) => std::env::set_var(ALLOW_UNPINNED_ENV_VAR, value),
             None => std::env::remove_var(ALLOW_UNPINNED_ENV_VAR),
+        }
+        assert!(absent, "an absent switch must allow an unpinned build");
+        for (value, expected, actual) in outcomes {
+            assert_eq!(actual, expected, "SOLDR_ALLOW_UNPINNED={value:?}");
         }
     }
 
@@ -476,8 +484,8 @@ mod pin_requirement_tests {
             "error must name the missing pin: {rendered}"
         );
         assert!(
-            rendered.contains("SOLDR_ALLOW_UNPINNED"),
-            "error must tell the user how to opt out: {rendered}"
+            rendered.contains("unset SOLDR_ALLOW_UNPINNED"),
+            "error must tell the user how to drop the strict guard: {rendered}"
         );
     }
 
@@ -533,7 +541,7 @@ mod pin_requirement_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous_opt_out = std::env::var_os(ALLOW_UNPINNED_ENV_VAR);
         let previous_toolchain = std::env::var_os(RUSTUP_TOOLCHAIN_ENV_VAR);
-        std::env::remove_var(ALLOW_UNPINNED_ENV_VAR);
+        std::env::set_var(ALLOW_UNPINNED_ENV_VAR, "0");
         std::env::set_var(RUSTUP_TOOLCHAIN_ENV_VAR, "1.94.1");
 
         let result = require_toolchain_pin(temp.path());
@@ -560,7 +568,7 @@ mod pin_requirement_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous_opt_out = std::env::var_os(ALLOW_UNPINNED_ENV_VAR);
         let previous_toolchain = std::env::var_os(RUSTUP_TOOLCHAIN_ENV_VAR);
-        std::env::remove_var(ALLOW_UNPINNED_ENV_VAR);
+        std::env::set_var(ALLOW_UNPINNED_ENV_VAR, "0");
 
         let mut outcomes = Vec::new();
         for blank in ["", "   "] {
@@ -586,7 +594,7 @@ mod pin_requirement_tests {
 
     #[test]
     fn explicit_falsey_opt_out_still_requires_a_pin() {
-        // An exported-but-disabled switch must not read as consent.
+        // soldr#3887: an explicit off spelling turns the strict guard on.
         let temp = tempfile::tempdir().expect("tempdir");
         let _lock = crate::TEST_PROCESS_ENV_LOCK
             .lock()
@@ -598,7 +606,7 @@ mod pin_requirement_tests {
         let previous_toolchain = std::env::var_os(RUSTUP_TOOLCHAIN_ENV_VAR);
         std::env::remove_var(RUSTUP_TOOLCHAIN_ENV_VAR);
         let mut outcomes = Vec::new();
-        for disabled in ["0", "false", "no", "off", ""] {
+        for disabled in ["0", "false", "no", "off"] {
             std::env::set_var(ALLOW_UNPINNED_ENV_VAR, disabled);
             outcomes.push((disabled, require_toolchain_pin(temp.path()).is_err()));
         }
@@ -613,7 +621,7 @@ mod pin_requirement_tests {
         for (disabled, refused) in outcomes {
             assert!(
                 refused,
-                "SOLDR_ALLOW_UNPINNED={disabled:?} must not count as opting out"
+                "SOLDR_ALLOW_UNPINNED={disabled:?} must turn the pin guard on"
             );
         }
     }

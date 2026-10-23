@@ -105,10 +105,10 @@ By default, `soldr cargo ...` resolves a fresh soldr workspace context from the 
     #[arg(
         long,
         global = true,
-        help = "Allow a build with no rust-toolchain.toml (soldr#1766)",
+        help = "Allow a build with no rust-toolchain.toml (default, soldr#3887)",
         long_help = "Proceed even when no rust-toolchain.toml exists at or above the working directory.
 
-Without a pin soldr resolves rustc from PATH, which can select a mismatched-host toolchain and makes cache keys depend on ambient PATH state. This flag makes that degraded mode an explicit choice. Equivalent to SOLDR_ALLOW_UNPINNED=1."
+Without a pin soldr resolves rustc from PATH, which can select a mismatched-host toolchain and makes cache keys depend on ambient PATH state. Since soldr#3887 this is the default; the flag overrides SOLDR_ALLOW_UNPINNED=0, which turns the strict soldr#1766 pin guard on. Equivalent to SOLDR_ALLOW_UNPINNED=1."
     )]
     pub(crate) allow_unpinned: bool,
     /// soldr#1802 — force the elapsed-seconds line prefix on.
