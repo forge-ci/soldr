@@ -31,7 +31,12 @@ pub(crate) fn adopt_sibling_store(
         let version_root = sibling.join(zccache::core::config::versioned_subdir());
         let Ok(lock) = zccache::core::cache_root_lock::CacheRootWriterLock::acquire(&version_root)
         else {
-            continue; // A live daemon owns it; try the next largest.
+            // A live daemon owns it; try the next largest.
+            eprintln!(
+                "soldr-daemon: store adoption skipped {} (held by a live daemon)",
+                sibling.display()
+            );
+            continue;
         };
         // Windows refuses to rename a directory with an open handle inside;
         // retry after releasing. A daemon that claims the store in between
@@ -43,6 +48,13 @@ pub(crate) fn adopt_sibling_store(
         drop(lock);
         match renamed {
             Ok(()) => {
+                // soldr#3882: stderr lands in `daemon-spawn.log`, which CI
+                // uploads; a tracing record would not.
+                eprintln!(
+                    "soldr-daemon: adopted sibling store {} as {}",
+                    sibling.display(),
+                    stable_root.display()
+                );
                 tracing::info!(
                     from = %sibling.display(),
                     to = %stable_root.display(),
