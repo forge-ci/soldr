@@ -265,6 +265,9 @@ pub(crate) mod color_choice;
 pub mod compile_diagnostics;
 pub mod compile_dispatch;
 pub mod compile_fallback_rollup;
+/// No-progress watchdog for `soldr cook`'s cargo-chef phases (CI silence
+/// follow-up to soldr#3043).
+pub(crate) mod compile_stall_watch;
 /// soldr#1081 — Shared compile dispatch logic used by both
 /// the soldr-as-RUSTC_WRAPPER hot path (`wrapper.rs`) and multicall
 /// `zccache-soldr` dispatch. Owns the hang-safe retry budget contract.
@@ -277,8 +280,6 @@ pub(crate) mod cook_source_journal;
 pub mod cook_source_snapshot;
 /// Blessed target prep for `soldr cook --target`, matching `soldr build`.
 pub(crate) mod cook_target_prep;
-/// No-progress watchdog for `soldr cook`'s cargo-chef phases (CI silence
-/// follow-up to soldr#3043).
 pub(crate) mod cook_watchdog;
 pub(crate) mod cook_watchdog_dump;
 pub mod daemon_entry;

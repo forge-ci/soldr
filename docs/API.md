@@ -320,6 +320,12 @@ If a harness sends `SIGTERM`, `SIGBREAK`, or `SIGINT` first, the backend also
 names the interrupted command and elapsed time. A hard process kill cannot be
 intercepted, so the explicit timeout remains the reliable diagnostic boundary.
 
+While a compile reply is outstanding, Soldr writes a stack dump of the soldr
+daemon, broker and its own child processes every
+`SOLDR_COMPILE_STALL_DUMP_SECS` (default 300, `0` disables) and prints the
+dump directory (`<cache>/logs/cook-stall-<ts>/`) in red on stderr (soldr#3813).
+It keeps waiting; the dump never kills the compile.
+
 For wheel and editable hooks, soldr keeps the last successful artifact under
 `<effective-soldr-root>/pep517/wheels/`. It performs a metadata-only recursive scan of the
 project (relative path, size, and modification time), staged files included,
