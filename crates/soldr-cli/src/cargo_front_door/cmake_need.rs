@@ -41,9 +41,31 @@ mod tests {
     const NO_CMAKE: &str = "[[package]]\nname = \"serde\"\nversion = \"1.0.0\"\n";
 
     #[test]
-    fn no_lock_is_needed() {
+    fn no_lock_without_dependencies_is_skipped() {
         let tmp = project(None);
-        assert!(managed_cmake_needed(&args(&["build"]), tmp.path()));
+        assert!(!managed_cmake_needed(&args(&["build"]), tmp.path()));
+    }
+
+    #[test]
+    fn no_lock_with_any_dependency_table_is_needed() {
+        for extra in [
+            "[dependencies]\nserde = \"1\"\n",
+            "[build-dependencies]\ncmake = \"0.1\"\n",
+            "[target.'cfg(unix)'.dependencies]\ncmake = \"0.1\"\n",
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+            "not toml [[",
+        ] {
+            let tmp = project(None);
+            std::fs::write(
+                tmp.path().join("Cargo.toml"),
+                format!("[package]\nname = \"x\"\n{extra}"),
+            )
+            .unwrap();
+            assert!(
+                managed_cmake_needed(&args(&["build"]), tmp.path()),
+                "{extra}"
+            );
+        }
     }
 
     #[test]
