@@ -72,6 +72,20 @@ pub(crate) struct CookArgs {
     /// cook always trims cargo-recreatable noise so the downstream
     /// tarball ships dramatically fewer bytes.
     pub no_trim: bool,
+    /// Skip Phase 4, the cross-repo cook-index pack (soldr#3499). On an
+    /// ephemeral CI runner the index starts empty and dies with the VM, so
+    /// the pack (100-240 s for a ~120 MiB target) can never be reused. Also
+    /// set by `SOLDR_COOK_INDEX=0`.
+    pub no_index: bool,
+}
+
+/// `SOLDR_COOK_INDEX` — an off value (`0`/`false`/`off`/`no`) skips the
+/// cook-index pack, like `--no-index`.
+pub(crate) const COOK_INDEX_ENV_VAR: &str = "SOLDR_COOK_INDEX";
+
+/// Whether Phase 4 runs: on unless `--no-index` or an off `SOLDR_COOK_INDEX`.
+pub(crate) fn cook_index_wanted(no_index_flag: bool, env_value: Option<&str>) -> bool {
+    !no_index_flag && !env_value.is_some_and(crate::core::is_off_value)
 }
 
 #[derive(Debug, Clone)]
@@ -92,7 +106,7 @@ pub(crate) struct CookContext {
 /// Recognised flags: `--release`, `--target <triple>`, `--workspace`,
 /// `--profile <name>`, `-p`/`--package <name>` (repeatable),
 /// `--recipe-path <path>`, `--keep-recipe`, `--prepare-only`,
-/// `--cook-only`. Anything after a literal `--` is collected into
+/// `--cook-only`, `--no-trim`, `--no-index`. Anything after a literal `--` is collected into
 /// `passthrough`. Unknown flags before `--` are an error (so typos fail
 /// fast).
 pub(crate) fn parse_cook_args(args: &[String]) -> Result<CookArgs, SoldrError> {
@@ -106,6 +120,7 @@ pub(crate) fn parse_cook_args(args: &[String]) -> Result<CookArgs, SoldrError> {
             "--prepare-only" => out.prepare_only = true,
             "--cook-only" => out.cook_only = true,
             "--no-trim" => out.no_trim = true,
+            "--no-index" => out.no_index = true,
             "--target" => {
                 let value = iter
                     .next()
@@ -518,7 +533,12 @@ proceeds uncached. See https://github.com/zackees/soldr/issues/2791"
     // `~/.soldr/cache/cook/` (issue #577, meta #579). Best-effort;
     // any failure here surfaces as a warning but never fails the
     // user's cook command — the local `target/` is still valid.
-    if let Err(err) = index_cooked_artifact(&ctx, &parsed, compile_duration_ms) {
+    let index_env = std::env::var(COOK_INDEX_ENV_VAR).ok();
+    if !cook_index_wanted(parsed.no_index, index_env.as_deref()) {
+        eprintln!(
+            "soldr cook: cook-index pack skipped (--no-index / {COOK_INDEX_ENV_VAR}=0, soldr#3499)"
+        );
+    } else if let Err(err) = index_cooked_artifact(&ctx, &parsed, compile_duration_ms) {
         eprintln!("{} {err}", yellow_warning_prefix());
     }
 
