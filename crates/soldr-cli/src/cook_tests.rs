@@ -143,6 +143,20 @@ fn parse_cook_args_keep_recipe_flag() {
 }
 
 #[test]
+fn cook_index_opt_out_by_flag_or_env() {
+    // soldr#3499: the pack is skipped only when asked.
+    assert!(!parse_cook_args(&argv(&[])).unwrap().no_index);
+    assert!(parse_cook_args(&argv(&["--no-index"])).unwrap().no_index);
+    assert!(cook_index_wanted(false, None));
+    assert!(cook_index_wanted(false, Some("1")));
+    assert!(cook_index_wanted(false, Some("")));
+    for off in ["0", "false", "off", "no"] {
+        assert!(!cook_index_wanted(false, Some(off)), "{off:?}");
+    }
+    assert!(!cook_index_wanted(true, None));
+}
+
+#[test]
 fn parse_cook_args_no_trim_flag() {
     // Default is trim-on (issue #459).
     let default = parse_cook_args(&argv(&["--release"])).unwrap();
