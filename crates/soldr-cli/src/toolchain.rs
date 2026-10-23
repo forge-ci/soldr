@@ -797,13 +797,7 @@ pub(crate) fn ensure_cargo_toolchain(explicit_channel: Option<&str>) -> Result<(
         require_toolchain_pin(&workspace_root)?;
         return Ok(());
     };
-    // soldr#3786: a rustup-less host toolchain that is exactly the pin
-    // satisfies it; components/targets still need rustup.
-    let needs_rustup = |list: &Option<Vec<String>>| list.as_ref().is_some_and(|l| !l.is_empty());
-    if !needs_rustup(&manifest.components)
-        && !needs_rustup(&manifest.targets)
-        && crate::system_toolchain_pin::matching_bin_dir(channel).is_some()
-    {
+    if crate::system_toolchain_pin::satisfies_manifest(channel, &manifest) {
         return Ok(());
     }
     let paths = SoldrPaths::new()?;
@@ -823,15 +817,14 @@ pub(crate) fn ensure_cargo_toolchain(explicit_channel: Option<&str>) -> Result<(
         .ok()
         .and_then(|output| installed_toolchain_name(&output.stdout, channel));
     if installed_name.is_none() {
-        let note = || crate::system_toolchain_pin::mismatch_note(channel).unwrap_or_default();
-        let code = rustup_toolchain_install_with_profile(channel, manifest.profile.as_deref())
-            .map_err(|err| SoldrError::Other(format!("{err}{}", note())))?;
-        if code != 0 {
-            return Err(SoldrError::Other(format!(
-                "toolchain install {channel} exited with code {code}{}",
-                note()
-            )));
-        }
+        crate::system_toolchain_pin::with_mismatch_note(channel, || {
+            match rustup_toolchain_install_with_profile(channel, manifest.profile.as_deref())? {
+                0 => Ok(()),
+                code => Err(SoldrError::Other(format!(
+                    "toolchain install {channel} exited with code {code}"
+                ))),
+            }
+        })?;
     }
     if let Some(components) = manifest.components.as_deref() {
         for component in components {

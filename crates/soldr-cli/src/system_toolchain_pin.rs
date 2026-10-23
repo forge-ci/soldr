@@ -108,9 +108,32 @@ pub(crate) fn pinned_system_binary(tool: &str, start_dir: Option<&Path>) -> Opti
     crate::binaries::executable_in_dir(matching_bin_dir(channel.trim())?, tool)
 }
 
+/// True when a rustup-less host toolchain satisfies the whole manifest:
+/// components and targets still need rustup.
+pub(crate) fn satisfies_manifest(
+    channel: &str,
+    manifest: &crate::core::RustToolchainManifest,
+) -> bool {
+    let needs_rustup = |list: &Option<Vec<String>>| list.as_ref().is_some_and(|l| !l.is_empty());
+    !needs_rustup(&manifest.components)
+        && !needs_rustup(&manifest.targets)
+        && matching_bin_dir(channel).is_some()
+}
+
+/// Run a pinned install; on failure, name a mismatching PATH rustc.
+pub(crate) fn with_mismatch_note(
+    channel: &str,
+    install: impl FnOnce() -> Result<(), crate::core::SoldrError>,
+) -> Result<(), crate::core::SoldrError> {
+    install().map_err(|err| match mismatch_note(channel) {
+        Some(note) => crate::core::SoldrError::Other(format!("{err}{note}")),
+        None => err,
+    })
+}
+
 /// The PATH rustc version when it does not satisfy `channel`, for the
 /// install-failure diagnostic.
-pub(crate) fn mismatch_note(channel: &str) -> Option<String> {
+fn mismatch_note(channel: &str) -> Option<String> {
     let found = system_toolchain()?;
     (found.release != channel).then(|| {
         format!(
