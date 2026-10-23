@@ -18,9 +18,34 @@ struct ControlContext {
     daemon_identity: running_process::broker::backend_handle::DaemonProcess,
     shutdown: Arc<crate::daemon::maintenance::ShutdownSignal>,
     state: tokio::sync::watch::Receiver<Option<Arc<State>>>,
+    /// Permits for control requests being served; see
+    /// [`MAX_CONTROL_REQUESTS_IN_FLIGHT`].
+    in_flight: Arc<tokio::sync::Semaphore>,
 }
 
+/// soldr#3839: a wedged daemon held 542 control sockets, one parked task per
+/// client that gave up. Past this many requests in flight the daemon answers
+/// with a loud error instead of parking another. Control requests are short,
+/// so a healthy daemon never comes near it; resident-capacity leases are
+/// long-lived by design and are not counted.
+const MAX_CONTROL_REQUESTS_IN_FLIGHT: usize = 256;
+
 impl ControlContext {
+    fn new(
+        daemon_identity: running_process::broker::backend_handle::DaemonProcess,
+        shutdown: Arc<crate::daemon::maintenance::ShutdownSignal>,
+        state: tokio::sync::watch::Receiver<Option<Arc<State>>>,
+    ) -> Self {
+        Self {
+            daemon_identity,
+            shutdown,
+            state,
+            in_flight: Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONTROL_REQUESTS_IN_FLIGHT,
+            )),
+        }
+    }
+
     /// The daemon's state once bringup publishes it, or `None` when bringup
     /// failed and the publisher is gone.
     async fn state(&mut self) -> Option<Arc<State>> {

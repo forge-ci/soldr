@@ -20,11 +20,11 @@ fn control_without_state() -> (
     // State is never published, so any request that needs it waits forever,
     // standing in for a wedged handler.
     let (publisher, state) = tokio::sync::watch::channel(None);
-    let control = ControlContext {
+    let control = ControlContext::new(
         daemon_identity,
-        shutdown: Arc::new(crate::daemon::maintenance::ShutdownSignal::default()),
+        Arc::new(crate::daemon::maintenance::ShutdownSignal::default()),
         state,
-    };
+    );
     (control, publisher)
 }
 
@@ -75,4 +75,33 @@ fn mutating_and_lease_requests_are_never_cancelled() {
     ] {
         assert!(!request_is_cancel_safe(&request));
     }
+}
+
+#[tokio::test]
+async fn requests_past_the_in_flight_cap_get_a_loud_error() {
+    let (mut control, _publisher) = control_without_state();
+    control.in_flight = Arc::new(tokio::sync::Semaphore::new(0));
+    let (mut client, server) = tokio::io::duplex(64 * 1024);
+    crate::daemon::ipc::write_frame_async(&mut client, &Request::Status)
+        .await
+        .expect("write request");
+    let task = tokio::spawn(handle_connection(
+        server,
+        control,
+        crate::daemon::ipc_peer::PeerIdentity::unknown(),
+    ));
+    let response: Response = tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::daemon::ipc::read_frame_async(&mut client),
+    )
+    .await
+    .expect("refused without waiting for state")
+    .expect("read response");
+    match response {
+        Response::Error(message) => assert!(message.contains("soldr daemon stop"), "{message}"),
+        other => panic!("expected a busy error, got {other:?}"),
+    }
+    task.await
+        .expect("connection task")
+        .expect("connection result");
 }

@@ -221,11 +221,7 @@ async fn run_async_recording(
     let terminate_signal = crate::platform::process::signal::wait_for_terminate_signal();
     let shutdown = Arc::new(crate::daemon::maintenance::ShutdownSignal::default());
     let (state_publisher, state_source) = tokio::sync::watch::channel(None);
-    let control = ControlContext {
-        daemon_identity: daemon_identity.clone(),
-        shutdown: Arc::clone(&shutdown),
-        state: state_source,
-    };
+    let control = ControlContext::new(daemon_identity.clone(), Arc::clone(&shutdown), state_source);
     let accept_handle = AcceptTask(match control_listener {
         Some((listener, _identity)) => tokio::spawn(async move {
             let _ = run_accept_loop_unix(listener, control).await;
