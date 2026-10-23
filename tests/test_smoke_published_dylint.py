@@ -111,6 +111,8 @@ def test_smoke_installs_exact_wheel_and_proves_version_channel_and_driver(
 
     def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
         calls.append(command)
+        if command[1:] in (["daemon", "stop"], ["broker", "stop"]):
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         if "--list" in command:
             raise AssertionError("published cargo-dylint 6 rejects deprecated --list")
         if command == ["uv", "venv", "--clear", str(venv)]:
@@ -134,7 +136,9 @@ def test_smoke_installs_exact_wheel_and_proves_version_channel_and_driver(
     smoke.smoke(version="0.9.11", repo_root=repo, venv=venv, state_root=state)
     assert calls[0] == ["uv", "venv", "--clear", str(venv)]
     assert calls[1] == smoke.published_install_command(venv, "0.9.11")
-    assert calls[-1] == [
+    # soldr#3868: the private broker/daemon are stopped after the probe.
+    assert calls[-2:] == smoke.teardown_commands(soldr)
+    assert calls[-3] == [
         str(soldr),
         "dylint",
         "--manifest-path",
@@ -346,3 +350,22 @@ def test_install_gives_up_after_the_last_attempt_and_on_other_errors(
             sleep=lambda _s: None,
         )
     assert calls == 1, "a non-resolution failure must not be retried"
+
+
+def test_teardown_is_best_effort_and_never_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """soldr#3868: a failed or timed-out stop is reported, never raised."""
+
+    soldr = tmp_path / "venv" / "bin" / "soldr"
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        if command[1:] == ["daemon", "stop"]:
+            raise subprocess.TimeoutExpired(command, 120)
+        return SimpleNamespace(returncode=3, stdout="", stderr="not running")
+
+    monkeypatch.setattr(smoke, "run_captured", fake_run)
+    smoke.stop_private_services(soldr, env={}, cwd=tmp_path)
+    assert calls == smoke.teardown_commands(soldr)
