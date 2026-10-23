@@ -81,10 +81,12 @@ pub fn libc() -> HostLibc {
 /// glibc-dynamic executable run on this OS", not "what was soldr built for"
 /// (soldr#3435).
 pub fn os_libc() -> HostLibc {
+    let musl_loader = probe_musl_dynamic_linker_present();
+    let glibc_loader = probe_glibc_dynamic_linker_present();
     classify_os_libc(
-        probe_ldd_reports_musl(),
-        probe_musl_dynamic_linker_present(),
-        probe_glibc_dynamic_linker_present(),
+        ldd_reports_musl_unless_loaders_decide(musl_loader, glibc_loader),
+        musl_loader,
+        glibc_loader,
     )
 }
 
@@ -188,12 +190,29 @@ pub fn info() -> HostInfo {
 /// 4. **Default**: glibc. Most Linux distributions ship glibc — only
 ///    musl distros need the override.
 pub(crate) fn detect_linux_libc() -> HostLibc {
+    if cfg!(target_env = "musl") {
+        return HostLibc::Musl;
+    }
+    let musl_loader = probe_musl_dynamic_linker_present();
+    let glibc_loader = probe_glibc_dynamic_linker_present();
     classify_linux_libc(
-        cfg!(target_env = "musl"),
-        probe_ldd_reports_musl(),
-        probe_musl_dynamic_linker_present(),
-        probe_glibc_dynamic_linker_present(),
+        false,
+        ldd_reports_musl_unless_loaders_decide(musl_loader, glibc_loader),
+        musl_loader,
+        glibc_loader,
     )
+}
+
+/// Whether the loader stats alone settle the host as glibc: a glibc loader
+/// and no musl loader. Every glibc distribution looks like this, so the
+/// `ldd --version` spawn (a serial front-door probe, soldr#3794) is only paid
+/// where a musl loader exists and ldd must break the tie.
+fn loaders_prove_glibc(musl_loader: bool, glibc_loader: bool) -> bool {
+    glibc_loader && !musl_loader
+}
+
+fn ldd_reports_musl_unless_loaders_decide(musl_loader: bool, glibc_loader: bool) -> bool {
+    !loaders_prove_glibc(musl_loader, glibc_loader) && probe_ldd_reports_musl()
 }
 
 fn classify_linux_libc(
@@ -286,6 +305,20 @@ mod tests {
         // Alpine: ldd is musl's, or only the musl loader exists.
         assert_eq!(classify_os_libc(true, true, false), HostLibc::Musl);
         assert_eq!(classify_os_libc(false, true, false), HostLibc::Musl);
+    }
+
+    #[test]
+    fn ldd_runs_only_when_a_musl_loader_leaves_the_question_open() {
+        // soldr#3794: a plain glibc host is settled by stat calls alone.
+        assert!(loaders_prove_glibc(false, true));
+        // A musl loader (Alpine, or musl-tools on a glibc runner), or no
+        // known loader at all, still asks ldd.
+        assert!(!loaders_prove_glibc(true, true));
+        assert!(!loaders_prove_glibc(true, false));
+        assert!(!loaders_prove_glibc(false, false));
+        // Where ldd is skipped, the verdict is the one it would get from a
+        // glibc ldd.
+        assert_eq!(classify_os_libc(false, false, true), HostLibc::Gnu);
     }
 
     #[test]
