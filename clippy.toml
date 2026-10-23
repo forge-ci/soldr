@@ -23,3 +23,15 @@ await-holding-invalid-types = [
     { path = "soldr_platform::platform::sync::RwLockReadGuard", reason = "blocking guard: release it before `.await` or use the async RwLock (soldr#3856)" },
     { path = "soldr_platform::platform::sync::RwLockWriteGuard", reason = "blocking guard: release it before `.await` or use the async RwLock (soldr#3856)" },
 ]
+
+## soldr#3785 / RUSTSEC-2026-0346: rustls client session values' `Debug`
+## impls exposed TLS secrets. soldr reaches rustls only through reqwest and
+## never names these types; this keeps any soldr code from holding (and so
+## debug-printing) a TLS connection, config or resumption value.
+disallowed-types = [
+    { path = "rustls::ClientConnection", reason = "TLS session state: let reqwest own it (soldr#3785, RUSTSEC-2026-0346)" },
+    { path = "rustls::ClientConfig", reason = "TLS session state: let reqwest own it (soldr#3785, RUSTSEC-2026-0346)" },
+    { path = "rustls::client::Tls13ClientSessionValue", reason = "TLS resumption secret (soldr#3785, RUSTSEC-2026-0346)" },
+    { path = "rustls::client::Tls12ClientSessionValue", reason = "TLS resumption secret (soldr#3785, RUSTSEC-2026-0346)" },
+    { path = "rustls::client::ClientSessionMemoryCache", reason = "TLS resumption store (soldr#3785, RUSTSEC-2026-0346)" },
+]

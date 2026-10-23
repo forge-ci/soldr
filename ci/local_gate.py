@@ -648,7 +648,15 @@ def checks() -> list[Check]:
         Check(
             "cargo deny (bans)", ("soldr", "cargo", "deny", "check", "bans"), "ci-lint"
         ),
-        Check("cargo audit", ("soldr", "cargo", "audit"), "ci-lint"),
+        # soldr#3785: a third-party advisory must not turn unrelated PRs red.
+        # The wrapper always reports; it blocks off pull requests (main,
+        # release candidates, schedules) and on a PR that changes
+        # Cargo.lock/Cargo.toml, and fails closed when it cannot diff.
+        Check(
+            "cargo audit",
+            (*script("audit_policy.py"), "--base-ref", base),
+            "ci-lint",
+        ),
         Check("cargo machete", ("soldr", "cargo", "machete"), "ci-lint"),
         Check(
             "clippy",
