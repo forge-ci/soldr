@@ -30,6 +30,11 @@ pub(crate) fn resolve_toolchain_binary(tool: &str) -> Result<std::path::PathBuf,
     if let Some(path) = probe_direct_toolchain_binary(tool, start_dir.as_deref()) {
         return Ok(path);
     }
+    if let Some(path) =
+        crate::system_toolchain_pin::pinned_system_binary(tool, start_dir.as_deref())
+    {
+        return Ok(path);
+    }
 
     resolve_toolchain_binary_with_optional_channel(tool, None, start_dir.as_deref())
 }
@@ -50,6 +55,11 @@ pub(crate) fn resolve_toolchain_binary_for_channel(
 
     if let Some(path) = toolchain_binary_override(tool) {
         return Ok(path);
+    }
+    if let Some(dir) = crate::system_toolchain_pin::matching_bin_dir(channel) {
+        if let Some(path) = executable_in_dir(dir, tool) {
+            return Ok(path);
+        }
     }
 
     let cache_scope = (!toolchain_bin_cache_disabled())
@@ -410,7 +420,7 @@ fn find_ancestor_dir_bounded(
     }
 }
 
-fn executable_in_dir(dir: &std::path::Path, tool: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn executable_in_dir(dir: &std::path::Path, tool: &str) -> Option<std::path::PathBuf> {
     let candidate = dir.join(tool);
     if candidate.is_file() {
         return Some(candidate);

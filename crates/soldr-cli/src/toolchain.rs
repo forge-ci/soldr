@@ -797,6 +797,9 @@ pub(crate) fn ensure_cargo_toolchain(explicit_channel: Option<&str>) -> Result<(
         require_toolchain_pin(&workspace_root)?;
         return Ok(());
     };
+    if crate::system_toolchain_pin::satisfies_manifest(channel, &manifest) {
+        return Ok(());
+    }
     let paths = SoldrPaths::new()?;
     let memo_key = cargo_prepare_memo_key(channel, explicit_channel, &manifest);
     if memo_key
@@ -814,12 +817,14 @@ pub(crate) fn ensure_cargo_toolchain(explicit_channel: Option<&str>) -> Result<(
         .ok()
         .and_then(|output| installed_toolchain_name(&output.stdout, channel));
     if installed_name.is_none() {
-        let code = rustup_toolchain_install_with_profile(channel, manifest.profile.as_deref())?;
-        if code != 0 {
-            return Err(SoldrError::Other(format!(
-                "toolchain install {channel} exited with code {code}"
-            )));
-        }
+        crate::system_toolchain_pin::with_mismatch_note(channel, || {
+            match rustup_toolchain_install_with_profile(channel, manifest.profile.as_deref())? {
+                0 => Ok(()),
+                code => Err(SoldrError::Other(format!(
+                    "toolchain install {channel} exited with code {code}"
+                ))),
+            }
+        })?;
     }
     if let Some(components) = manifest.components.as_deref() {
         for component in components {

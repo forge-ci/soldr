@@ -393,12 +393,13 @@ pub mod shim_materialize;
 /// soldr#2571 — opt-in per-phase startup breadcrumbs for the front door,
 /// so a client that wedges before its first byte still names the phase.
 pub mod startup_trace;
+/// soldr#1838 Phase 3 -- every timeout soldr honours, resolved through
+/// the real production resolvers so the report cannot drift.
+pub(crate) mod system_toolchain_pin;
 /// soldr#997 — friendly target aliases + Rust-triple passthrough.
 /// See module doc for the `soldr build --target <alias>` UX contract.
 pub mod target_alias;
 pub mod target_lifecycle;
-/// soldr#1838 Phase 3 -- every timeout soldr honours, resolved through
-/// the real production resolvers so the report cannot drift.
 pub(crate) mod timeout_registry;
 pub mod toolchain;
 pub(crate) mod toolchain_dir_name;
