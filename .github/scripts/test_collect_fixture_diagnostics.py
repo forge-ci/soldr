@@ -91,7 +91,7 @@ class CollectFixtureDiagnosticsTests(unittest.TestCase):
                     "soldr-rss-breach-cache-b-1700000000000/cache/soldr-daemon/"
                     "rss-ceiling-v1.json",
                     "soldr-rss-breach-cache-b-1700000000000/daemon-spawn.log",
-                    "soldr-rss-breach-home-1700000000000/.config/running-process/"
+                    "soldr-rss-breach-home-1700000000000/dot-config/running-process/"
                     "soldr-broker/broker-spawn.log",
                 ],
             )
@@ -118,11 +118,32 @@ class CollectFixtureDiagnosticsTests(unittest.TestCase):
             self.assertEqual(
                 copied,
                 [
-                    "soldr-cold-home-cargo-default-1-2-3/.config/running-process/"
+                    "soldr-cold-home-cargo-default-1-2-3/dot-config/running-process/"
                     "broker-bringup.jsonl",
                     "soldr-cold-root-cargo-default-1-2-3/cache/soldr-daemon/"
                     "daemon-bringup.jsonl",
                 ],
+            )
+
+    def test_hidden_path_components_are_renamed_for_upload(self) -> None:
+        # soldr#3831: upload-artifact skips hidden files, so `.soldr/` must not
+        # survive into the output tree.
+        with tempfile.TemporaryDirectory() as raw:
+            temp = Path(raw) / "scan"
+            home = temp / "soldr-cold-home-bare-build-1"
+            write(home / ".soldr" / "broker" / "broker-bringup.jsonl", "{}\n")
+            out = Path(raw) / "out"
+            collector.collect(
+                output=out, roots=[temp], prefixes=collector.DEFAULT_PREFIXES
+            )
+            copied = out / "soldr-cold-home-bare-build-1" / "dot-soldr" / "broker"
+            self.assertTrue((copied / "broker-bringup.jsonl").is_file())
+            self.assertFalse(
+                any(
+                    part.startswith(".")
+                    for p in out.rglob("*")
+                    for part in p.relative_to(out).parts
+                )
             )
 
     def test_index_is_written_even_when_nothing_matches(self) -> None:

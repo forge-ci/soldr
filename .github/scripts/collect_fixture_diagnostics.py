@@ -220,6 +220,20 @@ def copy_capped(source: Path, destination: Path, max_bytes: int) -> CopyResult:
     return CopyResult(len(payload), size, truncated)
 
 
+def artifact_relative(fixture: Path, source: Path) -> Path:
+    """Upload-safe relative path for `source` (soldr#3831).
+
+    `actions/upload-artifact` drops hidden files by default, and every
+    default-root log lives under `<home>/.soldr/` or `<home>/.config/`, so a
+    leading dot in any component is spelled `dot-` instead.
+    """
+
+    parts = [fixture.name, *source.relative_to(fixture).parts]
+    return Path(
+        *(f"dot-{part[1:]}" if part.startswith(".") else part for part in parts)
+    )
+
+
 def collect(
     *,
     output: Path,
@@ -249,7 +263,7 @@ def collect(
         for fixture in fixture_roots(resolved, prefixes):
             scanned.append(str(fixture))
             for source in collect_files(fixture, max_depth):
-                relative = Path(fixture.name) / source.relative_to(fixture)
+                relative = artifact_relative(fixture, source)
                 if total >= max_total_bytes:
                     skipped.append(SkippedFile(str(source), "total-cap"))
                     continue
