@@ -285,6 +285,10 @@ pub(crate) async fn run_cook(args: &[String], cache_enabled: bool) -> Result<i32
         );
     }
 
+    // Same environment `soldr build --target` applies, before any phase runs,
+    // so cooked units match the build's fingerprints.
+    let target_prep = crate::cook_target_prep::apply_cook_target_prep(&parsed).await?;
+
     let watchdog_config = crate::cook_watchdog::WatchdogConfig::from_env();
     let watchdog_paths = SoldrPaths::new()?;
 
@@ -465,7 +469,11 @@ proceeds uncached. See https://github.com/zackees/soldr/issues/2791"
         eprintln!(
             "soldr cook: supplementing portable dependency cook with the exact vendored dependency graph"
         );
-        let exact_args = build_exact_cook_args(&parsed);
+        let mut exact_args = build_exact_cook_args(&parsed);
+        if let Some(prep) = &target_prep {
+            exact_args =
+                crate::cli_dispatch::insert_cargo_config_args(exact_args, &prep.cargo_args);
+        }
         let exact_code = crate::cook_watchdog::run_with_watchdog(
             "exact",
             cook_target_dir.clone(),
