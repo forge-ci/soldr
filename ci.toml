@@ -122,7 +122,7 @@ max-age-hours = 24
 # worst case is steady + the lockfile-change peak (no writer flow pre-prunes;
 # see [flow.main]) + [cache.pr].budget. The janitor's own target is
 # steady <= 8.5 GiB -- the old `total_max_bytes`.
-# They sum to 8620 MiB (8.42 GiB). Sized 2026-10-09 from the live listing
+# They sum to 8685 MiB (8.48 GiB). Sized 2026-10-09 from the live listing
 # (`gh api 'repos/zackees/soldr/actions/caches?per_page=100' --paginate`,
 # 93 entries, 7.39 GiB); re-measure before retuning.
 #
@@ -158,11 +158,13 @@ uv                     = { via = "setup-uv",                   max = "1MB",   pe
 bootstrap-soldr        = { prefix = "bootstrap-soldr-blessed-", max = "50MB", evict = "lru", shapes = { cross-build = { max = "50MB" }, ci-dev = { max = "50MB" }, ci-dev-pr = { max = "50MB" } } }
 
 # -- group cook-layer (janitor: no budget eviction; cook's own lineage rules
-#    prune it), 2415 MiB. Five concurrent flag shapes from one writer (live
-#    540/506/505/422/417 MiB, 2389 MiB), so `max` is the largest shape.
+#    prune it), 2480 MiB. Five concurrent flag shapes from one writer (live
+#    546/512/512/426/422 MiB, 2418 MiB on 2026-10-23, when growth of 1-2 MiB
+#    per archive pushed the family to 100.3% and failed the budget gate), so
+#    `max` is the largest shape.
 #    `cook-delta-v2-` is retired fleet-wide (check_cache_budget.py
 #    RETIRED_PREFIXES) and has no producer here.
-cook                   = { via = "setup-soldr:cook", max = "545MB", min = "1MB", evict = "lru", shapes = { flags1 = { max = "545MB" }, flags2 = { max = "510MB" }, flags3 = { max = "510MB" }, flags4 = { max = "425MB" }, flags5 = { max = "425MB" } } }
+cook                   = { via = "setup-soldr:cook", max = "560MB", min = "1MB", evict = "lru", shapes = { flags1 = { max = "560MB" }, flags2 = { max = "525MB" }, flags3 = { max = "525MB" }, flags4 = { max = "435MB" }, flags5 = { max = "435MB" } } }
 
 # -- group dylint-foundation (janitor: no budget eviction), 608 MiB. One
 #    entry per nightly; the headroom covers a nightly bump's second generation
