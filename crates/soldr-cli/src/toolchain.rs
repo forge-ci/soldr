@@ -721,14 +721,11 @@ fn write_cargo_prepare_memo(paths: &SoldrPaths, key: CargoPrepareMemoKey, toolch
     }
 }
 
-/// True when the user has explicitly accepted an unpinned build, via
-/// `SOLDR_ALLOW_UNPINNED` or the `--allow-unpinned` flag (which sets it).
-///
-/// Parsed with the canonical owned-switch reader [`crate::core::flag`]: only
-/// `1`/`true`/`yes`/`on` enable it, so an unrecognised value such as
-/// `disabled` never weakens the soldr#1766 pin guard (soldr#3634).
+/// soldr#3887: unpinned is the default. Only an explicit off spelling of
+/// `SOLDR_ALLOW_UNPINNED` (`0`/`false`/`no`/`off`) restores the soldr#1766
+/// guard; absent, empty and unrecognised values allow an unpinned build.
 pub fn unpinned_allowed() -> bool {
-    crate::core::flag(ALLOW_UNPINNED_ENV_VAR)
+    !std::env::var(ALLOW_UNPINNED_ENV_VAR).is_ok_and(|value| crate::core::is_off_value(&value))
 }
 
 /// True when `RUSTUP_TOOLCHAIN` names an explicit toolchain.
@@ -753,7 +750,7 @@ fn rustup_toolchain_value_set(value: Option<&std::ffi::OsStr>) -> bool {
 }
 
 /// soldr#1766: refuse to build when no `rust-toolchain.toml` exists at or
-/// above `workspace_root`.
+/// above `workspace_root`, once `SOLDR_ALLOW_UNPINNED=0` opts in (soldr#3887).
 ///
 /// The search walks ancestors deliberately. A cwd-only check would reject
 /// every build launched from a subdirectory of a pinned repo.
@@ -770,7 +767,7 @@ pub fn require_toolchain_pin(workspace_root: &Path) -> Result<(), SoldrError> {
            - create rust-toolchain.toml:  printf '[toolchain]\nchannel = \"stable\"\n' > rust-toolchain.toml
            - or install the pin helper:   soldr toolchain
            - or select one explicitly:    RUSTUP_TOOLCHAIN=<channel>
-           - or explicitly opt out:       SOLDR_ALLOW_UNPINNED=1 (or --allow-unpinned)",
+           - or drop the strict guard:    unset SOLDR_ALLOW_UNPINNED (it is set to an off value)",
         workspace_root.display()
     )))
 }
