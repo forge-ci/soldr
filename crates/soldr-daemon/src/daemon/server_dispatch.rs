@@ -74,6 +74,18 @@ where
             return Ok(());
         }
     };
+    let _in_flight = if matches!(req, Request::AcquireResidentCapacity { .. }) {
+        None
+    } else {
+        match Arc::clone(&control.in_flight).try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                let _ = write_frame_async(&mut stream, &Response::Error(control_busy_message()))
+                    .await;
+                return Ok(());
+            }
+        }
+    };
     // soldr#2558: fire-and-forget requests acknowledge RECEIPT before anything
     // else. On macOS/BSD a connection the client closes before this server
     // accepts it is discarded together with its buffered frame, so pure
@@ -106,6 +118,15 @@ where
             Ok(())
         }
     }
+}
+
+fn control_busy_message() -> String {
+    format!(
+        "soldr-daemon: {MAX_CONTROL_REQUESTS_IN_FLIGHT} control requests are already in \
+         flight and none is completing, so the daemon looks wedged (soldr#3839). Check \
+         `soldr daemon status`, restart with `soldr daemon stop` then `soldr daemon start`, \
+         and find its logs with `soldr logs paths`."
+    )
 }
 
 /// Requests that only read daemon state, so dropping their handler when the
