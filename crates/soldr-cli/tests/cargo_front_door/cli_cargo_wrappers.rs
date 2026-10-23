@@ -595,7 +595,7 @@ fn embedded_rustfmt_preserves_toolchain_timeout() {
         .expect("run embedded rustfmt timeout case");
 
     assert!(!output.status.success());
-    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(started.elapsed() < std::time::Duration::from_secs(30)); // + cold lease daemon, #3855
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("installer watchdog category=safety-ceiling")

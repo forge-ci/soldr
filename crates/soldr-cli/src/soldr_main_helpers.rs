@@ -234,17 +234,7 @@ pub(crate) async fn run_daemon_command(command: DaemonSubcommand) -> Result<(), 
                 ));
             }
             let daemon = crate::binaries::soldr_daemon_binary()?;
-            let installed = crate::daemon::service_definition::install_service_definition(&daemon)
-                .map_err(|err| {
-                    SoldrError::Other(format!(
-                        "failed to register soldr-daemon image {} with the broker: {err}",
-                        daemon.display()
-                    ))
-                })?;
-            std::env::set_var(
-                crate::daemon::backend_handle_adoption::SOLDR_BROKER_SERVICE_ENV_VAR,
-                &installed.definition.service_name,
-            );
+            let installed = register_daemon_service(&daemon)?;
             crate::daemon::lifecycle::preflight_displace_stale_daemon(&paths);
             // Normal SESSION route acquisition remains bounded by
             // `BrokerDeadlines::route_ceiling`: 120s by default, configurable
@@ -277,28 +267,12 @@ pub(crate) async fn run_daemon_command(command: DaemonSubcommand) -> Result<(), 
             // would just move the cliff. 180s is chosen to be uninteresting on
             // a healthy host and still bounded, and the launcher keeps its own
             // more precise attribution for anything genuinely wedged.
-            let ready_route = crate::session_transport::ensure_broker_route(
-                &installed.definition.service_name,
-                DAEMON_START_ROUTE_BUDGET,
-            )
-            .map_err(|err| {
-                SoldrError::Other(format!(
-                    "broker could not start soldr-daemon route {}: {err}",
-                    installed.definition.service_name
-                ))
-            })?;
-            crate::daemon::lifecycle::status_after_negotiated_route(
+            await_daemon_route(
                 &paths,
                 &sock,
-                &ready_route.backend_pipe,
-                &ready_route.daemon_version,
-                crate::daemon::lifecycle::START_STATUS_READY_TIMEOUT,
-            )
-            .map_err(|err| {
-                SoldrError::Other(format!(
-                    "broker route was published but soldr-daemon did not become status-ready: {err}"
-                ))
-            })?;
+                &installed.definition.service_name,
+                DAEMON_START_ROUTE_BUDGET,
+            )?;
             println!("soldr-daemon: broker route ready");
             Ok(())
         }
@@ -420,3 +394,62 @@ pub(crate) async fn run_daemon_command(command: DaemonSubcommand) -> Result<(), 
 #[cfg(test)]
 #[path = "main_tests.rs"]
 mod tests;
+
+/// Register the soldr-daemon image with the broker and export its service
+/// name for this process's broker connections.
+fn register_daemon_service(
+    daemon: &std::path::Path,
+) -> Result<crate::daemon::service_definition::InstalledServiceDefinition, SoldrError> {
+    let installed = crate::daemon::service_definition::install_service_definition(daemon)
+        .map_err(|err| {
+            SoldrError::Other(format!(
+                "failed to register soldr-daemon image {} with the broker: {err}",
+                daemon.display()
+            ))
+        })?;
+    std::env::set_var(
+        crate::daemon::backend_handle_adoption::SOLDR_BROKER_SERVICE_ENV_VAR,
+        &installed.definition.service_name,
+    );
+    Ok(installed)
+}
+
+/// Ask the broker to launch (or adopt) the daemon route for `service_name`
+/// and wait until that daemon answers status.
+fn await_daemon_route(
+    paths: &crate::core::SoldrPaths,
+    sock: &std::path::Path,
+    service_name: &str,
+    budget: std::time::Duration,
+) -> Result<(), SoldrError> {
+    let ready_route =
+        crate::session_transport::ensure_broker_route(service_name, budget).map_err(|err| {
+            SoldrError::Other(format!(
+                "broker could not start soldr-daemon route {service_name}: {err}"
+            ))
+        })?;
+    crate::daemon::lifecycle::status_after_negotiated_route(
+        paths,
+        sock,
+        &ready_route.backend_pipe,
+        &ready_route.daemon_version,
+        crate::daemon::lifecycle::START_STATUS_READY_TIMEOUT,
+    )
+    .map_err(|err| {
+        SoldrError::Other(format!(
+            "broker route was published but soldr-daemon did not become status-ready: {err}"
+        ))
+    })?;
+    Ok(())
+}
+
+/// Bring up the broker-owned daemon route without displacing any running
+/// daemon (soldr#3855). Used by callers that found no daemon and need one
+/// before asking it for admission, such as `soldr rustfmt`.
+pub(crate) fn start_daemon_route(budget: std::time::Duration) -> Result<(), SoldrError> {
+    let paths = crate::core::SoldrPaths::new()?;
+    let sock = crate::daemon::client::default_sock_path(&paths);
+    let daemon = crate::binaries::soldr_daemon_binary()?;
+    let installed = register_daemon_service(&daemon)?;
+    await_daemon_route(&paths, &sock, &installed.definition.service_name, budget)
+}

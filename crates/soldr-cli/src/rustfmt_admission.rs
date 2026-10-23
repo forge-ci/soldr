@@ -27,8 +27,9 @@
 //! for the one capacity the daemon tracks, instead of rustfmt running
 //! entirely outside that accounting.
 //!
-//! The lease is best-effort: a daemon that is unreachable or refuses the
-//! reservation must never fail formatting, so [`RustfmtLeaseController::
+//! When no daemon is running the controller starts the broker-owned one and
+//! retries (soldr#3855). If that still fails, it prints a loud error naming
+//! the recovery steps, but it must never fail formatting, so [`RustfmtLeaseController::
 //! acquire`] returning `None` still runs the formatter -- it only means the
 //! admission signal was unavailable, not that formatting itself failed.
 //!
@@ -87,15 +88,19 @@ impl RustfmtLeaseController for DaemonRustfmtLeaseController {
         let paths = match crate::core::SoldrPaths::new() {
             Ok(paths) => paths,
             Err(error) => {
-                eprintln!(
-                    "soldr rustfmt: could not resolve daemon paths for the resident-capacity \
-                     lease (soldr#2877), proceeding without it: {error}"
-                );
+                report_lease_unavailable(&format!("could not resolve daemon paths: {error}"));
                 return None;
             }
         };
         let sock = crate::daemon::client::default_sock_path(&paths);
-        match crate::daemon::client::acquire_resident_capacity(&sock, self.permits) {
+        let acquired = acquire_starting_daemon(
+            || crate::daemon::client::acquire_resident_capacity(&sock, self.permits),
+            || {
+                crate::soldr_main::start_daemon_route(crate::soldr_main::DAEMON_START_ROUTE_BUDGET)
+                    .map_err(|error| error.to_string())
+            },
+        );
+        match acquired {
             Ok(lease) => {
                 if crate::core::flag("SOLDR_RUSTFMT_ADMISSION_TRACE") {
                     eprintln!(
@@ -106,11 +111,8 @@ impl RustfmtLeaseController for DaemonRustfmtLeaseController {
                 }
                 Some(lease)
             }
-            Err(error) => {
-                eprintln!(
-                    "soldr rustfmt: could not reserve the resident-capacity lease \
-                     (soldr#2877), proceeding without it: {error:?}"
-                );
+            Err(reason) => {
+                report_lease_unavailable(&reason);
                 None
             }
         }
@@ -126,6 +128,56 @@ impl RustfmtLeaseController for DaemonRustfmtLeaseController {
                  acknowledgement (soldr#2877): {error:?}"
             );
         }
+    }
+}
+
+/// Reserve the lease, starting the broker-owned daemon first when none is
+/// running (soldr#3855). The broker reaps an idle daemon once every
+/// requester exits, so between builds `NotRunning` is the normal state, and
+/// without a start every such formatter ran outside admission. Only
+/// `NotRunning` triggers a start: any other error is a real daemon fault, and
+/// waiting behind compile capacity is not an error at all.
+pub(crate) fn acquire_starting_daemon<L>(
+    mut try_acquire: impl FnMut() -> Result<L, crate::daemon::client::ClientError>,
+    start_daemon: impl FnOnce() -> Result<(), String>,
+) -> Result<L, String> {
+    match try_acquire() {
+        Ok(lease) => Ok(lease),
+        Err(crate::daemon::client::ClientError::NotRunning) => {
+            start_daemon().map_err(|error| {
+                format!("no soldr-daemon was running and starting one failed: {error}")
+            })?;
+            try_acquire().map_err(|error| {
+                format!("started soldr-daemon but the lease request still failed: {error:?}")
+            })
+        }
+        Err(error) => Err(format!("the daemon refused the lease request: {error:?}")),
+    }
+}
+
+/// Loud, actionable notice that this formatter runs without admission
+/// (soldr#3815). Formatting still proceeds and keeps its own exit status.
+fn report_lease_unavailable(reason: &str) {
+    use std::io::IsTerminal as _;
+    eprintln!(
+        "{}",
+        lease_unavailable_message(reason, std::io::stderr().is_terminal())
+    );
+}
+
+pub(crate) fn lease_unavailable_message(reason: &str, color: bool) -> String {
+    let text = format!(
+        "soldr rustfmt: ERROR: could not reserve the resident-capacity lease (soldr#2877): \
+         {reason}\n\
+         soldr rustfmt: formatting continues WITHOUT daemon admission protection. Recover with:\n\
+         soldr rustfmt:   soldr daemon status\n\
+         soldr rustfmt:   soldr daemon stop && soldr daemon start\n\
+         soldr rustfmt:   soldr logs paths   (daemon and broker logs)"
+    );
+    if color {
+        format!("\x1b[1;31m{text}\x1b[0m")
+    } else {
+        text
     }
 }
 
