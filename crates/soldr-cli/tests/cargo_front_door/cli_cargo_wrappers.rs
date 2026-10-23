@@ -595,7 +595,10 @@ fn embedded_rustfmt_preserves_toolchain_timeout() {
         .expect("run embedded rustfmt timeout case");
 
     assert!(!output.status.success());
-    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    // soldr#3855: on this fresh root rustfmt first starts the daemon for its
+    // admission lease (~8 s cold) before the hung tool hits its 1 s ceiling.
+    // The bound still proves the hang is cut rather than waited out.
+    assert!(started.elapsed() < std::time::Duration::from_secs(30));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("installer watchdog category=safety-ceiling")
