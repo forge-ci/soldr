@@ -493,3 +493,10 @@ disallowed_methods = "deny"
 # shrinks.
 cognitive_complexity = "warn"
 too_many_lines = "warn"
+# soldr#3856: a synchronous guard or `RefCell` borrow held across `.await`
+# can deadlock the daemon's runtime (the #3836 class). Clippy's built-ins
+# cover std/parking_lot locks and `RefCell`; `await_holding_invalid_type`
+# covers soldr's own timed guards, listed in root `clippy.toml`.
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+await_holding_invalid_type = "deny"

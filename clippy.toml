@@ -11,3 +11,15 @@ disallowed-methods = [
     { path = "bincode::serialize",   reason = "use prost; see CLAUDE.md 'Serialization (issues #580 / #603)'." },
     { path = "bincode::deserialize", reason = "use prost; see CLAUDE.md 'Serialization (issues #580 / #603)'." },
 ]
+
+## soldr#3856: guards that must not live across `.await`. Clippy's
+## `await_holding_lock` / `await_holding_refcell_ref` already cover std,
+## parking_lot and `RefCell`; these are soldr's own blocking wrappers, which
+## hold a std guard inside and register a critical-section ticket. The async
+## variants (`AsyncMutexGuard`, ...) are designed to be held across awaits
+## and are deliberately absent.
+await-holding-invalid-types = [
+    { path = "soldr_platform::platform::sync::MutexGuard", reason = "blocking guard: release it before `.await` or use soldr_platform::sync::AsyncMutex (soldr#3856)" },
+    { path = "soldr_platform::platform::sync::RwLockReadGuard", reason = "blocking guard: release it before `.await` or use the async RwLock (soldr#3856)" },
+    { path = "soldr_platform::platform::sync::RwLockWriteGuard", reason = "blocking guard: release it before `.await` or use the async RwLock (soldr#3856)" },
+]
