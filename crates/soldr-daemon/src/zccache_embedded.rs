@@ -594,8 +594,10 @@ fn prepare_embedded_cache_root(
     cache_root: &std::path::Path,
 ) -> Result<(), EmbeddedServiceError> {
     migrate_legacy_cache_root(paths, daemon_identity, cache_root)?;
-    adopt::adopt_sibling_store(paths, cache_root)?;
+    let lineage = std::env::var(adopt::SOLDR_DAEMON_IMAGE_SOURCE_ENV_VAR).ok();
+    adopt::adopt_sibling_store(paths, cache_root, lineage.as_deref())?;
     std::fs::create_dir_all(cache_root)?;
+    adopt::record_lineage(cache_root, lineage.as_deref());
     crate::cache_lib::path_safety::validate_owned_directory(&paths.root, cache_root)?;
     let version_root = cache_root.join(zccache::core::config::versioned_subdir());
     std::fs::create_dir_all(&version_root)?;
@@ -903,6 +905,7 @@ fn scrub_compile_journal_file(path: &std::path::Path) -> std::io::Result<()> {
 
 #[path = "zccache_embedded_legacy.rs"]
 mod legacy;
+pub use adopt::SOLDR_DAEMON_IMAGE_SOURCE_ENV_VAR;
 pub(crate) use legacy::migrate_legacy_cache_root;
 pub use legacy::sweep_legacy_cache_roots;
 #[cfg(test)]

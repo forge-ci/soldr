@@ -122,6 +122,15 @@ pub(crate) fn soldr_daemon_service_definition_for_paths(
             service_name.into(),
         )],
     )?;
+    // soldr#3882: the daemon adopts only an idle store its own image
+    // lineage left behind, never another soldr's (CI's bootstrap store).
+    add_daemon_env_labels(
+        &mut definition,
+        [(
+            crate::zccache_embedded::SOLDR_DAEMON_IMAGE_SOURCE_ENV_VAR.into(),
+            binary.display().to_string().into(),
+        )],
+    )?;
 
     debug_assert_eq!(definition.isolation, BrokerIsolation::SharedBroker as i32);
     Ok(definition)

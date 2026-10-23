@@ -261,7 +261,8 @@ every time. An `actions/cache` step now persists it:
   embedded service's object stores, one per daemon generation
   (`daemon-state/embedded-v1-<route>/v<VERSION>/`, soldr#3568). The route
   follows the daemon image hash, so each commit's source daemon is a new
-  generation; it adopts the largest idle sibling store on first start
+  generation; it adopts the largest idle sibling store of its own image lineage (the
+  `image-source` marker, so the source build never takes the bootstrap's store) on first start
   (`zccache_embedded_adopt.rs`). Without that, this restore served 0 hits. The compile journals
   (`cache/zccache/history/`) and session logs (`cache/zccache/logs/`) are
   siblings *outside* that directory and stay run-scoped, shipped by the
