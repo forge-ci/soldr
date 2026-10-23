@@ -121,6 +121,23 @@ pub fn ensure_daemon_relocated_with_progress(
     daemon_src: &Path,
     mut progress: impl FnMut(&'static str, u64, u64),
 ) -> Result<PathBuf, SoldrError> {
+    relocate_daemon(paths, daemon_src, &mut progress, hash_file_with_progress)
+}
+
+/// Digest an executable for placement identity, reporting byte progress
+/// under the given stage. The default, [`hash_file_with_progress`], reads the
+/// whole image. soldr#3831: the broker has already verified the same image
+/// with a memoized digest, and that second whole-file read of a ~120 MB debug
+/// image cost 5-7 s per cold route on CI runners, so it passes its own.
+pub type ImageDigest =
+    fn(&Path, &'static str, &mut dyn FnMut(&'static str, u64, u64)) -> Result<String, SoldrError>;
+
+fn relocate_daemon(
+    paths: &SoldrPaths,
+    daemon_src: &Path,
+    progress: &mut dyn FnMut(&'static str, u64, u64),
+    digest: ImageDigest,
+) -> Result<PathBuf, SoldrError> {
     // soldr#1300: a maturin-repaired wheel binary loads bundled shared
     // libraries through a path RELATIVE TO THE BINARY'S OWN LOCATION
     // (`@loader_path/../<pkg>.dylibs/...` on macOS). Copying just the
@@ -138,7 +155,7 @@ pub fn ensure_daemon_relocated_with_progress(
     if path_is_under(daemon_src, &runtime_root) {
         return Ok(daemon_src.to_path_buf());
     }
-    ensure_relocated_exe_in_with_progress(&runtime_root, daemon_src, &mut progress)
+    ensure_relocated_exe_in_with_progress(&runtime_root, daemon_src, progress, digest)
 }
 
 /// Place a daemon at a route-specific executable path, retaining the repaired
@@ -152,10 +169,26 @@ pub fn ensure_daemon_relocated_with_progress(
 pub fn ensure_daemon_relocated_for_route_with_progress(
     paths: &SoldrPaths,
     daemon_src: &Path,
+    progress: impl FnMut(&'static str, u64, u64),
+) -> Result<PathBuf, SoldrError> {
+    ensure_daemon_relocated_for_route_with_digest(
+        paths,
+        daemon_src,
+        hash_file_with_progress,
+        progress,
+    )
+}
+
+/// [`ensure_daemon_relocated_for_route_with_progress`] keyed by `digest`
+/// instead of a full SHA-256 read of the image.
+pub fn ensure_daemon_relocated_for_route_with_digest(
+    paths: &SoldrPaths,
+    daemon_src: &Path,
+    digest: ImageDigest,
     mut progress: impl FnMut(&'static str, u64, u64),
 ) -> Result<PathBuf, SoldrError> {
     if !exe_depends_on_bundled_wheel_libs(daemon_src) {
-        return ensure_daemon_relocated_with_progress(paths, daemon_src, progress);
+        return relocate_daemon(paths, daemon_src, &mut progress, digest);
     }
 
     let source_scripts = daemon_src.parent().ok_or_else(|| {
@@ -189,7 +222,7 @@ pub fn ensure_daemon_relocated_for_route_with_progress(
     let runtime_root = daemon_runtime_root(paths);
     fs::create_dir_all(&runtime_root)?;
     let _lock = lock_runtime_root(&runtime_root)?;
-    let identity = exe_identity_with_progress(daemon_src, &mut progress)?;
+    let identity = exe_identity_with_progress(daemon_src, &mut progress, digest)?;
     let dest_root = runtime_root.join(&identity.dir_name);
     let dest_scripts = dest_root.join(scripts_name);
     let file_name = daemon_src.file_name().ok_or_else(|| {
@@ -201,7 +234,7 @@ pub fn ensure_daemon_relocated_for_route_with_progress(
     let dest = dest_scripts.join(file_name);
     let complete = dest_root.join(".wheel-bundle-complete");
     if complete.is_file()
-        && exe_hash_matches_with_progress(&dest, &identity.hash_hex, &mut progress)
+        && exe_hash_matches_with_progress(&dest, &identity.hash_hex, &mut progress, digest)
     {
         touch_last_used(&dest_root)?;
         return Ok(dest);
@@ -305,104 +338,7 @@ pub fn exe_has_loader_path_reference(exe: &Path) -> bool {
     // soldr#3403: an ELF names its bundled libraries relative to itself with
     // `$ORIGIN` in DT_RPATH/DT_RUNPATH, and breaks the same way on a copy.
     crate::elf_origin::elf_has_origin_rpath(&bytes)
-        || macho_load_commands_mention_loader_path(&bytes)
-}
-
-/// `@loader_path` is the only Mach-O prefix that is relative to the
-/// *image being loaded*. `@executable_path` resolves against the main
-/// executable and `@rpath` against `LC_RPATH` entries, which is why
-/// neither is checked here: moving the file does not by itself break them.
-const LOADER_PATH_TOKEN: &[u8] = b"@loader_path";
-
-fn macho_load_commands_mention_loader_path(bytes: &[u8]) -> bool {
-    // Universal ("fat") binary: a big-endian table of slices, each a
-    // complete Mach-O. Any slice needing the trampoline condemns the file,
-    // since we cannot know which slice will be executed.
-    const FAT_MAGIC: u32 = 0xcafe_babe;
-    const FAT_MAGIC_64: u32 = 0xcafe_babf;
-    if let Some(magic) = read_u32(bytes, 0, false) {
-        if magic == FAT_MAGIC || magic == FAT_MAGIC_64 {
-            let Some(nfat) = read_u32(bytes, 4, false) else {
-                return false;
-            };
-            // fat_arch is cputype, cpusubtype, offset, size, align (5 x u32);
-            // fat_arch_64 widens offset/size to u64 and adds a reserved
-            // word. In both layouts `offset` starts at byte 8.
-            let entry_size = if magic == FAT_MAGIC { 20 } else { 32 };
-            const OFFSET_FIELD: usize = 8;
-            // Cap the arch count so a corrupt header cannot spin.
-            for i in 0..nfat.min(64) {
-                let base = 8 + (i as usize) * entry_size;
-                let off = if magic == FAT_MAGIC {
-                    read_u32(bytes, base + OFFSET_FIELD, false).map(|v| v as usize)
-                } else {
-                    read_u64(bytes, base + OFFSET_FIELD, false).map(|v| v as usize)
-                };
-                let Some(off) = off else { continue };
-                if let Some(slice) = bytes.get(off..) {
-                    if thin_macho_mentions_loader_path(slice) {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
-    }
-    thin_macho_mentions_loader_path(bytes)
-}
-
-fn thin_macho_mentions_loader_path(bytes: &[u8]) -> bool {
-    const MH_MAGIC: u32 = 0xfeed_face; // 32-bit, host-endian
-    const MH_CIGAM: u32 = 0xcefa_edfe; // 32-bit, byte-swapped
-    const MH_MAGIC_64: u32 = 0xfeed_facf;
-    const MH_CIGAM_64: u32 = 0xcffa_edfe;
-
-    let Some(raw) = read_u32(bytes, 0, true) else {
-        return false;
-    };
-    // `swapped` means the file's fields are big-endian relative to us.
-    let (is_64, swapped) = match raw {
-        MH_MAGIC_64 => (true, false),
-        MH_CIGAM_64 => (true, true),
-        MH_MAGIC => (false, false),
-        MH_CIGAM => (false, true),
-        _ => return false,
-    };
-
-    // mach_header: magic, cputype, cpusubtype, filetype, ncmds,
-    // sizeofcmds, flags [, reserved on 64-bit].
-    let Some(sizeofcmds) = read_u32(bytes, 20, !swapped) else {
-        return false;
-    };
-    let header_len: usize = if is_64 { 32 } else { 28 };
-    let end = header_len.saturating_add(sizeofcmds as usize);
-    let Some(region) = bytes.get(header_len..end.min(bytes.len())) else {
-        return false;
-    };
-    region
-        .windows(LOADER_PATH_TOKEN.len())
-        .any(|w| w == LOADER_PATH_TOKEN)
-}
-
-/// Read a `u32`, `little` selecting the interpretation. Returns `None`
-/// rather than panicking on a short buffer so a truncated file is simply
-/// "not position-dependent" instead of a crash in a shim writer.
-fn read_u32(bytes: &[u8], at: usize, little: bool) -> Option<u32> {
-    let raw: [u8; 4] = bytes.get(at..at + 4)?.try_into().ok()?;
-    Some(if little {
-        u32::from_le_bytes(raw)
-    } else {
-        u32::from_be_bytes(raw)
-    })
-}
-
-fn read_u64(bytes: &[u8], at: usize, little: bool) -> Option<u64> {
-    let raw: [u8; 8] = bytes.get(at..at + 8)?.try_into().ok()?;
-    Some(if little {
-        u64::from_le_bytes(raw)
-    } else {
-        u64::from_be_bytes(raw)
-    })
+        || crate::macho_loader_path::macho_load_commands_mention_loader_path(&bytes)
 }
 
 /// Periodic GC sweep for the daemon-runtime sub-tree. Same cadence and
@@ -524,18 +460,24 @@ fn relocation_guard_active() -> bool {
 }
 
 fn ensure_relocated_exe_in(runtime_root: &Path, current_exe: &Path) -> Result<PathBuf, SoldrError> {
-    ensure_relocated_exe_in_with_progress(runtime_root, current_exe, &mut |_, _, _| {})
+    ensure_relocated_exe_in_with_progress(
+        runtime_root,
+        current_exe,
+        &mut |_, _, _| {},
+        hash_file_with_progress,
+    )
 }
 
 fn ensure_relocated_exe_in_with_progress(
     runtime_root: &Path,
     current_exe: &Path,
     progress: &mut dyn FnMut(&'static str, u64, u64),
+    digest: ImageDigest,
 ) -> Result<PathBuf, SoldrError> {
     fs::create_dir_all(runtime_root)?;
     let _lock = lock_runtime_root(runtime_root)?;
 
-    let identity = exe_identity_with_progress(current_exe, progress)?;
+    let identity = exe_identity_with_progress(current_exe, progress, digest)?;
     let dest_dir = runtime_root.join(&identity.dir_name);
     fs::create_dir_all(&dest_dir)?;
 
@@ -547,7 +489,7 @@ fn ensure_relocated_exe_in_with_progress(
     })?;
     let dest = dest_dir.join(file_name);
 
-    if exe_hash_matches_with_progress(&dest, &identity.hash_hex, progress) {
+    if exe_hash_matches_with_progress(&dest, &identity.hash_hex, progress, digest) {
         touch_last_used(&dest_dir)?;
         return Ok(dest);
     }
@@ -562,13 +504,16 @@ fn ensure_relocated_exe_in_with_progress(
     let permissions = fs::metadata(current_exe)?.permissions();
     fs::set_permissions(&temp, permissions)?;
 
-    if dest.exists() && !exe_hash_matches_with_progress(&dest, &identity.hash_hex, progress) {
+    if dest.exists() && !exe_hash_matches_with_progress(&dest, &identity.hash_hex, progress, digest)
+    {
         let _ = fs::remove_file(&dest);
     }
 
     match fs::rename(&temp, &dest) {
         Ok(()) => {}
-        Err(_err) if exe_hash_matches_with_progress(&dest, &identity.hash_hex, progress) => {
+        Err(_err)
+            if exe_hash_matches_with_progress(&dest, &identity.hash_hex, progress, digest) =>
+        {
             let _ = fs::remove_file(&temp);
         }
         Err(err) => {
@@ -660,14 +605,15 @@ struct ExeIdentity {
 }
 
 fn exe_identity(path: &Path) -> Result<ExeIdentity, SoldrError> {
-    exe_identity_with_progress(path, &mut |_, _, _| {})
+    exe_identity_with_progress(path, &mut |_, _, _| {}, hash_file_with_progress)
 }
 
 fn exe_identity_with_progress(
     path: &Path,
     progress: &mut dyn FnMut(&'static str, u64, u64),
+    digest: ImageDigest,
 ) -> Result<ExeIdentity, SoldrError> {
-    let hash_hex = hash_file_with_progress(path, "source-hash", progress)?;
+    let hash_hex = digest(path, "source-hash", progress)?;
     Ok(ExeIdentity {
         dir_name: relocation_dir_name(env!("CARGO_PKG_VERSION"), &hash_hex),
         hash_hex,
@@ -692,17 +638,22 @@ fn relocation_dir_name(version: &str, hash_hex: &str) -> String {
 }
 
 fn exe_hash_matches(path: &Path, expected_hash: &str) -> bool {
-    exe_hash_matches_with_progress(path, expected_hash, &mut |_, _, _| {})
+    exe_hash_matches_with_progress(
+        path,
+        expected_hash,
+        &mut |_, _, _| {},
+        hash_file_with_progress,
+    )
 }
 
 fn exe_hash_matches_with_progress(
     path: &Path,
     expected_hash: &str,
     progress: &mut dyn FnMut(&'static str, u64, u64),
+    digest: ImageDigest,
 ) -> bool {
     path.is_file()
-        && hash_file_with_progress(path, "placed-hash", progress)
-            .is_ok_and(|actual| actual == expected_hash)
+        && digest(path, "placed-hash", progress).is_ok_and(|actual| actual == expected_hash)
 }
 
 fn hash_file(path: &Path) -> Result<String, SoldrError> {
