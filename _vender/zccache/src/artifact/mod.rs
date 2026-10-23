@@ -23,6 +23,7 @@ pub use layout::{
     record_legacy_artifact_access, resolve_artifact_payloads, resolve_staged_artifact_files,
     LegacyArtifactAccessPurpose, ResolvedArtifactPayload, LEGACY_PATH_VALIDATE_ENV,
 };
+pub(crate) use layout::blob_digest_sidecar_name;
 pub use staged_lock::StagedReadGuard;
 
 pub use reconcile::{

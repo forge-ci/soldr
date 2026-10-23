@@ -86,10 +86,12 @@ pub(super) fn restore(cache_dir: Option<&Path>) -> Result<(), String> {
     if !source.exists() {
         return Ok(()); // Historical archives have no portable backend snapshot.
     }
-    let receipt = backend::import(&paths, &source).map_err(|error| error.to_string())?;
-    eprintln!(
-        "soldr load: compiler snapshot entries={} outputs={}",
-        receipt.entries, receipt.outputs
-    );
+    match backend::import(&paths, &source).map_err(|error| error.to_string())? {
+        Some(receipt) => eprintln!(
+            "soldr load: compiler snapshot entries={} outputs={}",
+            receipt.entries, receipt.outputs
+        ),
+        None => eprintln!("soldr load: compiler snapshot kept the existing store"),
+    }
     Ok(())
 }

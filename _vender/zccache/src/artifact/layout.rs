@@ -320,6 +320,7 @@ pub(crate) fn copy_artifact_generation(
         if size != sizes[index] {
             return Err(invalid_data("snapshot payload changed size"));
         }
+        write_blob_digest_sidecar(pending.path(), &format!("output-{index}"), &digest_hex)?;
         outputs.push(StagedOutput {
             index,
             size,
@@ -380,8 +381,36 @@ fn copy_staged_generation(
         let copied = target.join(name);
         copy_snapshot_file(path, &copied)?;
     }
+    for (path, output) in paths.iter().zip(&generation.outputs) {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| invalid_data("staged output has no name"))?;
+        write_blob_digest_sidecar(&target, name, &output.digest_hex)?;
+    }
     publish_snapshot_pointer(destination, key, generation_name, sizes)?;
     Ok(true)
+}
+
+/// Name of the digest sidecar that the daemon's restart verification reads
+/// for a blob called `blob_name` in the same directory.
+pub(crate) fn blob_digest_sidecar_name(blob_name: &str) -> String {
+    format!(
+        ".cowhash-{}",
+        kernal_api::hash::blake3_bytes(blob_name.as_bytes()).to_hex()
+    )
+}
+
+/// zccache#1947: a copied generation must carry each output's digest
+/// sidecar. The daemon evicts a payload that has no sidecar on first use
+/// after restart, so a restored snapshot without them served no hits.
+/// `digest_hex` is the manifest digest the copy was verified against.
+fn write_blob_digest_sidecar(dir: &Path, blob_name: &str, digest_hex: &str) -> io::Result<()> {
+    let digest = kernal_api::hash::Blake3Digest::from_hex(digest_hex)
+        .map_err(|_| invalid_data("staged output digest is not hex"))?;
+    let mut file = fs::File::create(dir.join(blob_digest_sidecar_name(blob_name)))?;
+    std::io::Write::write_all(&mut file, digest.as_bytes())?;
+    file.sync_all()
 }
 
 fn copy_snapshot_file(source: &Path, destination: &Path) -> io::Result<()> {

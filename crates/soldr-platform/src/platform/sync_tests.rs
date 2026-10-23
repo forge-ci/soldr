@@ -59,7 +59,10 @@ fn an_overdue_wait_is_reported_once_and_does_not_abort() {
 fn critical_section_guards_unregister_on_drop() {
     let mutex = Mutex::new(1);
     let lock = RwLock::new(1);
-    let count = || with_registry(|entries| entries.len());
+    // Other tests hold locks concurrently in the same registry; count only
+    // this test's thread (libtest names it after the test).
+    let me = current_thread_name();
+    let count = || with_registry(|entries| entries.iter().filter(|e| e.thread == me).count());
     let before = count();
     {
         let mut guard = mutex.lock();

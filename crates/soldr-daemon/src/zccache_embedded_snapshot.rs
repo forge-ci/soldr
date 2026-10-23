@@ -44,15 +44,19 @@ pub fn export(paths: &SoldrPaths, destination: &Path) -> io::Result<Option<Snaps
 }
 
 /// Import before daemon startup. Existing destination stores are never
-/// replaced, and neither is an existing dep-graph.
-pub fn import(paths: &SoldrPaths, source: &Path) -> io::Result<SnapshotReceipt> {
+/// replaced, and neither is an existing dep-graph: a repeated restore into a
+/// populated root keeps that store and returns `None`.
+pub fn import(paths: &SoldrPaths, source: &Path) -> io::Result<Option<SnapshotReceipt>> {
     let destination = crate::zccache_embedded::embedded_version_root(paths);
+    if destination.symlink_metadata().is_ok() {
+        return Ok(None);
+    }
     let receipt = import_snapshot(source, &compatibility(), &destination)?;
     let target = destination.join(DEPGRAPH);
     if !target.exists() {
         copy_if_present(&source.join(DEPGRAPH), &target)?;
     }
-    Ok(receipt)
+    Ok(Some(receipt))
 }
 
 fn copy_if_present(from: &Path, to: &Path) -> io::Result<()> {
