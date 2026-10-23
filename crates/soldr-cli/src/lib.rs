@@ -275,6 +275,8 @@ pub(crate) mod cook_route_hold;
 /// soldr#3518 -- durable journal making the in-place cook skeleton crash-safe.
 pub(crate) mod cook_source_journal;
 pub mod cook_source_snapshot;
+/// Blessed target prep for `soldr cook --target`, matching `soldr build`.
+pub(crate) mod cook_target_prep;
 /// No-progress watchdog for `soldr cook`'s cargo-chef phases (CI silence
 /// follow-up to soldr#3043).
 pub(crate) mod cook_watchdog;
