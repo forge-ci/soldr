@@ -156,6 +156,46 @@ fn missing_std_guidance(channel: &str, toolchain_dir: &Path, missing: &[String])
     )
 }
 
+/// The installed toolchain directory for `channel` under `rustup_home`:
+/// `<channel>-<host>` first, then a bare `<channel>` (custom/linked names).
+pub(crate) fn installed_toolchain_dir(
+    rustup_home: &Path,
+    channel: &str,
+    host: &str,
+) -> Option<PathBuf> {
+    let toolchains = rustup_home.join("toolchains");
+    [format!("{channel}-{host}"), channel.to_string()]
+        .into_iter()
+        .map(|name| toolchains.join(name))
+        .find(|dir| dir.is_dir())
+}
+
+/// soldr#3793: after an ad hoc `rustup target add <triple>` (a `--target`
+/// that no manifest declared), rustup may answer "up to date" over a
+/// `rust-std` whose files are gone. Check the files, and repair or fail
+/// closed exactly as the declared-target path does.
+pub(crate) fn verify_added_target_std(
+    rustup_home: &Path,
+    channel: &str,
+    triple: &str,
+    caller_selected_home: bool,
+    repair: &mut dyn FnMut(&str) -> Result<(), SoldrError>,
+) -> Result<(), SoldrError> {
+    let host = crate::pyo3_detect::host_triple();
+    let Some(toolchain_dir) = installed_toolchain_dir(rustup_home, channel, host) else {
+        // No directory to judge; cargo reports the real state.
+        return Ok(());
+    };
+    repair_missing_std_libs(
+        channel,
+        &toolchain_dir,
+        None,
+        &[triple.to_string()],
+        caller_selected_home,
+        repair,
+    )
+}
+
 /// Reinstall `rust-std-<triple>` for `channel` in the Soldr-managed home.
 pub(crate) fn reinstall_rust_std(channel: &str, triple: &str) -> Result<(), SoldrError> {
     crate::core::forbid_toolchain_install_tripwire(&format!(
@@ -275,6 +315,50 @@ mod tests {
         )
         .unwrap();
         assert_eq!(called, vec![WASM.to_string()]);
+    }
+
+    #[test]
+    fn an_ad_hoc_target_with_missing_files_is_repaired_or_fails_closed() {
+        // soldr#3793: no declared targets; `target add` said "up to date".
+        let home = tempfile::tempdir().unwrap();
+        let host = crate::pyo3_detect::host_triple();
+        let toolchain = home.path().join(format!("toolchains/1.98.1-{host}"));
+        let lib = toolchain.join("lib/rustlib").join(WASM).join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+
+        let caller = verify_added_target_std(home.path(), "1.98.1", WASM, true, &mut |_| {
+            panic!("a caller-selected home must not be mutated")
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            caller.contains(WASM) && caller.contains("E0463"),
+            "{caller}"
+        );
+
+        let mut called = Vec::new();
+        verify_added_target_std(home.path(), "1.98.1", WASM, false, &mut |t| {
+            called.push(t.to_string());
+            std::fs::write(lib.join("libcore-9.rlib"), b"rlib").unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(called, vec![WASM.to_string()]);
+
+        // Files present: no repair.
+        verify_added_target_std(home.path(), "1.98.1", WASM, false, &mut |_| {
+            panic!("an intact target must not be reinstalled")
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn an_unknown_toolchain_dir_is_not_judged() {
+        let home = tempfile::tempdir().unwrap();
+        verify_added_target_std(home.path(), "1.98.1", WASM, false, &mut |_| {
+            panic!("nothing to judge")
+        })
+        .unwrap();
     }
 
     #[test]
