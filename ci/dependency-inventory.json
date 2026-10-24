@@ -28,6 +28,7 @@
       "filetime",
       "fs2",
       "getrandom",
+      "globset",
       "hex",
       "interprocess",
       "jwalk",

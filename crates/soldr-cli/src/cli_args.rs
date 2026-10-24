@@ -394,6 +394,17 @@ pub(crate) enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Inspect the verdict ledger (soldr#3894)
+    ///
+    /// `soldr cargo clippy|fmt --check|dylint|test --doc|deny check ...` skip
+    /// themselves when a passing run with identical inputs is recorded.
+    /// `key`/`explain` show the key for an invocation, `rekey` re-derives a
+    /// prior job's keys, `ls`/`gc`/`paths`/`profiles` manage the store.
+    /// `SOLDR_VERDICTS=off` disables skipping.
+    Verdict {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Execute Soldr's frozen validation DAG
     ///
     /// `soldr ci-test` is the CI-oriented orchestration exception to Soldr's

@@ -37,6 +37,7 @@ clap = { workspace = true }
 filetime = { workspace = true }
 fs2 = { workspace = true }
 getrandom = "0.4"
+globset = "0.4"
 hex = { workspace = true }
 interprocess = { version = "2", features = ["tokio"] }
 jwalk = { workspace = true }
