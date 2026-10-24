@@ -139,7 +139,14 @@ fn describe_siblings(parent: &std::path::Path) -> String {
             let name = entry.file_name().to_str()?.to_string();
             let marker = std::fs::read_to_string(entry.path().join(LINEAGE_FILE))
                 .unwrap_or_else(|_| "<no marker>".into());
-            Some(format!("{name}={marker}"))
+            let index = entry
+                .path()
+                .join(zccache::core::config::versioned_subdir())
+                .join("index.bin");
+            let index = std::fs::metadata(index)
+                .map(|meta| format!("index={}B", meta.len()))
+                .unwrap_or_else(|_| "no index".into());
+            Some(format!("{name}={marker} ({index})"))
         })
         .collect();
     seen.sort();
