@@ -902,3 +902,45 @@ fn a_stale_sibling_route_store_is_still_reclaimed() {
     let report = sweep_legacy_cache_roots(&paths, now, crate::cache_lib::gc_policy::STALENESS_GATE);
     assert!(!stale.exists(), "{report:?}");
 }
+
+fn generation_shell(paths: &SoldrPaths, name: &str, age: Duration, now: SystemTime) -> PathBuf {
+    let shell = paths.cache.join("zccache").join("daemon-state").join(name);
+    std::fs::create_dir_all(&shell).expect("shell dir");
+    let lineage = shell.join("image-source");
+    std::fs::write(&lineage, b"/bin/soldr-daemon").expect("lineage marker");
+    set_mtime(&lineage, now - age);
+    set_mtime(&shell, now - age);
+    shell
+}
+
+/// A generation whose version store was swept away leaves its root behind
+/// (lineage marker, logs). Those shells grew by one per generation forever
+/// and every adoption scan walked them; an idle one is now removed.
+#[test]
+fn an_idle_generation_shell_with_no_store_is_removed() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = SoldrPaths::with_root(temp.path().join(".soldr"));
+    let now = SystemTime::now();
+    let shell = generation_shell(
+        &paths,
+        "embedded-v1-soldr-daemon-old",
+        hours(10.0 * 24.0),
+        now,
+    );
+
+    let report = sweep_legacy_cache_roots(&paths, now, crate::cache_lib::gc_policy::STALENESS_GATE);
+    assert!(!shell.exists(), "{report:?}");
+}
+
+/// A shell touched within the gate may be a daemon that has created its root
+/// but not yet its store, so it is left alone.
+#[test]
+fn a_recent_generation_shell_is_kept() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = SoldrPaths::with_root(temp.path().join(".soldr"));
+    let now = SystemTime::now();
+    let shell = generation_shell(&paths, "embedded-v1-soldr-daemon-new", hours(1.0), now);
+
+    let report = sweep_legacy_cache_roots(&paths, now, crate::cache_lib::gc_policy::STALENESS_GATE);
+    assert!(shell.exists(), "{report:?}");
+}
