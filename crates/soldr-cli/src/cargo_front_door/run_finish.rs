@@ -265,6 +265,7 @@ fn complete_cargo_run(
 ) -> Result<i32, SoldrError> {
     let paths = &prepared.paths;
     let captured_stderr_for_diagnosis = diagnostic_capture;
+    crate::verdict::gate::note_output(captured_stderr_for_diagnosis.as_deref());
     let compile_fallback_log =
         emit_compile_fallback_summary(paths, &session.compile_fallback_cursor, session.session_id);
     let strip_outcome = strip_diagnostics::StripOutcome::from_cargo(

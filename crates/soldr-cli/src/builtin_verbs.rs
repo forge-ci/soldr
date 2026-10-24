@@ -99,6 +99,8 @@ pub(crate) const SOLDR_BUILTIN_VERBS: &[&str] = &[
     "dylint",
     "cook",
     "lint",
+    // soldr#3894 — verdict ledger inspection.
+    "verdict",
     "ci-test",
     // soldr#1059 — PATH-prepending escape hatch for cargo extensions.
     "exec",

@@ -26,3 +26,5 @@ operational and integration details.
 - `TARGET_GC_PROPOSAL.md` — Rust
   artifact cache / target-dir GC design notes.
 - `TRUST_BOUNDARIES.md` — trust-mode semantics.
+- `VERDICT_LEDGER.md` — the verdict ledger: checks skip when their exact
+  inputs already passed (core, adapters, key, record, store; soldr#3894).

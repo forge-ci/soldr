@@ -411,6 +411,8 @@ pub(crate) mod toolchain_prepare;
 pub mod toolchain_readiness;
 pub(crate) mod toolchain_std_libs;
 pub mod trampoline;
+/// soldr#3894 — verdict ledger: skip a check whose exact inputs already passed.
+pub mod verdict;
 /// soldr#2024 — the `--as <version>` trampoline, split out of
 /// `soldr_main.rs` so that file could stop growing.
 pub mod version_trampoline;

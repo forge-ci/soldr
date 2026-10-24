@@ -3,6 +3,26 @@ pub(crate) async fn run_cargo_front_door(
     cache_enabled: bool,
     trust_inherited_soldr_env: bool,
 ) -> Result<i32, SoldrError> {
+    // soldr#3896: a pure check whose exact inputs already passed is replayed
+    // before any setup; otherwise a pass is recorded for the next run.
+    let armed = match crate::verdict::gate::open(args) {
+        crate::verdict::gate::Gate::Replayed(code) => return Ok(code),
+        crate::verdict::gate::Gate::Armed(armed) => Some(armed),
+        crate::verdict::gate::Gate::Pass => None,
+    };
+    let result =
+        run_cargo_front_door_ungated(args, cache_enabled, trust_inherited_soldr_env).await;
+    if let Some(armed) = armed {
+        armed.finish(*result.as_ref().unwrap_or(&1));
+    }
+    result
+}
+
+async fn run_cargo_front_door_ungated(
+    args: &[String],
+    cache_enabled: bool,
+    trust_inherited_soldr_env: bool,
+) -> Result<i32, SoldrError> {
     // Time the front door (#1843); a warm no-op does not invoke a rustc
     // wrapper. Zero-cost unless SOLDR_PROFILE_STARTUP is set.
     let mut profile = crate::startup_profile::WrapperProfile::new();

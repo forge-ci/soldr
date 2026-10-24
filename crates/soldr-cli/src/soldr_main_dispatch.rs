@@ -175,6 +175,7 @@ async fn dispatch_state_command(command: Commands, flags: DispatchFlags) -> Resu
         Commands::SessionEnd { id, clear, json } => cache::run_session_end_command(id, clear, json),
         Commands::Daemon { command } => run_daemon_command(command).await,
         Commands::Broker { command } => crate::broker_cmd::run_broker_command(command),
+        Commands::Verdict { args } => exit_with(crate::verdict::cli::run(&args)),
         Commands::External(args) => Box::pin(run_external_command(args, flags)).await,
         // Listed rather than `_` so a new command still fails to compile until
         // it is routed to a family.
