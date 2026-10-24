@@ -263,6 +263,7 @@ pub fn sweep_legacy_cache_roots(
                     ),
                 );
             } else if let Ok(stores) = std::fs::read_dir(&path) {
+                let mut has_store = false;
                 for store in stores.flatten() {
                     let store_path = store.path();
                     if store.file_type().is_ok_and(|kind| kind.is_dir())
@@ -279,7 +280,15 @@ pub fn sweep_legacy_cache_roots(
                                 zccache::core::config::RetiredSweepMode::Routine,
                             ),
                         );
+                        has_store |= store_path.exists();
                     }
+                }
+                // A generation whose store is gone leaves a shell (lineage
+                // marker, logs) that otherwise accumulates one per
+                // generation. The whole-root age gate below removes it once
+                // idle, so a daemon still creating its root is never raced.
+                if !has_store {
+                    candidates.push(path);
                 }
             }
         }
@@ -497,7 +506,9 @@ mod legacy_gc_tests {
         }
 
         let report = sweep_legacy_cache_roots(&owned, SystemTime::now(), std::time::Duration::ZERO);
-        assert_eq!(report.removed, 5);
+        // The emptied retired route root is a shell and goes too.
+        assert_eq!(report.removed, 6);
+        assert!(!retired_route.parent().unwrap().exists());
         assert!(!legacy.exists());
         assert!(!nested_old_version.exists());
         assert!(!retired_route.exists());
@@ -562,7 +573,8 @@ mod legacy_gc_tests {
         let released =
             sweep_legacy_cache_roots(&owned, SystemTime::now(), std::time::Duration::ZERO);
 
-        assert_eq!(released.removed, 1, "{released:?}");
+        // The store, then its emptied shell root.
+        assert_eq!(released.removed, 2, "{released:?}");
         assert_eq!(released.live_retained, 0, "{released:?}");
         assert!(!retired.exists());
     }
