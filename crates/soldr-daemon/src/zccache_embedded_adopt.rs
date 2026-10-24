@@ -53,17 +53,36 @@ pub(crate) fn adopt_sibling_store(
     stable_root: &std::path::Path,
     lineage: Option<&str>,
 ) -> Result<(), EmbeddedServiceError> {
+    // soldr#3882: every outcome is printed to the daemon's stderr (CI's
+    // uploaded daemon-spawn.log). A silent no-op left a 0-hit lane with no
+    // way to tell which of these held.
     let Some(lineage) = lineage else {
+        eprintln!("soldr-daemon: store adoption off: no {SOLDR_DAEMON_IMAGE_SOURCE_ENV_VAR}");
         return Ok(());
     };
     if stable_root.exists() {
+        eprintln!(
+            "soldr-daemon: store adoption not needed: {} exists",
+            stable_root.display()
+        );
         return Ok(());
     }
     let Some(parent) = stable_root.parent().filter(|parent| parent.exists()) else {
+        eprintln!(
+            "soldr-daemon: store adoption found no store directory beside {}",
+            stable_root.display()
+        );
         return Ok(());
     };
     crate::cache_lib::path_safety::validate_owned_directory(&paths.root, parent)?;
-    for sibling in sibling_stores_largest_first(parent, stable_root, lineage)? {
+    let candidates = sibling_stores_largest_first(parent, stable_root, lineage)?;
+    if candidates.is_empty() {
+        eprintln!(
+            "soldr-daemon: store adoption found no sibling of lineage {lineage}: {}",
+            describe_siblings(parent)
+        );
+    }
+    for sibling in candidates {
         let version_root = sibling.join(zccache::core::config::versioned_subdir());
         let Ok(lock) = zccache::core::cache_root_lock::CacheRootWriterLock::acquire(&version_root)
         else {
@@ -106,6 +125,29 @@ pub(crate) fn adopt_sibling_store(
         }
     }
     Ok(())
+}
+
+/// `name=lineage` for every generation store beside this one, for the
+/// no-candidate diagnostic.
+fn describe_siblings(parent: &std::path::Path) -> String {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return "unreadable".into();
+    };
+    let mut seen: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_string();
+            let marker = std::fs::read_to_string(entry.path().join(LINEAGE_FILE))
+                .unwrap_or_else(|_| "<no marker>".into());
+            Some(format!("{name}={marker}"))
+        })
+        .collect();
+    seen.sort();
+    if seen.is_empty() {
+        "none".into()
+    } else {
+        seen.join(", ")
+    }
 }
 
 /// Same-lineage sibling generation stores for this zccache version, largest artifact index
