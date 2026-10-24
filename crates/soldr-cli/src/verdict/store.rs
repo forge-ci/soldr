@@ -13,6 +13,7 @@
 //! `records/` before checks run and publish `spool/` after; trust policy
 //! (who may publish) belongs to them.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -46,6 +47,11 @@ pub struct Seen {
     pub cwd: String,
     pub key: String,
     pub hit: bool,
+    /// The selected environment the key used. A re-key derives with it, not
+    /// with the environment of the step that predicts (soldr#3907); absent
+    /// on lines from older soldr and on ungated runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<BTreeMap<String, String>>,
 }
 
 impl Store {

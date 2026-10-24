@@ -237,6 +237,7 @@ fn store_round_trips_and_gc_keeps_newest() {
             cwd: ".".into(),
             key: "k2".into(),
             hit: false,
+            env: None,
         })
         .unwrap();
     assert_eq!(
@@ -390,6 +391,59 @@ fn disabled_workspace_never_skips() {
     assert!(reason.contains("disabled"), "{reason}");
 }
 
+#[test]
+fn rekey_derives_with_the_recorded_env_not_its_own() {
+    // soldr#3907: a check ran in a step that set RUSTFLAGS; the remote tier
+    // predicts from an earlier step that did not. The recorded env must win.
+    let repo = fixture_repo();
+    let root = repo.path();
+    let ctx = Context::discover(root).unwrap();
+    let args = argv("clippy --workspace");
+    let step: BTreeMap<String, String> = [
+        ("RUSTFLAGS", "-D warnings"),
+        ("RUSTUP_TOOLCHAIN", "nightly-2026-05-28"),
+        ("CARGO_TARGET_DIR", "/elsewhere"),
+        ("HOME", "/home/x"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    let ran = ctx.derive_with_env(&args, root, Some(&step)).unwrap();
+    assert_eq!(
+        ran.env.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["RUSTFLAGS", "RUSTUP_TOOLCHAIN"],
+        "only selected, non-noise variables are recorded"
+    );
+    assert_eq!(ran.toolchain, "pin:nightly-2026-05-28");
+
+    let bare = ctx
+        .derive_with_env(&args, root, Some(&BTreeMap::new()))
+        .unwrap();
+    assert_ne!(ran.key, bare.key, "the env is part of the key");
+
+    let line = serde_json::to_string(&Seen {
+        tool: ran.tool.clone(),
+        args: args.clone(),
+        cwd: ran.cwd.clone(),
+        key: ran.key.clone(),
+        hit: false,
+        env: Some(ran.env.clone()),
+    })
+    .unwrap();
+    let seen: Seen = serde_json::from_str(&line).unwrap();
+    let rekeyed = ctx
+        .derive_with_env(&seen.args, root, seen.env.as_ref())
+        .unwrap();
+    assert_eq!(rekeyed.key, ran.key);
+
+    // A line from an older soldr has no env and falls back to this process.
+    let legacy: Seen = serde_json::from_str(
+        r#"{"tool":"clippy","args":["clippy"],"cwd":".","key":"k","hit":false}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy.env, None);
+}
+
 mod per_crate {
     use std::collections::BTreeMap;
 
@@ -523,6 +577,7 @@ mod per_crate {
                     config: &config,
                     args: &args,
                     cwd: root,
+                    env: None,
                 },
                 &Snapshot::discover(root).unwrap(),
                 &members,

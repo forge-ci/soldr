@@ -168,7 +168,7 @@ fn rekey_one(context: &Result<Context, String>, seen: &Seen) -> Rekeyed {
             } else {
                 ctx.snapshot.root.join(Path::new(&seen.cwd))
             };
-            ctx.derive(&seen.args, &dir)
+            ctx.derive_with_env(&seen.args, &dir, seen.env.as_ref())
         }
         Err(reason) => Err(reason.clone()),
     };
