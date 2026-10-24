@@ -842,3 +842,63 @@ fn bytes_reclaimed_counts_only_last_links() {
     );
     assert_eq!(report.failed, 0, "report={report:?}");
 }
+
+/// soldr#3882: a sibling route's store restored from CI's Tier-2 archive is
+/// all single-link files. A pressure sweep by another daemon (the bootstrap
+/// soldr) must not purge it while its `.last-active` marker is recent: that
+/// store is the previous run's, waiting for its own lineage to adopt it.
+#[test]
+fn a_recently_active_sibling_route_store_survives_a_pressure_sweep() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = SoldrPaths::with_root(temp.path().join(".soldr"));
+    let now = SystemTime::now();
+    let version = zccache::core::config::versioned_subdir();
+    let store = paths
+        .cache
+        .join("zccache")
+        .join("daemon-state")
+        .join("embedded-v1-soldr-daemon-previous-run")
+        .join(&version);
+    let artifacts = store.join("artifacts");
+    std::fs::create_dir_all(&artifacts).expect("artifacts dir");
+    let restored = artifacts.join("restored.bin");
+    std::fs::write(&restored, b"payload").expect("restored artifact");
+    set_mtime(&restored, now - hours(5.0 * 24.0));
+    let index = store.join("index.bin");
+    std::fs::write(&index, b"index").expect("index");
+    set_mtime(&index, now - hours(5.0 * 24.0));
+    let marker = store.join(zccache::core::config::LAST_ACTIVE_MARKER_FILE);
+    std::fs::write(&marker, b"").expect("last-active marker");
+    set_mtime(&marker, now - hours(2.0));
+
+    let report = sweep_legacy_cache_roots(&paths, now, crate::cache_lib::gc_policy::STALENESS_GATE);
+    assert!(restored.exists(), "{report:?}");
+    assert!(index.exists(), "{report:?}");
+}
+
+/// The other half of the same contract: a sibling route nobody has used
+/// within the gate is still reclaimed, so old generations do not pile up.
+#[test]
+fn a_stale_sibling_route_store_is_still_reclaimed() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = SoldrPaths::with_root(temp.path().join(".soldr"));
+    let now = SystemTime::now();
+    let version = zccache::core::config::versioned_subdir();
+    let store = paths
+        .cache
+        .join("zccache")
+        .join("daemon-state")
+        .join("embedded-v1-soldr-daemon-long-gone")
+        .join(&version);
+    let artifacts = store.join("artifacts");
+    std::fs::create_dir_all(&artifacts).expect("artifacts dir");
+    let stale = artifacts.join("stale.bin");
+    std::fs::write(&stale, b"payload").expect("stale artifact");
+    set_mtime(&stale, now - hours(10.0 * 24.0));
+    let marker = store.join(zccache::core::config::LAST_ACTIVE_MARKER_FILE);
+    std::fs::write(&marker, b"").expect("last-active marker");
+    set_mtime(&marker, now - hours(10.0 * 24.0));
+
+    let report = sweep_legacy_cache_roots(&paths, now, crate::cache_lib::gc_policy::STALENESS_GATE);
+    assert!(!stale.exists(), "{report:?}");
+}
