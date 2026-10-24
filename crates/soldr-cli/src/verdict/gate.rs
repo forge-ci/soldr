@@ -74,6 +74,12 @@ pub(crate) struct Armed {
     store: Store,
     derivation: Derivation,
     mode: Mode,
+    /// Per-member keys this run covers, recorded alongside the workspace
+    /// verdict on a pass.
+    crate_keys: Vec<String>,
+    /// The narrowed argv to run instead of the caller's, when only some
+    /// members changed.
+    args_override: Option<Vec<String>>,
 }
 
 fn debug(message: impl FnOnce() -> String) {
@@ -128,8 +134,10 @@ fn open_top_level(args: &[String], mode: Mode) -> Gate {
     let (Some(cwd), Some(store)) = (cwd(), Store::default_location()) else {
         return Gate::Pass;
     };
-    let derivation = match Context::discover(&cwd).and_then(|ctx| ctx.derive(args, &cwd)) {
-        Ok(derivation) => derivation,
+    let derived = Context::discover(&cwd)
+        .and_then(|ctx| ctx.derive(args, &cwd).map(|derivation| (ctx, derivation)));
+    let (ctx, derivation) = match derived {
+        Ok(pair) => pair,
         Err(reason) => {
             debug(|| format!("running: {reason}"));
             return Gate::Pass;
@@ -143,19 +151,56 @@ fn open_top_level(args: &[String], mode: Mode) -> Gate {
         key: derivation.key.clone(),
         hit,
     };
+    let (seen_hit, seen_miss) = (seen(true), seen(false));
     if let Some(record) = store.lookup(&derivation.key) {
-        let _ = store.note_seen(&seen(true));
+        let _ = store.note_seen(&seen_hit);
         replay(&record);
         return Gate::Replayed(0);
     }
-    let _ = store.note_seen(&seen(false));
-    debug(|| format!("miss {}", derivation.key));
-    std::env::set_var(NESTED_ENV, "1");
-    Gate::Armed(Box::new(Armed {
+    // soldr#3897: a workspace run whose members mostly kept their verdicts
+    // runs only the members that did not.
+    let crate_keys = ctx.derive_crates(args, &cwd).unwrap_or_default();
+    let missing: Vec<String> = crate_keys
+        .iter()
+        .filter(|(_, key)| store.lookup(key).is_none())
+        .map(|(name, _)| name.clone())
+        .collect();
+    let mut armed = Armed {
         store,
         derivation,
         mode,
-    }))
+        crate_keys: Vec::new(),
+        args_override: None,
+    };
+    if !crate_keys.is_empty() && missing.is_empty() {
+        let _ = armed.store.note_seen(&seen_hit);
+        eprintln!(
+            "soldr: {} skipped: every one of {} workspace member(s) matches a passing run",
+            armed.derivation.tool,
+            crate_keys.len()
+        );
+        // Every member passed under these inputs, so the workspace did too.
+        armed.record_all(None);
+        return Gate::Replayed(0);
+    }
+    let _ = armed.store.note_seen(&seen_miss);
+    debug(|| format!("miss {}", armed.derivation.key));
+    if !missing.is_empty() && missing.len() < crate_keys.len() {
+        eprintln!(
+            "soldr: {}: {} of {} workspace member(s) changed; checking only {}",
+            armed.derivation.tool,
+            missing.len(),
+            crate_keys.len(),
+            missing.join(", ")
+        );
+        armed.args_override = Some(super::crates::narrow(args, &missing));
+    }
+    armed.crate_keys = missing
+        .iter()
+        .filter_map(|name| crate_keys.get(name).cloned())
+        .collect();
+    std::env::set_var(NESTED_ENV, "1");
+    Gate::Armed(Box::new(armed))
 }
 
 fn has_user_rows() -> bool {
@@ -175,7 +220,7 @@ fn replay(record: &Record) {
     let note = if record.output_captured {
         ""
     } else {
-        " (the original run's output went to a terminal and was not recorded)"
+        " (no output was recorded for it: the run wrote to a terminal, or was assembled from per-member verdicts)"
     };
     eprintln!(
         "soldr: {} skipped: inputs match a passing run (verdict {}){note}; SOLDR_VERDICTS=off forces a run",
@@ -184,19 +229,46 @@ fn replay(record: &Record) {
 }
 
 impl Armed {
+    /// The argv the front door should run, when the gate narrowed it.
+    pub(crate) fn args_override(&self) -> Option<&[String]> {
+        self.args_override.as_deref()
+    }
+
     /// Record the verdict if the check passed.
     pub(crate) fn finish(self, exit_code: i32) {
         std::env::remove_var(NESTED_ENV);
         let output = take_output();
-        if exit_code != 0 || self.mode != Mode::On {
+        if exit_code != 0 {
             return;
         }
+        let partial = self.args_override.is_some();
+        // A narrowed run's output covers only the members it checked.
+        self.record_all(if partial { None } else { output.as_deref() });
+    }
+
+    fn record_all(self, output: Option<&str>) {
+        if self.mode != Mode::On {
+            return;
+        }
+        let keys =
+            std::iter::once(self.derivation.key.clone()).chain(self.crate_keys.iter().cloned());
+        for (index, key) in keys.enumerate() {
+            let record = self.record(key, if index == 0 { output } else { None });
+            match self.store.put(&record) {
+                Ok(()) => debug(|| format!("recorded {}", record.key)),
+                Err(err) => debug(|| format!("could not record {}: {err}", record.key)),
+            }
+        }
+        self.store.gc(DEFAULT_MAX_RECORDS);
+    }
+
+    fn record(&self, key: String, output: Option<&str>) -> Record {
         let created = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        let record = Record {
+        Record {
             v: SCHEMA,
-            key: self.derivation.key.clone(),
+            key,
             tool: self.derivation.tool.clone(),
             argv: self.derivation.normalized_args.clone(),
             cwd: self.derivation.cwd.clone(),
@@ -207,13 +279,6 @@ impl Armed {
             output: None,
             output_captured: false,
         }
-        .with_output(output.as_deref());
-        match self.store.put(&record) {
-            Ok(()) => {
-                debug(|| format!("recorded {}", record.key));
-                self.store.gc(DEFAULT_MAX_RECORDS);
-            }
-            Err(err) => debug(|| format!("could not record {}: {err}", record.key)),
-        }
+        .with_output(output)
     }
 }

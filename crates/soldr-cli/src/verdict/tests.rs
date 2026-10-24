@@ -389,3 +389,171 @@ fn disabled_workspace_never_skips() {
     let reason = key_in(root, "clippy").unwrap_err();
     assert!(reason.contains("disabled"), "{reason}");
 }
+
+mod per_crate {
+    use std::collections::BTreeMap;
+
+    use super::super::crates::{merkle, narrow, owner, parse_metadata, selects_workspace, Member};
+    use super::super::key::{derive_crates, KeyRequest, Snapshot};
+    use super::super::profiles;
+    use super::{argv, fixture_repo, git};
+
+    fn member(name: &str, dir: &str, deps: &[&str]) -> Member {
+        Member {
+            name: name.into(),
+            dir: dir.into(),
+            deps: deps.iter().map(|d| (*d).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn workspace_selection_is_detected_and_narrowed() {
+        assert!(selects_workspace(&argv("fmt --all -- --check")));
+        assert!(selects_workspace(&argv("clippy --workspace")));
+        assert!(!selects_workspace(&argv("fmt -p a -- --check")));
+        assert!(!selects_workspace(&argv("clippy --workspace --exclude b")));
+        assert!(
+            !selects_workspace(&argv("fmt -- --check --all")),
+            "after -- is the tool's argv"
+        );
+        assert_eq!(
+            narrow(&argv("fmt --all -- --check"), &["a".into(), "c".into()]),
+            argv("fmt -p a -p c -- --check"),
+        );
+    }
+
+    #[test]
+    fn files_belong_to_the_deepest_member() {
+        let members = [member("root", "", &[]), member("a", "crates/a", &[])];
+        assert_eq!(owner(&members, "crates/a/src/lib.rs").unwrap().name, "a");
+        assert_eq!(owner(&members, "src/main.rs").unwrap().name, "root");
+        assert_eq!(owner(&[member("a", "crates/a", &[])], "docs/x.md"), None);
+        assert_eq!(
+            owner(&[member("a", "crates/a", &[])], "crates/ab/x.rs"),
+            None
+        );
+    }
+
+    #[test]
+    fn merkle_keys_move_with_dependencies_only() {
+        let members = [
+            member("app", "app", &["lib"]),
+            member("lib", "lib", &[]),
+            member("other", "other", &[]),
+        ];
+        let seal =
+            |name: &str, own: &str, deps: &[String]| format!("{name}:{own}:{}", deps.join("+"));
+        let mut own: BTreeMap<String, String> = [("app", "1"), ("lib", "1"), ("other", "1")]
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .into();
+        let before = merkle(&members, &own, seal).unwrap();
+        own.insert("lib".into(), "2".into());
+        let after = merkle(&members, &own, seal).unwrap();
+        assert_ne!(before["lib"], after["lib"]);
+        assert_ne!(before["app"], after["app"], "dependent re-keys");
+        assert_eq!(
+            before["other"], after["other"],
+            "unrelated member keeps its key"
+        );
+        let cyclic = [member("a", "a", &["b"]), member("b", "b", &["a"])];
+        assert!(merkle(&cyclic, &BTreeMap::new(), seal).is_err());
+    }
+
+    #[test]
+    fn metadata_parses_members_and_path_edges() {
+        let repo = fixture_repo();
+        let root = repo.path().canonicalize().unwrap();
+        let json = format!(
+            r#"{{"workspace_members":["app-id","lib-id"],"packages":[
+              {{"id":"app-id","name":"app","manifest_path":"{r}/app/Cargo.toml",
+                "dependencies":[{{"name":"lib","path":"{r}/lib"}},{{"name":"serde"}}]}},
+              {{"id":"lib-id","name":"lib","manifest_path":"{r}/lib/Cargo.toml","dependencies":[]}},
+              {{"id":"ext","name":"serde","manifest_path":"/elsewhere/Cargo.toml","dependencies":[]}}]}}"#,
+            r = root.display()
+        );
+        let members = parse_metadata(&json, &root).unwrap();
+        assert_eq!(
+            members,
+            vec![member("app", "app", &["lib"]), member("lib", "lib", &[])]
+        );
+    }
+
+    #[test]
+    fn crate_keys_isolate_edits_to_the_edited_member_and_its_dependents() {
+        let repo = fixture_repo();
+        let root = repo.path();
+        for (name, deps) in [
+            ("app", "lib = { path = \"../lib\" }\n"),
+            ("lib", ""),
+            ("other", ""),
+        ] {
+            std::fs::create_dir_all(root.join(name).join("src")).unwrap();
+            std::fs::write(
+                root.join(name).join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n[dependencies]\n{deps}"
+                ),
+            )
+            .unwrap();
+            std::fs::write(root.join(name).join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+        }
+        std::fs::remove_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"lib\", \"other\"]\n",
+        )
+        .unwrap();
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", "ws"]);
+        let members = vec![
+            member("app", "app", &["lib"]),
+            member("lib", "lib", &[]),
+            member("other", "other", &[]),
+        ];
+        let profile = profiles::builtin()
+            .into_iter()
+            .find(|p| p.name == "fmt")
+            .unwrap();
+        let config = profiles::WorkspaceConfig::default();
+        let keys = |args: &str| {
+            let args = argv(args);
+            derive_crates(
+                &KeyRequest {
+                    profile: &profile,
+                    config: &config,
+                    args: &args,
+                    cwd: root,
+                },
+                &Snapshot::discover(root).unwrap(),
+                &members,
+            )
+            .unwrap()
+        };
+        let before = keys("fmt --all -- --check");
+        assert_eq!(
+            before,
+            keys("fmt -- --check"),
+            "selection flags do not enter crate keys"
+        );
+        std::fs::write(root.join("lib/src/lib.rs"), "pub fn g() {}\n").unwrap();
+        let after = keys("fmt --all -- --check");
+        assert_ne!(before["lib"], after["lib"]);
+        assert_ne!(before["app"], after["app"]);
+        assert_eq!(before["other"], after["other"]);
+        assert!(
+            after["other"].starts_with("soldr-verdict-v1-fmt-c-other-"),
+            "{}",
+            after["other"]
+        );
+    }
+
+    #[test]
+    fn only_fmt_narrows_by_default() {
+        let narrowing: Vec<String> = profiles::builtin()
+            .into_iter()
+            .filter(|p| p.per_package)
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(narrowing, vec!["fmt".to_string()]);
+    }
+}

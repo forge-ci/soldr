@@ -85,6 +85,38 @@ Known limit: a build script's `rerun-if-env-changed` variables are not
 knowable before the build. List any that change lint results in the
 adapter's `env`.
 
+## Per-member verdicts (soldr#3897)
+
+A workspace-wide run (`--workspace` / `--all`, no `-p` / `--exclude`) whose
+workspace key misses can still skip the members whose own inputs are
+unchanged. soldr reads `cargo metadata --no-deps` and keys each member on the
+shared inputs, the member's own files and the keys of the workspace members
+it depends on (a Merkle tree), so an edit re-checks the edited member and its
+dependents only:
+
+```text
+soldr: fmt: 1 of 3 workspace member(s) changed; checking only other
+```
+
+The run is narrowed to `-p <member> ...`; on a pass soldr records the
+members it checked and the workspace verdict. When every member already has
+a verdict the whole run is skipped.
+
+Narrowing is only sound for a tool whose result for one crate does not depend
+on which other crates are selected. Cargo unifies features across the
+selected packages, so Clippy and doc-tests can see different code under `-p`
+than under `--workspace`. The adapter field `per_package` opts in; the
+built-in table sets it for `fmt` alone. A workspace whose members do not
+change each other's features can opt Clippy in:
+
+```toml
+[workspace.metadata.soldr.verdict.tools.clippy]
+per_package = true
+```
+
+A workspace dependency cycle (possible through dev-dependencies) or a failed
+`cargo metadata` falls back to the workspace key.
+
 ## The record
 
 ```json
