@@ -158,26 +158,29 @@ def strip_ansi(text: str) -> str:
 
 
 def final_link_invocations(build_log: str, package_bin_crate: str) -> list[str]:
-    """Every rustc invocation line that links a `bin` crate-type artifact."""
-    # `str.splitlines()` also splits on bare `\r` (and other unicode line
-    # separators), and soldr's own progress banner writes `\r`-terminated
-    # updates to the same stream cargo's `-v` output goes to. That can slice
-    # a single long rustc invocation line into fragments at a `\r`, so a
-    # substring check against any one fragment misses it even though the
-    # full text is present in `build_log`. Split on `\n` only.
-    lines = []
-    for line in strip_ansi(build_log).split("\n"):
-        if "Running `" not in line:
-            continue
-        if "--crate-type bin" not in line:
+    """Every rustc invocation that links a `bin` crate-type artifact."""
+    # Each invocation is read as the whole `Running `...`` span, not one
+    # line. Other writers share the stream cargo's `-v` output goes to:
+    # soldr's progress banner writes `\r`-terminated updates and its
+    # timestamped stderr can land a whole line mid-invocation (soldr#3893).
+    # Either cuts the invocation before its tail, where the project's own
+    # rustflags (`--cfg tokio_unstable`) sit, so a line-based check reported
+    # them lost although the full text was in `build_log`.
+    invocations = []
+    for match in RUNNING_SPAN_RE.finditer(strip_ansi(build_log)):
+        invocation = match.group(1)
+        if "--crate-type bin" not in invocation:
             continue
         if (
-            f"--crate-name {package_bin_crate}" not in line
-            and "--crate-name soldr " not in line
+            f"--crate-name {package_bin_crate}" not in invocation
+            and "--crate-name soldr " not in invocation
         ):
             continue
-        lines.append(line)
-    return lines
+        invocations.append(invocation)
+    return invocations
+
+
+RUNNING_SPAN_RE = re.compile(r"Running `([^`]*)`")
 
 
 def extract_linker_path(invocation: str) -> str | None:
