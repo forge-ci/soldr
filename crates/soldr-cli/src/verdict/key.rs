@@ -64,6 +64,18 @@ pub struct Derivation {
     pub components: BTreeMap<String, String>,
 }
 
+impl Derivation {
+    /// The `name=value` pairs the key's env component used.
+    pub fn selected_env(&self) -> BTreeMap<String, String> {
+        self.components
+            .iter()
+            .filter_map(|(name, value)| {
+                Some((name.strip_prefix("env:")?.to_string(), value.clone()))
+            })
+            .collect()
+    }
+}
+
 /// The git view of the checkout a key is derived from.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
@@ -349,14 +361,25 @@ fn env_selected(name: &str, patterns: &[&str]) -> bool {
         })
 }
 
-fn env_component(profile: &Profile) -> Vec<(String, String)> {
+/// The selected environment: `recorded` when the invocation's own env was
+/// logged (soldr#3907), else the process environment.
+fn env_component(
+    profile: &Profile,
+    recorded: Option<&BTreeMap<String, String>>,
+) -> Vec<(String, String)> {
     let patterns: Vec<&str> = BASE_ENV
         .iter()
         .copied()
         .chain(profile.env.iter().map(String::as_str))
         .collect();
-    let mut vars: Vec<(String, String)> = std::env::vars_os()
-        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.to_string_lossy().into_owned())))
+    let source: Vec<(String, String)> = match recorded {
+        Some(env) => env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        None => std::env::vars_os()
+            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.to_string_lossy().into_owned())))
+            .collect(),
+    };
+    let mut vars: Vec<(String, String)> = source
+        .into_iter()
         .filter(|(k, _)| env_selected(k, &patterns) && !ENV_NOISE.contains(&k.as_str()))
         .collect();
     vars.sort();
@@ -517,6 +540,9 @@ pub struct KeyRequest<'a> {
     pub config: &'a WorkspaceConfig,
     pub args: &'a [String],
     pub cwd: &'a Path,
+    /// The invocation's recorded env, for a re-key in another process
+    /// (soldr#3907). `None` reads the process environment.
+    pub env: Option<&'a BTreeMap<String, String>>,
 }
 
 /// One selected input: repo-relative path and its fingerprint (the blob id
@@ -614,7 +640,7 @@ fn common(
         "args".into(),
         serde_json::to_string(&normalized_args).unwrap_or_default(),
     );
-    for (name, value) in env_component(request.profile) {
+    for (name, value) in env_component(request.profile, request.env) {
         components.insert(format!("env:{name}"), value);
     }
     for (name, value) in identity_components(request.profile, &cwd)? {

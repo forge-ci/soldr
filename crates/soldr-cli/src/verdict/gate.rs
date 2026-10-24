@@ -117,6 +117,7 @@ fn note_ungated(args: &[String]) {
         cwd: cwd.display().to_string(),
         key: String::new(),
         hit: false,
+        env: None,
     });
 }
 
@@ -150,6 +151,7 @@ fn open_top_level(args: &[String], mode: Mode) -> Gate {
         cwd: rel_cwd.clone(),
         key: derivation.key.clone(),
         hit,
+        env: Some(derivation.selected_env()),
     };
     let (seen_hit, seen_miss) = (seen(true), seen(false));
     if let Some(record) = store.lookup(&derivation.key) {

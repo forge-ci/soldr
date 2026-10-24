@@ -112,11 +112,11 @@ fn explain(cargo_args: &[String], store: &Store) -> Result<i32, SoldrError> {
 }
 
 #[derive(Serialize)]
-struct Rekeyed {
+pub(super) struct Rekeyed {
     tool: String,
     args: Vec<String>,
     cwd: String,
-    key: Option<String>,
+    pub(super) key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
 }
@@ -160,7 +160,7 @@ fn rekey(flags: &[String], json: bool) -> Result<i32, SoldrError> {
     Ok(0)
 }
 
-fn rekey_one(context: &Result<Context, String>, seen: &Seen) -> Rekeyed {
+pub(super) fn rekey_one(context: &Result<Context, String>, seen: &Seen) -> Rekeyed {
     let derived = match context {
         Ok(ctx) => {
             let dir = if seen.cwd == "." {
@@ -168,7 +168,7 @@ fn rekey_one(context: &Result<Context, String>, seen: &Seen) -> Rekeyed {
             } else {
                 ctx.snapshot.root.join(Path::new(&seen.cwd))
             };
-            ctx.derive(&seen.args, &dir)
+            ctx.derive_with_env(&seen.args, &dir, seen.env.as_ref())
         }
         Err(reason) => Err(reason.clone()),
     };

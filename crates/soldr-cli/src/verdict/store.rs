@@ -13,6 +13,7 @@
 //! `records/` before checks run and publish `spool/` after; trust policy
 //! (who may publish) belongs to them.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -46,6 +47,11 @@ pub struct Seen {
     pub cwd: String,
     pub key: String,
     pub hit: bool,
+    /// The env the key's env component selected, so a re-key in another
+    /// process (the remote tier's setup step) derives the same key
+    /// (soldr#3907). Absent on lines from an older soldr.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<BTreeMap<String, String>>,
 }
 
 impl Store {

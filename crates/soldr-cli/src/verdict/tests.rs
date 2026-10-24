@@ -237,6 +237,7 @@ fn store_round_trips_and_gc_keeps_newest() {
             cwd: ".".into(),
             key: "k2".into(),
             hit: false,
+            env: None,
         })
         .unwrap();
     assert_eq!(
@@ -523,6 +524,7 @@ mod per_crate {
                     config: &config,
                     args: &args,
                     cwd: root,
+                    env: None,
                 },
                 &Snapshot::discover(root).unwrap(),
                 &members,
@@ -556,4 +558,50 @@ mod per_crate {
             .collect();
         assert_eq!(narrowing, vec!["fmt".to_string()]);
     }
+}
+
+/// soldr#3907: the remote tier re-keys `seen.jsonl` in its setup step, whose
+/// env lacks what the check's own step set. The line carries the env the key
+/// used, so the re-key reproduces the recorded key regardless.
+#[test]
+fn rekey_uses_the_recorded_env_not_the_process_env() {
+    let repo = fixture_repo();
+    let root = repo.path();
+    let ctx = Context::discover(root).unwrap();
+    let args = argv("clippy --workspace");
+    let step_env = BTreeMap::from([(
+        "RUSTFLAGS".to_string(),
+        "-D warnings --cfg soldr_test_3907".to_string(),
+    )]);
+    let recorded = ctx.derive_with_env(&args, root, Some(&step_env)).unwrap();
+    assert_eq!(
+        recorded.selected_env().get("RUSTFLAGS").map(String::as_str),
+        Some("-D warnings --cfg soldr_test_3907")
+    );
+    assert_ne!(
+        recorded.key,
+        ctx.derive(&args, root).unwrap().key,
+        "this process does not carry the step's RUSTFLAGS"
+    );
+
+    let line = serde_json::to_string(&Seen {
+        tool: recorded.tool.clone(),
+        args: args.clone(),
+        cwd: ".".into(),
+        key: recorded.key.clone(),
+        hit: false,
+        env: Some(recorded.selected_env()),
+    })
+    .unwrap();
+    let seen: Seen = serde_json::from_str(&line).unwrap();
+    let rekeyed = super::cli::rekey_one(&Context::discover(root), &seen);
+    assert_eq!(rekeyed.key.as_deref(), Some(recorded.key.as_str()));
+
+    // A line from an older soldr has no env and keeps the process env.
+    let legacy: Seen =
+        serde_json::from_str(&serde_json::to_string(&Seen { env: None, ..seen }).unwrap()).unwrap();
+    assert_eq!(
+        super::cli::rekey_one(&Context::discover(root), &legacy).key,
+        Some(ctx.derive(&args, root).unwrap().key)
+    );
 }
