@@ -519,8 +519,76 @@ pub struct KeyRequest<'a> {
     pub cwd: &'a Path,
 }
 
-/// Derive the key, or the reason this invocation must run.
-pub fn derive(request: &KeyRequest<'_>, snapshot: &Snapshot) -> Result<Derivation, String> {
+/// One selected input: repo-relative path and its fingerprint (the blob id
+/// for a clean tracked file, a content hash for an uncommitted one).
+type Entry = (String, String);
+
+fn input_entries(
+    snapshot: &Snapshot,
+    selection: &Selection,
+) -> Result<(Vec<Entry>, usize), String> {
+    let mut entries = Vec::new();
+    for (path, oid) in &snapshot.tracked {
+        if selection.selects(path) && !snapshot.dirty.contains_key(path) {
+            entries.push((path.clone(), oid.clone()));
+        }
+    }
+    let mut dirty_count = 0usize;
+    for (path, state) in &snapshot.dirty {
+        if !selection.selects(path) {
+            continue;
+        }
+        let fingerprint = match state {
+            Dirty::Deleted => "deleted".to_string(),
+            Dirty::Modified | Dirty::Untracked => {
+                let full = snapshot.root.join(path);
+                if full.is_dir() {
+                    return Err(format!("untracked directory `{path}` (nested repo?)"));
+                }
+                let bytes = std::fs::read(&full)
+                    .map_err(|err| format!("cannot read uncommitted `{path}`: {err}"))?;
+                format!("dirty:{}", blake3::hash(&bytes).to_hex())
+            }
+        };
+        entries.push((path.clone(), fingerprint));
+        dirty_count += 1;
+    }
+    entries.sort();
+    Ok((entries, dirty_count))
+}
+
+fn short(hash: blake3::Hash) -> String {
+    hash.to_hex()[..32].to_string()
+}
+
+fn digest_entries<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for (path, fingerprint) in entries {
+        hasher
+            .update(path.as_bytes())
+            .update(b"\0")
+            .update(fingerprint.as_bytes())
+            .update(b"\n");
+    }
+    short(hasher.finalize())
+}
+
+/// Everything but the files: toolchain, host, config, cwd, argv, env,
+/// identity probes and the adapter row.
+struct Common {
+    components: BTreeMap<String, String>,
+    toolchain: String,
+    normalized_args: Vec<String>,
+    cwd: String,
+    entries: Vec<Entry>,
+    dirty: usize,
+}
+
+fn common(
+    request: &KeyRequest<'_>,
+    snapshot: &Snapshot,
+    args: &[String],
+) -> Result<Common, String> {
     if let Some(reason) = escaping_path_dependency(snapshot) {
         return Err(reason);
     }
@@ -533,51 +601,11 @@ pub fn derive(request: &KeyRequest<'_>, snapshot: &Snapshot) -> Result<Derivatio
         .canonicalize()
         .unwrap_or_else(|_| snapshot.root.clone());
     let selection = Selection::new(snapshot, request.profile, request.config)?;
-
-    let mut files = blake3::Hasher::new();
-    let mut file_count = 0usize;
-    for (path, oid) in &snapshot.tracked {
-        if selection.selects(path) && !snapshot.dirty.contains_key(path) {
-            files
-                .update(path.as_bytes())
-                .update(b"\0")
-                .update(oid.as_bytes())
-                .update(b"\n");
-            file_count += 1;
-        }
-    }
-    let mut dirty = blake3::Hasher::new();
-    let mut dirty_count = 0usize;
-    for (path, state) in &snapshot.dirty {
-        if !selection.selects(path) {
-            continue;
-        }
-        dirty.update(path.as_bytes()).update(b"\0");
-        match state {
-            Dirty::Deleted => {
-                dirty.update(b"deleted");
-            }
-            Dirty::Modified | Dirty::Untracked => {
-                let full = snapshot.root.join(path);
-                if full.is_dir() {
-                    return Err(format!("untracked directory `{path}` (nested repo?)"));
-                }
-                let bytes = std::fs::read(&full)
-                    .map_err(|err| format!("cannot read uncommitted `{path}`: {err}"))?;
-                dirty.update(blake3::hash(&bytes).as_bytes());
-            }
-        }
-        dirty.update(b"\n");
-        dirty_count += 1;
-    }
-
+    let (entries, dirty) = input_entries(snapshot, &selection)?;
     let toolchain = toolchain_identity(&root, &cwd, request.args)?;
-    let normalized_args = normalize_args(request.args);
+    let normalized_args = normalize_args(args);
     let cwd_rel = cwd_relative(&root, &cwd)?;
     let mut components = BTreeMap::new();
-    let short = |h: blake3::Hash| h.to_hex()[..32].to_string();
-    components.insert("files".into(), short(files.finalize()));
-    components.insert("dirty".into(), short(dirty.finalize()));
     components.insert("toolchain".into(), toolchain.clone());
     components.insert("host".into(), crate::pyo3_detect::host_triple().to_string());
     components.insert("cargo-home-config".into(), cargo_home_config());
@@ -597,24 +625,92 @@ pub fn derive(request: &KeyRequest<'_>, snapshot: &Snapshot) -> Result<Derivatio
         "profile".into(),
         short(blake3::hash(profile_json.as_bytes())),
     );
+    Ok(Common {
+        components,
+        toolchain,
+        normalized_args,
+        cwd: cwd_rel,
+        entries,
+        dirty,
+    })
+}
 
+fn key_id(tool: &str, scope: &str, digest: &str) -> String {
+    format!(
+        "soldr-verdict-v{}-{tool}-{scope}-{digest}",
+        super::record::SCHEMA
+    )
+}
+
+/// Derive the key, or the reason this invocation must run.
+pub fn derive(request: &KeyRequest<'_>, snapshot: &Snapshot) -> Result<Derivation, String> {
+    let mut common = common(request, snapshot, request.args)?;
+    common
+        .components
+        .insert("files".into(), digest_entries(&common.entries));
     let scope = "ws".to_string();
-    let digest = digest_components(&request.profile.name, &scope, &components);
+    let digest = digest_components(&request.profile.name, &scope, &common.components);
     Ok(Derivation {
-        key: format!(
-            "soldr-verdict-v{}-{}-{scope}-{digest}",
-            super::record::SCHEMA,
-            request.profile.name
-        ),
+        key: key_id(&request.profile.name, &scope, &digest),
         tool: request.profile.name.clone(),
         scope,
-        toolchain,
-        cwd: cwd_rel,
-        normalized_args,
-        files: file_count,
-        dirty: dirty_count,
-        components,
+        toolchain: common.toolchain,
+        cwd: common.cwd,
+        normalized_args: common.normalized_args,
+        files: common.entries.len() - common.dirty,
+        dirty: common.dirty,
+        components: common.components,
     })
+}
+
+/// Per-member keys for a workspace-wide invocation (soldr#3897). The
+/// workspace-selecting flags are dropped from the argv component so a later
+/// `-p name` run of the same check derives the same key for `name`.
+pub fn derive_crates(
+    request: &KeyRequest<'_>,
+    snapshot: &Snapshot,
+    members: &[super::crates::Member],
+) -> Result<BTreeMap<String, String>, String> {
+    let args: Vec<String> = request
+        .args
+        .iter()
+        .take_while(|a| a.as_str() != "--")
+        .filter(|a| !matches!(a.as_str(), "--workspace" | "--all"))
+        .chain(request.args.iter().skip_while(|a| a.as_str() != "--"))
+        .cloned()
+        .collect();
+    let common = common(request, snapshot, &args)?;
+    let mut owned: BTreeMap<String, Vec<&Entry>> = BTreeMap::new();
+    let mut shared = Vec::new();
+    for entry in &common.entries {
+        match super::crates::owner(members, &entry.0) {
+            Some(member) => owned.entry(member.name.clone()).or_default().push(entry),
+            None => shared.push(entry),
+        }
+    }
+    let mut base = common.components;
+    base.insert("shared-files".into(), digest_entries(shared));
+    let own: BTreeMap<String, String> = members
+        .iter()
+        .map(|m| {
+            let entries = owned.get(&m.name).map(Vec::as_slice).unwrap_or(&[]);
+            (m.name.clone(), digest_entries(entries.iter().copied()))
+        })
+        .collect();
+    let tool = request.profile.name.clone();
+    let digests = super::crates::merkle(members, &own, |name, own_digest, dep_keys| {
+        let mut components = base.clone();
+        components.insert("own-files".into(), own_digest.to_string());
+        components.insert("deps".into(), dep_keys.join(","));
+        digest_components(&tool, &format!("c-{name}"), &components)
+    })?;
+    Ok(digests
+        .into_iter()
+        .map(|(name, digest)| {
+            let id = key_id(&tool, &format!("c-{name}"), &digest);
+            (name, id)
+        })
+        .collect())
 }
 
 pub(crate) fn digest_components(

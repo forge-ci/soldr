@@ -49,6 +49,12 @@ pub struct Profile {
     /// say why) but never skipped.
     #[serde(default = "default_true")]
     pub pure: bool,
+    /// A workspace-wide run may be narrowed to the members whose inputs
+    /// changed (soldr#3897). Only sound for a tool whose per-crate result
+    /// does not depend on Cargo's feature unification across the selected
+    /// packages, so it is on for `fmt` alone by default.
+    #[serde(default)]
+    pub per_package: bool,
 }
 
 fn default_true() -> bool {
@@ -78,6 +84,7 @@ fn row(
         identity: owned(identity),
         replay: true,
         pure,
+        per_package: false,
     }
 }
 
@@ -94,18 +101,22 @@ pub fn builtin() -> Vec<Profile> {
         true,
     );
     clippy.env.push("CLIPPY_CONF_DIR".into());
+    // rustfmt reads syntax only, so one crate's result never depends on
+    // which other crates are selected.
+    let mut fmt = row(
+        "fmt",
+        "fmt",
+        &["--check"],
+        &[],
+        &[],
+        &["**/rustfmt.toml", "**/.rustfmt.toml"],
+        &[],
+        true,
+    );
+    fmt.per_package = true;
     vec![
         clippy,
-        row(
-            "fmt",
-            "fmt",
-            &["--check"],
-            &[],
-            &[],
-            &["**/rustfmt.toml", "**/.rustfmt.toml"],
-            &[],
-            true,
-        ),
+        fmt,
         // The dylint driver is built and resolved by soldr, so soldr's own
         // version is part of the tool identity.
         row(
@@ -206,6 +217,7 @@ pub struct ToolRow {
     pub identity: Vec<String>,
     pub replay: Option<bool>,
     pub pure: Option<bool>,
+    pub per_package: Option<bool>,
 }
 
 /// Read `[workspace.metadata.soldr.verdict]` (or the `package` form for a
@@ -262,6 +274,9 @@ pub fn effective(config: &WorkspaceConfig) -> Vec<Profile> {
         }
         if let Some(pure) = user.pure {
             profile.pure = pure;
+        }
+        if let Some(per_package) = user.per_package {
+            profile.per_package = per_package;
         }
         profiles.push(profile);
     }

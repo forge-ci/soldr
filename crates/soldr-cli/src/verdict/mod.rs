@@ -7,6 +7,7 @@
 //!   check and what, beyond the Rust sources, can change their result.
 //! - [`key`] — the core's input digest, shared by every adapter.
 //! - [`context`] — one checkout's snapshot, configuration and adapters.
+//! - [`crates`] — per-member Merkle keys for narrowing a workspace run.
 //! - [`record`] — the small artifact a pass leaves behind.
 //! - [`store`] — the local store, plus the spool and `seen.jsonl` a remote
 //!   tier (setup-soldr) uses to publish and predict verdicts.
@@ -18,6 +19,7 @@
 
 pub mod cli;
 pub mod context;
+pub mod crates;
 pub mod gate;
 pub mod key;
 pub mod profiles;

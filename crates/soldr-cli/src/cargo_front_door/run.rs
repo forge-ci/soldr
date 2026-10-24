@@ -10,8 +10,14 @@ pub(crate) async fn run_cargo_front_door(
         crate::verdict::gate::Gate::Armed(armed) => Some(armed),
         crate::verdict::gate::Gate::Pass => None,
     };
+    // soldr#3897: the gate may narrow a workspace run to changed members.
+    let run_args = armed
+        .as_ref()
+        .and_then(|armed| armed.args_override())
+        .unwrap_or(args)
+        .to_vec();
     let result =
-        run_cargo_front_door_ungated(args, cache_enabled, trust_inherited_soldr_env).await;
+        run_cargo_front_door_ungated(&run_args, cache_enabled, trust_inherited_soldr_env).await;
     if let Some(armed) = armed {
         armed.finish(*result.as_ref().unwrap_or(&1));
     }
