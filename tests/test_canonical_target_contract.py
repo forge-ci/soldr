@@ -13,7 +13,7 @@ from conftest import RELEASE_INCLUDED_TRIPLES, load_script_module
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "ci" / "canonical-targets.json"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
-RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release-auto.yml"
+RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "auto-release.yml"
 
 
 def contract_targets() -> list[dict]:
@@ -297,7 +297,7 @@ def test_release_inclusions_and_exclusions_match_contract() -> None:
         "contract is the single source (soldr#2469 step 2.2)"
     )
     assert "x86_64-unknown-linux-gnu.tar.zst" not in workflow, (
-        "an inline release asset list reappeared in release-auto.yml; the "
+        "an inline release asset list reappeared in auto-release.yml; the "
         "contract script is the single source (soldr#2469 step 2.2)"
     )
     for row in rows:
@@ -408,7 +408,7 @@ def test_release_asset_expectation_matches_contract() -> None:
 
 
 def test_release_build_matrix_is_generated_from_the_contract() -> None:
-    """soldr#2469 step 2.1: release-auto.yml's build matrix is generated
+    """soldr#2469 step 2.1: auto-release.yml's build matrix is generated
     from ci/canonical-targets.json, not hand-inlined. The hand-inlined
     matrix is exactly what let PR #2455 shrink the matrix and the contract
     together with nothing failing."""

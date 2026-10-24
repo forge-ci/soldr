@@ -187,7 +187,7 @@ jobs:
       # to the soldr#1060 target baseline, 2.17 (Rust Tier 1 / manylinux_2_17).
       #
       # This is what makes that claim checkable on a PR instead of only
-      # after a release: the release-lane ratchets in `release-auto.yml` are
+      # after a release: the release-lane ratchets in `auto-release.yml` are
       # still 2.39, and lowering them without evidence would either assert a
       # number nothing observes or turn a release red. Whichever way this
       # step lands, it is the measurement that decides.
@@ -393,7 +393,7 @@ jobs:
       # soldr#2145 / soldr#1060 item 3. The aarch64 half of the measurement
       # #2163 added for x86_64 in the bootstrap job. Only `-unknown-linux-gnu`
       # has a glibc floor at all: musl is static, and darwin/msvc are a
-      # different question entirely (see the macOS ratchet in release-auto).
+      # different question entirely (see the macOS ratchet in auto-release).
       #
       # In this matrix that is aarch64-unknown-linux-gnu alone — x86_64-gnu is
       # built in `bootstrap-and-linux-x86` and ratcheted there.

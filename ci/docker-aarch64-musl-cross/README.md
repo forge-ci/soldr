@@ -1,7 +1,7 @@
 # `ci/docker-aarch64-musl-cross/`
 
 Local validation harness for soldr's `aarch64-unknown-linux-musl`
-cross-compile lane. Mirrors what `release-auto.yml`'s Linux ARM64
+cross-compile lane. Mirrors what `auto-release.yml`'s Linux ARM64
 (musl) job runs on `ubuntu-latest`.
 
 **Per the 2026-06-28 user directive**: every soldr cross-compile
@@ -39,7 +39,7 @@ gate that proves the cross-compile actually worked.
 
 Before pushing ANY change to:
 
-* `.github/workflows/release-auto.yml`'s Linux ARM64 (musl) lane
+* `.github/workflows/auto-release.yml`'s Linux ARM64 (musl) lane
 * `.github/workflows/_bootstrap-e2e.yml` musl env vars
 * Crate dependencies that pull `tikv-jemalloc-sys` (including zccache)
 * `Cargo.toml` workspace lints / profile settings

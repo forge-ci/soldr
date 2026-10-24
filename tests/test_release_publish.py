@@ -236,7 +236,7 @@ def test_every_asset_is_passed_to_gh(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_the_workflow_invokes_the_script_for_both_mutations() -> None:
-    workflow = (REPO_ROOT / ".github" / "workflows" / "release-auto.yml").read_text(
+    workflow = (REPO_ROOT / ".github" / "workflows" / "auto-release.yml").read_text(
         encoding="utf-8"
     )
     assert "release_publish.py ensure-tag" in workflow
@@ -363,7 +363,7 @@ def test_info_json_is_an_expected_release_asset_and_written_by_the_workflow() ->
         "soldr-v1.2.3-info.json"
         in MODULE.release_completeness.expected_github_assets(TAG, [])
     )
-    workflow = (REPO_ROOT / ".github" / "workflows" / "release-auto.yml").read_text(
+    workflow = (REPO_ROOT / ".github" / "workflows" / "auto-release.yml").read_text(
         encoding="utf-8"
     )
     write = workflow.index("release_publish.py write-info")

@@ -350,7 +350,7 @@ opt-level = 3
 # macOS asymmetry (dsymutil's `.dSYM` model does not have this duplication
 # problem, so macOS keeps `split-debuginfo = "packed"` -- injected only for
 # darwin targets via `CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO` in
-# release-auto.yml / native_release_build.py, not here).
+# auto-release.yml / native_release_build.py, not here).
 debug = "line-tables-only"
 split-debuginfo = "off"
 strip = "none"
@@ -411,7 +411,7 @@ codegen-units = 1
 # link for the soldr-cli monocrate. CI cross-build artifacts are
 # `soldr-ci-e2e-*` — consumed only by `_ci-target-run.yml` for
 # nextest smoke runs; NOT the shipped `release-soldr-*` /
-# `pypi-soldr-*` artifacts produced by `release-auto.yml` (which
+# `pypi-soldr-*` artifacts produced by `auto-release.yml` (which
 # stays on `--release` for shipped-binary quality). Keep a light
 # optimizer pass so CI still catches optimized-codegen issues without
 # paying full release opt-level 3 on every cross/PEP smoke build.

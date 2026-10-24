@@ -12,7 +12,7 @@ They arrived in three separate PRs (#2145's lane, then soldr#2163, then
 soldr#2165) and nothing tied them together, so one could be tightened or
 loosened alone and the others would keep reporting the old number.
 
-`release-auto.yml` has **two** ceilings, and excluding the whole file
+`auto-release.yml` has **two** ceilings, and excluding the whole file
 (as this script used to) silently dropped one of them:
 
   :902  the *bundled* archive — `soldr`, `soldr-daemon`, `crgx`,
@@ -62,7 +62,7 @@ from pathlib import Path
 SCRIPT = "verify_glibc_baseline.py"
 
 # Workflows whose `verify_glibc_baseline.py` invocations gate a binary soldr
-# builds and must all carry the same ceiling. `release-auto.yml` is handled
+# builds and must all carry the same ceiling. `auto-release.yml` is handled
 # separately by `check_release_ceilings` rather than skipped — its own-binary
 # ceiling is knowingly looser, so it is pinned instead of pooled.
 OWN_BINARY_WORKFLOWS = (
@@ -74,9 +74,9 @@ OWN_BINARY_WORKFLOWS = (
 # green because nothing is checked any more.
 MIN_EXPECTED_INVOCATIONS = 3
 
-RELEASE_WORKFLOW = ".github/workflows/release-auto.yml"
+RELEASE_WORKFLOW = ".github/workflows/auto-release.yml"
 
-# `release-auto.yml`'s own-binary ceiling. Now matches the per-PR ceilings
+# `auto-release.yml`'s own-binary ceiling. Now matches the per-PR ceilings
 # (see module docs, soldr#1060) — still pinned explicitly, rather than pooled
 # with the other three, so a future regression is named against this file's
 # rationale instead of silently drifting.
@@ -135,7 +135,7 @@ def ceilings_by_marker(text: str) -> "dict[str, str]":
 
 
 def check_release_ceilings(repo_root: Path) -> int:
-    """Assert release-auto's own-binary ceiling is the declared value."""
+    """Assert auto-release's own-binary ceiling is the declared value."""
     path = repo_root / RELEASE_WORKFLOW
     try:
         text = path.read_text(encoding="utf-8")

@@ -40,7 +40,7 @@ GNU binutils only for a host-native target and reaches for target-agnostic
 `llvm-objcopy` / `llvm-strip` (or the managed cross toolchain's
 target-prefixed binutils) otherwise. See that function for the full rationale.
 
-It was extracted from release-auto.yml as part of soldr#2469 step 2.2 so the
+It was extracted from auto-release.yml as part of soldr#2469 step 2.2 so the
 platform-specific staging policy can be unit-tested without running a release.
 
 Usage (CI):
@@ -567,7 +567,7 @@ def stage_debug_symbols(  # noqa: C901
             print(f"staged macOS dSYM bundle into separate symbols asset: {dsym.name}")
 
             # dsymutil (run during the build by `split-debuginfo = "packed"`,
-            # injected for darwin targets only -- see release-auto.yml /
+            # injected for darwin targets only -- see auto-release.yml /
             # native_release_build.py) gathers DWARF from the intermediate
             # `.o` files via N_OSO stabs, not from the linked binary's own
             # embedded debug info, so the dSYM above is already complete.

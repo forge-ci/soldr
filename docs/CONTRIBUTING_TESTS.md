@@ -238,7 +238,7 @@ it from `ci.yml` into `.github/workflows/macos-recovery-replay.yml`, which
 runs nightly against `main`, on `workflow_dispatch`, and on pull requests
 labelled `macos-replay` (the lane had produced no green result in 25 CI runs
 and a wedged guest set the run's wall clock; soldr#3088 holds the criteria
-for restoring it). `release-auto.yml` runs the same replay again at release
+for restoring it). `auto-release.yml` runs the same replay again at release
 time (`e2e_macos_x64_build` / `e2e_macos_x64_replay`), pinned to the release
 commit. That release-time replay is advisory: soldr#3088 removed it from
 `publish`'s gate after it blocked v0.9.12 twice on harness bugs without

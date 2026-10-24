@@ -19,7 +19,7 @@ from soldr._process import (  # noqa: E402 -- source-relative bootstrap precedes
 
 REPO_ROOT = Path(__file__).parents[1]
 SCRIPTS = REPO_ROOT / ".github" / "scripts"
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-auto.yml"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "auto-release.yml"
 
 stage = load_script_module(
     SCRIPTS / "stage_release_binaries.py", "stage_release_binaries"
@@ -503,7 +503,7 @@ def test_foreign_target_finds_llvm_in_the_managed_soldr_cache(
 def test_foreign_target_finds_llvm_in_the_rustup_llvm_tools_component(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_managed_llvm: Path
 ) -> None:
-    """The backstop release-auto.yml installs. RUSTUP_HOME is read from the
+    """The backstop auto-release.yml installs. RUSTUP_HOME is read from the
     environment because setup-soldr relocates it away from ~/.rustup."""
     monkeypatch.setattr(stage.sys, "platform", "linux")
     monkeypatch.setattr(stage.platform, "machine", lambda: "x86_64")

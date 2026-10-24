@@ -77,7 +77,7 @@ SETUP_UV_PATTERN = re.compile(r"astral-sh/setup-uv")
 UV_RUN_PATTERN = re.compile(r"\buv\s+run\b")
 UV_PYTHON_313_PATTERN = re.compile(r"--python(?:=|\s+)3\.13(?=\s|$)")
 UV_NO_PROJECT_PATTERN = re.compile(r"--no-project(?=\s|$)")
-RELEASE_WORKFLOW = "release-auto.yml"
+RELEASE_WORKFLOW = "auto-release.yml"
 
 # Repo scripts that run under a runner image's own `python3` on purpose: the
 # fast pre-check (ci-pre.yml, zackees/ci.yml#6) may install nothing. Each is

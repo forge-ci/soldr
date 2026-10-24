@@ -11,7 +11,7 @@ from conftest import load_script_module
 
 REPO_ROOT = Path(__file__).parents[1]
 SCRIPTS = REPO_ROOT / ".github" / "scripts"
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-auto.yml"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "auto-release.yml"
 
 bundle = load_script_module(
     SCRIPTS / "verify_release_bundle.py", "verify_release_bundle"

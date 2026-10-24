@@ -74,6 +74,6 @@ def test_two_wheels_fail(tmp_path: Path) -> None:
 
 def test_the_workflow_invokes_the_script() -> None:
     workflow = (
-        Path(__file__).parents[1] / ".github" / "workflows" / "release-auto.yml"
+        Path(__file__).parents[1] / ".github" / "workflows" / "auto-release.yml"
     ).read_text(encoding="utf-8")
     assert "wheel_bin_script_verify.py" in workflow

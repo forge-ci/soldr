@@ -162,7 +162,7 @@ def test_ci_lane_runs_the_verb_and_both_checks() -> None:
 
 @pytest.mark.parametrize(
     "path",
-    [".github/workflows/release-auto.yml", ".github/scripts/prepare_release_wheel.py"],
+    [".github/workflows/auto-release.yml", ".github/scripts/prepare_release_wheel.py"],
 )
 def test_release_wheel_changes_select_canary(path: str) -> None:
     """#3436: a change to the shipping path must select its wheel canary."""

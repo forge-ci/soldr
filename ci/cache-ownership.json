@@ -415,7 +415,7 @@
       "step": "Upload the wheel for inspection",
       "mechanism": "actions/upload-artifact",
       "tier": "none",
-      "rationale": "A CI wheel kept for inspection; the shipped wheel is built by release-auto.yml."
+      "rationale": "A CI wheel kept for inspection; the shipped wheel is built by auto-release.yml."
     },
     {
       "id": "benchmark-stats-rustup-toolchain",
@@ -483,7 +483,7 @@
     },
     {
       "id": "release-archive-upload",
-      "workflow": "release-auto.yml",
+      "workflow": "auto-release.yml",
       "step": "*",
       "mechanism": "actions/upload-artifact",
       "tier": "release-deliverable",
@@ -491,7 +491,7 @@
     },
     {
       "id": "release-artifact-downloads",
-      "workflow": "release-auto.yml",
+      "workflow": "auto-release.yml",
       "step": "*",
       "mechanism": "actions/download-artifact",
       "tier": "release-deliverable",

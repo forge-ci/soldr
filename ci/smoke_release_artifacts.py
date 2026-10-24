@@ -4,7 +4,7 @@
 Release binaries are cross-built on Linux; EXECUTION still needs the
 target's native OS. The `smoke_macos_x64`, `smoke_macos_arm64`, and
 `smoke_windows` jobs in
-`release-auto.yml` download the lane's artifacts into `dist/` and run
+`auto-release.yml` download the lane's artifacts into `dist/` and run
 this script. It:
 
 1. checks the wheel's declared version (soldr#1202);

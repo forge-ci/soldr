@@ -36,6 +36,8 @@ def test_hosted_macos_runner_labels_are_confined_to_opt_in_and_release() -> None
             if RUNNER_LABEL_PATTERN.search(line):
                 offenders.append(f"{workflow.name}: {line.strip()}")
     assert offenders == [
+        "auto-release.yml: runs-on: macos-15-intel",
+        "auto-release.yml: runs-on: macos-15",
         "ci.yml: runs_on: macos-15-intel",
         "ci.yml: runs_on: macos-15",
         # soldr#3276 §6: reld live-fetch evidence job. Uses the same hosted
@@ -44,8 +46,6 @@ def test_hosted_macos_runner_labels_are_confined_to_opt_in_and_release() -> None
         # succeeded), so it adds no new runner exposure beyond what full CI
         # already provisions.
         "ci.yml: runs-on: macos-15",
-        "release-auto.yml: runs-on: macos-15-intel",
-        "release-auto.yml: runs-on: macos-15",
     ]
 
 
@@ -114,7 +114,7 @@ def test_scheduled_recovery_replay_uses_one_full_owned_partition() -> None:
 
 
 def test_release_recovery_replay_uses_one_full_owned_partition() -> None:
-    release = (WORKFLOWS / "release-auto.yml").read_text(encoding="utf-8")
+    release = (WORKFLOWS / "auto-release.yml").read_text(encoding="utf-8")
     job = release.split("\n  e2e_macos_x64_replay:\n", 1)[1].split(
         "\n  release_execution_contract:\n", 1
     )[0]
@@ -211,7 +211,7 @@ def test_release_workflow_has_the_macos_x64_replay_jobs() -> None:
     The jobs must keep existing and running. soldr#3088 removed only their
     hold over `publish` -- see the test below.
     """
-    release = (WORKFLOWS / "release-auto.yml").read_text(encoding="utf-8")
+    release = (WORKFLOWS / "auto-release.yml").read_text(encoding="utf-8")
     assert re.search(r"(?m)^  e2e_macos_x64_build:\s*$", release) is not None
     assert re.search(r"(?m)^  e2e_macos_x64_replay:\s*$", release) is not None
     assert "uses: ./.github/workflows/_ci-cross-build-linux.yml" in release
@@ -219,7 +219,7 @@ def test_release_workflow_has_the_macos_x64_replay_jobs() -> None:
 
 
 def test_release_macos_x64_smoke_executes_the_shipped_wheel() -> None:
-    release = (WORKFLOWS / "release-auto.yml").read_text(encoding="utf-8")
+    release = (WORKFLOWS / "auto-release.yml").read_text(encoding="utf-8")
     smoke = release.split("\n  smoke_macos_x64:\n", 1)[1].split(
         "\n  smoke_macos_arm64:\n", 1
     )[0]
@@ -238,7 +238,7 @@ def test_release_macos_x64_smoke_executes_the_shipped_wheel() -> None:
 
 
 def _publish_job() -> str:
-    release = (WORKFLOWS / "release-auto.yml").read_text(encoding="utf-8")
+    release = (WORKFLOWS / "auto-release.yml").read_text(encoding="utf-8")
     start = release.index("\n  publish:\n")
     end = release.index("\n  verify_github_release:\n", start)
     return release[start:end]

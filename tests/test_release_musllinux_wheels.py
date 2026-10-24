@@ -16,7 +16,7 @@ def _load_release_completeness():
 release_completeness = _load_release_completeness()
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-auto.yml"
+RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "auto-release.yml"
 CONTRACT = REPO_ROOT / "ci" / "canonical-targets.json"
 
 

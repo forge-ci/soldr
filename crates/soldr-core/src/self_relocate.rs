@@ -620,7 +620,7 @@ fn exe_identity_with_progress(
     })
 }
 
-/// soldr#1597 Phase 3: official (`release-auto.yml`-published) builds
+/// soldr#1597 Phase 3: official (`auto-release.yml`-published) builds
 /// relocate to a hash-free `v{VERSION}/` directory. Dev/manual builds
 /// keep the hash-keyed `v{VERSION}-{hash}` name unconditionally — the
 /// hash is the only thing that distinguishes two dev rebuilds sharing a

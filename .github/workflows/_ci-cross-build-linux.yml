@@ -660,14 +660,14 @@ jobs:
       # published binaries came to require GLIBC_2.39, excluding RHEL 9,
       # Debian 12 and Ubuntu 22.04.
       #
-      # The ceiling here is 2.28, NOT the 2.39 release-auto.yml uses, because
+      # The ceiling here is 2.28, NOT the 2.39 auto-release.yml uses, because
       # this lane does better and the ratchet should hold it to that.
       #
       # The difference is the builder, not the profile. Per this file's own
       # header, `*-unknown-linux-gnu (aarch64 cross)` goes through
       # `cargo zigbuild`, and zig links against its bundled glibc headers
       # rather than the runner's -- landing on GLIBC_2.28 (measured in CI on
-      # #2083). release-auto.yml builds the same target NATIVELY on
+      # #2083). auto-release.yml builds the same target NATIVELY on
       # ubuntu-24.04-arm and inherits that runner's 2.39.
       #
       # So the floor is low exactly when zig links it, and that is the whole
@@ -737,7 +737,7 @@ jobs:
             "target/${{ inputs.target }}/ci-nextest/soldr.exe"
 
       # The musl equivalent of the three ratchets above, and the gap they
-      # left: `verify_static_link.py` ran only in release-auto.yml, so a musl
+      # left: `verify_static_link.py` ran only in auto-release.yml, so a musl
       # binary that silently picked up an interpreter or a NEEDED entry built
       # clean, printed a valid ELF from `file`, and was first caught at
       # release -- or by a user on a non-Alpine host getting

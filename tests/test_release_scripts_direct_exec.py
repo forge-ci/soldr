@@ -1,6 +1,6 @@
 """Release scripts that load `release_completeness.py` must run as files.
 
-`release-auto.yml` runs these scripts directly (`uv run ... <script>.py`), not
+`auto-release.yml` runs these scripts directly (`uv run ... <script>.py`), not
 through `conftest.load_script_module`. Each one loads its sibling
 `release_completeness.py` with importlib, and that helper defines dataclasses,
 which resolve their own module through `sys.modules` while the class is being

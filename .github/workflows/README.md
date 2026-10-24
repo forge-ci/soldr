@@ -17,7 +17,7 @@ GitHub Actions workflow definitions.
   it retains push-to-main and manual operation while ci.yml invokes it for its
   former PR path set.
 
-Normal build/test workflows use `zackees/setup-soldr` for Rust build acceleration, excluding `release-auto.yml`. Jobs that build soldr before running soldr self-tests or bootstrap tests stop the setup-soldr builder daemon before the test phase, run the test phase with a fresh `SOLDR_CACHE_DIR` / `ZCCACHE_CACHE_DIR`, and request `SOLDR_CACHE_LIFECYCLE=command` for the isolated test cache when supported by soldr.
+Normal build/test workflows use `zackees/setup-soldr` for Rust build acceleration, excluding `auto-release.yml`. Jobs that build soldr before running soldr self-tests or bootstrap tests stop the setup-soldr builder daemon before the test phase, run the test phase with a fresh `SOLDR_CACHE_DIR` / `ZCCACHE_CACHE_DIR`, and request `SOLDR_CACHE_LIFECYCLE=command` for the isolated test cache when supported by soldr.
 
 Only `ci.yml` may declare `pull_request` or `pull_request_target`, except a
 `pull_request` trigger limited to `types: [closed]`, which runs only after a PR
@@ -36,5 +36,5 @@ over Markdown-only `Lint` reporting.
 
 Exceptions:
 
-- **release-auto.yml** remains conservative and keeps its existing release artifact build path.
+- **auto-release.yml** remains conservative and keeps its existing release artifact build path.
 - **parent-cache-bench.yml**, **perf-cold-warm.yml**, **perf-matrix.yml**, **cache-delta-experiment.yml** intentionally compare cache strategies or preserve experiment topology, so setup-soldr is not forced onto the control rows. The third-party comparison surface (`cache-benchmark.yml` and friends) lives in `zackees/setup-soldr` now — see soldr#674.

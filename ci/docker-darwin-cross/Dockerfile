@@ -1,10 +1,10 @@
-# Darwin cross-compile harness for soldr's release-auto.yml apple-darwin lanes.
+# Darwin cross-compile harness for soldr's auto-release.yml apple-darwin lanes.
 #
 # Goal: prove a Linux host can produce a Mach-O `soldr` binary for
 # x86_64-apple-darwin (and aarch64-apple-darwin) using plain `cargo
 # build` + a complete Apple SDK sysroot, NOT `cargo zigbuild`. Once the
 # env block in this harness produces a working binary, the same env is
-# already codified into `.github/workflows/release-auto.yml` (the
+# already codified into `.github/workflows/auto-release.yml` (the
 # darwin Linux-host branch of the build step).
 #
 # Image contents:
