@@ -62,6 +62,9 @@ pub struct Derivation {
     pub dirty: usize,
     /// Labelled component digests, for `soldr verdict explain`.
     pub components: BTreeMap<String, String>,
+    /// The selected environment the key used, so a later re-key can derive
+    /// it outside the step that set it (soldr#3907).
+    pub env: BTreeMap<String, String>,
 }
 
 /// The git view of the checkout a key is derived from.
@@ -349,18 +352,26 @@ fn env_selected(name: &str, patterns: &[&str]) -> bool {
         })
 }
 
-fn env_component(profile: &Profile) -> Vec<(String, String)> {
+/// The selected variables, from `recorded` when re-keying a logged run,
+/// else from this process.
+fn env_component(
+    profile: &Profile,
+    recorded: Option<&BTreeMap<String, String>>,
+) -> BTreeMap<String, String> {
     let patterns: Vec<&str> = BASE_ENV
         .iter()
         .copied()
         .chain(profile.env.iter().map(String::as_str))
         .collect();
-    let mut vars: Vec<(String, String)> = std::env::vars_os()
-        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.to_string_lossy().into_owned())))
+    let all: Vec<(String, String)> = match recorded {
+        Some(env) => env.clone().into_iter().collect(),
+        None => std::env::vars_os()
+            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.to_string_lossy().into_owned())))
+            .collect(),
+    };
+    all.into_iter()
         .filter(|(k, _)| env_selected(k, &patterns) && !ENV_NOISE.contains(&k.as_str()))
-        .collect();
-    vars.sort();
-    vars
+        .collect()
 }
 
 /// `nightly-2026-05-28`, `1.89.0`, `1.89.0-x86_64-unknown-linux-gnu`.
@@ -406,16 +417,21 @@ fn toolchain_file_channel(root: &Path, cwd: &Path) -> Option<String> {
 
 /// Toolchain identity: an exact pin is identity enough (it names one
 /// immutable release); anything floating is resolved by asking rustc.
-fn toolchain_identity(root: &Path, cwd: &Path, args: &[String]) -> Result<String, String> {
+fn toolchain_identity(
+    root: &Path,
+    cwd: &Path,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+) -> Result<String, String> {
     let directive = args
         .iter()
         .take_while(|a| a.as_str() != "--")
         .find_map(|a| a.strip_prefix('+').map(str::to_string));
     let channel = directive
         .or_else(|| {
-            std::env::var("RUSTUP_TOOLCHAIN")
-                .ok()
+            env.get("RUSTUP_TOOLCHAIN")
                 .filter(|v| !v.is_empty())
+                .cloned()
         })
         .or_else(|| toolchain_file_channel(root, cwd));
     if let Some(channel) = channel.as_deref().filter(|c| is_exact_channel(c)) {
@@ -517,6 +533,9 @@ pub struct KeyRequest<'a> {
     pub config: &'a WorkspaceConfig,
     pub args: &'a [String],
     pub cwd: &'a Path,
+    /// The environment a logged invocation recorded; `None` reads this
+    /// process (soldr#3907).
+    pub env: Option<&'a BTreeMap<String, String>>,
 }
 
 /// One selected input: repo-relative path and its fingerprint (the blob id
@@ -582,6 +601,7 @@ struct Common {
     cwd: String,
     entries: Vec<Entry>,
     dirty: usize,
+    env: BTreeMap<String, String>,
 }
 
 fn common(
@@ -602,7 +622,8 @@ fn common(
         .unwrap_or_else(|_| snapshot.root.clone());
     let selection = Selection::new(snapshot, request.profile, request.config)?;
     let (entries, dirty) = input_entries(snapshot, &selection)?;
-    let toolchain = toolchain_identity(&root, &cwd, request.args)?;
+    let env = env_component(request.profile, request.env);
+    let toolchain = toolchain_identity(&root, &cwd, request.args, &env)?;
     let normalized_args = normalize_args(args);
     let cwd_rel = cwd_relative(&root, &cwd)?;
     let mut components = BTreeMap::new();
@@ -614,8 +635,8 @@ fn common(
         "args".into(),
         serde_json::to_string(&normalized_args).unwrap_or_default(),
     );
-    for (name, value) in env_component(request.profile) {
-        components.insert(format!("env:{name}"), value);
+    for (name, value) in &env {
+        components.insert(format!("env:{name}"), value.clone());
     }
     for (name, value) in identity_components(request.profile, &cwd)? {
         components.insert(format!("identity:{name}"), value);
@@ -632,6 +653,7 @@ fn common(
         cwd: cwd_rel,
         entries,
         dirty,
+        env,
     })
 }
 
@@ -660,6 +682,7 @@ pub fn derive(request: &KeyRequest<'_>, snapshot: &Snapshot) -> Result<Derivatio
         files: common.entries.len() - common.dirty,
         dirty: common.dirty,
         components: common.components,
+        env: common.env,
     })
 }
 

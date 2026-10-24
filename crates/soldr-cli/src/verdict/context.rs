@@ -2,6 +2,7 @@
 //! `[workspace.metadata.soldr.verdict]` configuration and the effective
 //! adapters. Shared by the front-door gate and `soldr verdict`.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::key::{self, Derivation, KeyRequest, Snapshot};
@@ -78,6 +79,7 @@ impl Context {
                 config: &self.config,
                 args,
                 cwd,
+                env: None,
             },
             &self.snapshot,
             &members,
@@ -86,6 +88,17 @@ impl Context {
 
     /// Derive the key for `args` run in `cwd`.
     pub fn derive(&self, args: &[String], cwd: &Path) -> Result<Derivation, String> {
+        self.derive_with_env(args, cwd, None)
+    }
+
+    /// [`Self::derive`] under a recorded environment (`None`: this
+    /// process's), so a re-key matches the step that ran the check.
+    pub fn derive_with_env(
+        &self,
+        args: &[String],
+        cwd: &Path,
+        env: Option<&BTreeMap<String, String>>,
+    ) -> Result<Derivation, String> {
         if self.config.enabled == Some(false) {
             return Err("disabled by [workspace.metadata.soldr.verdict] enabled = false".into());
         }
@@ -100,6 +113,7 @@ impl Context {
                 config: &self.config,
                 args,
                 cwd,
+                env,
             },
             &self.snapshot,
         )
