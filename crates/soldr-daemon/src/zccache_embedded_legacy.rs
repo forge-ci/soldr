@@ -226,9 +226,18 @@ pub fn sweep_legacy_cache_roots(
     }
     // The singleton broker can keep several daemon image routes alive at
     // once. Each route now owns a private embedded store. An old route's
-    // writer lock is the authority on whether it has retired: zccache's
-    // sweep leaves a live store intact and can reclaim it after the broker
-    // stops that daemon and the lock is released.
+    // writer lock is the authority on whether it is live: zccache's sweep
+    // leaves a live store intact and can reclaim it after the broker stops
+    // that daemon and the lock is released.
+    //
+    // A sibling route's store is swept in `Routine` mode, never `Pressure`
+    // (soldr#3882). Pressure purges every file with a single link whatever
+    // its age, and a store restored from an archive (CI's Tier-2 cache) is
+    // entirely single-link files. The first daemon under disk pressure --
+    // in CI the bootstrap soldr -- emptied the previous run's source store
+    // before its own lineage could adopt it, so every run served 0 hits.
+    // Routine keeps a store whose `.last-active` marker is recent and
+    // otherwise expires files by age.
     if let Ok(entries) = std::fs::read_dir(&daemon_state) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -267,7 +276,7 @@ pub fn sweep_legacy_cache_roots(
                                 &store_path,
                                 max_age,
                                 now,
-                                zccache::core::config::RetiredSweepMode::Pressure,
+                                zccache::core::config::RetiredSweepMode::Routine,
                             ),
                         );
                     }
