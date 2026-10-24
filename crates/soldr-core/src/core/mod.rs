@@ -109,6 +109,11 @@ pub enum SoldrError {
     Network(String),
     #[error("tool not found: {0}")]
     ToolNotFound(String),
+    /// GitHub answered 404 for a release lookup: the repository or its
+    /// releases do not exist. Unlike [`Self::ToolNotFound`] (an asset or tag
+    /// not published *yet*) it is permanent and never retried (soldr#3911).
+    #[error("tool not found: {0}")]
+    ReleaseNotFound(String),
     #[error("archive error: {0}")]
     Archive(String),
     #[error("{0}")]

@@ -105,7 +105,7 @@ pub(super) async fn fetch_release(
                         found = Some(release);
                         break;
                     }
-                    Err(SoldrError::ToolNotFound(_)) => continue,
+                    Err(SoldrError::ToolNotFound(_) | SoldrError::ReleaseNotFound(_)) => continue,
                     Err(err) => return Err(err),
                 }
             }
@@ -282,13 +282,13 @@ fn release_tag_candidates(version: &str, tag_prefix: Option<&str>) -> Vec<String
 /// answer". Unauthenticated CI runners share one IP's 60-requests/hour
 /// budget, so 403 is routine there.
 ///
-/// 403 / 429 / 5xx are the server declining or failing → `Network`.
-/// Everything else, 404 above all, stays `ToolNotFound`: that is the
-/// release-propagation window the retry loop exists for.
-///
-/// Both variants are transient per `is_transient_fetch_error`, so the
-/// retry budget and backoff are unchanged — this only fixes the
-/// classification and the wording the user sees.
+/// 403 / 429 / 5xx are the server declining or failing → `Network`, which
+/// is retried. 404 → `ReleaseNotFound`, which is not (soldr#3911): every
+/// caller is a release lookup or listing, so 404 means the repository or
+/// its releases do not exist, and retrying it cost 36 s for a missing tool.
+/// The release-propagation window stays covered: an exact version whose tag
+/// is not listed yet is `ToolNotFound` from the listing, and keeps its
+/// retries. Any other status stays `ToolNotFound`.
 fn github_status_error(
     repo: &RepoInfo,
     stage: &str,
@@ -302,6 +302,8 @@ fn github_status_error(
         || status.is_server_error()
     {
         SoldrError::Network(message)
+    } else if status == reqwest::StatusCode::NOT_FOUND {
+        SoldrError::ReleaseNotFound(message)
     } else {
         SoldrError::ToolNotFound(message)
     }
@@ -940,8 +942,8 @@ mod tests {
             assert!(err.to_string().contains(status.as_str()));
         }
 
-        // 404 stays ToolNotFound: that is the release-propagation window
-        // the retry loop exists for.
+        // soldr#3911: 404 means the release does not exist. It is never
+        // retried, and still reads as "tool not found" to the user.
         let missing = github_status_error(
             &r,
             "release lookup",
@@ -949,7 +951,12 @@ mod tests {
             reqwest::StatusCode::NOT_FOUND,
             "Not Found",
         );
-        assert!(matches!(missing, SoldrError::ToolNotFound(_)));
+        assert!(
+            matches!(missing, SoldrError::ReleaseNotFound(_)),
+            "{missing:?}"
+        );
+        assert!(!crate::fetch::retry::is_transient(&missing));
+        assert!(missing.to_string().starts_with("tool not found: "));
     }
 
     #[test]
