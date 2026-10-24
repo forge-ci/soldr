@@ -20,7 +20,8 @@
 //! [`is_transient`] deliberately matches the predicate the existing loops
 //! already used: [`SoldrError::Network`] and [`SoldrError::ToolNotFound`]
 //! (a release asset that is not published *yet*). Everything else is fatal on
-//! the first try — in particular a sha256 mismatch is
+//! the first try -- including [`SoldrError::ReleaseNotFound`], GitHub's 404 for
+//! a release that does not exist (soldr#3911) — in particular a sha256 mismatch is
 //! [`SoldrError::Other`]/[`SoldrError::Archive`] and must stay fatal. Retrying
 //! an integrity failure would turn a hard stop into three more chances to
 //! accept a bad artifact, which is worse than the flake this module exists to
@@ -253,6 +254,29 @@ mod tests {
         ));
         assert!(result.is_err());
         assert_eq!(calls.get(), 1, "a non-transient error must not be retried");
+    }
+
+    /// soldr#3911: GitHub's 404 for a release lookup is permanent; retrying
+    /// it spent 36 s before reporting a tool that does not exist.
+    #[test]
+    fn a_missing_release_is_not_retried() {
+        let calls = Cell::new(0u32);
+        let result: Result<(), SoldrError> = block_on(with_backoff_params(
+            "test-release",
+            4,
+            NO_SLEEP,
+            AMPLE_BUDGET,
+            || {
+                calls.set(calls.get() + 1);
+                async {
+                    Err(SoldrError::ReleaseNotFound(
+                        "release lookup failed: HTTP 404 Not Found".into(),
+                    ))
+                }
+            },
+        ));
+        assert!(matches!(result, Err(SoldrError::ReleaseNotFound(_))));
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]

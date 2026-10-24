@@ -503,13 +503,14 @@ fn newest_cached_tool(
 }
 
 /// Classify whether an error from the repo-fetch chain is worth retrying.
-/// `ToolNotFound` covers GitHub-Releases 404s during release propagation
-/// windows + crates.io index-not-ready windows; `Network` covers DNS
+/// `ToolNotFound` covers release-propagation windows (a tag or asset not
+/// published yet) + crates.io index-not-ready windows; a release-lookup 404
+/// is `ReleaseNotFound` and terminal (soldr#3911); `Network` covers DNS
 /// blips, connection resets, and TLS handshake failures. Anything else
 /// (malformed JSON, archive extraction errors, IO errors) is treated as
 /// terminal — retrying wouldn't help.
 fn is_transient_fetch_error(err: &SoldrError) -> bool {
-    matches!(err, SoldrError::ToolNotFound(_) | SoldrError::Network(_))
+    retry::is_transient(err)
 }
 
 /// One attempt at the full repo-binary fetch pipeline. Cache check →
