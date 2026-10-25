@@ -1,25 +1,25 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-10-24T03:37:56Z",
-  "git_sha": "5ebc4f9544f8de30a0727780a790715c31c3fae1",
+  "generated_at": "2026-10-25T03:40:56Z",
+  "git_sha": "fb8c8a7e20baa4e59045f2ee3aff890a6161f180",
   "branch": "benchmark-stats",
-  "repository": "zackees/soldr",
+  "repository": "forge-ci/soldr",
   "artifacts": {
     "manifest": {
       "description": "This file. Discovery index. Regenerated on every push.",
-      "url": "https://raw.githubusercontent.com/zackees/soldr/benchmark-stats/manifest.json",
+      "url": "https://raw.githubusercontent.com/forge-ci/soldr/benchmark-stats/manifest.json",
       "content_type": "application/json",
       "schema_version": 1
     },
     "latest": {
       "description": "Rich snapshot of the most-recent main-merge benchmark run.",
-      "url": "https://raw.githubusercontent.com/zackees/soldr/benchmark-stats/latest.json",
+      "url": "https://raw.githubusercontent.com/forge-ci/soldr/benchmark-stats/latest.json",
       "content_type": "application/json",
       "schema_version": 1
     },
     "history": {
       "description": "Slim rolling history of soldr canary timings and README comparison cache/timing rows. One JSONL line per main-commit.",
-      "url": "https://raw.githubusercontent.com/zackees/soldr/benchmark-stats/history.jsonl",
+      "url": "https://raw.githubusercontent.com/forge-ci/soldr/benchmark-stats/history.jsonl",
       "content_type": "application/x-ndjson",
       "schema_version": 2,
       "max_lines": 1000,
@@ -32,22 +32,22 @@
     },
     "index_html": {
       "description": "Human-facing rendered view with Chart.js interactive graphs.",
-      "url": "https://zackees.github.io/soldr/",
+      "url": "https://forge-ci.github.io/soldr/",
       "content_type": "text/html"
     },
     "trend_image": {
       "description": "Static PNG of the canary trend; retained for the Pages historical deep-dive.",
-      "url": "https://raw.githubusercontent.com/zackees/soldr/benchmark-stats/benchmark-trend.png",
+      "url": "https://raw.githubusercontent.com/forge-ci/soldr/benchmark-stats/benchmark-trend.png",
       "content_type": "image/png"
     },
     "comparison_rust": {
       "description": "Dark zccache-style overlay chart: bare cargo vs sccache vs soldr on a pure-Rust workload. Cold bars are drawn behind warm overlays. Embedded in README.",
-      "url": "https://raw.githubusercontent.com/zackees/soldr/benchmark-stats/benchmark-rust-only.jpg",
+      "url": "https://raw.githubusercontent.com/forge-ci/soldr/benchmark-stats/benchmark-rust-only.jpg",
       "content_type": "image/jpeg"
     },
     "comparison_rust_c": {
       "description": "Dark zccache-style overlay chart: bare cargo vs sccache vs soldr on a Rust+C workload (rust-native). Cold bars are drawn behind warm overlays.",
-      "url": "https://raw.githubusercontent.com/zackees/soldr/benchmark-stats/benchmark-rust-c.jpg",
+      "url": "https://raw.githubusercontent.com/forge-ci/soldr/benchmark-stats/benchmark-rust-c.jpg",
       "content_type": "image/jpeg"
     }
   },
