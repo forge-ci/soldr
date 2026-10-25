@@ -592,6 +592,35 @@ fn digest_entries<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> String {
     short(hasher.finalize())
 }
 
+/// Cargo picks the package from the nearest `Cargo.toml` above `cwd`. When
+/// git can see neither that manifest nor its files (an ignored directory,
+/// such as a scratch crate under `target/`), no package root covers its
+/// sources and the key would never change, so it disables the skip.
+fn invisible_manifest(snapshot: &Snapshot, root: &Path, cwd: &Path) -> Option<String> {
+    let mut dir = Some(cwd);
+    while let Some(current) = dir {
+        if current.join("Cargo.toml").is_file() {
+            let rel = cwd_relative(root, current).ok()?;
+            let manifest = if rel == "." {
+                "Cargo.toml".to_string()
+            } else {
+                format!("{rel}/Cargo.toml")
+            };
+            if snapshot.tracked.contains_key(&manifest) || snapshot.dirty.contains_key(&manifest) {
+                return None;
+            }
+            return Some(format!(
+                "`{manifest}` is ignored by git, so its sources cannot key a verdict"
+            ));
+        }
+        if current == root {
+            return None;
+        }
+        dir = current.parent();
+    }
+    None
+}
+
 /// Everything but the files: toolchain, host, config, cwd, argv, env,
 /// identity probes and the adapter row.
 struct Common {
@@ -620,6 +649,9 @@ fn common(
         .root
         .canonicalize()
         .unwrap_or_else(|_| snapshot.root.clone());
+    if let Some(reason) = invisible_manifest(snapshot, &root, &cwd) {
+        return Err(reason);
+    }
     let selection = Selection::new(snapshot, request.profile, request.config)?;
     let (entries, dirty) = input_entries(snapshot, &selection)?;
     let env = env_component(request.profile, request.env);
