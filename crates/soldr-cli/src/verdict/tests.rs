@@ -381,6 +381,31 @@ fn unaccountable_inputs_disable_the_skip() {
 }
 
 #[test]
+fn workspace_ignored_by_git_never_skips() {
+    // A crate under an ignored directory of the parent checkout (a scratch
+    // crate in `target/`): none of its files are in the index or in `git
+    // status`, so a key would cover none of its sources and replay one pass
+    // forever, even after the source gains a compile error.
+    let repo = fixture_repo();
+    let root = repo.path();
+    std::fs::write(root.join(".gitignore"), "/target/\n").unwrap();
+    git(root, &["add", ".gitignore"]);
+    git(root, &["commit", "-q", "-m", "ignore target"]);
+    let scratch = root.join("target/scratch");
+    std::fs::create_dir_all(scratch.join("src")).unwrap();
+    std::fs::write(
+        scratch.join("Cargo.toml"),
+        "[package]\nname = \"scratch\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(scratch.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+    let reason = key_in(&scratch, "clippy").unwrap_err();
+    assert!(reason.contains("ignored"), "{reason}");
+    let reason = key_in(&scratch.join("src"), "test --doc").unwrap_err();
+    assert!(reason.contains("ignored"), "{reason}");
+}
+
+#[test]
 fn disabled_workspace_never_skips() {
     let repo = fixture_repo();
     let root = repo.path();
