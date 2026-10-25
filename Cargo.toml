@@ -34,7 +34,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.9.42"
+version = "0.9.43"
 edition = "2021"
 rust-version = "1.98"
 license = "AGPL-3.0-only"
