@@ -235,7 +235,7 @@ platform-code     = ["crates/soldr-platform/src/**", "scripts/**"]
 
 # Read off the workflows: the release job publishes to PyPI/crates.io with an
 # OIDC token, and cache-budget retires entries with `actions: write`.
-permissions = { "id-token: write" = ["publish"], "actions: write" = ["cache-budget"] }
+permissions = { "id-token: write" = ["publish"], "actions: write" = ["cache-budget", "cancel-superseded", "queue-cache-janitor"] }
 
 # This repository calls `zackees/setup-soldr` directly from its workflows and has
 # no composite wrapper under `.github/actions/`, so `only-in` is the empty

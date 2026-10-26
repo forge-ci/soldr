@@ -110,6 +110,10 @@ def test_minimal_jobs_and_full_jobs_have_explicit_dependencies() -> None:
         "lint-docs",
         # zackees/ci.yml#6: the cache janitor + budget verdict (ci-pre.yml).
         "ci-pre",
+        # GEN-022 (forge-ci/ci.yml#405/#409): merge-queue housekeeping,
+        # event-scoped and independent of CI mode.
+        "cancel-superseded",
+        "queue-cache-janitor",
         "setup-soldr-action",
         "cook-size-gate",
         "macos-recovery-replay",

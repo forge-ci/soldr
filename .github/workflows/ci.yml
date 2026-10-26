@@ -29,6 +29,11 @@ on:
   # Label changes recompute the mode against the same PR head SHA.
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  # GEN-022 (forge-ci/ci.yml#405/#432): main merges through a merge queue,
+  # which validates the exact merge commit. ci_mode.py already selects the
+  # queue head for this event.
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
     inputs:
       candidate_sha:
@@ -76,6 +81,33 @@ jobs:
       contents: read
       actions: write
       pull-requests: read
+
+  # GEN-022 / forge-ci/ci.yml#409: a queue ref carries the base commit
+  # (gh-readonly-queue/main/pr-<N>-<sha>), so the concurrency group above never
+  # pairs a PR's rebuilt queue run with the one main's movement replaced; this
+  # cancels the older one. No `needs:`; only the end-of-queue janitor depends
+  # on it.
+  cancel-superseded:
+    name: Cancel superseded queue runs
+    if: ${{ !cancelled() && github.event_name == 'merge_group' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: .github/scripts/cancel_superseded.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+      - name: Cancel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/cancel_superseded.py
 
   ci-mode:
     name: CI mode
@@ -1327,3 +1359,39 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+
+  # GEN-022 (forge-ci/ci.yml#405): every queue run and main push ends with the
+  # ci-lint cache janitor. It runs after every other job, even failed ones, so
+  # the repository stays under [cache].budget by our LRU order instead of
+  # GitHub's, which can evict a seed a required job restores. The queue
+  # serializes default-branch cache writes; it shares ci-pre's non-cancelling
+  # `cache-janitor` group, so only one sweep runs at a time across runs.
+  queue-cache-janitor:
+    name: End-of-queue cache janitor
+    needs: [cancel-superseded, ci-pre, ci-mode, path-selection, lint-docs, lint, build-linux-x64, pep517-daemon-smoke, e2e-linux-x64, windows-e2e-policy, e2e-cross-bootstrap-soldr, e2e-linux-x64-gnu-build, e2e-linux-arm64-build, e2e-linux-arm64, e2e-linux-x64-musl-build, e2e-linux-x64-musl, e2e-linux-arm64-musl-build, e2e-linux-arm64-musl, e2e-macos-x64-build, e2e-macos-x64, e2e-macos-arm64-build, e2e-macos-arm64, e2e-windows-x64-build, e2e-windows-x64, e2e-windows-x64-gnu-build, e2e-windows-x64-gnu, e2e-windows-arm64-build, e2e-windows-arm64, wheel-cross-policy, wheel-cross-verify, reld-dogfood-proof-linux, reld-live-fetch-windows-x64, reld-live-fetch-macos-arm64, setup-soldr-action, cook-size-gate, macos-recovery-replay, full-coverage, ci-summary, cancel-on-bootstrap-failure, cancel-on-e2e-linux-x64-failure]
+    if: always() && github.event_name != 'pull_request' && github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency:
+      group: cache-janitor
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: zackees/ci.yml
+          ref: 29087cb90ddebb84cd5f4b2e0f85380e76c743e5
+          path: .ci-lint
+          persist-credentials: false
+          sparse-checkout: ci_lint
+      - name: Evict down to the cache budget
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PYTHONPATH: .ci-lint
+        run: python3 -m ci_lint cache janitor --repo .
