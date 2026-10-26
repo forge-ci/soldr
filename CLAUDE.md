@@ -590,3 +590,15 @@ platform behavioral tests reach the target-run lanes.
   2. Decide whether that named test can even reach your change. A tool-fetch-only or parser-only test cannot be affected by daemon/IPC changes.
   3. These lanes time out on `main` too under runner contention — **rerun the failed job before blaming the PR** (`gh run rerun <run-id> --failed`), and diff a red lane against `main` *by test name*, not by lane name.
   4. Only raise a budget if the test is *legitimately* long. A stub-driven test that suddenly takes 120 s is an environmental stall; raising the budget masks the hang the timeout exists to surface. Note that a broker-spawning test still pays a real cold start — process spawn, route acquisition and daemon bringup, recorded per phase in `daemon-bringup.jsonl` (soldr#3163) — which is measurable and not a hang. It no longer pays a full executable image hash each time: the broker's blake3 is memoized per inode (soldr#2521/#2996) and optimized (soldr#3166), and the daemon's per-start SHA-256 identity hash fell from ~2.9 s to ~0.13 s (soldr#3173).
+
+## Design principles (fleet directives, zackees/ci.yml#163)
+
+Agent and review guidance from zackees/ci.yml `docs/policy-rust.md` ("Design principles, narrowed"). Not enforced by ci-lint; no rule ID.
+
+1. **Search before you add.** Before adding a resolver, detector, predicate, guard or path helper, `rg` for an existing one. Reuse it, or say in the PR why it does not fit.
+2. **Conflicting implementations get a research issue, not an inline winner.** Follow the Agent Code-Smell Reporting Rule above (soldr#2741); it is this directive, including its three-part bar.
+3. **Keep behaviour changes and refactors apart.** Separate commits, preferably separate PRs, never one mixed diff.
+4. **Refactor first only when you would grow a giant function.** If a fix would add more than 50 lines to a function already over 200 lines, extract first in a separate behaviour-preserving change with characterization tests written first (RED -> GREEN). Otherwise fix it where it belongs; no unrequested restructures.
+5. **Function and file size follow the complexity ratchet (`RUST-018`).** New functions stay under clippy's `too_many_lines` (100) and `cognitive_complexity` (25). A function carrying an `#[expect]` must not grow; delete the `expect` once it is back under. Never split a file with `include!` fragments to dodge a length ceiling. Before splitting a hot file, check `git branch -a --contains` for in-flight branches -- a split is a rename and conflicts destructively.
+6. **Fail fast, and delete before you abstract.** Reject invalid input at the boundary with a typed error; never fall back silently to a degraded path. Prefer deleting code to adding a layer. No new trait until there are two real implementations (a test double does not count).
+7. **Existing boundaries beat generic DRY.** Platform modules, Dylint-enforced layering, crate boundaries and documented deliberate copies win over removing duplication. Do not copy code across a crate boundary to get around it -- say the boundary hurts. An undocumented copy is a finding under 2; a documented one is not.
