@@ -1,7 +1,7 @@
 """Unit coverage for ci/smoke_release_artifacts.py (soldr#2294, soldr#3076).
 
 The native release smokes (smoke_macos_x64, smoke_windows in
-release-auto.yml) execute this script; the target-dependent decisions are
+auto-release.yml) execute this script; the target-dependent decisions are
 pure functions so they are pinned here instead of being discovered on a
 release run.
 """
@@ -45,12 +45,12 @@ def test_macho_arch_only_for_darwin() -> None:
 
 def test_stub_floor_matches_the_workflow_contract() -> None:
     # 2 MiB, the soldr#1140 / soldr#1202 stub-binary floor used by the
-    # inline archive smoke in release-auto.yml.
+    # inline archive smoke in auto-release.yml.
     assert MODULE.MIN_SOLDR_BYTES == 2 * 1024 * 1024
 
 
 def test_workflow_smoke_jobs_invoke_the_script() -> None:
-    release = (REPO_ROOT / ".github" / "workflows" / "release-auto.yml").read_text(
+    release = (REPO_ROOT / ".github" / "workflows" / "auto-release.yml").read_text(
         encoding="utf-8"
     )
     assert release.count("ci/smoke_release_artifacts.py") >= 2

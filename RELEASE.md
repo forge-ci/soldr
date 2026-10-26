@@ -12,7 +12,7 @@ It is written for two audiences:
 The release model satisfies these properties:
 
 - the version to release is `workspace.package.version` in `Cargo.toml` on `main`
-- a release is an explicit `workflow_dispatch` of `release-auto.yml` naming one
+- a release is an explicit `workflow_dispatch` of `auto-release.yml` naming one
   exact merged commit (`candidate_sha`)
 - a successful **full** CI run on that exact SHA (`full_ci_run_id`) is required
   before any release artifact is built
@@ -30,8 +30,8 @@ These controls are in place:
   2026-08-11; restoring protection is tracked in soldr#2469)
 - immutable GitHub Releases are enabled
 - GitHub Actions requires full-SHA pinning for third-party actions
-- `.github/workflows/release-auto.yml` is the only release workflow
-- PyPI publication uses OIDC Trusted Publishing bound to `release-auto.yml`
+- `.github/workflows/auto-release.yml` is the only release workflow
+- PyPI publication uses OIDC Trusted Publishing bound to `auto-release.yml`
 
 crates.io publication is not part of the current release direction. `soldr` is being released as a hardened binary tool, not as a promised Rust library API surface. The completeness gate still accounts for it: `release_completeness.py` derives the publishable crates from the manifests and prints an explicit skip while every crate is `publish = false`; a crate that drops it joins the gate (soldr#3343).
 
@@ -50,13 +50,13 @@ uv run --no-project python ci/release.py start  --sha <40-hex merged SHA>
 - It refuses a SHA that isn't on `origin/main`.
 - It refuses when `vX.Y.Z` already tags a different commit; a released version is never moved.
 - It dispatches full CI when the SHA has no `CI full <sha>` run, and waits while one is running.
-- Once that run has succeeded, it dispatches `release-auto.yml` with the SHA and the run's id.
+- Once that run has succeeded, it dispatches `auto-release.yml` with the SHA and the run's id.
 
 It never bumps a version or creates a tag.
 
 ## Dry run (soldr#2469 3.1)
 
-Dispatch `release-auto.yml` with `candidate_sha`, `full_ci_run_id` and
+Dispatch `auto-release.yml` with `candidate_sha`, `full_ci_run_id` and
 `dry_run=true` to build, smoke and verify the full production matrix on that
 exact SHA without writing anything. Every artifact is built, and the macOS,
 Windows and darwin smokes and `release_execution_contract` all run. No tag,
@@ -67,12 +67,12 @@ lifted concurrency cap, before a real release.
 ## Promotion: publish a dry run's exact artifacts (soldr#2469 4.1)
 
 A green dry run for a candidate can be promoted instead of rebuilt. Dispatch
-`release-auto.yml` again with the same `candidate_sha` and `full_ci_run_id`,
+`auto-release.yml` again with the same `candidate_sha` and `full_ci_run_id`,
 plus `promote_run_id=<the dry run's id>`:
 - `build` is skipped, so nothing is compiled.
 - Every artifact download reads from the promoted run.
 - `release_promotion_gate.py` first proves that run is this candidate's
-  `release-auto.yml` dispatch (its run-name names the SHA), with every
+  `auto-release.yml` dispatch (its run-name names the SHA), with every
   production build and release-artifact smoke green.
 
 The smokes then run again against those exact artifacts before anything is
@@ -83,7 +83,7 @@ promotion path without publishing.
 
 Since soldr#3346 (2026-09-24) a release is a deliberate two-dispatch act on
 one exact commit. Merging a version bump no longer releases anything by
-itself: `release-auto.yml` has only a `workflow_dispatch` trigger.
+itself: `auto-release.yml` has only a `workflow_dispatch` trigger.
 
 1. A reviewed PR bumps the version in lockstep: `[workspace.package].version`
    in `Cargo.toml`, `"version"` in `package.json`, and the workspace crates in
@@ -95,7 +95,7 @@ itself: `release-auto.yml` has only a `workflow_dispatch` trigger.
    every target in `ci/canonical-targets.json` plus the platform smokes run.
    It must finish with `CI mode` and `Full coverage` both successful. See
    [docs/CI_MODES.md](./docs/CI_MODES.md).
-3. **Release dispatch.** Dispatch `Autonomous Release` (`release-auto.yml`)
+3. **Release dispatch.** Dispatch `Autonomous Release` (`auto-release.yml`)
    with `candidate_sha=<same SHA>` and `full_ci_run_id=<that CI run's ID>`.
 4. `prepare` (`Detect explicit release candidate`) checks out the candidate
    and runs `release_full_ci_gate.py --verify-candidate`, which requires HEAD to
@@ -180,7 +180,7 @@ Register a GitHub publisher on https://pypi.org/manage/project/soldr/settings/pu
 
 - Owner: `zackees`
 - Repository: `soldr`
-- Workflow filename: `release-auto.yml`
+- Workflow filename: `auto-release.yml`
 - Environment: leave blank
 
 There is no environment approval boundary in the unattended model.
@@ -197,7 +197,7 @@ Before changing the release workflow:
 
 1. Read this file.
 2. Audit the live GitHub-side controls before trusting the checked-in docs.
-3. Confirm the PyPI Trusted Publisher for `release-auto.yml` is still registered.
+3. Confirm the PyPI Trusted Publisher for `auto-release.yml` is still registered.
 4. Check whether `main` is branch-protected. It is **not** today, so the
    expected result is a 404 from the protection API and an empty ruleset
    list — finding protection in place is the change worth reporting, and
@@ -205,7 +205,7 @@ Before changing the release workflow:
    docs/RELEASE_VERIFICATION.md all need updating together.
 5. Confirm tag protection (if any) still permits `github-actions` to mint `v*.*.*` tags.
 6. Confirm the release is still dispatch-only with the exact-SHA full-CI
-   gate (`release-auto.yml` `on:` and `full_ci_gate`). Do not reintroduce a
+   gate (`auto-release.yml` `on:` and `full_ci_gate`). Do not reintroduce a
    push trigger, remove the full-CI gate, or add environment approval
    boundaries without explicit owner instruction.
 
@@ -223,7 +223,7 @@ When preparing a normal release:
 4. `gh workflow run ci.yml --repo zackees/soldr --ref main -f candidate_sha=<SHA>`
    and wait for it to succeed (it runs the whole target matrix; plan on
    roughly an hour).
-5. `gh workflow run release-auto.yml --repo zackees/soldr --ref main
+5. `gh workflow run auto-release.yml --repo zackees/soldr --ref main
    -f candidate_sha=<SHA> -f full_ci_run_id=<CI run ID>`.
 6. If a lane fails after publication started, fix the cause and re-dispatch
    step 5 for the same SHA; completed surfaces are skipped.

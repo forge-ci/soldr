@@ -157,7 +157,7 @@ def sha_problems(manifest: dict, package_dir: "Path | None") -> "list[str]":  # 
                 continue
             candidate = package_dir / name
             if candidate.is_dir():
-                # A macOS dSYM is a directory, and release-auto hashes it as a
+                # A macOS dSYM is a directory, and auto-release hashes it as a
                 # `tar -cf -` stream. That is not reproducible here (member
                 # order, mtimes, uid/gid), so re-deriving it would invent
                 # failures. Presence is what can honestly be checked.

@@ -317,7 +317,7 @@ def test_a_missing_pdb_is_caught(mod, tmp_path):
 
 
 def test_a_dsym_directory_is_not_digest_checked(mod, tmp_path):
-    # release-auto hashes a dSYM as a `tar -cf -` stream, which is not
+    # auto-release hashes a dSYM as a `tar -cf -` stream, which is not
     # reproducible here (member order, mtimes, uid/gid). Re-deriving it would
     # invent failures, so presence is all that is honestly checkable.
     manifest = _complete_package(tmp_path)

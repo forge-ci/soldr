@@ -45,7 +45,7 @@ permissions:
 # queues to 20-30 min, which in turn delayed the cross-builds that gate the
 # macOS target-runs (one waited 83m40s to do 117s of work).
 #
-# Pushes to main are never cancelled: release-auto.yml triggers on push-to-main
+# Pushes to main are never cancelled: auto-release.yml triggers on push-to-main
 # (Cargo.toml / package.json), so every commit that lands must stay fully tested.
 concurrency:
   # run_id fallback on non-PR events: GitHub keeps at most ONE pending run
@@ -1212,7 +1212,7 @@ jobs:
   #
   # PR-only (github.event_name == 'pull_request'): cancelling a `main` push
   # destroys the post-merge validation record -- this repo has already lost
-  # a comparison baseline that way. release-auto.yml also triggers off
+  # a comparison baseline that way. auto-release.yml also triggers off
   # push-to-main, so every commit on main must run CI to completion.
   #
   # Branch protection (checked 2026-09-02): main carries NO required status

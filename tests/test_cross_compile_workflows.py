@@ -675,7 +675,7 @@ def test_pep517_platform_smokes_run_on_pull_requests() -> None:
             "if: ${{ inputs.run_pep517_smoke && matrix.replay.run_followup "
             "&& inputs.target_execution != 'x86_64-recovery' }}" in step
         )
-    release = (WORKFLOWS / "release-auto.yml").read_text(encoding="utf-8")
+    release = (WORKFLOWS / "auto-release.yml").read_text(encoding="utf-8")
     macos_release_smoke = _job_block(release, "smoke_macos_x64", "smoke_windows")
     assert "--require-wheel-import" in macos_release_smoke
     # The smoke must run after (and never gate) the archive replay.
@@ -938,7 +938,7 @@ def test_gnu_catalogue_fixture_is_part_of_both_gnu_ci_lanes() -> None:
 
 def test_mac_x64_distribution_uses_pinned_setup_soldr_and_the_blessed_build() -> None:
     ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
-    release = (WORKFLOWS / "release-auto.yml").read_text(encoding="utf-8")
+    release = (WORKFLOWS / "auto-release.yml").read_text(encoding="utf-8")
     support_fetch = (
         REPO_ROOT / ".github" / "scripts" / "fetch_release_support_binaries.py"
     ).read_text(encoding="utf-8")
@@ -1041,7 +1041,7 @@ def _matrix_binary_source_prepares_gnu_linux() -> bool:
 
 def test_release_wheels_use_soldr_with_legacy_hooks_for_other_platforms() -> None:
     """GNU uses soldr wheel; the legacy builders keep their prepared environment."""
-    release = (WORKFLOWS / "release-auto.yml").read_text(encoding="utf-8")
+    release = (WORKFLOWS / "auto-release.yml").read_text(encoding="utf-8")
 
     assert _matrix_binary_source_prepares_gnu_linux()
     assert (
@@ -1104,7 +1104,7 @@ def test_release_wheels_use_soldr_with_legacy_hooks_for_other_platforms() -> Non
 
 
 def test_release_target_prepare_retries_transient_setup_failure() -> None:
-    release = (WORKFLOWS / "release-auto.yml").read_text(encoding="utf-8")
+    release = (WORKFLOWS / "auto-release.yml").read_text(encoding="utf-8")
     setup = _step_block(release, "Install pinned Soldr and prepare target environment")
     retry = _step_block(
         release, "Retry target preparation after setup transport failure"
@@ -1127,7 +1127,7 @@ def test_release_target_prepare_retries_transient_setup_failure() -> None:
 
 
 def test_release_supports_isolated_npm_recovery_from_an_immutable_ref() -> None:
-    release = (WORKFLOWS / "release-auto.yml").read_text(encoding="utf-8")
+    release = (WORKFLOWS / "auto-release.yml").read_text(encoding="utf-8")
     prepare = _job_block(release, "prepare", "build")
     publish_npm = _job_block(release, "publish-npm")
 
@@ -1156,7 +1156,7 @@ def test_release_supports_isolated_npm_recovery_from_an_immutable_ref() -> None:
 def test_windows_wheel_does_not_reuse_archive_executable_output() -> None:
     """PEP 517 must not rebuild the archive lane's still-open soldr.exe."""
 
-    release = (WORKFLOWS / "release-auto.yml").read_text(encoding="utf-8")
+    release = (WORKFLOWS / "auto-release.yml").read_text(encoding="utf-8")
     matrix = release.split("      matrix:\n", 1)[1].split("\n    steps:\n", 1)[0]
     wheel_step = _step_block(release, "Build wheel through Soldr")
     wheel_smoke = _step_block(release, "Smoke test wheel")
@@ -1221,7 +1221,7 @@ def test_windows_wheel_does_not_reuse_archive_executable_output() -> None:
 
 
 def test_partial_immutable_release_can_recover_missing_pypi_wheels() -> None:
-    release = (WORKFLOWS / "release-auto.yml").read_text(encoding="utf-8")
+    release = (WORKFLOWS / "auto-release.yml").read_text(encoding="utf-8")
     pypi_job = _job_block(release, "publish-pypi", "publish-npm")
 
     assert (
@@ -1251,7 +1251,7 @@ def test_partial_immutable_release_can_recover_missing_pypi_wheels() -> None:
 def test_cross_compile_docs_match_current_blessed_surfaces() -> None:
     docs = (REPO_ROOT / "docs" / "CROSS_COMPILE.md").read_text(encoding="utf-8")
     ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
-    release = (WORKFLOWS / "release-auto.yml").read_text(encoding="utf-8")
+    release = (WORKFLOWS / "auto-release.yml").read_text(encoding="utf-8")
 
     assert "soldr build --release --target x86_64-pc-windows-msvc" in docs
     assert "soldr cargo xwin build --release" in docs

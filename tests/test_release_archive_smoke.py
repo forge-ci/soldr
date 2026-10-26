@@ -14,7 +14,7 @@ from conftest import load_script_module
 
 REPO_ROOT = Path(__file__).parents[1]
 SCRIPTS = REPO_ROOT / ".github" / "scripts"
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-auto.yml"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "auto-release.yml"
 CONTRACT = REPO_ROOT / "ci" / "canonical-targets.json"
 
 smoke = load_script_module(
@@ -186,6 +186,6 @@ def test_workflow_invokes_the_script_instead_of_inlining_the_gate() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     assert ".github/scripts/release_archive_smoke.py" in workflow
     assert "MIN_SOLDR_BYTES" not in workflow, (
-        "the stub floor reappeared inline in release-auto.yml; the script is "
+        "the stub floor reappeared inline in auto-release.yml; the script is "
         "the single source (soldr#2469 step 2.2)"
     )

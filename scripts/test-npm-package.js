@@ -359,12 +359,12 @@ assert.strictEqual(
   );
 }
 
-// MIN_GLIBC_FOR_GNU must track the ceiling release-auto.yml enforces on the
+// MIN_GLIBC_FOR_GNU must track the ceiling auto-release.yml enforces on the
 // gnu ARCHIVE (see the lockstep assertion below). When that ceiling drops,
 // the installer must follow it down -- otherwise glibc hosts keep being sent
 // to musl long after gnu would work -- and it must never go below it.
 //
-// Anchored on the script name rather than on any `--max-glibc`. release-auto
+// Anchored on the script name rather than on any `--max-glibc`. auto-release
 // now passes that flag twice: 2.39 to verify_glibc_baseline.py for the
 // binaries, and 2.17 to verify_wheel_glibc.py for the wheel contents. A bare
 // match takes whichever appears first, so this was correct only by the order
@@ -394,7 +394,7 @@ function glibcCeilingFor(workflowText, scriptName) {
   if (found.length === 0) {
     return null;
   }
-  // release-auto invokes verify_glibc_baseline.py twice -- once pre-staging on
+  // auto-release invokes verify_glibc_baseline.py twice -- once pre-staging on
   // the built binary, once post-staging across the whole bundle. Returning the
   // first would let the two drift apart with the installer silently following
   // only one of them, which is the same order-dependence this function was
@@ -403,7 +403,7 @@ function glibcCeilingFor(workflowText, scriptName) {
   assert.strictEqual(
     distinct.length,
     1,
-    `release-auto.yml passes conflicting --max-glibc values to ${scriptName}: ` +
+    `auto-release.yml passes conflicting --max-glibc values to ${scriptName}: ` +
       `${found.join(", ")}. They gate the same artifacts and must agree.`,
   );
   return distinct[0];
@@ -448,11 +448,11 @@ function glibcCeilingFor(workflowText, scriptName) {
 }
 
 const releaseWorkflow = fs.readFileSync(
-  path.join(root, ".github", "workflows", "release-auto.yml"),
+  path.join(root, ".github", "workflows", "auto-release.yml"),
   "utf8",
 );
 // The installer downloads the whole -gnu ARCHIVE, not just soldr's own
-// binary, so its floor must be the ceiling release-auto.yml enforces on the
+// binary, so its floor must be the ceiling auto-release.yml enforces on the
 // bundle (`verify_release_bundle.py --check glibc-baseline`), which also
 // covers the prebuilt `crgx` / `cargo-chef` fetched from soldr-toolchain.
 // Tracking the own-binary ceiling instead (2.17 since soldr#1060) would send
@@ -460,13 +460,13 @@ const releaseWorkflow = fs.readFileSync(
 const bundleCeiling = glibcCeilingFor(releaseWorkflow, "--check glibc-baseline");
 assert(
   bundleCeiling,
-  "release-auto.yml must pass --max-glibc to the bundled glibc-baseline check",
+  "auto-release.yml must pass --max-glibc to the bundled glibc-baseline check",
 );
 assert.strictEqual(
   install.MIN_GLIBC_FOR_GNU,
   bundleCeiling,
   `install.js MIN_GLIBC_FOR_GNU (${install.MIN_GLIBC_FOR_GNU}) must match the ` +
-    `--max-glibc ceiling release-auto.yml enforces on the bundled -gnu archive ` +
+    `--max-glibc ceiling auto-release.yml enforces on the bundled -gnu archive ` +
     `(${bundleCeiling})`,
 );
 

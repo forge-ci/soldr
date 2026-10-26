@@ -10,7 +10,7 @@
 
 
 [![CI](https://github.com/zackees/soldr/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/zackees/soldr/actions/workflows/ci.yml)
-[![Autonomous Release](https://github.com/zackees/soldr/actions/workflows/release-auto.yml/badge.svg?branch=main)](https://github.com/zackees/soldr/actions/workflows/release-auto.yml)
+[![Autonomous Release](https://github.com/zackees/soldr/actions/workflows/auto-release.yml/badge.svg?branch=main)](https://github.com/zackees/soldr/actions/workflows/auto-release.yml)
 
 ## Performance
 
@@ -623,7 +623,7 @@ Built on lessons from:
 - [SECURITY.md](./SECURITY.md) describes the current hardening posture and release policy.
 - [docs/API_BOUNDARY.md](./docs/API_BOUNDARY.md) defines the supported machine-facing integration boundary.
 - [docs/PYPI_TRUSTED_PUBLISHING.md](./docs/PYPI_TRUSTED_PUBLISHING.md) describes the optional Trusted Publishing path for hardened PyPI wheels.
-- [`.github/workflows/release-auto.yml`](./.github/workflows/release-auto.yml) is the only release workflow: when a reviewed version bump lands on `main`, it derives the version from `Cargo.toml`, reruns the release gate, and performs final publication through the `release` environment where the release credentials live.
+- [`.github/workflows/auto-release.yml`](./.github/workflows/auto-release.yml) is the only release workflow: when a reviewed version bump lands on `main`, it derives the version from `Cargo.toml`, reruns the release gate, and performs final publication through the `release` environment where the release credentials live.
 - [RELEASE.md](./RELEASE.md) documents the intended maximum-security release setup and owner workflow.
 - [docs/RELEASE_VERIFICATION.md](./docs/RELEASE_VERIFICATION.md) explains how to verify published release artifacts.
 - [docs/TRUST_BOUNDARIES.md](./docs/TRUST_BOUNDARIES.md) inventories the external systems and artifacts `soldr` currently trusts, including the current `0.5.x` limits of runtime fetched-binary trust.

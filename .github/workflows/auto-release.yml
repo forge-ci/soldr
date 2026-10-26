@@ -30,7 +30,7 @@ on:
         type: boolean
         default: false
       promote_run_id:
-        description: Promote the exact artifacts of this earlier release-auto run for candidate_sha instead of rebuilding (soldr#2469 4.1).
+        description: Promote the exact artifacts of this earlier auto-release run for candidate_sha instead of rebuilding (soldr#2469 4.1).
         type: string
         default: ""
 permissions:
@@ -48,7 +48,7 @@ env:
   SOLDR_GITHUB_TOKEN: ${{ github.token }}
 
 concurrency:
-  group: release-auto-${{ github.ref_name }}
+  group: auto-release-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -871,7 +871,7 @@ jobs:
       source_ref: ${{ needs.prepare.outputs.commit_sha }}
       # bootstrap_artifact_name omitted (optional, default ""): ci.yml's
       # value names an artifact produced by its own e2e-cross-bootstrap-soldr
-      # job earlier in the *same* workflow run. release-auto.yml has no such
+      # job earlier in the *same* workflow run. auto-release.yml has no such
       # job, and artifacts do not cross workflow runs, so this falls back to
       # `_ci-cross-build-linux.yml`'s own actions/cache-or-bootstrap path.
 

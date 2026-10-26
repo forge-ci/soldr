@@ -87,7 +87,7 @@ jobs:
         # Pinned at 0.7.28 specifically — that's the latest
         # **published** GitHub Release. Cargo.toml/package.json on
         # main may be bumped to a higher version (e.g. 0.7.29)
-        # before the release-auto workflow has built and published
+        # before the auto-release workflow has built and published
         # the matching tarball; setup-soldr fetches by tag, so an
         # unpublished version 404s here.
         uses: zackees/setup-soldr@a07bab94f16124b5c6857b137a237a53a61e06d1

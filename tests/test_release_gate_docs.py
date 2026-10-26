@@ -19,7 +19,7 @@ from pathlib import Path
 import yaml
 
 REPO_ROOT = Path(__file__).parents[1]
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-auto.yml"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "auto-release.yml"
 VERIFICATION = REPO_ROOT / "docs" / "RELEASE_VERIFICATION.md"
 RELEASE_MD = REPO_ROOT / "RELEASE.md"
 SECURITY_MD = REPO_ROOT / "SECURITY.md"
@@ -86,7 +86,7 @@ def test_docs_do_not_claim_release_time_revalidation() -> None:
     jobs = set(workflow_jobs())
     for suspect in ("lint", "test", "e2e", "clippy", "fmt"):
         assert suspect not in jobs, (
-            f"release-auto.yml gained a {suspect!r} job; the docs saying it does "
+            f"auto-release.yml gained a {suspect!r} job; the docs saying it does "
             "NOT re-validate before publishing are now wrong (soldr#2469 Phase 1)"
         )
     for path in (SECURITY_MD, VERIFICATION):

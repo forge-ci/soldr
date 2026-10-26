@@ -230,7 +230,7 @@ def test_python_action_helpers_import_contract_constants() -> None:
 def test_release_workflow_and_docs_reference_contract_layout() -> None:
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
     release_workflow = (
-        REPO_ROOT / ".github" / "workflows" / "release-auto.yml"
+        REPO_ROOT / ".github" / "workflows" / "auto-release.yml"
     ).read_text(encoding="utf-8")
     npm_docs = (REPO_ROOT / "docs" / "NPM_PUBLISHING.md").read_text(encoding="utf-8")
     runtime_docs = (REPO_ROOT / "docs" / "ZCCACHE_RUNTIME_CONTRACT.md").read_text(
@@ -238,7 +238,7 @@ def test_release_workflow_and_docs_reference_contract_layout() -> None:
     )
 
     # soldr#2469 step 2.2: the manifest body moved out of a heredoc in
-    # release-auto.yml into release_manifest.py, so the shape it must produce
+    # auto-release.yml into release_manifest.py, so the shape it must produce
     # is asserted at its new home. Kept as three separate facts rather than a
     # substring sweep of the script: the schema version, the archive format,
     # and that debug sidecars are still emitted at all.

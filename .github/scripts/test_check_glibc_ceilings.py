@@ -39,7 +39,7 @@ def _workflow(*ceilings: str) -> str:
 
 
 def _release_workflow(own: str, bundled: str) -> str:
-    """`release-auto.yml`'s two steps, which differ only in what they check.
+    """`auto-release.yml`'s two steps, which differ only in what they check.
 
     The invocation shape matters: the own-binary step names one built artifact,
     while the bundled step uses the shared dispatcher for fetched third-party
@@ -71,13 +71,13 @@ def _seed(
     workflows.mkdir(parents=True)
     (workflows / "_ci-cross-build-linux.yml").write_text(first, encoding="utf-8")
     (workflows / "cross-compile-all-targets.yml").write_text(second, encoding="utf-8")
-    # release-auto is part of the contract now, not an exclusion, so every
+    # auto-release is part of the contract now, not an exclusion, so every
     # fixture supplies it — defaulting to the values on main (own-binary
     # 2.17, matching the per-PR lanes since soldr#1060; bundled archive
     # 2.39, still pinned by prebuilt crgx/cargo-chef, soldr#2170).
     if release is None:
         release = _release_workflow("2.17", "2.39")
-    (workflows / "release-auto.yml").write_text(release, encoding="utf-8")
+    (workflows / "auto-release.yml").write_text(release, encoding="utf-8")
 
 
 def test_agreeing_ceilings_pass(mod, tmp_path):
@@ -100,7 +100,7 @@ def test_a_removed_ratchet_fails_rather_than_passing_vacuously(mod, tmp_path):
 
 
 def test_release_bundled_ceiling_is_not_pooled_with_the_per_pr_ones(mod, tmp_path):
-    # release-auto's *bundled* ceiling also covers crgx / cargo-chef, which
+    # auto-release's *bundled* ceiling also covers crgx / cargo-chef, which
     # soldr fetches prebuilt at 2.39. It legitimately differs and must not
     # drag the own-binary ceilings with it (soldr#2170).
     _seed(tmp_path, _workflow("2.28"), _workflow("2.28", "2.28"))

@@ -5,7 +5,7 @@
 #   $1 = target triple (x86_64-apple-darwin | aarch64-apple-darwin)
 #   $@ = remaining args forwarded as cargo args (e.g. --release)
 #
-# Mirrors the env block in release-auto.yml's darwin Linux-host branch
+# Mirrors the env block in auto-release.yml's darwin Linux-host branch
 # (post-v0.7.87). The whole point of this harness is that this same
 # env, when applied locally inside a clean ubuntu-24.04 container,
 # either:
@@ -91,7 +91,7 @@ ln -sf "$WRAP_DIR/clang++" /usr/bin/clang++
 ln -sf "$WRAP_DIR/clang" /usr/bin/clang-18
 ln -sf "$WRAP_DIR/clang++" /usr/bin/clang++-18
 
-# v0.7.87's env block — keep in lockstep with release-auto.yml.
+# v0.7.87's env block — keep in lockstep with auto-release.yml.
 # -fuse-ld=lld in CFLAGS so cmake-rs sub-builds use lld for their
 # test-compile-link step (else they call /usr/bin/ld which can't
 # emit Mach-O).
@@ -128,7 +128,7 @@ export "CXXFLAGS_${TARGET_U}=-isysroot ${SDKROOT} -mmacosx-version-min=11.0 -std
 # autoconf-style configure scripts (like jemalloc's) only honor the
 # bare `CPPFLAGS` env var — not the cc-rs-style `CPPFLAGS_<triple>`
 # suffix. So we have to set CPPFLAGS directly. This script is darwin-
-# only (entry point gated on `*-apple-darwin` in release-auto.yml +
+# only (entry point gated on `*-apple-darwin` in auto-release.yml +
 # in the docker harness's caller), so setting plain CPPFLAGS doesn't
 # bleed into other targets.
 export CPPFLAGS="--target=${CLANG_ARCH} -isysroot ${SDKROOT} -mmacosx-version-min=11.0"

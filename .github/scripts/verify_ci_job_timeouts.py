@@ -139,7 +139,7 @@ def find_timeout_violations(workflow: str) -> list[str]:
 # exactly what happened after the first three.
 #
 # Burned down so far: benchmark-stats (#2057), parent-cache-bench (#2058),
-# cache-delta-experiment (#2067), release-auto + vcpkg-windows-refresh (#2077).
+# cache-delta-experiment (#2067), auto-release + vcpkg-windows-refresh (#2077).
 #
 # The point of the extension is that a *new* workflow cannot join this list.
 # Removing an entry is a burn-down PR; picking the right bound for a perf or
