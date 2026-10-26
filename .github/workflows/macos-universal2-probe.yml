@@ -70,7 +70,6 @@ jobs:
       - uses: zackees/setup-soldr@a07bab94f16124b5c6857b137a237a53a61e06d1 # v0.9.82
         with:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
-          save-cache: ${{ env.ACT && 'true' || 'auto' }}
           cook-delta: false
           toolchain-file: rust-toolchain.toml
           lockfile: Cargo.lock

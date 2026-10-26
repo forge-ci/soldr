@@ -171,7 +171,6 @@ jobs:
           ACTION_WORKSPACE: ${{ github.workspace }}/soldr
         with:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
-          save-cache: ${{ env.ACT && 'true' || 'auto' }}
           cook-delta: false
           # soldr#1799: pin the soldr that builds us -- the action's default
           # (0.8.23) predates #1820 and GCs live target/ artifacts after every
