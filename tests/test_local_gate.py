@@ -179,6 +179,9 @@ def test_a_nonce_proof_failure_persists_its_provenance(
     )  # the nonce file lands in the throwaway tree
     # Runs, exits clean, never echoes the nonce: `_run` rewrites this into a
     # failure whose added provenance must reach the durable log as well.
+    # zackees/ci.yml#414: a missing echo is NOT another worktree's blame --
+    # the verdict names the exit code, suggests a rerun, and must never carry
+    # the destructive "stop the other session's container" advice.
     child = "import sys\nsys.exit(0)\n"
     check = GATE.Check(
         "fake nonce check",
@@ -196,9 +199,72 @@ def test_a_nonce_proof_failure_persists_its_provenance(
     assert len(logs) == 1
     assert str(logs[0]) in out
     body = logs[0].read_text(encoding="utf-8")
-    assert "did not see this worktree" in body  # the rewrite reaches the log...
+    assert (
+        "exited 0 without echoing a nonce" in body
+    )  # the #414 rewrite reaches the log...
     assert GATE.NONCE_MARKER in body  # ...with its expected/seen provenance
+    assert "zackees/ci.yml#414" in body
+    assert "Stop or remove" not in body, (
+        "no-echo must never blame another worktree's container"
+    )
     assert not (tmp_path / GATE.NONCE_FILE).exists()  # nonce cleanup unchanged
+
+
+def test_a_different_nonce_keeps_the_other_worktree_blame(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """zackees/ci.yml#414: ONLY a runner that echoed a different nonce gets
+    the wrong-worktree verdict with its (destructive, and here correct)
+    container advice."""
+
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    monkeypatch.setattr(GATE, "_git_dir", lambda: git_dir)
+    monkeypatch.setattr(GATE, "ROOT", tmp_path)
+    child = f"print({GATE.NONCE_MARKER!r} + '{'0' * 32}')\n"
+    check = GATE.Check(
+        "fake other-tree check", (sys.executable, "-c", child), "tests", tree_nonce=True
+    )
+    monkeypatch.setattr(GATE, "checks", lambda: [check])
+
+    assert GATE.main([]) == 1
+    body = sorted((git_dir / "local-gate" / "logs").rglob("*.log"))[0].read_text(
+        encoding="utf-8"
+    )
+    assert "proved a DIFFERENT worktree" in body
+    assert "Stop or remove" in body  # the advice is correct for THIS case
+
+
+def test_a_failed_runner_reports_its_exit_code_and_suggests_a_rerun(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """zackees/ci.yml#414: the soldr 2026-10-22 case -- bosn setup died
+    (reaped Docker output) before any test ran, no nonce was ever echoed,
+    and the old verdict told the operator to destroy a peer's container.
+    Now: exit code, rerun, explicitly not another worktree."""
+
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    monkeypatch.setattr(GATE, "_git_dir", lambda: git_dir)
+    monkeypatch.setattr(GATE, "ROOT", tmp_path)
+    child = "import sys\nprint('bosn run: ensure of stack cook failed (job 602)')\nsys.exit(2)\n"
+    check = GATE.Check(
+        "fake dying runner", (sys.executable, "-c", child), "tests", tree_nonce=True
+    )
+    monkeypatch.setattr(GATE, "checks", lambda: [check])
+
+    assert GATE.main([]) == 1
+    capsys.readouterr()
+    body = sorted((git_dir / "local-gate" / "logs").rglob("*.log"))[0].read_text(
+        encoding="utf-8"
+    )
+    assert "failed with exit 2" in body
+    assert "Rerun" in body
+    assert "not evidence of another worktree" in body
+    assert "Stop or remove" not in body
+    assert (
+        "bosn run: ensure of stack cook failed" in body
+    )  # the runner's own error stays first
 
 
 def test_successful_checks_write_no_logs_and_stay_concise(

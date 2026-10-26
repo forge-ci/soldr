@@ -928,6 +928,35 @@ NONCE_FILE = ".gate-nonce"
 NONCE_MARKER = "gate-nonce: "
 
 
+def _nonce_verdict(expected: str, seen: list[str], exit_code: int) -> str:
+    """zackees/ci.yml#414: blame another worktree only on a DIFFERENT echoed
+    nonce. No echo at all means the runner never reached the task (failed
+    setup, reaped Docker output -- the 2026-10-22 soldr case) or completed
+    without echoing; either way the destructive "stop the other session's
+    container" advice would be wrong for a failure a rerun fixes, so surface
+    the exit code and suggest one instead."""
+
+    if seen:
+        return (
+            "the isolated runner proved a DIFFERENT worktree "
+            f"(expected {NONCE_MARKER}{expected}, saw {seen[-1]}) -- it ran another checkout's tree, "
+            "zackees/bosn#314, zackees/ci.yml#196. Stop or remove the bosn setup container bound "
+            "to the other worktree, or wait for it, then rerun."
+        )
+    if exit_code:
+        return (
+            f"the isolated runner never echoed a nonce (expected {NONCE_MARKER}{expected}) and its run "
+            f"failed with exit {exit_code}: the runner errored before the task reached the nonce echo "
+            "(its error is above). Rerun; this is not evidence of another worktree's container "
+            "(zackees/ci.yml#414)."
+        )
+    return (
+        f"the isolated runner exited 0 without echoing a nonce (expected {NONCE_MARKER}{expected}): "
+        "the task never reached the nonce echo -- check the entry script's gate-nonce print "
+        "(zackees/ci.yml#414). Not another worktree's container."
+    )
+
+
 def _run(check: Check) -> Result:
     if not check.tree_nonce:
         return _run_plain(check)
@@ -945,11 +974,7 @@ def _run(check: Check) -> Result:
         check,
         result.code or 1,
         result.seconds,
-        result.output + f"\nlocal gate: the isolated runner did not see this worktree "
-        f"(expected {NONCE_MARKER}{nonce}, saw {seen[-1] if seen else 'no nonce'}). "
-        "It ran another checkout's tree -- zackees/bosn#314, zackees/ci.yml#196. "
-        "Stop or remove the bosn setup container bound to the other worktree, "
-        "or wait for it, then rerun.",
+        result.output + f"\nlocal gate: {_nonce_verdict(nonce, seen, result.code)}",
     )
 
 
