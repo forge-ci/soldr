@@ -492,9 +492,9 @@ def classify_warm_misses(
     recompiled on a warm run means dependency compilation stopped being warm,
     which is the property the compilation cache exists to deliver.
 
-    `expected` is first-party plus ambiguous units. Under soldr#2931 a linked
-    test product is never cacheable, so a first-party unit missing is the
-    normal shape of a passing run, not a defect.
+    `expected` is first-party plus ambiguous units. A first-party test harness
+    is cached, but it re-links whenever anything it links changed, so a
+    first-party unit missing is not by itself a defect.
     """
     dependency: list[str] = []
     expected: list[str] = []

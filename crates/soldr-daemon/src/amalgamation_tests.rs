@@ -156,7 +156,7 @@ fn the_compile_path_announces_before_dispatching() {
         .find("compile_notice(")
         .expect("compile() must ask for the notice");
     let dispatch = src
-        .find("self.inner.compile(")
+        .find(".compile_with_options(zreq")
         .expect("compile() must dispatch to zccache");
     assert!(
         announce < dispatch,

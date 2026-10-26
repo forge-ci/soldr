@@ -30,9 +30,10 @@ required to be hits.
 This replaced the soldr#1391 invariant, which required the full **linked** test
 archive to be warm-cacheable at positive hits and zero misses. soldr#2931
 inverted that: cache admission follows the stability of an artifact's identity
-key relative to its size, and a linked test product has the least stable key
-and one of the largest sizes in the build, so it is never cacheable. The old
-rule was asking the store to carry exactly what the policy forbids.
+key relative to its size. A linked test product has the least stable key in
+the build, so a warm run may legitimately re-link it; requiring zero misses
+made the acceptance fail on ordinary re-links. Test harness compiles are
+now admitted to the zccache store, so unchanged harnesses do hit.
 
 The verdict itself lives in `evaluate_warm_result` and is unit-tested without
 Docker in `test_nextest_archive_cacheability.py` — a 40-minute acceptance is

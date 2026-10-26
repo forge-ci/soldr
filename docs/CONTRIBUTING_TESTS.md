@@ -266,8 +266,8 @@ When a change relies on host behavior:
 - preserve complete **owned** target-run coverage — every positive selector
   must match the full archive and the union of replay partitions must execute
   every selected test — within the archive's explicit byte/disk budget
-  (soldr#2931: linked test products are ephemeral transport, never cached, and
-  the bundle must stay compact and single-extraction); and
+  (soldr#2931: the archive is same-run transport and must stay compact and
+  single-extraction; test harness compiles themselves are cached by zccache); and
 - validate host failures by test name — now `<category_binary>::<module>::<test_name>`
   — comparing known runner flakes against `main` before changing a nextest
   budget; and
