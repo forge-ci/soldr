@@ -196,7 +196,6 @@ jobs:
         uses: zackees/setup-soldr@a07bab94f16124b5c6857b137a237a53a61e06d1
         with:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
-          save-cache: ${{ env.ACT && 'true' || 'auto' }}
           cook-delta: false
           # soldr#1799: pin the soldr that builds us -- the action's default
           # (0.8.23) predates #1820 and GCs live target/ artifacts after every
@@ -472,7 +471,6 @@ jobs:
           SOLDR_SAVE_PROFILE: ${{ inputs.bootstrap_artifact_name != '' && 'cook' || '' }}
         uses: zackees/setup-soldr/cook@a07bab94f16124b5c6857b137a237a53a61e06d1
         with:
-          save-cache: ${{ env.ACT && 'true' || 'auto' }}
           cache: ${{ (inputs.target == 'x86_64-pc-windows-gnu' || inputs.target == 'x86_64-unknown-linux-gnu' || inputs.target == 'aarch64-pc-windows-msvc' || inputs.target == 'x86_64-pc-windows-msvc' || inputs.target == 'aarch64-unknown-linux-gnu') && 'true' || 'false' }}
           # soldr#3019: fatal on `main`, a warning on pull requests.
           #
