@@ -21,7 +21,9 @@ setup-steps = ["Enlarge swap (OOM headroom)", "Install ripgrep"]
 verify = "ci.yml:ci-mode"
 # ci-pre must not wait on anything (zackees/ci.yml#23); path-selection only
 # computes outputs and runs beside ci-mode rather than after it.
-verify-exempt = ["ci-pre", "path-selection"]
+# cancel-superseded (GEN-022, ci.yml#409) runs only on merge_group and must
+# run first, with no `needs:`.
+verify-exempt = ["ci-pre", "path-selection", "cancel-superseded"]
 mode = "enforce"
 
 # zackees/ci.yml#168 (GATE-005), soldr#3516: soldr's tests start soldr

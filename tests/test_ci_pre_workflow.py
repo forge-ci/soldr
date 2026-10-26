@@ -213,6 +213,11 @@ def test_ci_calls_ci_pre_first_and_nothing_waits_for_it() -> None:
         == "read"
     )
     for job_id, job in jobs.items():
+        if job_id == "queue-cache-janitor":
+            # GEN-022 (forge-ci/ci.yml#405): the end-of-queue janitor is the
+            # run's terminal job and must need every other job; it delays no
+            # build.
+            continue
         needs = job.get("needs") or []
         needs = [needs] if isinstance(needs, str) else needs
         assert "ci-pre" not in needs, job_id
