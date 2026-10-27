@@ -2659,6 +2659,7 @@ dependencies = [
  "sha2",
  "soldr-core",
  "soldr-platform",
+ "strum",
  "tar",
  "tempfile",
  "thiserror",
