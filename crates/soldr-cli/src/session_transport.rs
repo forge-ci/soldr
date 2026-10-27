@@ -297,7 +297,8 @@ pub(crate) fn local_session_name(
 /// `output_started` preserves diagnostic attribution: a failure after compiler
 /// output began may have emitted a partial diagnostic, while a setup failure
 /// did not. Both are hard failures on the mandatory SESSION route.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("SESSION compile failed (output_started={output_started}): {source}")]
 pub struct SessionError {
     /// Whether compiler stdout/stderr was written locally before the failure.
     pub output_started: bool,
@@ -326,22 +327,6 @@ impl SessionError {
             broker_unreachable: true,
             source,
         }
-    }
-}
-
-impl std::fmt::Display for SessionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "SESSION compile failed (output_started={}): {}",
-            self.output_started, self.source
-        )
-    }
-}
-
-impl std::error::Error for SessionError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.source)
     }
 }
 
