@@ -86,6 +86,7 @@ tracing-appender = "0.2"
 # soldr-cli when the crate's `tokio-console` feature is enabled.
 console-subscriber = "0.5"
 thiserror = "2"
+strum = { version = "0.27.2", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 semver = "1"

@@ -159,26 +159,25 @@ impl StripTargetOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
 pub enum StripCategory {
+    #[strum(serialize = "large_stderr")]
     LargeStderr,
+    #[strum(serialize = "build_script_binary")]
     BuildScriptBinary,
+    #[strum(serialize = "examples_doc_tests")]
     ExamplesDocTests,
+    #[strum(serialize = "debug_sidecar")]
     DebugSidecar,
+    #[strum(serialize = "incremental_dir")]
     IncrementalDir,
+    #[strum(serialize = "stub_binary")]
     StubBinary,
 }
 
 impl StripCategory {
     pub fn as_str(self) -> &'static str {
-        match self {
-            StripCategory::LargeStderr => "large_stderr",
-            StripCategory::BuildScriptBinary => "build_script_binary",
-            StripCategory::ExamplesDocTests => "examples_doc_tests",
-            StripCategory::DebugSidecar => "debug_sidecar",
-            StripCategory::IncrementalDir => "incremental_dir",
-            StripCategory::StubBinary => "stub_binary",
-        }
+        self.into()
     }
 }
 
@@ -561,6 +560,21 @@ mod tests {
         }
         let mut f = File::create(path).unwrap();
         f.write_all(bytes).unwrap();
+    }
+
+    #[test]
+    fn category_strings_are_stable() {
+        let expected = [
+            (StripCategory::LargeStderr, "large_stderr"),
+            (StripCategory::BuildScriptBinary, "build_script_binary"),
+            (StripCategory::ExamplesDocTests, "examples_doc_tests"),
+            (StripCategory::DebugSidecar, "debug_sidecar"),
+            (StripCategory::IncrementalDir, "incremental_dir"),
+            (StripCategory::StubBinary, "stub_binary"),
+        ];
+        for (category, name) in expected {
+            assert_eq!(category.as_str(), name);
+        }
     }
 
     #[test]
