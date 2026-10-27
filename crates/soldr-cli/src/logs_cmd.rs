@@ -343,6 +343,13 @@ fn collect_log_path_entries(paths: &SoldrPaths) -> Vec<LogPathEntry> {
              build-session id, elapsed time, cleanup counts, and cache-bypass recovery hints.",
         ),
         (
+            "soldr-porcelain-logs",
+            crate::cargo_front_door::porcelain::log_dir(paths),
+            "Full stdout+stderr of `--porcelain` / `SOLDR_PORCELAIN` runs: the machine-readable \
+             front-door mode suppresses the child relay and names one of these files as the JSON \
+             payload's `log_path`. Swept by the auto-GC pass on the same schedule as the build logs.",
+        ),
+        (
             "soldr-compile-daemon-fallback-log",
             compile_daemon_fallback_log,
             "Historical JSONL record of pre-cutover compile-daemon cache-bypass \

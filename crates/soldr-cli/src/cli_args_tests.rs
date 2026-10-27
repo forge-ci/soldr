@@ -203,6 +203,28 @@ fn jobs_flag_is_accepted_after_the_subcommand() {
     assert_eq!(cli.jobs, Some(4));
 }
 
+// Porcelain. Same contract as --timestamp-lines / --debug: publish the
+// variable `porcelain::enabled()` reads so nested soldr invocations (the
+// zthreads and no-cache retries) inherit the machine-readable mode.
+#[test]
+fn porcelain_flag_publishes_the_env_var() {
+    let _lock = ENV_LOCK.lock();
+    let name = crate::cargo_front_door::porcelain::PORCELAIN_ENV_VAR;
+    let previous = std::env::var(name).ok();
+
+    std::env::remove_var(name);
+    Cli::parse_from(["soldr", "--porcelain", "status"]).export_global_env();
+    let on = std::env::var(name).ok();
+
+    std::env::remove_var(name);
+    Cli::parse_from(["soldr", "status"]).export_global_env();
+    let absent = std::env::var(name).ok();
+
+    restore(name, previous);
+    assert_eq!(on.as_deref(), Some("1"));
+    assert_eq!(absent, None, "without --porcelain nothing may be published");
+}
+
 // soldr#2546. Same contract as --timestamp-lines: publish the variable
 // `debug_trace::enabled()` reads so nested soldr invocations inherit it.
 #[test]

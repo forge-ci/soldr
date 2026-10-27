@@ -59,6 +59,8 @@ mod nested_cargo;
 mod nested_cargo_guard;
 pub(crate) mod no_cache_detach;
 mod orphan_rmeta;
+/// `--porcelain` / `SOLDR_PORCELAIN` machine-readable front-door mode.
+pub(crate) mod porcelain;
 mod profile_debug;
 pub(crate) mod provision;
 mod strip_diagnostics;
@@ -138,6 +140,7 @@ type CargoRunResult = Result<
         std::process::ExitStatus,
         Option<String>,
         Option<Vec<String>>,
+        Option<porcelain::PorcelainLogArtifact>,
     ),
     SoldrError,
 >;
@@ -666,6 +669,8 @@ mod dylint_link_validation_tests;
 mod dylint_rustup_home_child_tests;
 #[cfg(test)]
 mod linker_project_config_tests;
+#[cfg(test)]
+mod porcelain_tests;
 #[cfg(test)]
 mod scrub_pool_tests;
 #[cfg(test)]
