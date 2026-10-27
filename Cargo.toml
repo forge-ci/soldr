@@ -130,7 +130,7 @@ prost = "0.14"
 # directory walker used in soldr-cli.
 jwalk = "0.8"
 wait-timeout = "0.2"
-zstd = { version = "0.13", default-features = false, features = ["zstdmt"] }
+zstd = { version = "0.14.3", default-features = false, features = ["zstdmt"] }
 # soldr#3735: binstall `pkg-fmt = "tbz2"`. bzip2 0.6 defaults to the
 # pure-Rust libbz2-rs-sys backend (no C build, unlike bzip2-sys).
 bzip2 = "0.6"
