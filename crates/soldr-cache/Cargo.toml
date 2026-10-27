@@ -33,6 +33,7 @@ tracing = { workspace = true }
 zccache = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+strum = { workspace = true }
 toml = { workspace = true }
 zstd = { workspace = true }
 

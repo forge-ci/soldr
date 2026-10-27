@@ -10,46 +10,37 @@
 use crate::core::{SoldrError, TargetTriple};
 
 /// binstall `pkg-fmt` values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString, strum::IntoStaticStr)]
 pub(crate) enum PkgFmt {
+    #[strum(serialize = "tar")]
     Tar,
+    #[strum(serialize = "tbz2")]
     Tbz2,
+    #[strum(serialize = "tgz")]
     Tgz,
+    #[strum(serialize = "txz")]
     Txz,
+    #[strum(serialize = "tzstd")]
     Tzstd,
+    #[strum(serialize = "zip")]
     Zip,
+    #[strum(serialize = "bin")]
     Bin,
 }
 
 impl PkgFmt {
     pub(crate) fn parse(raw: &str) -> Result<Self, SoldrError> {
-        Ok(match raw.trim() {
-            "tar" => Self::Tar,
-            "tbz2" => Self::Tbz2,
-            "tgz" => Self::Tgz,
-            "txz" => Self::Txz,
-            "tzstd" => Self::Tzstd,
-            "zip" => Self::Zip,
-            "bin" => Self::Bin,
-            other => {
-                return Err(SoldrError::Other(format!(
-                "binstall: unknown pkg-fmt `{other}` (known: tar, tbz2, tgz, txz, tzstd, zip, bin)"
-            )))
-            }
+        raw.trim().parse().map_err(|_| {
+            SoldrError::Other(format!(
+                "binstall: unknown pkg-fmt `{}` (known: tar, tbz2, tgz, txz, tzstd, zip, bin)",
+                raw.trim()
+            ))
         })
     }
 
     /// `{ archive-format }`: binstall's first extension without the dot.
     fn archive_format(self) -> &'static str {
-        match self {
-            Self::Tar => "tar",
-            Self::Tbz2 => "tbz2",
-            Self::Tgz => "tgz",
-            Self::Txz => "txz",
-            Self::Tzstd => "tzstd",
-            Self::Zip => "zip",
-            Self::Bin => "bin",
-        }
+        self.into()
     }
 
     /// `{ archive-suffix }`.

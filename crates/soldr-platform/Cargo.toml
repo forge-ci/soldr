@@ -20,6 +20,7 @@ publish = false
 # the workspace [patch] tables that used to redirect it.
 
 [dependencies]
+thiserror = { workspace = true }
 blake3 = "1"
 interprocess = { version = "2", features = ["tokio"] }
 # Exact pin: kernal-api is pre-1.0, so per its COMPATIBILITY.md every

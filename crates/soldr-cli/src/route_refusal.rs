@@ -33,7 +33,8 @@ pub(crate) fn code_is_fatal(code: i32) -> bool {
 /// A broker route refusal carried through the `io::Error` chain as a value, not
 /// a flattened string (soldr#3401), so the dispatcher can tell a deterministic
 /// policy refusal from a transient failure and report it once per build.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{text}")]
 pub(crate) struct RouteRefusal {
     /// The explanation to show the user.
     pub(crate) text: String,
@@ -43,14 +44,6 @@ pub(crate) struct RouteRefusal {
     /// pointer back to it.
     pub(crate) repeat: bool,
 }
-
-impl std::fmt::Display for RouteRefusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.text)
-    }
-}
-
-impl std::error::Error for RouteRefusal {}
 
 impl RouteRefusal {
     /// The refusal inside `error`, if it carries one.
