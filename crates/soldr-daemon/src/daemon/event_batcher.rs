@@ -190,16 +190,9 @@ enum BatcherCmd {
     Shutdown(oneshot::Sender<Result<(), String>>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
 pub struct EventBatcherError(pub String);
-
-impl std::fmt::Display for EventBatcherError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for EventBatcherError {}
 
 /// Cheap-to-clone handle. Each request handler in
 /// [`crate::daemon::server`] holds one; the inner `mpsc::Sender` is

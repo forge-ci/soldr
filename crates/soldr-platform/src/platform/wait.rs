@@ -49,24 +49,15 @@ pub const SHORT_LOCK: Duration = Duration::from_secs(30);
 pub const LONG_LOCK: Duration = LONG_CHILD;
 
 /// A bounded wait ran out of time, or its counterpart went away.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum WaitError {
     /// The wait exceeded its bound.
+    #[error("wait exceeded its {0:?} bound")]
     TimedOut(Duration),
     /// The other side disconnected (channel closed, thread panicked).
+    #[error("the other side disconnected")]
     Disconnected,
 }
-
-impl std::fmt::Display for WaitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::TimedOut(bound) => write!(f, "wait exceeded its {bound:?} bound"),
-            Self::Disconnected => write!(f, "the other side disconnected"),
-        }
-    }
-}
-
-impl std::error::Error for WaitError {}
 
 impl From<WaitError> for io::Error {
     fn from(error: WaitError) -> Self {

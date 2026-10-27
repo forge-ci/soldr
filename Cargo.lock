@@ -2694,6 +2694,7 @@ dependencies = [
  "serde_json",
  "tar",
  "tempfile",
+ "thiserror",
  "tokio",
  "wait-timeout",
  "widestring",
