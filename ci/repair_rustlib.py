@@ -8,10 +8,13 @@ that the doctor succeeds before the dogfood test suite starts.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 from dataclasses import dataclass
+from pathlib import Path
 
 TARGET = "x86_64-pc-windows-gnu"
 
@@ -75,12 +78,36 @@ def main() -> int:
         )
         return 1
 
-    print(f"repairing incomplete cached rustlib for {TARGET}", flush=True)
-    subprocess.run(
-        ["soldr", "rustup", "component", "remove", "rust-std", "--target", TARGET],
-        check=True,
-    )
-    subprocess.run(["soldr", "rustup", "target", "add", TARGET], check=True)
+    rustup_home = Path(os.environ.get("RUSTUP_HOME", ""))
+    if (
+        rustup_home.name not in ("rustup-home", "rustup")
+        or rustup_home.parent.name != "setup-soldr-action-state"
+    ):
+        raise RuntimeError(
+            "refusing to replace a toolchain outside the setup action state"
+        )
+    with Path("rust-toolchain.toml").open("rb") as stream:
+        toolchain = tomllib.load(stream)["toolchain"]
+    channel = toolchain["channel"]
+    if channel != os.environ.get("RUSTUP_TOOLCHAIN"):
+        raise RuntimeError("setup action toolchain differs from rust-toolchain.toml")
+
+    print(f"reinstalling cached toolchain {channel} for {TARGET}", flush=True)
+    subprocess.run(["soldr", "rustup", "toolchain", "uninstall", channel], check=True)
+    install = [
+        "soldr",
+        "rustup",
+        "toolchain",
+        "install",
+        channel,
+        "--profile",
+        toolchain["profile"],
+        "--target",
+        TARGET,
+    ]
+    for component in toolchain.get("components", []):
+        install.extend(["--component", component])
+    subprocess.run(install, check=True)
     repaired = doctor()
     if repaired.status != 0 or repaired.corrupted:
         print(
