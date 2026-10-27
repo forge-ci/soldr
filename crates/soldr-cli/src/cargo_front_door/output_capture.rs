@@ -407,6 +407,29 @@ fn run_command_capturing_porcelain(
     command.stderr(std::process::Stdio::piped());
     configure_cargo_child_for_timeout(command);
     let started_at_ms = current_unix_ms();
+    // soldr#2024 misattribution: porcelain is the one capture mode that both
+    // (a) does NOT inherit stdio -- it pipes the child into the porcelain log
+    // and relays nothing -- and (b) skips `log_summary::emit_session_log_summary`,
+    // which is suppressed under `prepared.porcelain` and is the *other* place
+    // that calls `mark_spoke()`. With neither signal the process-wide `SPOKE`
+    // latch stayed clear, so `exit_guard` saw a non-zero exit that "ran no
+    // child process" and appended this to an ordinary child compile failure:
+    //
+    //   soldr: exiting 101 -- soldr emitted no diagnostic and ran no child
+    //   process, so nothing has explained this failure.
+    //   soldr: this is a fault in soldr itself, not a compile error in your
+    //   project; please report it with the command you ran (soldr#2024).
+    //
+    // That is false and harmful: the child DID run, its diagnostic DID reach
+    // the caller -- in the porcelain log the single JSON line points at -- and
+    // a harness would be told to file a bogus soldr bug on every red build.
+    //
+    // Marking before the spawn, exactly as `exit_guard::run_child_command`
+    // does, records that soldr handed the child's output off (to the
+    // porcelain log). A child that dies before writing a byte still suppresses
+    // the annotation, because soldr handed the output off either way and the
+    // exit code remains the child's.
+    crate::exit_guard::mark_spoke();
     let mut child = debug_trace::spawn_traced(command, "cargo porcelain capture")
         .map_err(|err| SoldrError::Other(format!("spawn cargo for porcelain capture failed: {err}")))?;
     // Same post-hoc descendant attach as the JSON and diagnostic capture modes.

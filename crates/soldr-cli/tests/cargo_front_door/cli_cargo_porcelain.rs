@@ -62,6 +62,46 @@ fn failing_cargo_script() -> String {
     }
 }
 
+/// A child that mimics a real rustc compile failure: a diagnostic on stderr
+/// and Rust's canonical compile-failure exit code, 101.
+///
+/// This is the fixture for the soldr#2024 misattribution regression: 101 is
+/// the exact status the real reproduction carried, and it is *not* a soldr
+/// fault -- the child ran and explained itself.
+fn compile_failure_cargo_script() -> String {
+    if matches!(
+        soldr_platform::host::facts::os(),
+        soldr_platform::host::facts::HostOs::Windows
+    ) {
+        "@echo off\r\nexit /b 101\r\n".to_string()
+    } else {
+        "#!/bin/sh\nexit 101\n".to_string()
+    }
+}
+
+/// Phrases from the `exit_guard` annotation (soldr#2024). Either appearing on
+/// stderr of a run whose child *did* execute means soldr blamed itself for the
+/// child's own failure.
+const SOLD_FAULT_PHRASE: &str = "fault in soldr itself";
+const EXIT_GUARD_ISSUE: &str = "soldr#2024";
+
+/// Assert that a run whose child ran is not annotated as a soldr fault.
+///
+/// With `--porcelain` the child's bytes are relayed nowhere -- they live in
+/// the `log_path` the single JSON line points at -- so the exit-guard's
+/// process-wide `SPOKE` latch is the *only* thing standing between an ordinary
+/// red build and this message. If it is not set, every normal compile failure
+/// tells the caller (typically an autonomous harness) to file a bug against
+/// soldr.
+fn assert_not_misattributed_as_a_soldr_fault(stderr: &str, context: &str) {
+    assert!(
+        !stderr.contains(SOLD_FAULT_PHRASE) && !stderr.contains(EXIT_GUARD_ISSUE),
+        "{context}: soldr claimed its own fault for a failure the child explained. \
+         The child ran and its diagnostic is in the porcelain log, so neither \
+         {SOLD_FAULT_PHRASE:?} nor {EXIT_GUARD_ISSUE:?} may appear.\nstderr:\n{stderr}"
+    );
+}
+
 struct Fixture {
     workspace: PathBuf,
     cache_root: PathBuf,
@@ -183,6 +223,10 @@ fn porcelain_flag_emits_one_json_line_and_suppresses_the_relay() {
     assert!(body.contains("--- stderr ---"));
     assert!(body.contains("# command: cargo build"));
     assert!(body.contains("# exit_code: 0"));
+
+    // soldr#2024: a green porcelain run has nothing to explain, so it is not
+    // annotated either.
+    assert_not_misattributed_as_a_soldr_fault(&stderr, "porcelain succeeding child");
 }
 
 #[test]
@@ -192,6 +236,12 @@ fn porcelain_env_var_emits_one_json_line() {
     let (value, _stdout) = sole_json_line(&output);
     assert_eq!(value["exit_code"], 0);
     assert!(value["log_path"].is_string());
+    // The env-var entry point shares the flag's spawn path, so it must not
+    // annotate a success either (soldr#2024).
+    assert_not_misattributed_as_a_soldr_fault(
+        &String::from_utf8_lossy(&output.stderr),
+        "SOLDR_PORCELAIN=1 succeeding child",
+    );
 }
 
 #[test]
@@ -227,6 +277,76 @@ fn a_failing_run_reports_its_exit_code_and_error_digest() {
     // The detail still survives in the log.
     let body = fs::read_to_string(log_path_of(&value)).expect("readable run log");
     assert!(body.contains("E0308"), "failure detail lost: {body}");
+
+    // soldr#2024 regression guard: the child ran and emitted the diagnostic
+    // above, so soldr must not tell the caller the failure was its own fault.
+    assert_not_misattributed_as_a_soldr_fault(
+        &String::from_utf8_lossy(&output.stderr),
+        "porcelain failing child (exit 3)",
+    );
+}
+
+/// The soldr#2024 misattribution regression at the exact exit code the real
+/// reproduction carried.
+///
+/// Before the fix, `SPOKE` was never set on the porcelain spawn path (it
+/// pipes the child into the log rather than inheriting stdio, and it skips
+/// the log-summary call that marks on every other path), so an ordinary
+/// compile failure carried this on stderr:
+///
+/// ```text
+/// soldr: exiting 101 — soldr emitted no diagnostic and ran no child process,
+/// so nothing has explained this failure.
+/// soldr: this is a fault in soldr itself, not a compile error in your project;
+/// please report it with the command you ran (soldr#2024).
+/// ```
+///
+/// That is false: the child ran, and its diagnostic is in the `log_path` the
+/// single JSON line names. A harness believed it and filed bugs against soldr
+/// for its users' broken code.
+#[test]
+fn porcelain_preserves_a_child_compile_failure_without_blaming_soldr() {
+    let fixture = fixture("porcelain-exit-101", &compile_failure_cargo_script());
+    let output = run_soldr(
+        &fixture,
+        &["--porcelain", "--no-cache", "cargo", "build"],
+        false,
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(101),
+        "the child's real exit code must survive porcelain\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (value, _stdout) = sole_json_line(&output);
+    assert_eq!(value["exit_code"], 101);
+    assert_eq!(value["summary"]["status"], "failed");
+    assert_not_misattributed_as_a_soldr_fault(
+        &String::from_utf8_lossy(&output.stderr),
+        "porcelain child exiting 101",
+    );
+}
+
+/// The default (non-porcelain) path is unchanged: a failing child still has
+/// its diagnostic relayed through to the caller, and soldr still does not
+/// annotate. This pins the behaviour the porcelain fix must not disturb.
+#[test]
+fn default_path_failure_relays_the_child_and_is_not_annotated() {
+    let fixture = fixture("porcelain-default-failure", &failing_cargo_script());
+    let output = run_soldr(&fixture, &["--no-cache", "cargo", "build"], false);
+
+    assert_eq!(output.status.code(), Some(3));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // The default path relays the child: its diagnostic reaches the caller
+    // (stdout is inherited; stderr is captured and tee'd back).
+    assert!(
+        format!("{stdout}{stderr}").contains("E0308"),
+        "the default path must keep relaying the child's diagnostic\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_not_misattributed_as_a_soldr_fault(&stderr, "default path failing child");
 }
 
 #[test]
