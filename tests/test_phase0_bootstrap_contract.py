@@ -31,7 +31,10 @@ def test_all_sixteen_setup_soldr_pins_use_managed_release() -> None:
 def test_third_party_toolchain_uses_managed_rustup() -> None:
     workflow = (WORKFLOWS / "_bootstrap-e2e.yml").read_text(encoding="utf-8")
     assert "soldr rustup toolchain install $channel --profile minimal" in workflow
-    assert 'soldr rustup target add --toolchain $channel "${{ inputs.target }}"' in workflow
+    assert (
+        'soldr rustup target add --toolchain $channel "${{ inputs.target }}"'
+        in workflow
+    )
     assert "run: rustup " not in workflow
     assert workflow.count("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }") >= 2
 
