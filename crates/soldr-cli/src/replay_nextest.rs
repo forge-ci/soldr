@@ -154,6 +154,8 @@ pub(crate) fn run(
     let mut command = Command::new(runner);
     command.args(args);
     inherited.restore_to(&mut command);
+    // The runner inherits our output streams and explains its own failure.
+    crate::exit_guard::mark_spoke();
     let status =
         crate::platform::process::spawn::exec_or_status(&mut command).map_err(|error| {
             SoldrError::Other(format!(

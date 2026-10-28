@@ -22,7 +22,7 @@ fn replay_forwards_exit_and_signal_and_rejects_before_spawning() {
     let marker = tmp.path().join("invoked");
     std::fs::write(
         &runner,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$REPLAY_MARKER\"\ncase \"$REPLAY_ACTION\" in exit) exit 37;; signal) kill -TERM $$;; nested) exec \"$REPLAY_SOLDR\" --version;; esac\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$REPLAY_MARKER\"\ncase \"$REPLAY_ACTION\" in exit) echo 'nextest test failed' >&2; exit 37;; signal) kill -TERM $$;; nested) exec \"$REPLAY_SOLDR\" --version;; esac\n",
     )
     .expect("write runner");
     soldr_platform::fs::permissions::make_executable(&runner).expect("make runner executable");
@@ -58,6 +58,12 @@ fn replay_forwards_exit_and_signal_and_rejects_before_spawning() {
     }
     let output = invoke(&["--version"], "exit", None);
     assert_eq!(output.status.code(), Some(37));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("nextest test failed"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("this is a fault in soldr itself"),
+        "stderr: {stderr}"
+    );
     assert_eq!(
         std::fs::read_to_string(&marker).expect("marker").trim(),
         "nextest --version"
