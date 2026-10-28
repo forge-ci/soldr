@@ -213,6 +213,14 @@
       "reason": "Repository guards read source files or launch fixture commands to enforce platform-independent policy and should run once in canonical validation."
     },
     {
+      "id": "replay-guard-linux-once",
+      "package": "soldr-cli",
+      "binary": "guards",
+      "modules": ["replay_nextest"],
+      "disposition": "native-linux-once",
+      "reason": "The process fixture is a POSIX shell executable and asserts exact signal propagation; Windows target replay is exercised separately."
+    },
+    {
       "id": "toolchain-linux-once",
       "package": "soldr-cli",
       "binary": "toolchain_env",

@@ -1,34 +1,38 @@
 //! Process-level coverage for offline nextest archive replay.
 
-#![cfg(unix)]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::too_many_lines)]
 
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::ExitStatusExt;
 use std::process::Command;
 
 use crate::common;
 
 #[test]
 fn replay_forwards_exit_and_signal_and_rejects_before_spawning() {
+    // The fixture is a POSIX shell script. Windows replay gets native coverage
+    // in the target workflow; this guard runs once on the Linux host.
+    if matches!(
+        soldr_platform::host::facts::os(),
+        soldr_platform::host::facts::HostOs::Windows
+    ) {
+        return;
+    }
     let tmp = tempfile::tempdir().expect("temporary test directory");
     let runner = tmp.path().join("cargo-nextest");
     let marker = tmp.path().join("invoked");
     std::fs::write(
         &runner,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$REPLAY_MARKER\"\ncase \"$REPLAY_ACTION\" in exit) exit 37;; signal) kill -TERM $$;; esac\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$REPLAY_MARKER\"\ncase \"$REPLAY_ACTION\" in exit) exit 37;; signal) kill -TERM $$;; nested) exec \"$REPLAY_SOLDR\" --version;; esac\n",
     )
     .expect("write runner");
-    let mut permissions = std::fs::metadata(&runner)
-        .expect("runner metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&runner, permissions).expect("make runner executable");
+    soldr_platform::fs::permissions::make_executable(&runner).expect("make runner executable");
     let invoke = |args: &[&str], action: &str, version_pin: Option<&str>| {
         let mut cmd = Command::new(common::soldr_bin());
         cmd.current_dir(tmp.path())
             .env("REPLAY_MARKER", &marker)
             .env("REPLAY_ACTION", action)
+            .env("REPLAY_SOLDR", common::soldr_bin())
+            .env_remove("IN_SOLDR_PID")
+            .env_remove("IN_SOLDR_ROLE")
             .env("RUSTUP_HOME", tmp.path().join("missing-rustup"))
             .env("CARGO_HOME", tmp.path().join("missing-cargo"))
             .env_remove("SOLDR_AS")
@@ -62,7 +66,17 @@ fn replay_forwards_exit_and_signal_and_rejects_before_spawning() {
         "signal",
         None,
     );
-    assert_eq!(output.status.signal(), Some(15));
+    assert_eq!(
+        soldr_platform::process::test_child::returncode(&output.status),
+        -15
+    );
+
+    let nested = invoke(&["--version"], "nested", None);
+    assert!(
+        nested.status.success(),
+        "nested Soldr failed: {}",
+        String::from_utf8_lossy(&nested.stderr)
+    );
     let previous = std::fs::read_to_string(&marker).expect("marker");
     let output = invoke(&["--version"], "", Some("0.0.1"));
     assert!(!output.status.success());

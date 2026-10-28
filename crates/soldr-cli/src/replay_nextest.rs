@@ -8,6 +8,40 @@ use std::process::Command;
 
 use crate::core::SoldrError;
 
+/// Provenance inherited by Soldr before its reentrancy guard stamps this process.
+/// Replay restores this exact state for the test runner, preserving a caller's
+/// original ownership without making the replay wrapper a new parent marker.
+#[derive(Clone, Debug)]
+pub(crate) struct InheritedProvenance {
+    pid: Option<std::ffi::OsString>,
+    role: Option<std::ffi::OsString>,
+}
+
+impl InheritedProvenance {
+    pub(crate) fn capture() -> Self {
+        Self {
+            pid: std::env::var_os(crate::reentrancy_guard::IN_SOLDR_PID_ENV),
+            role: std::env::var_os(crate::reentrancy_guard::IN_SOLDR_ROLE_ENV),
+        }
+    }
+
+    fn restore_to(&self, command: &mut Command) {
+        for (name, value) in [
+            (crate::reentrancy_guard::IN_SOLDR_PID_ENV, &self.pid),
+            (crate::reentrancy_guard::IN_SOLDR_ROLE_ENV, &self.role),
+        ] {
+            match value {
+                Some(value) => {
+                    command.env(name, value);
+                }
+                None => {
+                    command.env_remove(name);
+                }
+            }
+        }
+    }
+}
+
 /// Detect the replay subcommand without parsing its (possibly invalid) body.
 /// The values of the three global options cannot themselves be subcommands.
 pub(crate) fn is_invocation(args: &[String]) -> bool {
@@ -105,7 +139,11 @@ fn validate(args: &[String]) -> Result<(), SoldrError> {
     Ok(())
 }
 
-pub(crate) fn run(runner: &Path, args: &[String]) -> Result<i32, SoldrError> {
+pub(crate) fn run(
+    runner: &Path,
+    args: &[String],
+    inherited: &InheritedProvenance,
+) -> Result<i32, SoldrError> {
     validate(args)?;
     if !runner.is_absolute() || !runner.is_file() {
         return Err(SoldrError::Other(format!(
@@ -115,6 +153,7 @@ pub(crate) fn run(runner: &Path, args: &[String]) -> Result<i32, SoldrError> {
     }
     let mut command = Command::new(runner);
     command.args(args);
+    inherited.restore_to(&mut command);
     let status =
         crate::platform::process::spawn::exec_or_status(&mut command).map_err(|error| {
             SoldrError::Other(format!(
@@ -128,10 +167,41 @@ pub(crate) fn run(runner: &Path, args: &[String]) -> Result<i32, SoldrError> {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::{is_invocation, run, validate};
+    use super::{is_invocation, run, validate, InheritedProvenance};
 
     fn args(value: &[&str]) -> Vec<String> {
         value.iter().map(|item| (*item).to_string()).collect()
+    }
+
+    #[test]
+    fn child_environment_restores_exact_inherited_provenance() {
+        let inherited = InheritedProvenance {
+            pid: Some("123".into()),
+            role: Some("front-door".into()),
+        };
+        let mut command = std::process::Command::new("unused");
+        inherited.restore_to(&mut command);
+        let vars: Vec<_> = command.get_envs().collect();
+        assert!(vars.iter().any(
+            |(key, value)| *key == crate::reentrancy_guard::IN_SOLDR_PID_ENV
+                && *value == Some(std::ffi::OsStr::new("123"))
+        ));
+        assert!(vars.iter().any(
+            |(key, value)| *key == crate::reentrancy_guard::IN_SOLDR_ROLE_ENV
+                && *value == Some(std::ffi::OsStr::new("front-door"))
+        ));
+        let absent = InheritedProvenance {
+            pid: None,
+            role: None,
+        };
+        absent.restore_to(&mut command);
+        let vars: Vec<_> = command.get_envs().collect();
+        assert!(vars.iter().any(
+            |(key, value)| *key == crate::reentrancy_guard::IN_SOLDR_PID_ENV && value.is_none()
+        ));
+        assert!(vars.iter().any(
+            |(key, value)| *key == crate::reentrancy_guard::IN_SOLDR_ROLE_ENV && value.is_none()
+        ));
     }
 
     #[test]
@@ -246,10 +316,15 @@ mod tests {
     #[test]
     fn rejects_missing_and_relative_runners() {
         let version = args(&["nextest", "--version"]);
-        assert!(run(std::path::Path::new("cargo-nextest"), &version).is_err());
+        assert!(run(
+            std::path::Path::new("cargo-nextest"),
+            &version,
+            &InheritedProvenance::capture()
+        )
+        .is_err());
         let dir = tempfile::tempdir().expect("temporary directory");
         let missing = dir.path().join("missing-runner");
-        assert!(run(&missing, &version).is_err());
+        assert!(run(&missing, &version, &InheritedProvenance::capture()).is_err());
     }
 
     #[test]
@@ -257,12 +332,14 @@ mod tests {
         let runner = std::env::current_exe().expect("current test binary");
         assert!(run(
             &runner,
-            &args(&["nextest", "run", "--", "--archive-file", "fake"])
+            &args(&["nextest", "run", "--", "--archive-file", "fake"]),
+            &InheritedProvenance::capture()
         )
         .is_err());
         assert!(run(
             &runner,
-            &args(&["nextest", "list", "--profile", "--archive-file", "fake"])
+            &args(&["nextest", "list", "--profile", "--archive-file", "fake"]),
+            &InheritedProvenance::capture()
         )
         .is_err());
     }
