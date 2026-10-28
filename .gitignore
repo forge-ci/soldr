@@ -205,3 +205,8 @@ act-run-*.log
 .soldr-dylint-cook.lock
 # zackees/ci.yml#196: the local gate's per-run worktree nonce
 .gate-nonce
+
+# soldr#3946: bosn fleet run dumps are run metadata, not source. Attestations
+# are commit-message trailers and measurements belong in Actions artifacts or a
+# side branch, so nothing written here is repository content.
+/ci/fleet-evidence/
