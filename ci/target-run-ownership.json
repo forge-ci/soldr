@@ -333,6 +333,28 @@
       "reason": "Unix socket placement, symlink canonicalization, and path overflow use the native filesystem."
     },
     {
+      "id": "broker-resurrection-slow-stage",
+      "source_id": "broker-target-replay",
+      "test_name": "cli_broker_resurrection::broker_starts_after_uncontended_image_staging_outlives_lease",
+      "targets": [
+        "x86_64-pc-windows-msvc",
+        "x86_64-pc-windows-gnu",
+        "aarch64-pc-windows-msvc"
+      ],
+      "reason": "Windows cold storage must not lose an uncontended lease while staging the broker image."
+    },
+    {
+      "id": "broker-resurrection-stage-takeover",
+      "source_id": "broker-target-replay",
+      "test_name": "cli_broker_resurrection::stale_image_stager_does_not_replace_a_successor_after_lease_takeover",
+      "targets": [
+        "x86_64-pc-windows-msvc",
+        "x86_64-pc-windows-gnu",
+        "aarch64-pc-windows-msvc"
+      ],
+      "reason": "A Windows image-staging owner must not publish after a successor takes its lease."
+    },
+    {
       "id": "broker-resurrection-known-bad",
       "source_id": "broker-target-replay",
       "test_name": "cli_broker_resurrection::issue_2920_known_bad_older_broker_is_retired_once_with_a_structured_outcome",
