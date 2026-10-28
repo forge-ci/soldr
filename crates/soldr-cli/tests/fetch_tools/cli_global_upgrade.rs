@@ -31,6 +31,40 @@ fn fake_global_soldr(log: &Path) -> String {
 }
 
 #[test]
+fn explicit_opt_out_keeps_the_source_driver_when_a_newer_global_exists() {
+    let fixture = unique_temp_dir("source-driver-no-delegation");
+    std::fs::write(
+        fixture.join("Cargo.toml"),
+        "[workspace]\n\n[workspace.metadata.soldr]\nprefer_newer_global = true\n",
+    )
+    .expect("write opt-in manifest");
+    let global_bin_dir = fixture.join("global-bin");
+    std::fs::create_dir_all(&global_bin_dir).expect("create global bin dir");
+    let log = fixture.join("global-invocation.log");
+    let global_soldr = fake_script_path(&global_bin_dir, "soldr");
+    write_fake_script(&global_soldr, &fake_global_soldr(&log));
+
+    let output = isolated_soldr_command()
+        .env(
+            soldr_cli::global_upgrade::GLOBAL_DELEGATION_DISABLE_ENV_VAR,
+            "1",
+        )
+        .env("SOLDR_BROKER_AUTOSPAWN", "0")
+        .env("SOLDR_CACHE_DIR", fixture.join("cache"))
+        .env("PATH", prepend_to_path(&global_bin_dir))
+        .current_dir(&fixture)
+        .arg("status")
+        .output()
+        .expect("run source soldr");
+    assert_ne!(
+        output.status.code(),
+        Some(73),
+        "newer global driver took ownership"
+    );
+    assert!(!log.exists(), "global driver was invoked");
+}
+
+#[test]
 fn project_policy_delegates_to_newer_global_soldr() {
     let fixture = unique_temp_dir("newer-global-soldr");
     std::fs::write(
