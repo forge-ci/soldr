@@ -616,8 +616,9 @@ def test_host_validation_opportunistically_reuses_exact_sha_bootstrap() -> None:
         "bootstrap-soldr-blessed-linux-gnu-dev-v1${{ env.PR_CACHE_TAG }}-"
         "${{ needs.ci-mode.outputs.checkout_sha }}" in producer
     )
-    assert "key: rustup-1.98.1-linux-x64-v1" in producer
-    assert "rustup toolchain install 1.98.1 --profile minimal" in producer
+    bootstrap_setup = _step_block(producer, "Set up soldr for bootstrap build")
+    assert "toolchain: 1.98.1" in bootstrap_setup
+    assert "uses: zackees/setup-soldr@" in bootstrap_setup
     assert "toolchain: 1.98.1" in host_template
     assert "cargo build --profile dev --package soldr-cli" in producer
     assert "soldr cargo build --profile dev -p soldr-cli" in host_build
@@ -970,7 +971,7 @@ def test_mac_x64_distribution_uses_pinned_setup_soldr_and_the_blessed_build() ->
     # assertion follows the logic rather than being dropped.
     assert _matrix_binary_source_prepares_gnu_linux()
     assert (
-        "uses: zackees/setup-soldr@a07bab94f16124b5c6857b137a237a53a61e06d1" in release
+        "uses: zackees/setup-soldr@10a58e5c892077586794cca1086c4a8162206bef" in release
     )
     assert "version: 0.9.27" not in release  # one pin: setup-soldr's default
     assert "cross-targets: ${{ matrix.setup_target }}" in release
@@ -1048,7 +1049,7 @@ def test_release_wheels_use_soldr_with_legacy_hooks_for_other_platforms() -> Non
 
     assert _matrix_binary_source_prepares_gnu_linux()
     assert (
-        "uses: zackees/setup-soldr@a07bab94f16124b5c6857b137a237a53a61e06d1" in release
+        "uses: zackees/setup-soldr@10a58e5c892077586794cca1086c4a8162206bef" in release
     )
     assert "version: 0.9.27" not in release  # one pin: setup-soldr's default
     assert "cross-targets: ${{ matrix.setup_target }}" in release

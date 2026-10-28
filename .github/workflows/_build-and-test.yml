@@ -156,32 +156,7 @@ jobs:
       # The older soldr#1248 wording here claimed cook restore was being
       # "reintroduced in the cross/release lanes first"; that has pointed the
       # wrong way since soldr#2867.
-      # soldr#1340 — pre-cache the 1.98.1 toolchain in ~/.rustup so
-      # setup-soldr finds it via its "Runner rustup home already
-      # contains toolchain X" check and skips its own 9 s rustup
-      # install. On cache miss (first run at a new key) the install
-      # step runs locally and populates ~/.rustup for the save.
-      - name: Restore rustup 1.98.1 in ~/.rustup
-        id: rustup_cache
-        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        with:
-          path: ~/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu
-          key: rustup-1.98.1-linux-x64-v1
-
-      - name: Install rustup 1.98.1 to ~/.rustup (if not cached)
-        if: steps.rustup_cache.outputs.cache-hit != 'true'
-        # soldr#3557: a pure pre-seed. Runner images without rustup (act2's
-        # catthehacker image) skip it; setup-soldr bootstraps rustup itself.
-        run: command -v rustup >/dev/null || { echo "rustup not preinstalled; setup-soldr bootstraps it"; exit 0; }; rustup toolchain install 1.98.1 --profile minimal --no-self-update  # ci-lint: allow RUST-001 bootstrap: pre-seeds ~/.rustup before setup-soldr puts soldr on PATH (soldr#1340)
-
-      # zackees/ci.yml#6: an immutable download shared with main -- a PR
-      # restores main's entry but never saves its own copy.
-      - name: Save rustup 1.98.1 cache
-        if: github.event_name != 'pull_request' && steps.rustup_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        with:
-          path: ~/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu
-          key: rustup-1.98.1-linux-x64-v1
+      # The setup action prepares the pinned toolchain through Soldr.
 
       # soldr#2349: resolve the Dylint nightly + cargo-dylint version once, from
       # the same authority soldr's own resolver uses, so the cache key below,
@@ -222,7 +197,7 @@ jobs:
       # bootstrap-embeds-zccache: 1.15.0
       # bootstrap-zccache-pending: 1.15.5
       - name: Setup pinned soldr toolchain
-        uses: zackees/setup-soldr@a07bab94f16124b5c6857b137a237a53a61e06d1
+        uses: zackees/setup-soldr@10a58e5c892077586794cca1086c4a8162206bef
         with:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
           cook-delta: false
@@ -691,7 +666,6 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/scripts/report_dylint_tree_size.py \
-            --cache-hit "rustup 1.98.1=${{ steps.rustup_cache.outputs.cache-hit }}" \
             --cache-hit "dylint libraries+target trees=${{ steps.dylint_trees.outputs.cache-hit }}" \
             --cache-hit "dylint driver+prepared marker=${{ steps.dylint_driver_cache.outputs.cache-hit }}" \
             --library-stage-skip-marker "target/dylint/libraries/${{ steps.dylint_identity.outputs.channel }}-x86_64-unknown-linux-gnu/.soldr-dylint-library-marker-v1.json" \

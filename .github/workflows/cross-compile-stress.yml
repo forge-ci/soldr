@@ -100,7 +100,7 @@ jobs:
       # toolchain). SHA + version kept in step with every other build lane; the
       # setup-soldr pin guards assert both stay current.
       - name: Setup soldr
-        uses: zackees/setup-soldr@a07bab94f16124b5c6857b137a237a53a61e06d1
+        uses: zackees/setup-soldr@10a58e5c892077586794cca1086c4a8162206bef
         with:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
           cook-delta: false
