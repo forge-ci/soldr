@@ -234,6 +234,7 @@ fn extract_errors(output: &str) -> (usize, Vec<String>) {
     let mut errors: Vec<String> = Vec::new();
     let mut count = 0usize;
     for line in output.lines() {
+        let line = without_ansi(line);
         let trimmed = line.trim();
         if !is_error_line(trimmed) {
             continue;
@@ -244,6 +245,54 @@ fn extract_errors(output: &str) -> (usize, Vec<String>) {
         }
     }
     (count, errors)
+}
+
+/// Strip ANSI escapes from one captured line.
+///
+/// Cargo colours `error[E0308]: ...` whenever the caller forces colour
+/// (`CARGO_TERM_COLOR=always`, `--color always`, `CLICOLOR_FORCE`). The escape
+/// bytes then sit in front of `error[`, so a plain `starts_with` scan reports
+/// `status: "failed"` with `error_count: 0, errors: []` -- the empty digest this
+/// mode exists to prevent. Borrow when there is nothing to strip, which is the
+/// common (piped, uncoloured) case.
+fn without_ansi(line: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    if !line.contains('\u{1b}') {
+        return Cow::Borrowed(line);
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            // CSI: parameters/intermediates, then one final byte in `@..=~`.
+            Some('[') => {
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            // OSC: consume until BEL or ST (`ESC \`).
+            Some(']') => {
+                for next in chars.by_ref() {
+                    if next == '\u{7}' {
+                        break;
+                    }
+                    if next == '\u{1b}' {
+                        let _ = chars.next();
+                        break;
+                    }
+                }
+            }
+            // Two-byte escape, or a truncated sequence at end of line.
+            Some(_) | None => {}
+        }
+    }
+    Cow::Owned(out)
 }
 
 fn is_error_line(trimmed: &str) -> bool {

@@ -99,6 +99,38 @@ fn summarize_scans_plain_rustc_and_nextest_failures() {
 }
 
 #[test]
+fn summarize_sees_coloured_failures() {
+    // Cargo emits SGR escapes around `error[..]` whenever colour is forced.
+    // The digest must not go empty just because the caller asked for colour.
+    let output = "\u{1b}[1m\u{1b}[31merror[E0308]\u{1b}[0m\u{1b}[1m: mismatched types\u{1b}[0m\n\
+                  \u{1b}[1m\u{1b}[31merror\u{1b}[0m\u{1b}[1m: could not compile `demo` (lib)\u{1b}[0m\n";
+    let summary = summarize("cargo build", 101, output);
+    assert_eq!(summary.status, "failed");
+    assert_eq!(summary.error_count, 2, "colour must not hide the digest");
+    assert!(
+        summary.errors[0].starts_with("error[E0308]"),
+        "{:?}",
+        summary.errors
+    );
+    assert!(
+        !summary.errors.iter().any(|e| e.contains('\u{1b}')),
+        "escape bytes must not survive into the identities: {:?}",
+        summary.errors
+    );
+}
+
+#[test]
+fn summarize_sees_nextest_failures_through_colour() {
+    let output = "\u{1b}[31mFAIL\u{1b}[0m [   0.123s] my_crate::tests::it_works\n";
+    let summary = summarize("cargo nextest run", 100, output);
+    assert_eq!(summary.error_count, 1);
+    assert_eq!(
+        summary.errors,
+        vec!["FAIL [   0.123s] my_crate::tests::it_works"]
+    );
+}
+
+#[test]
 fn summarize_prefers_the_cargo_json_stream_when_present() {
     let output = concat!(
         r#"{"reason":"compiler-message","message":{"level":"error","code":{"code":"E0432"},"message":"unresolved import `foo`\nsecond line"}}"#,
