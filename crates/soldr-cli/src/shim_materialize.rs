@@ -590,6 +590,19 @@ mod tests {
     fn loader_path_verdict_is_memoized_by_content() {
         let tmp = tempfile::tempdir().unwrap();
         let elf = origin_runpath_elf_source(&tmp);
+        // This test temporarily writes a false verdict to the content-keyed
+        // global memo. Give its ELF distinct content so parallel trampoline
+        // tests cannot observe that deliberately false value.
+        let mut bytes = std::fs::read(&elf).unwrap();
+        bytes.extend_from_slice(b"memo-verdict-test-fixture:");
+        bytes.extend_from_slice(tmp.path().to_string_lossy().as_bytes());
+        std::fs::write(&elf, &bytes).unwrap();
+        let other_tmp = tempfile::tempdir().unwrap();
+        let other = origin_runpath_elf_source(&other_tmp);
+        assert!(
+            bytes != std::fs::read(&other).unwrap(),
+            "memo fixture must not share a digest with other ELF fixtures"
+        );
         let dir = crate::daemon::image_hash::machine_scoped_cache_dir(&std::env::temp_dir());
         let digest = crate::daemon::image_hash::cached_blake3_hex(&dir, &elf).unwrap();
         let entry = dir.join(format!("{digest}.loader-path"));
