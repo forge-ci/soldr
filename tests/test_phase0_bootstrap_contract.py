@@ -18,13 +18,13 @@ class SetupPin:
     sha: str
 
 
-def test_all_sixteen_setup_soldr_pins_use_managed_release() -> None:
+def test_all_seventeen_setup_soldr_pins_use_managed_release() -> None:
     pins: list[SetupPin] = []
     for workflow in sorted(WORKFLOWS.glob("*.y*ml")):
         for match in DIRECT_USE.finditer(workflow.read_text(encoding="utf-8")):
             pins.append(SetupPin(workflow.name, match.group(1)))
 
-    assert len(pins) == 16, pins
+    assert len(pins) == 17, pins
     assert {pin.sha for pin in pins} == {SETUP_SOLDR_MANAGED_SHA}, pins
 
 
