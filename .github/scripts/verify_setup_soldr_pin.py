@@ -19,7 +19,7 @@ from soldr._process import (  # noqa: E402 -- source-relative bootstrap precedes
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SETUP_SOLDR_REPO = "https://github.com/zackees/setup-soldr.git"
-SETUP_SOLDR_RELEASE_REF = "refs/tags/v0.9.82"
+SETUP_SOLDR_RELEASE_REF = "refs/tags/v0"
 OLD_SETUP_SOLDR_SHA = "1937c19529f3690df5553a36dd33f39ccb20b070"
 SETUP_SOLDR_V0_2_SHA = "13b2e37f3ee8dc6867f08d3b2fe49ece4783dba2"
 SETUP_SOLDR_V0_4_3_SHA = "6c48a0946390a3520a853e30fe417db7465b9119"
@@ -37,8 +37,8 @@ SETUP_SOLDR_USE_RE = re.compile(
     r"\buses:\s*(zackees/setup-soldr(?:/[A-Za-z0-9_.-]+)?)@([^\s#]+)"
 )
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-AUTOFIX_BRANCH_PREFIX = "ci/update-setup-soldr-v0.9.82"
-AUTOFIX_ISSUE_TITLE = "Update setup-soldr workflow pin to current v0.9.82"
+AUTOFIX_BRANCH_PREFIX = "ci/update-setup-soldr-v0"
+AUTOFIX_ISSUE_TITLE = "Update setup-soldr workflow pin to current v0"
 GIT_LS_REMOTE_TIMEOUT_SECS = 300
 SUBPROCESS_TIMEOUT_SECS = 300
 
@@ -124,7 +124,7 @@ def verify_setup_soldr_pins(repo_root: Path = REPO_ROOT) -> None:
             )
         elif ref != current_release_sha:
             errors.append(
-                f"zackees/setup-soldr pin {ref} does not match current v0.9.82 {current_release_sha}"
+                f"zackees/setup-soldr pin {ref} does not match current v0 {current_release_sha}"
             )
 
     if errors:
@@ -140,7 +140,7 @@ def verify_setup_soldr_pins(repo_root: Path = REPO_ROOT) -> None:
                 )
         raise SystemExit("\n".join(errors))
 
-    print(f"zackees/setup-soldr workflow pins match v0.9.82: {current_release_sha}")
+    print(f"zackees/setup-soldr workflow pins match v0: {current_release_sha}")
 
 
 def truthy_env(name: str) -> bool:
@@ -253,7 +253,7 @@ def ensure_update_pr(
     body = "\n".join(
         [
             "## Summary",
-            f"- update executable `zackees/setup-soldr` workflow pins to current `@v0.9.82` `{current_release_sha}`",
+            f"- update executable `zackees/setup-soldr` workflow pins to current `@v0` `{current_release_sha}`",
             "- keep repository SHA-pinning ruleset satisfied while tracking the public major tag",
             "",
             "## Drift Detected",
@@ -336,9 +336,9 @@ def issue_body(
 ) -> str:
     return "\n".join(
         [
-            "`zackees/setup-soldr@v0.9.82` moved, but this repository requires full-SHA action pins.",
+            "`zackees/setup-soldr@v0` moved, but this repository requires full-SHA action pins.",
             "",
-            f"Current `@v0.9.82`: `{current_release_sha}`",
+            f"Current `@v0`: `{current_release_sha}`",
             f"Update PR: {pr_url}",
             *(["", f"Detected by: {run_url}"] if run_url else []),
             "",

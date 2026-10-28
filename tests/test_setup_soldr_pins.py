@@ -23,7 +23,7 @@ def executable_yaml(text: str) -> str:
 # `git ls-remote`, so every PR turned red whenever upstream moved a release -- a
 # failure with no relationship to the change under review. The pin-drift check
 # still exists, but only where it belongs: the `Verify setup-soldr pin matches
-# v0.9.82` step in .github/workflows/setup-soldr-action.yml, which runs the same
+# v0` step in .github/workflows/setup-soldr-action.yml, which runs the same
 # script as `continue-on-error: true` (warns yellow, never blocks). Pin bumps
 # are handled out-of-band. The hermetic tests below still cover the verifier's
 # parsing/autofix logic without touching the network.

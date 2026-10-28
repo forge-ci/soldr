@@ -70,7 +70,7 @@ jobs:
           submodules: recursive
 
       - id: setup-soldr
-        # zackees/setup-soldr@v0.9.82 pinned to a full SHA per the repo
+        # zackees/setup-soldr@v0 pinned to a full SHA per the repo
         # ruleset. Disable setup-soldr's own caching — the
         # cache-delta-experiment action owns caching for this
         # workflow. Build-cache + target-cache off for the same
@@ -90,7 +90,7 @@ jobs:
         # before the release-auto workflow has built and published
         # the matching tarball; setup-soldr fetches by tag, so an
         # unpublished version 404s here.
-        uses: zackees/setup-soldr@a07bab94f16124b5c6857b137a237a53a61e06d1
+        uses: zackees/setup-soldr@2f4be9f8f5806fbe0e8e16cc3534489d147da094
         with:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
           cook-delta: false
@@ -192,7 +192,7 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: zackees/setup-soldr@a07bab94f16124b5c6857b137a237a53a61e06d1
+      - uses: zackees/setup-soldr@2f4be9f8f5806fbe0e8e16cc3534489d147da094
         with:
           cook-delta: false
           # 0.7.29 brings `soldr cook` — see delta job above for why.

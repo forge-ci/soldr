@@ -129,7 +129,7 @@ jobs:
         run: rustup toolchain install 1.98.1 --profile minimal --no-self-update  # ci-lint: allow RUST-001 bootstrap: pre-seeds ~/.rustup before setup-soldr puts soldr on PATH (soldr#1340)
 
       - name: Setup soldr build cache
-        uses: zackees/setup-soldr@a07bab94f16124b5c6857b137a237a53a61e06d1
+        uses: zackees/setup-soldr@2f4be9f8f5806fbe0e8e16cc3534489d147da094
         env:
           ACTION_WORKSPACE: ${{ github.workspace }}/soldr
         with:
