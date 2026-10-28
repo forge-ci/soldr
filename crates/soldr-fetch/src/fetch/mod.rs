@@ -739,6 +739,10 @@ fn smoke_command(
     arg: &str,
 ) -> std::process::Command {
     let mut command = std::process::Command::new(binary_path);
+    // cargo-llvm-cov requires the subcommand argument even for these probes.
+    if cache_name == "cargo-llvm-cov" {
+        command.arg("llvm-cov");
+    }
     command.arg(arg);
     if let Some(toolchain) = smoke_rustup_toolchain(cache_name, target) {
         command.env("RUSTUP_TOOLCHAIN", toolchain);
