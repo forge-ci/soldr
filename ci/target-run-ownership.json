@@ -79,6 +79,7 @@
       "binary": "cargo_front_door",
       "modules": [
         "cli_cargo_dylint_link",
+        "cli_cargo_porcelain",
         "cli_cargo_strip_failure",
         "cli_cargo_toolchain_env",
         "cli_cargo_trampoline_workspace",
