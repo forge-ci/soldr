@@ -669,4 +669,6 @@ mod linker_project_config_tests;
 #[cfg(test)]
 mod scrub_pool_tests;
 #[cfg(test)]
+mod signal_tests;
+#[cfg(test)]
 mod tests;

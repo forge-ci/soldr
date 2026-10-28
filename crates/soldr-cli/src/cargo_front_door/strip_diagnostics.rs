@@ -31,7 +31,14 @@ impl StripOutcome {
         if self.0.is_some() {
             1
         } else {
-            status.code().unwrap_or(-1)
+            status.code().unwrap_or_else(|| {
+                let returncode = soldr_platform::process::test_child::returncode(status);
+                if returncode < 0 {
+                    returncode.saturating_sub(128)
+                } else {
+                    -1
+                }
+            })
         }
     }
 

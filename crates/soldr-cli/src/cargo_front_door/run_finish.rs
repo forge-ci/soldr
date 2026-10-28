@@ -264,6 +264,12 @@ fn complete_cargo_run(
     normalized: NormalizedArgs,
 ) -> Result<i32, SoldrError> {
     let paths = &prepared.paths;
+    if status.code().is_none() {
+        let returncode = soldr_platform::process::test_child::returncode(&status);
+        if returncode < 0 {
+            eprintln!("soldr: cargo terminated by signal {}", returncode.saturating_neg());
+        }
+    }
     let captured_stderr_for_diagnosis = diagnostic_capture;
     crate::verdict::gate::note_output(captured_stderr_for_diagnosis.as_deref());
     let compile_fallback_log =
