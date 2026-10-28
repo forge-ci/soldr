@@ -283,7 +283,10 @@ def test_windows_msvc_ci_builds_and_archives_real_tests() -> None:
 
     assert "test archive missing" not in target_run
     assert '"$SOLDR_BIN" --version' not in target_run
-    assert '"$SOLDR_BIN" replay-nextest --runner "$NEXTEST_BIN" -- nextest run' in target_run
+    assert (
+        '"$SOLDR_BIN" replay-nextest --runner "$NEXTEST_BIN" -- nextest run'
+        in target_run
+    )
     assert 'echo "SOLDR_BIN=$soldr_bin"' in target_run
     assert (
         "case '${{ inputs.target }}' in *-pc-windows-*) suffix=\".exe\"" in target_run

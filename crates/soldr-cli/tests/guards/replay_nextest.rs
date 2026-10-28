@@ -1,7 +1,8 @@
 //! Process-level coverage for offline nextest archive replay.
 
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::too_many_lines)]
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::path::Path;
 use std::process::Command;
 
 use crate::common;
@@ -92,57 +93,46 @@ fn replay_forwards_exit_and_signal_and_rejects_before_spawning() {
         .expect("run soldr with explicit version pin");
     assert!(!explicit_pin.status.success());
     assert_eq!(std::fs::read_to_string(&marker).expect("marker"), previous);
-    for mode_option in [vec!["--zccache-mode", "copy"], vec!["--zccache-mode=copy"]] {
-        for pin_by_argument in [false, true] {
-            let mut cmd = Command::new(common::soldr_bin());
-            cmd.current_dir(tmp.path())
-                .env("REPLAY_MARKER", &marker)
-                .env("RUSTUP_HOME", tmp.path().join("missing-rustup"))
-                .env("CARGO_HOME", tmp.path().join("missing-cargo"));
-            if pin_by_argument {
-                cmd.env_remove("SOLDR_AS").args(["--as", "0.0.1"]);
-            } else {
-                cmd.env("SOLDR_AS", "0.0.1");
-            }
-            cmd.args(&mode_option);
-            let output = cmd
-                .args(["replay-nextest", "--runner"])
-                .arg(&runner)
-                .args(["--", "nextest", "--version"])
-                .output()
-                .expect("run with global mode");
-            assert!(!output.status.success());
-            assert!(
-                String::from_utf8_lossy(&output.stderr).contains("version overrides"),
-                "stderr: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert_eq!(std::fs::read_to_string(&marker).expect("marker"), previous);
-        }
-    }
-    for mode_option in [vec!["--zccache-mode", "copy"], vec!["--zccache-mode=copy"]] {
-        for pin_by_argument in [false, true] {
-            let mut cmd = Command::new(common::soldr_bin());
-            cmd.current_dir(tmp.path()).env("REPLAY_MARKER", &marker);
-            if pin_by_argument {
-                cmd.env_remove("SOLDR_AS").args(["--as", "0.0.1"]);
-            } else {
-                cmd.env("SOLDR_AS", "0.0.1");
-            }
-            cmd.args(&mode_option);
-            let output = cmd
-                .args(["replay-nextest", "--", "nextest", "--version"])
-                .output()
-                .expect("run malformed replay with version pin");
-            assert!(!output.status.success());
-            assert!(
-                String::from_utf8_lossy(&output.stderr).contains("version overrides"),
-                "stderr: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert_eq!(std::fs::read_to_string(&marker).expect("marker"), previous);
-        }
-    }
+    assert_mode_pins_rejected(tmp.path(), &runner, &marker, &previous, false);
+    assert_mode_pins_rejected(tmp.path(), &runner, &marker, &previous, true);
     assert!(!tmp.path().join("missing-rustup").exists());
     assert!(!tmp.path().join("missing-cargo").exists());
+}
+
+fn assert_mode_pins_rejected(
+    root: &Path,
+    runner: &Path,
+    marker: &Path,
+    previous: &str,
+    malformed: bool,
+) {
+    for mode_option in [vec!["--zccache-mode", "copy"], vec!["--zccache-mode=copy"]] {
+        for pin_by_argument in [false, true] {
+            let mut cmd = Command::new(common::soldr_bin());
+            cmd.current_dir(root)
+                .env("REPLAY_MARKER", marker)
+                .env("RUSTUP_HOME", root.join("missing-rustup"))
+                .env("CARGO_HOME", root.join("missing-cargo"));
+            if pin_by_argument {
+                cmd.env_remove("SOLDR_AS").args(["--as", "0.0.1"]);
+            } else {
+                cmd.env("SOLDR_AS", "0.0.1");
+            }
+            cmd.args(&mode_option).arg("replay-nextest");
+            if !malformed {
+                cmd.arg("--runner").arg(runner);
+            }
+            let output = cmd
+                .args(["--", "nextest", "--version"])
+                .output()
+                .expect("run replay with global mode and version pin");
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("version overrides"),
+                "stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(std::fs::read_to_string(marker).expect("marker"), previous);
+        }
+    }
 }
