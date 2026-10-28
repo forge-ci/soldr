@@ -222,7 +222,7 @@ jobs:
       - name: Install pinned Soldr and prepare target environment
         id: setup_soldr
         continue-on-error: ${{ matrix.setup_target != '' }}
-        uses: zackees/setup-soldr@10a58e5c892077586794cca1086c4a8162206bef
+        uses: zackees/setup-soldr@2f4be9f8f5806fbe0e8e16cc3534489d147da094
         with:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
           cook-delta: false

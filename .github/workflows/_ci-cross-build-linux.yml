@@ -193,7 +193,7 @@ jobs:
       # lane's target-specific compiler/SDK setup and passes the real
       # target/profile shape.
       - name: Setup soldr build cache (Rust toolchain only)
-        uses: zackees/setup-soldr@10a58e5c892077586794cca1086c4a8162206bef
+        uses: zackees/setup-soldr@2f4be9f8f5806fbe0e8e16cc3534489d147da094
         with:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
           cook-delta: false
@@ -469,7 +469,7 @@ jobs:
         # empty string is a valid spelling of `full`, so that path is unchanged.
         env:
           SOLDR_SAVE_PROFILE: ${{ inputs.bootstrap_artifact_name != '' && 'cook' || '' }}
-        uses: zackees/setup-soldr/cook@10a58e5c892077586794cca1086c4a8162206bef
+        uses: zackees/setup-soldr/cook@2f4be9f8f5806fbe0e8e16cc3534489d147da094
         with:
           cache: ${{ (inputs.target == 'x86_64-pc-windows-gnu' || inputs.target == 'x86_64-unknown-linux-gnu' || inputs.target == 'aarch64-pc-windows-msvc' || inputs.target == 'x86_64-pc-windows-msvc' || inputs.target == 'aarch64-unknown-linux-gnu') && 'true' || 'false' }}
           # soldr#3019: fatal on `main`, a warning on pull requests.

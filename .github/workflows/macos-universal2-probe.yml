@@ -67,7 +67,7 @@ jobs:
           free -h
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: zackees/setup-soldr@10a58e5c892077586794cca1086c4a8162206bef # v0
+      - uses: zackees/setup-soldr@2f4be9f8f5806fbe0e8e16cc3534489d147da094 # v0
         with:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
           cook-delta: false

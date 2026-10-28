@@ -111,7 +111,7 @@ jobs:
       - id: setup
         # This is zackees/setup-soldr@v0 pinned to a full SHA
         # because this repository's ruleset requires SHA-pinned actions.
-        uses: zackees/setup-soldr@10a58e5c892077586794cca1086c4a8162206bef
+        uses: zackees/setup-soldr@2f4be9f8f5806fbe0e8e16cc3534489d147da094
         with:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
           cook-delta: false
@@ -194,7 +194,7 @@ jobs:
         run: date +%s > "${{ runner.temp }}/dogfood-zccache-restored-at"
 
       - name: Stop setup-soldr builder cache before dogfood build
-        uses: zackees/setup-soldr/cleanup@10a58e5c892077586794cca1086c4a8162206bef
+        uses: zackees/setup-soldr/cleanup@2f4be9f8f5806fbe0e8e16cc3534489d147da094
 
       - name: Build through soldr
         shell: pwsh
