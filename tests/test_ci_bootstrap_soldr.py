@@ -65,3 +65,12 @@ def test_release_action_smoke_routes_tool_probes_through_soldr() -> None:
     assert "soldr rustc --version" in workflow
     assert "\n          cargo --version" not in workflow
     assert "\n          rustc --version" not in workflow
+
+
+def test_reld_proof_clears_setup_action_linker_override() -> None:
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    steps = workflow["jobs"]["reld-dogfood-proof-linux"]["steps"]
+    proof = next(
+        step for step in steps if step.get("name", "").startswith("Prove reld")
+    )
+    assert "unset SOLDR_LINKER" in proof["run"]

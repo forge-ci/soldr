@@ -1137,6 +1137,9 @@ jobs:
         run: soldr cargo build -p soldr-cli
       - name: Prove reld resolves to an absolute path and tokio_unstable survives
         run: |
+          # setup-soldr defaults SOLDR_LINKER to fast; the proof must exercise
+          # this workspace's own reld selection instead of that override.
+          unset SOLDR_LINKER
           uv run --no-project --python 3.13 python \
             .github/scripts/reld_dogfood_proof.py --soldr-bin target/debug/soldr
 
