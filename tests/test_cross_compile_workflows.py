@@ -94,8 +94,8 @@ def test_windows_behavior_contract_reaches_native_target_runners() -> None:
     replay = _step_block(target_run, "Run owned pre-built native tests")
     archive_assignment = 'archive="artifact/${{ inputs.artifact_name }}-tests.tar.zst"'
     archive_check = 'test -f "$archive"'
-    list_command = '"$NEXTEST_BIN" nextest list'
-    run_command = '"$NEXTEST_BIN" nextest run'
+    list_command = '"$SOLDR_BIN" replay-nextest --runner "$NEXTEST_BIN" -- nextest list'
+    run_command = '"$SOLDR_BIN" replay-nextest --runner "$NEXTEST_BIN" -- nextest run'
     for required in [
         archive_assignment,
         archive_check,
@@ -283,7 +283,10 @@ def test_windows_msvc_ci_builds_and_archives_real_tests() -> None:
 
     assert "test archive missing" not in target_run
     assert '"$SOLDR_BIN" --version' not in target_run
-    assert '"$NEXTEST_BIN" nextest run' in target_run
+    assert (
+        '"$SOLDR_BIN" replay-nextest --runner "$NEXTEST_BIN" -- nextest run'
+        in target_run
+    )
     assert 'echo "SOLDR_BIN=$soldr_bin"' in target_run
     assert (
         "case '${{ inputs.target }}' in *-pc-windows-*) suffix=\".exe\"" in target_run

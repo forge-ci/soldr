@@ -214,6 +214,22 @@
       "reason": "Repository guards read source files or launch fixture commands to enforce platform-independent policy and should run once in canonical validation."
     },
     {
+      "id": "replay-windows-exit-guard",
+      "package": "soldr-cli",
+      "binary": "guards",
+      "modules": ["replay_nextest_windows"],
+      "disposition": "target-replay",
+      "reason": "Windows waits for replay children and must preserve their failure diagnostics without an invented Soldr fault."
+    },
+    {
+      "id": "replay-guard-linux-once",
+      "package": "soldr-cli",
+      "binary": "guards",
+      "modules": ["replay_nextest"],
+      "disposition": "native-linux-once",
+      "reason": "The process fixture is a POSIX shell executable and asserts exact signal propagation; Windows target replay is exercised separately."
+    },
+    {
       "id": "toolchain-linux-once",
       "package": "soldr-cli",
       "binary": "toolchain_env",
@@ -276,6 +292,17 @@
   ],
   "replay_selectors": [
     {
+      "id": "replay-windows-child-diagnostic",
+      "source_id": "replay-windows-exit-guard",
+      "test_prefix": "replay_nextest_windows::",
+      "targets": [
+        "x86_64-pc-windows-msvc",
+        "x86_64-pc-windows-gnu",
+        "aarch64-pc-windows-msvc"
+      ],
+      "reason": "Replay Windows child failures through the native spawn-and-wait path."
+    },
+    {
       "id": "platform-native-modules",
       "source_id": "platform-target-replay",
       "test_prefix": "platform",
@@ -305,6 +332,28 @@
         "aarch64-unknown-linux-musl"
       ],
       "reason": "Unix socket placement, symlink canonicalization, and path overflow use the native filesystem."
+    },
+    {
+      "id": "broker-resurrection-slow-stage",
+      "source_id": "broker-target-replay",
+      "test_name": "cli_broker_resurrection::broker_starts_after_uncontended_image_staging_outlives_lease",
+      "targets": [
+        "x86_64-pc-windows-msvc",
+        "x86_64-pc-windows-gnu",
+        "aarch64-pc-windows-msvc"
+      ],
+      "reason": "Windows cold storage must not lose an uncontended lease while staging the broker image."
+    },
+    {
+      "id": "broker-resurrection-stage-takeover",
+      "source_id": "broker-target-replay",
+      "test_name": "cli_broker_resurrection::stale_image_stager_does_not_replace_a_successor_after_lease_takeover",
+      "targets": [
+        "x86_64-pc-windows-msvc",
+        "x86_64-pc-windows-gnu",
+        "aarch64-pc-windows-msvc"
+      ],
+      "reason": "A Windows image-staging owner must not publish after a successor takes its lease."
     },
     {
       "id": "broker-resurrection-known-bad",

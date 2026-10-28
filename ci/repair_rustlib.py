@@ -1,0 +1,122 @@
+"""Repair an incomplete cached Windows GNU rustlib in the setup-action smoke job.
+
+The action's Rustup home can report this target as installed while its rustlib
+is absent. Keep the toolchain-doctor test strict: restore the target and verify
+that the doctor succeeds before the dogfood test suite starts.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+
+TARGET = "x86_64-pc-windows-gnu"
+
+
+@dataclass(frozen=True)
+class DoctorResult:
+    status: int
+    corrupted: tuple[str, ...]
+
+
+def doctor() -> DoctorResult:
+    with tempfile.TemporaryFile(mode="w+t") as stdout_file:
+        with tempfile.TemporaryFile(mode="w+t") as stderr_file:
+            process = subprocess.run(
+                ["soldr", "toolchain", "doctor", "--json"],
+                stdout=stdout_file,
+                stderr=stderr_file,
+                check=False,
+            )
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout = stdout_file.read()
+            stderr = stderr_file.read()
+    try:
+        report = json.loads(stdout)
+        probes = report["probes"]
+        rustlib = next(
+            probe for probe in probes if probe["name"] == "rustlib-integrity"
+        )
+        corrupted = rustlib["details"].get("corrupted_targets", [])
+        if not isinstance(corrupted, list) or not all(
+            isinstance(item, str) for item in corrupted
+        ):
+            raise ValueError("invalid corrupted_targets in toolchain doctor report")
+    except (
+        json.JSONDecodeError,
+        KeyError,
+        StopIteration,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise RuntimeError(
+            f"could not read soldr toolchain doctor report: {error}\n"
+            f"stdout: {stdout}\nstderr: {stderr}"
+        ) from error
+    return DoctorResult(process.returncode, tuple(corrupted))
+
+
+def main() -> int:
+    initial = doctor()
+    if not initial.corrupted:
+        if initial.status != 0:
+            print(
+                "soldr toolchain doctor failed for a reason other than rustlib integrity",
+                file=sys.stderr,
+            )
+        return initial.status
+    if initial.corrupted != (TARGET,):
+        print(
+            f"unexpected corrupt rustlib targets: {initial.corrupted}", file=sys.stderr
+        )
+        return 1
+
+    rustup_home = Path(os.environ.get("RUSTUP_HOME", ""))
+    if (
+        rustup_home.name not in ("rustup-home", "rustup")
+        or rustup_home.parent.name != "setup-soldr-action-state"
+    ):
+        raise RuntimeError(
+            "refusing to replace a toolchain outside the setup action state"
+        )
+    with Path("rust-toolchain.toml").open("rb") as stream:
+        toolchain = tomllib.load(stream)["toolchain"]
+    channel = toolchain["channel"]
+    if channel != os.environ.get("RUSTUP_TOOLCHAIN"):
+        raise RuntimeError("setup action toolchain differs from rust-toolchain.toml")
+
+    print(f"reinstalling cached toolchain {channel} for {TARGET}", flush=True)
+    subprocess.run(["soldr", "rustup", "toolchain", "uninstall", channel], check=True)
+    install = [
+        "soldr",
+        "rustup",
+        "toolchain",
+        "install",
+        channel,
+        "--profile",
+        toolchain["profile"],
+        "--target",
+        TARGET,
+    ]
+    for component in toolchain.get("components", []):
+        install.extend(["--component", component])
+    subprocess.run(install, check=True)
+    repaired = doctor()
+    if repaired.status != 0 or repaired.corrupted:
+        print(
+            f"rustlib repair did not pass toolchain doctor: {repaired.corrupted}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

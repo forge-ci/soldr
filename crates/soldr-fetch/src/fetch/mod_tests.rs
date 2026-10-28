@@ -324,6 +324,26 @@ fn darwin_x64_catalogue_mappings_cover_blessed_mac_x86() {
 // soldr#936 smoke-test-or-evict regression tests.
 
 #[test]
+fn cargo_llvm_cov_smoke_uses_cargo_subcommand_protocol() {
+    let target = TargetTriple::host().unwrap();
+    let command = smoke_command(
+        std::path::Path::new("cargo-llvm-cov"),
+        "cargo-llvm-cov",
+        &target,
+        "--version",
+    );
+    let args: Vec<_> = command.get_args().collect();
+    assert_eq!(args, ["llvm-cov", "--version"]);
+    let help = smoke_command(
+        std::path::Path::new("cargo-llvm-cov"),
+        "cargo-llvm-cov",
+        &target,
+        "--help",
+    );
+    assert_eq!(help.get_args().collect::<Vec<_>>(), ["llvm-cov", "--help"]);
+}
+
+#[test]
 fn smoke_test_missing_file_errors() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let bogus = tmp.path().join("not-a-binary");

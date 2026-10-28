@@ -308,6 +308,25 @@ fn template_renders_documented_variables() {
 }
 
 #[test]
+fn pkg_fmt_names_round_trip_without_accepting_extra_spellings() {
+    let cases = [
+        ("tar", PkgFmt::Tar),
+        ("tbz2", PkgFmt::Tbz2),
+        ("tgz", PkgFmt::Tgz),
+        ("txz", PkgFmt::Txz),
+        ("tzstd", PkgFmt::Tzstd),
+        ("zip", PkgFmt::Zip),
+        ("bin", PkgFmt::Bin),
+    ];
+    for (name, format) in cases {
+        assert_eq!(PkgFmt::parse(name).unwrap(), format);
+        assert_eq!(<&'static str>::from(format), name);
+    }
+    assert!(PkgFmt::parse("Tar").is_err());
+    assert!(PkgFmt::parse("unknown").is_err());
+}
+
+#[test]
 fn metadata_overrides_and_absence() {
     let target = TargetTriple::from_triple("x86_64-pc-windows-msvc").expect("triple");
     let toml = "[package]\nname = \"t\"\nversion = \"1.0.0\"\n[package.metadata.binstall]\npkg-url = \"https://a/{ name }.tgz\"\n[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]\npkg-url = \"https://w/{ name }.zip\"\npkg-fmt = \"zip\"\n";

@@ -47,19 +47,12 @@ pub fn hold_limit() -> Duration {
 }
 
 /// A timeout-flavor acquisition gave up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("lock not acquired within {waited:?}")]
 pub struct LockTimeout {
     /// How long the caller waited before giving up.
     pub waited: Duration,
 }
-
-impl std::fmt::Display for LockTimeout {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "lock not acquired within {:?}", self.waited)
-    }
-}
-
-impl std::error::Error for LockTimeout {}
 
 // ---------------------------------------------------------------------------
 // Registry and watchdog

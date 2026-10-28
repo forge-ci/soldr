@@ -286,7 +286,7 @@ def test_executor_contract_owns_every_3084_handoff_edge() -> None:
     """soldr#3084 may close only when soldr#3294 owns every sharp edge."""
     contract = _contract_document()
 
-    assert contract["schema_version"] == 1
+    assert contract["schema_version"] == 2
     assert contract["superseded_issue"] == "soldr#3084"
     assert contract["owner_issue"] == "soldr#3294"
     assert contract["target"] == "x86_64-apple-darwin"
@@ -296,7 +296,14 @@ def test_executor_contract_owns_every_3084_handoff_edge() -> None:
         "blocked_by": ["soldr#3088", "soldr#3136"],
         "unavailable_action": "fail-closed-with-no-run-guidance",
     }
-    assert contract["nextest"]["argv_prefix"] == ["cargo-nextest", "nextest"]
+    assert contract["nextest"]["argv_prefix"] == [
+        "$SOLDR_BIN",
+        "replay-nextest",
+        "--runner",
+        "$NEXTEST_BIN",
+        "--",
+        "nextest",
+    ]
     assert contract["nextest"]["archive"] == "tests.tar.zst"
     assert contract["nextest"]["inventory_arguments"] == [
         "--archive-file=$WORK/tests.tar.zst",
@@ -405,7 +412,10 @@ def test_executor_contract_matches_the_emitted_guest_program() -> None:
                 option, value = argument.split("=", maxsplit=1)
                 assert f'{option} "{value}"' in block or f"{option} {value}" in block
 
-    assert '"$NEXTEST_BIN" nextest list' in inventory
+    assert (
+        '"$SOLDR_BIN" replay-nextest --runner "$NEXTEST_BIN" -- nextest list'
+        in inventory
+    )
     assert_arguments(inventory, contract["nextest"]["inventory_arguments"])
     for reuse_arguments in contract["nextest"]["reuse_arguments"].values():
         assert_arguments(inventory, reuse_arguments)

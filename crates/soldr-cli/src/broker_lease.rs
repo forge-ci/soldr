@@ -512,6 +512,7 @@ mod tests {
         let second = BrokerLease::acquire(&path).unwrap();
         assert!(second.generation > first.generation);
         assert!(matches!(first.check_fence(), Err(BrokerLeaseError::Fenced)));
+        assert!(matches!(first.renew(), Err(BrokerLeaseError::Fenced)));
         first.release();
         second
             .check_fence()

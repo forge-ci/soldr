@@ -105,14 +105,16 @@ that archive on the target:
 ```bash
 soldr ci-test --no-run --target <triple>
 # then, on (or emulating) the target:
-cargo-nextest nextest run --archive-file <printed-path> --workspace-remap <checkout>
+soldr replay-nextest --runner <absolute-nextest-binary> -- nextest run --archive-file <printed-path> --workspace-remap <checkout>
 ```
 
 Two things bite consumers here, both observed rather than hypothesised:
 
-* `cargo-nextest` is a **cargo subcommand shim**. Invoked as `cargo-nextest run`
-  it proxies to cargo, which replies `unrecognized subcommand 'run'` — an error
-  that reads like a broken archive. The `nextest` verb is required.
+* Supply the absolute path to the packaged, target-native `cargo-nextest`
+  executable. The `nextest` token is required. `replay-nextest` accepts only
+  version probes and archive-backed list/run operations; it does not install
+  a toolchain or download a runner. Tests in the archive can still use tools
+  or network if their own execution environment permits it.
 * A replay needs the **project source**, because the archive records its
   workspace root. Without it: `error: workspace root manifest at ... does not
   exist`. `--workspace-remap` must point at a real checkout.

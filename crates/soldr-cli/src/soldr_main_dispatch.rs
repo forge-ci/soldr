@@ -11,7 +11,10 @@ fn exit_with(result: Result<i32, SoldrError>) -> Result<(), SoldrError> {
     guarded_exit(result?)
 }
 
-async fn run_cli(cli: Cli) -> Result<(), SoldrError> {
+async fn run_cli(
+    cli: Cli,
+    inherited_provenance: &crate::replay_nextest::InheritedProvenance,
+) -> Result<(), SoldrError> {
     // #1364: a truthy `ZCCACHE_DISABLE` acts like `--no-cache` so the
     // standard zccache kill-switch actually bypasses the wrapper/daemon.
     let flags = DispatchFlags {
@@ -25,7 +28,8 @@ async fn run_cli(cli: Cli) -> Result<(), SoldrError> {
     cli.export_global_env();
 
     // Each family handles its own commands and hands any other back.
-    let Some(command) = dispatch_build_command(cli.command, flags).await? else {
+    let Some(command) = dispatch_build_command(cli.command, flags, inherited_provenance).await?
+    else {
         return Ok(());
     };
     let Some(command) = dispatch_toolchain_command(command, flags).await? else {
@@ -38,6 +42,7 @@ async fn run_cli(cli: Cli) -> Result<(), SoldrError> {
 async fn dispatch_build_command(
     command: Commands,
     flags: DispatchFlags,
+    inherited_provenance: &crate::replay_nextest::InheritedProvenance,
 ) -> Result<Option<Commands>, SoldrError> {
     let DispatchFlags {
         cache_enabled,
@@ -53,7 +58,7 @@ async fn dispatch_build_command(
         }
         Commands::Ld(args) => exit_with(crate::ld_cmd::run_ld(args).await),
         Commands::Link(args) => exit_with(crate::ld_cmd::run_link(args).await),
-        Commands::Wheel(args) => run_wheel_command(&args, flags).await,
+        Commands::Wheel(args) => run_wheel_command(&args, flags, inherited_provenance).await,
         Commands::Cargo { args } => run_cargo_command(args, flags).await,
         Commands::Dylint { args } => exit_with(
             Box::pin(run_dylint_command(
@@ -71,6 +76,11 @@ async fn dispatch_build_command(
         }
         Commands::Cook { args } => exit_with(cook::run_cook(&args, cache_enabled).await),
         Commands::Exec { args } => exit_with(exec_cmd::run_exec(&args)),
+        Commands::ReplayNextest { runner, args } => exit_with(crate::replay_nextest::run(
+            &runner,
+            &args,
+            inherited_provenance,
+        )),
         Commands::Archive {
             target,
             stage_dir,
@@ -196,6 +206,7 @@ async fn dispatch_state_command(command: Commands, flags: DispatchFlags) -> Resu
         | Commands::BuildFromSource { .. }
         | Commands::Install(_)
         | Commands::Env { .. }
+        | Commands::ReplayNextest { .. }
         | Commands::Rustc { .. }
         | Commands::Rustfmt { .. }
         | Commands::ClippyDriver { .. }
