@@ -37,6 +37,7 @@ c++                    Compile C++ with a catalogue-backed toolchain\n  \
 rustc                  Compile Rust source via the pinned toolchain\n  \
 lint                   Run Soldr's unified Rust and dependency lint suites\n  \
 ci-test                Run the prescribed host-validation DAG\n  \
+replay-nextest         Replay an archived test suite with a packaged runner\n  \
 rustfmt                Format Rust source via the pinned toolchain\n  \
 clippy-driver          Run the clippy linter via the pinned toolchain\n  \
 rustup                 Drop-in passthrough to the system rustup binary\n\n\
@@ -435,6 +436,16 @@ pub(crate) enum Commands {
     ///
     /// Example: `soldr exec cargo-dylint dylint --all`
     Exec {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        args: Vec<String>,
+    },
+    /// Replay prebuilt nextest archives with the specified native runner.
+    ///
+    /// This path does not install a toolchain or fetch a runner. Only version
+    /// probes and archive-backed list/run operations are accepted.
+    ReplayNextest {
+        #[arg(long)]
+        runner: std::path::PathBuf,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         args: Vec<String>,
     },

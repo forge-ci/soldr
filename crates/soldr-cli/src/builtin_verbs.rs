@@ -104,6 +104,7 @@ pub(crate) const SOLDR_BUILTIN_VERBS: &[&str] = &[
     "ci-test",
     // soldr#1059 — PATH-prepending escape hatch for cargo extensions.
     "exec",
+    "replay-nextest",
     "rustc",
     "rustfmt",
     "clippy-driver",

@@ -428,7 +428,7 @@ jobs:
           metadata="${NEXTEST_BIN%/*}/cargo-nextest.json"
           test -f "$metadata"
           expected_version=$(jq -r '.version' "$metadata" | sed 's/^v//')
-          actual_version=$(python .github/scripts/run_target_command.py --execution '${{ inputs.target_execution }}' -- "$NEXTEST_BIN" nextest --version \
+          actual_version=$(python .github/scripts/run_target_command.py --execution '${{ inputs.target_execution }}' -- "$SOLDR_BIN" replay-nextest --runner "$NEXTEST_BIN" -- nextest --version \
             | sed -n 's/.* \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' \
             | head -n1)
           test -n "$actual_version"
@@ -469,7 +469,7 @@ jobs:
           # below consumes what it produced. This first inventory is complete:
           # ownership is validated before partitioning so every declaration
           # must match somewhere in the archive, including on sharded lanes.
-          python .github/scripts/run_target_command.py --execution '${{ inputs.target_execution }}' -- "$NEXTEST_BIN" nextest list \
+          python .github/scripts/run_target_command.py --execution '${{ inputs.target_execution }}' -- "$SOLDR_BIN" replay-nextest --runner "$NEXTEST_BIN" -- nextest list \
             --archive-file "$archive" \
             --extract-to "$NEXTEST_EXTRACT_DIR" \
             --workspace-remap "$GITHUB_WORKSPACE" \
@@ -530,7 +530,7 @@ jobs:
           # List the positively owned partition separately. This filtered
           # inventory is the denominator for execution coverage below, while
           # NEXTEST_ALL_LIST_JSON remains proof that declarations are live.
-          python .github/scripts/run_target_command.py --execution '${{ inputs.target_execution }}' -- "$NEXTEST_BIN" nextest list \
+          python .github/scripts/run_target_command.py --execution '${{ inputs.target_execution }}' -- "$SOLDR_BIN" replay-nextest --runner "$NEXTEST_BIN" -- nextest list \
             "${reuse_args[@]}" \
             --workspace-remap "$GITHUB_WORKSPACE" \
             --profile target-run \
@@ -545,7 +545,7 @@ jobs:
             --list-json "$NEXTEST_LIST_JSON"
 
           set +e
-          python .github/scripts/run_target_command.py --execution '${{ inputs.target_execution }}' -- "$NEXTEST_BIN" nextest run \
+          python .github/scripts/run_target_command.py --execution '${{ inputs.target_execution }}' -- "$SOLDR_BIN" replay-nextest --runner "$NEXTEST_BIN" -- nextest run \
             "${reuse_args[@]}" \
             --workspace-remap "$GITHUB_WORKSPACE" \
             --profile target-run \

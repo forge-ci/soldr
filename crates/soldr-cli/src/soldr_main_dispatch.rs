@@ -71,6 +71,9 @@ async fn dispatch_build_command(
         }
         Commands::Cook { args } => exit_with(cook::run_cook(&args, cache_enabled).await),
         Commands::Exec { args } => exit_with(exec_cmd::run_exec(&args)),
+        Commands::ReplayNextest { runner, args } => {
+            exit_with(crate::replay_nextest::run(&runner, &args))
+        }
         Commands::Archive {
             target,
             stage_dir,
@@ -196,6 +199,7 @@ async fn dispatch_state_command(command: Commands, flags: DispatchFlags) -> Resu
         | Commands::BuildFromSource { .. }
         | Commands::Install(_)
         | Commands::Env { .. }
+        | Commands::ReplayNextest { .. }
         | Commands::Rustc { .. }
         | Commands::Rustfmt { .. }
         | Commands::ClippyDriver { .. }

@@ -174,7 +174,7 @@ pub(crate) fn front_door_command_shape(raw_args: &[String]) -> bool {
     // Don't spawn a broker to service a direct `soldr broker ...`
     // invocation -- that command IS the broker; spawning another one to
     // watch it start would just race its own singleton bind pointlessly.
-    if first_positional == "broker" {
+    if matches!(first_positional.as_str(), "broker" | "replay-nextest") {
         return false;
     }
     true

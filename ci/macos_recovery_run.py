@@ -235,7 +235,7 @@ def executor_contract() -> ExecutorContract:
     are resolved.  This contract does not claim Phase 2 is complete.
     """
     return ExecutorContract(
-        schema_version=1,
+        schema_version=2,
         superseded_issue="soldr#3084",
         owner_issue="soldr#3294",
         target="x86_64-apple-darwin",
@@ -246,9 +246,16 @@ def executor_contract() -> ExecutorContract:
             unavailable_action="fail-closed-with-no-run-guidance",
         ),
         nextest=NextestContract(
-            # cargo-nextest is a Cargo subcommand shim; omitting the second
-            # `nextest` silently routes `run` to Cargo instead.
-            argv_prefix=("cargo-nextest", "nextest"),
+            # Use the target-native Soldr and the exact packaged runner;
+            # cargo-nextest still expects the `nextest` subcommand token.
+            argv_prefix=(
+                "$SOLDR_BIN",
+                "replay-nextest",
+                "--runner",
+                "$NEXTEST_BIN",
+                "--",
+                "nextest",
+            ),
             archive="tests.tar.zst",
             inventory_arguments=(
                 "--archive-file=$WORK/tests.tar.zst",
@@ -693,7 +700,7 @@ def _stage_nextest_version() -> list[str]:
     return [
         "stage_start nextest_version",
         'if [ "$FETCH_CARGO_NEXTEST_OK" -eq 0 ] && [ "$FETCH_NEXTVER_OK" -eq 0 ]; then',
-        '  ACTUAL=$("$NEXTEST_BIN" nextest --version 2>&1 '
+        '  ACTUAL=$("$SOLDR_BIN" replay-nextest --runner "$NEXTEST_BIN" -- nextest --version 2>&1 '
         + "| sed -n 's/.*[^0-9]\\([0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*\\).*/\\1/p' "
         + "| head -n1)",
         '  EXPECTED=$(cat "$WORK/nextest-version.txt")',
@@ -729,7 +736,7 @@ def _stage_nextest_list_all() -> list[str]:
         # nextest canonicalizes --extract-to before extracting and exits 96 when
         # it does not exist yet (seen live on release run 33820395040).
         '  mkdir -p "$WORK/extract"',
-        '  "$NEXTEST_BIN" nextest list \\',
+        '  "$SOLDR_BIN" replay-nextest --runner "$NEXTEST_BIN" -- nextest list \\',
         '    --archive-file "$WORK/tests.tar.zst" \\',
         '    --extract-to "$WORK/extract" \\',
         '    --workspace-remap "$WORK/workspace" \\',
@@ -818,7 +825,7 @@ def _stage_nextest_list_selected(partition: str) -> list[str]:
         'if [ "$LIST_ALL_OK" -eq 0 ] && [ "$FETCH_FILTER_OK" -eq 0 ]; then',
         *_read_recovery_filter(),
         "  # shellcheck disable=SC2086",
-        '  "$NEXTEST_BIN" nextest list $REUSE_ARGS \\',
+        '  "$SOLDR_BIN" replay-nextest --runner "$NEXTEST_BIN" -- nextest list $REUSE_ARGS \\',
         '    --workspace-remap "$WORK/workspace" \\',
         "    --profile target-run \\",
         f"    --partition {partition} \\",
@@ -967,7 +974,7 @@ def _stage_nextest_run(partition: str) -> list[str]:
         "  # no-progress timeout (runs 33928513384, 33935578999). The exit code",
         "  # is carried through a file because Recovery's sh has no PIPESTATUS.",
         "  # shellcheck disable=SC2086",
-        '  ( "$NEXTEST_BIN" nextest run $REUSE_ARGS \\',
+        '  ( "$SOLDR_BIN" replay-nextest --runner "$NEXTEST_BIN" -- nextest run $REUSE_ARGS \\',
         '      --workspace-remap "$WORK/workspace" \\',
         "      --profile target-run \\",
         f"      --partition {partition} \\",

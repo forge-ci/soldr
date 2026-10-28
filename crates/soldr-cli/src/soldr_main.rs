@@ -304,18 +304,34 @@ fn run_main(raw_args: Vec<String>) -> i32 {
     // `pip install .` with a stale `soldr==0.9.6` build backend left a 0.9.6
     // broker behind a 0.9.22 install. The newer soldr's front door spawns it.
     // An `--as` pin never delegates, so it keeps spawning from this image.
-    if pinned_version.is_none() {
+    // Archive replay must use the exact target-native driver supplied by CI,
+    // without probing or delegating to an unrelated global installation.
+    let is_archive_replay = if trampoline_args.iter().any(|arg| arg == "replay-nextest") {
+        let mut unpinned_args = vec![raw_args[0].clone()];
+        unpinned_args.extend(trampoline_args.iter().cloned());
+        crate::replay_nextest::is_invocation(&unpinned_args)
+    } else {
+        false
+    };
+    if is_archive_replay && pinned_version.is_some() {
+        eprintln!(
+            "soldr replay-nextest: version overrides are not permitted for target-native replay"
+        );
+        return 1;
+    }
+    if pinned_version.is_none() && !is_archive_replay {
         if let Some(code) = crate::global_upgrade::maybe_delegate(&raw_args) {
             return code;
         }
         startup_trace::phase(startup_trace::phase::GLOBAL_UPGRADE);
     }
 
-    crate::broker_spawn::maybe_spawn_broker_front_door(&raw_args);
+    if !is_archive_replay {
+        crate::broker_spawn::maybe_spawn_broker_front_door(&raw_args);
+        // soldr#3193: the notice follows the broker spawn.
+        crate::broker_inventory::maybe_toast(&raw_args);
+    }
     startup_trace::phase(startup_trace::phase::BROKER_FRONT_DOOR);
-    // soldr#3193: after the spawn, never before it -- the notice must not
-    // delay the path that makes this invocation work.
-    crate::broker_inventory::maybe_toast(&raw_args);
 
     if let Some(version) = pinned_version {
         if should_trampoline(&version) {
