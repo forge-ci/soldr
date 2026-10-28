@@ -328,3 +328,32 @@ fn the_autospawn_switch_is_off_only_for_an_exact_zero() {
     assert!(broker_enabled_for(Some(OsStr::new("false"))));
     assert!(!broker_enabled_for(Some(OsStr::new("0"))));
 }
+
+#[test]
+fn archived_replay_never_starts_broker() {
+    for args in [
+        vec![
+            "soldr",
+            "replay-nextest",
+            "--runner",
+            "/runner",
+            "--",
+            "nextest",
+            "--version",
+        ],
+        vec![
+            "soldr",
+            "--as",
+            "0.0.1",
+            "replay-nextest",
+            "--runner",
+            "/runner",
+            "--",
+            "nextest",
+            "--version",
+        ],
+    ] {
+        let raw: Vec<String> = args.into_iter().map(str::to_owned).collect();
+        assert!(!front_door_command_shape(&raw));
+    }
+}

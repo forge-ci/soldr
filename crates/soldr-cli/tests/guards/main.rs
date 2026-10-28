@@ -31,6 +31,8 @@ mod no_timed_test_guard;
 mod phase5_contract;
 mod piped_child_drain_lint;
 mod process_isolation_lint;
+mod replay_nextest;
+mod replay_nextest_windows;
 mod runtime_alias_identity;
 mod static_liblzma;
 mod version_lockstep;

@@ -743,3 +743,140 @@ fn issue_2476_sigstop_owner_is_fenced_after_lease_expiry() {
         "the fenced owner must not spawn a second broker after resume\n{log}"
     );
 }
+
+#[cfg(debug_assertions)]
+struct SlowStageBrokerCleanup(std::path::PathBuf);
+
+#[cfg(debug_assertions)]
+impl Drop for SlowStageBrokerCleanup {
+    fn drop(&mut self) {
+        let mut command = Command::new(common::soldr_bin());
+        common::scrub_outer_soldr_env(&mut command);
+        command
+            .args(["broker", "stop"])
+            .env("HOME", &self.0)
+            .env("USERPROFILE", &self.0);
+        if let Ok(child) = common::tracked_child::spawn_tracked(&mut command) {
+            let _ = child.wait_bounded(Duration::from_secs(15));
+        }
+    }
+}
+
+#[test]
+#[cfg(debug_assertions)]
+fn broker_starts_after_uncontended_image_staging_outlives_lease() {
+    let home = common::unique_temp_dir("broker-slow-image-stage");
+    let cleanup = SlowStageBrokerCleanup(home.clone());
+    let marker = home.join("post-sync-delay-completed");
+    let mut command = front_door_capturing_stderr(&home);
+    command.env("SOLDR_TEST_BROKER_POST_SYNC_PAUSE_MS", "6000");
+    command.env("SOLDR_TEST_BROKER_POST_SYNC_MARKER", &marker);
+    let output = common::tracked_child::spawn_tracked(&mut command)
+        .expect("spawn front door")
+        .wait_bounded(Duration::from_secs(90));
+    let log = wait_for_successful_bind(&home, Instant::now() + Duration::from_secs(15));
+    drop(cleanup);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.timed_out, "front door timed out: {stderr}");
+    assert!(
+        output.status.is_some_and(|status| status.success()),
+        "front door failed: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&marker).ok().as_deref(),
+        Some(b"completed".as_slice()),
+        "post-sync delay did not complete: {stderr}"
+    );
+    assert!(
+        log.contains("stable endpoint bound at"),
+        "broker did not become ready; stderr: {stderr}; log: {log}"
+    );
+    assert!(
+        !stderr.contains("lease was fenced"),
+        "uncontended lease was lost: {stderr}"
+    );
+}
+
+#[cfg(debug_assertions)]
+struct PausedStager {
+    child: Option<TrackedChild>,
+    resume: std::path::PathBuf,
+}
+
+#[cfg(debug_assertions)]
+impl PausedStager {
+    fn finish(mut self) -> common::tracked_child::TrackedOutput {
+        let _ = std::fs::write(&self.resume, b"resume");
+        self.child
+            .take()
+            .expect("tracked stager")
+            .wait_bounded(Duration::from_secs(30))
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for PausedStager {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.resume, b"resume");
+        if let Some(child) = self.child.take() {
+            let _ = child.wait_bounded(Duration::from_secs(30));
+        }
+    }
+}
+
+#[test]
+#[cfg(debug_assertions)]
+fn stale_image_stager_does_not_replace_a_successor_after_lease_takeover() {
+    let home = common::unique_temp_dir("broker-slow-stage-takeover");
+    let cleanup = SlowStageBrokerCleanup(home.clone());
+    let ready = home.join("stage-ready");
+    let resume = home.join("stage-resume");
+    let stale_published = home.join("stale-published");
+    let mut first = front_door_capturing_stderr(&home);
+    first
+        .env("SOLDR_TEST_BROKER_POST_SYNC_PAUSE_MS", "90000")
+        .env("SOLDR_TEST_BROKER_POST_SYNC_READY", &ready)
+        .env("SOLDR_TEST_BROKER_POST_SYNC_RESUME", &resume)
+        .env("SOLDR_TEST_BROKER_PUBLISHED_MARKER", &stale_published);
+    let first = PausedStager {
+        child: Some(common::tracked_child::spawn_tracked(&mut first).expect("spawn first owner")),
+        resume,
+    };
+    assert!(
+        wait_for_path(&ready, Instant::now() + Duration::from_secs(60)),
+        "first owner never reached stage"
+    );
+    std::thread::sleep(Duration::from_secs(6));
+    let mut second = front_door_capturing_stderr(&home);
+    let second = common::tracked_child::spawn_tracked(&mut second)
+        .expect("spawn successor")
+        .wait_bounded(Duration::from_secs(60));
+    let log_before = wait_for_successful_bind(&home, Instant::now() + Duration::from_secs(15));
+    let first = first.finish();
+    let log_after = spawn_log(&home);
+    drop(cleanup);
+    let first_stderr = String::from_utf8_lossy(&first.stderr);
+    let second_stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        !second.timed_out && second.status.is_some_and(|status| status.success()),
+        "successor failed: {second_stderr}"
+    );
+    assert!(
+        log_before.contains("stable endpoint bound at"),
+        "successor did not bind: {second_stderr}; {log_before}"
+    );
+    assert!(!first.timed_out, "former owner timed out: {first_stderr}");
+    assert!(
+        first_stderr.contains("lease was fenced"),
+        "former owner did not observe the successor: {first_stderr}"
+    );
+    assert!(
+        !stale_published.exists(),
+        "former owner published over its successor"
+    );
+    assert_eq!(
+        log_after.matches("stable endpoint bound at").count(),
+        1,
+        "multiple broker binds: {log_after}"
+    );
+}

@@ -174,7 +174,7 @@ pub(crate) fn front_door_command_shape(raw_args: &[String]) -> bool {
     // Don't spawn a broker to service a direct `soldr broker ...`
     // invocation -- that command IS the broker; spawning another one to
     // watch it start would just race its own singleton bind pointlessly.
-    if first_positional == "broker" {
+    if matches!(first_positional.as_str(), "broker" | "replay-nextest") {
         return false;
     }
     true
@@ -814,6 +814,7 @@ fn stage_broker_image(
 
     let source = std::env::current_exe().map_err(|error| error.to_string())?;
     if source == target {
+        lease.renew().map_err(|error| error.to_string())?;
         lease.check_fence().map_err(|error| error.to_string())?;
         return Ok(());
     }
@@ -826,6 +827,7 @@ fn stage_broker_image(
         Ok(())
     };
     if target.exists() && same_file_contents(&source, target, &mut checkpoint)? {
+        lease.renew().map_err(|error| error.to_string())?;
         lease.check_fence().map_err(|error| error.to_string())?;
         return Ok(());
     }
@@ -871,8 +873,15 @@ fn stage_broker_image(
     output.sync_all().map_err(|error| error.to_string())?;
     drop(output);
     drop(input);
+    #[cfg(debug_assertions)]
+    staging_test::pause_after_sync();
+    // A blocking flush or sync can outlive the lease. Renew atomically before
+    // publishing: this succeeds only if our generation still owns the row.
+    lease.renew().map_err(|error| error.to_string())?;
     lease.check_fence().map_err(|error| error.to_string())?;
     replace_staged_image(&temporary, target).map_err(|error| error.to_string())?;
+    #[cfg(debug_assertions)]
+    staging_test::note_publication();
     Ok(())
 }
 
@@ -982,3 +991,7 @@ pub(crate) fn daemon_stdio(log: &std::fs::File) -> DaemonStdio<'_> {
 #[cfg(test)]
 #[path = "broker_spawn_tests.rs"]
 mod tests;
+
+#[cfg(debug_assertions)]
+#[path = "broker_staging_test.rs"]
+mod staging_test;

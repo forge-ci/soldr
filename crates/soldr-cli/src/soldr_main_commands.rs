@@ -2,6 +2,7 @@
 async fn run_wheel_command(
     args: &crate::wheel_cmd::WheelArgs,
     flags: DispatchFlags,
+    inherited_provenance: &crate::replay_nextest::InheritedProvenance,
 ) -> Result<(), SoldrError> {
     // soldr#2139 gap 1. Re-enter through `soldr maturin build ...` so
     // provisioning, toolchain pinning, the build lease, target prep,
@@ -11,7 +12,7 @@ async fn run_wheel_command(
         !flags.cache_enabled,
         flags.trust_inherited_soldr_env,
     )?;
-    guarded_exit(Box::pin(run_with_args("soldr", &argv)).await?);
+    guarded_exit(Box::pin(run_with_args("soldr", &argv, inherited_provenance)).await?);
 }
 
 /// `soldr cargo ...`: the cargo front door.
@@ -40,11 +41,9 @@ fn run_shims_command(json: bool) -> Result<(), SoldrError> {
 async fn run_toolchain_subcommand(subcommand: ToolchainSubcommand) -> Result<(), SoldrError> {
     match subcommand {
         ToolchainSubcommand::Install => exit_with(toolchain::run_toolchain_install()),
-        ToolchainSubcommand::Prepare { target } => {
-            exit_with(crate::toolchain_prepare::run_toolchain_prepare_for_target(
-                target.as_deref(),
-            ))
-        }
+        ToolchainSubcommand::Prepare { target } => exit_with(
+            crate::toolchain_prepare::run_toolchain_prepare_for_target(target.as_deref()),
+        ),
         ToolchainSubcommand::Ensure { json, target } => {
             exit_with(toolchain_ensure::run_toolchain_ensure(json, target).await)
         }
@@ -340,7 +339,8 @@ async fn run_gc_cli(
                 doc,
                 subcommand_caches,
             );
-            match gc_purge_invocation(effective_kind, all, older_than, larger_than, json, dry_run)? {
+            match gc_purge_invocation(effective_kind, all, older_than, larger_than, json, dry_run)?
+            {
                 Some(invocation) => invocation,
                 None => return Ok(()),
             }
@@ -452,7 +452,9 @@ fn gc_purge_invocation(
             Ok(None)
         }
         Some(
-            GcListKind::CargoRegistryCache | GcListKind::CargoGitDb | GcListKind::CargoInstalledBinaries,
+            GcListKind::CargoRegistryCache
+            | GcListKind::CargoGitDb
+            | GcListKind::CargoInstalledBinaries,
         ) => {
             let kind_name = gc_kind_display_name(effective_kind.expect("matched Some"));
             Err(SoldrError::Other(format!(

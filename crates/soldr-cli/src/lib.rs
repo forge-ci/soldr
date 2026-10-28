@@ -379,6 +379,7 @@ mod prepare_state_tests;
 pub mod pyo3_detect;
 pub mod reentrancy_guard;
 pub mod release_sidecar;
+mod replay_nextest;
 pub(crate) mod route_refusal;
 pub(crate) mod route_refusal_sentinel;
 /// soldr#2877 — daemon-mediated resident-permit lease for `cargo fmt`
