@@ -452,3 +452,21 @@ def test_main_publisher_promotes_merged_pr_evidence() -> None:
     assert "GITHUB_TOKEN: ${{ github.token }}" in pre
     assert "args=" not in pre.split("  attestations:", 1)[1]
     assert f"ref: {GATE.CI_LINT_REF}" in pre
+
+
+def test_fleet_evidence_dumps_are_not_tracked(tmp_path: Path) -> None:
+    """soldr#3946: bosn fleet run dumps are run metadata, never source.
+
+    PY-003 forbids capture_output here, so the listing goes to a file.
+    """
+    ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert "/ci/fleet-evidence/" in ignore
+    listing = tmp_path / "ls-files.txt"
+    with listing.open("w", encoding="utf-8") as handle:
+        subprocess.run(
+            ["git", "ls-files", "ci/fleet-evidence"],
+            cwd=ROOT,
+            stdout=handle,
+            check=True,
+        )
+    assert listing.read_text(encoding="utf-8").strip() == ""
