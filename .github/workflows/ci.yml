@@ -571,16 +571,28 @@ jobs:
       # exception; zackees/ci.yml CACHE-025 bans it with no exceptions
       # (maintainer decision 2026-10-02), so the bootstrap driver now builds
       # uncached on a binary-cache miss. Cook still cannot reach it: the build
-      # runs bare `cargo build` with RUSTC_WRAPPER emptied and the job has no
-      # setup-soldr step (soldr#2451).
+      # uses a published soldr solely to build the source driver (soldr#3934).
+      - name: Set up soldr for bootstrap build
+        if: steps.bootstrap_cache.outputs.cache-hit != 'true'
+        uses: zackees/setup-soldr@a07bab94f16124b5c6857b137a237a53a61e06d1
+        with:
+          toolchain: 1.98.1
+          cook-delta: false
+          cache: false
+          build-cache: false
+          target-cache: false
+          cargo-registry-cache: false
+          soldr-mini-cache: false
+          solo-toolchain-cache: false
+          prebuild-deps: none
       - name: Build bootstrap soldr
         if: steps.bootstrap_cache.outputs.cache-hit != 'true'
         shell: bash
         env:
-          RUSTC_WRAPPER: ""
+          SOLDR_RUSTC_WRAPPER: none
         run: |
           set -euo pipefail
-          cargo build --profile dev --package soldr-cli \
+          soldr cargo build --profile dev --package soldr-cli \
             --bin soldr \
             --target x86_64-unknown-linux-gnu
           mkdir -p "$RUNNER_TEMP/soldr-bin"
@@ -1107,8 +1119,22 @@ jobs:
           cache-suffix: ${{ env.PR_CACHE_TAG }}
       - name: Install rustup 1.98.1
         run: rustup toolchain install 1.98.1 --profile minimal --no-self-update  # ci-lint: allow RUST-001 bootstrap: pre-seeds ~/.rustup before setup-soldr puts soldr on PATH (soldr#1340)
+      - name: Set up soldr for local driver build
+        uses: zackees/setup-soldr@a07bab94f16124b5c6857b137a237a53a61e06d1
+        with:
+          toolchain: 1.98.1
+          cook-delta: false
+          cache: false
+          build-cache: false
+          target-cache: false
+          cargo-registry-cache: false
+          soldr-mini-cache: false
+          solo-toolchain-cache: false
+          prebuild-deps: none
       - name: Build local soldr driver
-        run: cargo build -p soldr-cli  # ci-lint: allow RUST-001 bootstrap: builds soldr from source before any soldr exists in this job
+        env:
+          SOLDR_RUSTC_WRAPPER: none
+        run: soldr cargo build -p soldr-cli
       - name: Prove reld resolves to an absolute path and tokio_unstable survives
         run: |
           uv run --no-project --python 3.13 python \
