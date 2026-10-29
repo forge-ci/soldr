@@ -4,7 +4,7 @@
 
 use super::porcelain::*;
 use crate::build_log_meta::utc_compact_timestamp;
-use crate::cargo_front_door::cache_states::DeferredCacheDrain;
+use crate::cargo_front_door::cache_annotations::DeferredCacheDrain;
 use crate::core::SoldrPaths;
 use crate::{EnvVarGuard, TEST_PROCESS_ENV_LOCK};
 

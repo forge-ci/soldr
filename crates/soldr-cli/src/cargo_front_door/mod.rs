@@ -36,6 +36,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wait_timeout::ChildExt;
 
 mod build_session;
+pub(crate) mod cache_annotations; // soldr#3924 — where those annotations go
 mod cache_plan;
 pub(crate) mod cache_states; // soldr#2302 — HIT/MISS annotations + stats
 mod clang_cl_shim;

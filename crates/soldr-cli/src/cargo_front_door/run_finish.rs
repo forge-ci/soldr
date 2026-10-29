@@ -18,7 +18,7 @@ struct FrontDoorBuildSession {
     /// Where a `--porcelain` run's per-unit cache annotations went instead of
     /// stderr. `None` for a default run (its annotations streamed live) and for
     /// a run with no cache session.
-    cache_aux: Option<cache_states::DeferredCacheLines>,
+    cache_aux: Option<cache_annotations::DeferredCacheLines>,
 }
 
 impl FrontDoorBuildSession {

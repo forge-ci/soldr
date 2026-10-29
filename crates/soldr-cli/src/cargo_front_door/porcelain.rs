@@ -59,7 +59,7 @@
 //! own per-unit `soldr[cache] <crate> [HIT!/MISS]` annotations (soldr#2302) to
 //! stderr, and those leaked into a `--porcelain` caller's transcript even
 //! though its JSON already carries the counts. They are now deferred by
-//! [`super::cache_states::CacheLineSink::for_capture`] and appended to the run
+//! [`super::cache_annotations::CacheLineSink::for_capture`] and appended to the run
 //! log as their own labelled section
 //! ([`append_deferred_annotations`]) — preserved, not dropped, and identified
 //! as a separate source because their order is the compile journal's rather
@@ -76,7 +76,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::cache_states::DeferredCacheDrain;
+use super::cache_annotations::DeferredCacheDrain;
 use crate::build_log_meta::{sanitize_cwd_slug, utc_compact_timestamp};
 use crate::core::SoldrPaths;
 
