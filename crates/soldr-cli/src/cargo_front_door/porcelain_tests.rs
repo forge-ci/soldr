@@ -165,22 +165,20 @@ fn failure_report_reports_the_process_exit_code() {
     assert_eq!(report.summary.error_count, 1);
 }
 
-#[cfg(unix)]
 #[test]
 fn signal_killed_child_reports_the_code_the_process_exits_with() {
-    use std::os::unix::process::ExitStatusExt;
-
-    // A signalled child has no numeric exit code, so `effective_exit_code`
-    // answers -1 while the process exits 1. The JSON must not disagree.
-    let signalled = std::process::ExitStatus::from_raw(0x000f); // SIGTERM
-    assert_eq!(signalled.code(), None);
-    assert_eq!(process_exit_code(&signalled, -1), 1);
-    assert_eq!(process_exit_code(&signalled, 1), 1);
-
-    // A normal failure code passes through untouched.
-    let exited = std::process::ExitStatus::from_raw(101 << 8);
-    assert_eq!(exited.code(), Some(101));
-    assert_eq!(process_exit_code(&exited, 101), 101);
+    // A signalled child has no `ExitStatus::code`, so `effective_exit_code`
+    // answers -1 while the process exits FAILURE_EXIT_CODE. Expressed on
+    // `status.code()` so it needs no host-cfg selection.
+    assert_eq!(process_exit_code(-1, None), FAILURE_EXIT_CODE);
+    assert_eq!(
+        process_exit_code(-1, Some(101)),
+        101,
+        "a real code must never be replaced by the -1 sentinel"
+    );
+    assert_eq!(process_exit_code(101, Some(101)), 101);
+    assert_eq!(process_exit_code(0, Some(0)), 0);
+    assert_eq!(process_exit_code(1, None), 1, "an explicit code wins");
 }
 
 #[test]
