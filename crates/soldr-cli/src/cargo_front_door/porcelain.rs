@@ -172,23 +172,20 @@ pub(super) struct RunReportInputs<'a> {
     pub(super) output: Option<&'a str>,
 }
 
-/// The exit code this process will actually report.
+/// The exit code this process will actually report for `status`.
 ///
 /// [`StripOutcome::effective_exit_code`] answers `-1` when the child died from a
 /// signal, because an `ExitStatus` carries no numeric code then. The process
-/// itself exits `status.code().unwrap_or(FAILURE_EXIT_CODE)`, so emitting `-1`
-/// would make the JSON disagree with `$?` for the same run. Normalize to the code
-/// the process uses; the durable log keeps the signal evidence.
-///
-/// Takes `status.code()` rather than the `ExitStatus` so the rule is testable on
-/// every host without host-`cfg` selection (dylint: `ban_platform_cfg_outside_boundary`).
+/// itself exits `status.code().unwrap_or(1)`, so emitting `-1` would make the
+/// JSON disagree with `$?` for the same run. Normalize to the code the process
+/// uses; the durable log keeps the signal evidence.
 ///
 /// [`StripOutcome::effective_exit_code`]: super::strip_diagnostics::StripOutcome::effective_exit_code
-pub(super) fn process_exit_code(effective: i32, status_code: Option<i32>) -> i32 {
+pub(super) fn process_exit_code(status: &std::process::ExitStatus, effective: i32) -> i32 {
     if effective >= 0 {
         return effective;
     }
-    status_code.unwrap_or(FAILURE_EXIT_CODE)
+    status.code().unwrap_or(FAILURE_EXIT_CODE)
 }
 
 /// Build the report for a run that reached the capture stage (success,

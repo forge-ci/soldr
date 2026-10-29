@@ -323,7 +323,7 @@ fn complete_cargo_run(
     let porcelain_report = porcelain_log.as_ref().map(|artifact| {
         porcelain::report_for_run(&porcelain::RunReportInputs {
             command: &porcelain::command_string(&prepared.args),
-            exit_code: porcelain::process_exit_code(effective_exit_code, status.code()),
+            exit_code: porcelain::process_exit_code(&status, effective_exit_code),
             started_at_ms: artifact.started_at_ms,
             ended_at_ms: current_unix_ms(),
             log_path: Some(artifact.path.clone()),
