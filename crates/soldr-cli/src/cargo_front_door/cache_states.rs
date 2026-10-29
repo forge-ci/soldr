@@ -51,7 +51,7 @@
 use std::io::{IsTerminal, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -66,6 +66,103 @@ pub(crate) const NO_CACHE_STATES_ENV_VAR: &str = "SOLDR_NO_CACHE_STATES";
 
 /// How often the tail thread re-reads the journal for new records.
 const TAIL_POLL: Duration = Duration::from_millis(100);
+
+/// Where a per-unit annotation line is written.
+///
+/// stderr is the surface an interactive run and a CI log see, and it stays the
+/// default. A `--porcelain` run asked for exactly one JSON line on stdout and
+/// nothing else, so its annotations are *deferred*: buffered here and appended
+/// to the durable porcelain run log afterwards
+/// ([`super::porcelain::append_deferred_annotations`]). They are moved, never
+/// suppressed -- the log is the artifact that carries them, which is the rule
+/// soldr#3929 sets for anything taken off the agent's stream.
+#[derive(Clone)]
+pub(crate) enum CacheLineSink {
+    Stderr,
+    Deferred(DeferredCacheLines),
+}
+
+impl CacheLineSink {
+    /// The sink a run in this capture mode uses.
+    pub(crate) fn for_capture(porcelain: bool) -> Self {
+        if porcelain {
+            Self::Deferred(DeferredCacheLines::default())
+        } else {
+            Self::Stderr
+        }
+    }
+
+    /// The buffer behind a deferred sink, for the caller that will flush it.
+    pub(crate) fn deferred(&self) -> Option<DeferredCacheLines> {
+        match self {
+            Self::Stderr => None,
+            Self::Deferred(buffer) => Some(buffer.clone()),
+        }
+    }
+
+    fn write(&self, line: String) {
+        match self {
+            Self::Stderr => eprintln!("{line}"),
+            Self::Deferred(buffer) => buffer.push(line),
+        }
+    }
+}
+
+/// Bound on the annotations one run holds in memory before it starts counting
+/// omissions. A cold workspace build emits one line per compiled unit, so this
+/// is far above any realistic build; it exists so a pathological journal cannot
+/// make soldr grow without bound. The compile journal keeps the complete
+/// record, and the log section states how many lines were left out.
+const MAX_DEFERRED_LINES: usize = 5_000;
+
+/// The annotations a porcelain run kept off stderr, in journal order.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct DeferredCacheDrain {
+    pub(crate) lines: Vec<String>,
+    pub(crate) omitted: usize,
+}
+
+/// The shared buffer a deferred sink writes into.
+#[derive(Clone, Default)]
+pub(crate) struct DeferredCacheLines {
+    inner: Arc<Mutex<DeferredBuffer>>,
+}
+
+#[derive(Default)]
+struct DeferredBuffer {
+    lines: Vec<String>,
+    omitted: usize,
+}
+
+impl DeferredCacheLines {
+    fn push(&self, line: String) {
+        let Ok(mut buffer) = self.inner.lock() else {
+            return;
+        };
+        if buffer.lines.len() < MAX_DEFERRED_LINES {
+            buffer.lines.push(line);
+        } else {
+            buffer.omitted += 1;
+        }
+    }
+
+    /// Take everything buffered so far. Called once, after the tail is joined.
+    pub(crate) fn drain(&self) -> DeferredCacheDrain {
+        let Ok(mut buffer) = self.inner.lock() else {
+            return DeferredCacheDrain::default();
+        };
+        DeferredCacheDrain {
+            lines: std::mem::take(&mut buffer.lines),
+            omitted: std::mem::take(&mut buffer.omitted),
+        }
+    }
+}
+
+/// A started tail plus the buffer its lines were deferred into, if any.
+pub(crate) struct CacheStateTailStart {
+    pub(crate) tail: Option<CacheStateTail>,
+    pub(crate) deferred: Option<DeferredCacheLines>,
+}
 
 /// Whether the cache-states surfaces are enabled for this run.
 ///
@@ -167,12 +264,16 @@ fn json_u64(value: &serde_json::Value, key: &str) -> Option<u64> {
 /// Start the live per-unit tail for a cache-enabled build. Returns `None`
 /// (printing nothing) for a `--no-cache` run with no session or when the
 /// surface is disabled — so the front door integrates in one line.
+///
+/// `porcelain` selects the sink: a machine-readable run defers every
+/// annotation into the returned buffer instead of writing it to stderr.
 pub(crate) fn start_tail(
     cache_plan: &CargoCachePlan,
     paths: &SoldrPaths,
     journal_start_offset: u64,
     args: &[String],
-) -> Option<CacheStateTail> {
+    porcelain: bool,
+) -> Option<CacheStateTailStart> {
     cache_plan.zccache_session()?;
     // Stamp with the same elapsed-seconds prefix as the relayed cargo output
     // when that prefix is on, so the two read as one stream in a CI log.
@@ -183,12 +284,16 @@ pub(crate) fn start_tail(
         std::io::stderr().is_terminal(),
     )
     .then(Instant::now);
-    CacheStateTail::start(
+    let sink = CacheLineSink::for_capture(porcelain);
+    let deferred = sink.deferred();
+    let tail = CacheStateTail::start(
         super::embedded_compile_journal_path(paths),
         journal_start_offset,
         stamp_from,
         BuildScope::resolve(args),
-    )
+        sink,
+    );
+    Some(CacheStateTailStart { tail, deferred })
 }
 
 /// Stop and join a tail started by [`start_tail`], draining its final records.
@@ -452,12 +557,13 @@ impl ScopedLines {
     }
 }
 
-/// A live tail over the compile journal that prints per-unit HIT/MISS lines to
-/// stderr as records land, for the lifetime of one cargo run.
+/// A live tail over the compile journal that writes per-unit HIT/MISS lines as
+/// records land, for the lifetime of one cargo run.
 ///
-/// The thread writes whole lines via `eprintln!`; a rare interleave with the
-/// relayed cargo stream is cosmetic and does not warrant sharing a lock with
-/// the front door's output tee.
+/// The thread writes whole lines through its [`CacheLineSink`]; on the default
+/// stderr sink a rare interleave with the relayed cargo stream is cosmetic and
+/// does not warrant sharing a lock with the front door's output tee, and on the
+/// deferred sink nothing is interleaved at all.
 pub(crate) struct CacheStateTail {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
@@ -476,6 +582,7 @@ impl CacheStateTail {
         start_offset: u64,
         stamp_from: Option<Instant>,
         scope: BuildScope,
+        sink: CacheLineSink,
     ) -> Option<Self> {
         if !enabled() {
             return None;
@@ -493,6 +600,7 @@ impl CacheStateTail {
                     stamp_from,
                     &stop_thread,
                     ScopedLines::new(scope),
+                    sink,
                 )
             })
             .ok()?;
@@ -511,11 +619,12 @@ impl CacheStateTail {
     }
 }
 
-fn emit(line: &str, stamp_from: Option<Instant>) {
-    match stamp_from {
-        Some(t0) => eprintln!("{:>8.2} {line}", t0.elapsed().as_nanos() as f64 / 1e9),
-        None => eprintln!("{line}"),
-    }
+fn emit(line: &str, stamp_from: Option<Instant>, sink: &CacheLineSink) {
+    let rendered = match stamp_from {
+        Some(t0) => format!("{:>8.2} {line}", t0.elapsed().as_nanos() as f64 / 1e9),
+        None => line.to_string(),
+    };
+    sink.write(rendered);
 }
 
 fn tail_loop(
@@ -525,6 +634,7 @@ fn tail_loop(
     stamp_from: Option<Instant>,
     stop: &AtomicBool,
     mut lines: ScopedLines,
+    sink: CacheLineSink,
 ) {
     let mut offset = start_offset;
     let mut pending: Vec<u8> = Vec::new();
@@ -537,6 +647,7 @@ fn tail_loop(
             use_color,
             stamp_from,
             &mut lines,
+            &sink,
         );
         if stopping {
             // Cargo has exited, but the daemon writes journal records
@@ -551,9 +662,10 @@ fn tail_loop(
                 use_color,
                 stamp_from,
                 &mut lines,
+                &sink,
             );
             for line in lines.finish() {
-                emit(&line, stamp_from);
+                emit(&line, stamp_from, &sink);
             }
             break;
         }
@@ -571,6 +683,7 @@ fn drain_new_records(
     use_color: bool,
     stamp_from: Option<Instant>,
     lines: &mut ScopedLines,
+    sink: &CacheLineSink,
 ) -> u64 {
     let Ok(mut file) = std::fs::File::open(journal_path) else {
         return offset;
@@ -598,7 +711,7 @@ fn drain_new_records(
         let complete: Vec<u8> = pending.drain(..=last_nl).collect();
         for unit in parse_journal_chunk(&String::from_utf8_lossy(&complete)) {
             if let Some(line) = lines.accept(&unit, use_color) {
-                emit(&line, stamp_from);
+                emit(&line, stamp_from, sink);
             }
         }
     }
@@ -862,7 +975,15 @@ mod tests {
 
         let mut pending: Vec<u8> = Vec::new();
         let mut lines = ScopedLines::new(BuildScope::default());
-        let offset = drain_new_records(&path, 0, &mut pending, false, None, &mut lines);
+        let offset = drain_new_records(
+            &path,
+            0,
+            &mut pending,
+            false,
+            None,
+            &mut lines,
+            &CacheLineSink::Stderr,
+        );
         // Only the complete first record is consumed for rendering; the
         // partial `beta` line stays pending, but the offset still advances past
         // all bytes read so the next poll does not re-read them.
@@ -953,6 +1074,57 @@ mod tests {
                 "soldr[cache] a [MISS]".to_string(),
                 "soldr[cache] b [MISS]".to_string()
             ]
+        );
+    }
+
+    /// The porcelain half of the contract: the same journal that renders
+    /// three annotations on the stderr sink lands all three in the deferred
+    /// buffer instead, in journal order, with nothing printed.
+    #[test]
+    fn a_porcelain_run_defers_its_annotations_instead_of_printing_them() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let journal = dir.path().join("compile_journal.jsonl");
+        std::fs::write(&journal, CHUNK).expect("write journal");
+        let sink = CacheLineSink::for_capture(true);
+        let buffer = sink.deferred().expect("porcelain defers");
+        let tail = CacheStateTail::start(journal, 0, None, BuildScope::default(), sink)
+            .expect("tail started");
+        tail.stop_and_join();
+        assert_eq!(
+            buffer.drain(),
+            DeferredCacheDrain {
+                lines: vec![
+                    "soldr[cache] serde [HIT!]".to_string(),
+                    "soldr[cache] soldr_cli [MISS]".to_string(),
+                    "soldr[cache] tokio [HIT!]".to_string(),
+                ],
+                omitted: 0,
+            }
+        );
+    }
+
+    /// The default surfaces are unchanged: a human or CI run keeps the live
+    /// stderr stream, which is the whole point of soldr#2302.
+    #[test]
+    fn a_default_run_keeps_the_stderr_sink() {
+        assert!(CacheLineSink::for_capture(false).deferred().is_none());
+    }
+
+    /// The buffer is bounded, and what it leaves out is counted rather than
+    /// silently forgotten, so the log section can say so.
+    #[test]
+    fn the_deferred_buffer_is_bounded_and_counts_its_omissions() {
+        let buffer = DeferredCacheLines::default();
+        for index in 0..MAX_DEFERRED_LINES + 3 {
+            buffer.push(format!("soldr[cache] crate{index} [MISS]"));
+        }
+        let drained = buffer.drain();
+        assert_eq!(drained.lines.len(), MAX_DEFERRED_LINES);
+        assert_eq!(drained.omitted, 3);
+        assert_eq!(
+            buffer.drain(),
+            DeferredCacheDrain::default(),
+            "draining twice must not replay lines"
         );
     }
 

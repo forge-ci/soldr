@@ -4,6 +4,7 @@
 
 use super::porcelain::*;
 use crate::build_log_meta::utc_compact_timestamp;
+use crate::cargo_front_door::cache_states::DeferredCacheDrain;
 use crate::core::SoldrPaths;
 use crate::{EnvVarGuard, TEST_PROCESS_ENV_LOCK};
 
@@ -26,6 +27,7 @@ fn run_inputs<'a>(
         ended_at_ms: 1_750,
         log_path,
         output,
+        cache_lines: 0,
     }
 }
 
@@ -76,6 +78,23 @@ fn report_carries_every_required_field() {
     assert_eq!(report.expires_at, Some(1_000 + PORCELAIN_LOG_TTL_MS));
     assert_eq!(report.summary.status, "ok");
     assert_eq!(report.summary.exit_code, 0);
+    assert_eq!(report.summary.cache_lines, 0);
+}
+
+/// The per-crate annotations a porcelain run moves out of stderr are reported
+/// as a count, so a caller can tell the detail exists without reading it.
+#[test]
+fn the_report_counts_the_annotations_it_moved_into_the_log() {
+    let report = report_for_run(&RunReportInputs {
+        cache_lines: 16,
+        ..run_inputs("cargo build", 0, None, Some("    Finished `dev` profile\n"))
+    });
+    assert_eq!(report.summary.cache_lines, 16);
+    let line = serde_json::to_string(&report).expect("serialize");
+    assert!(
+        line.contains("\"cache_lines\":16"),
+        "count must be on the wire: {line}"
+    );
 }
 
 #[test]
@@ -229,6 +248,71 @@ fn run_log_is_durable_and_readable_afterwards() {
     assert!(body.contains("# command: cargo build"));
     assert!(body.contains("# exit_code: 101"));
     assert!(body.contains(&format!("# schema_version: {SCHEMA_VERSION}")));
+}
+
+/// The annotations are preserved, not dropped: they land in the log under a
+/// header that names them as a separate source, and the child's bytes above
+/// them are untouched.
+#[test]
+fn deferred_annotations_are_appended_to_the_log_as_their_own_section() {
+    let (dir, paths) = temp_paths();
+    let child = "   Compiling demo v0.1.0\n    Finished `dev` profile\n";
+    let artifact =
+        write_run_log(&paths, 1_000, dir.path(), "cargo build", 0, child).expect("write run log");
+    let drained = DeferredCacheDrain {
+        lines: vec![
+            "    0.92 soldr[cache] unicode_ident [MISS]".to_string(),
+            "   15.35 soldr[cache] demo [MISS]".to_string(),
+        ],
+        omitted: 4,
+    };
+
+    assert_eq!(
+        append_deferred_annotations(Some(&artifact), Some(&drained)),
+        2
+    );
+
+    let body = std::fs::read_to_string(&artifact.path).expect("read log");
+    assert!(body.contains(child.trim_end()), "child bytes must survive");
+    assert!(
+        body.contains(DEFERRED_SECTION_HEADER.trim_end()),
+        "section must be labelled: {body}"
+    );
+    for line in &drained.lines {
+        assert!(body.contains(line.as_str()), "missing {line} in {body}");
+    }
+    assert!(
+        body.contains("# 4 further annotation line(s) omitted"),
+        "an omission must be stated, not hidden: {body}"
+    );
+    // Appended after the child section, never spliced into it.
+    let child_at = body.find(child.trim_end()).expect("child section");
+    let section_at = body
+        .find(DEFERRED_SECTION_HEADER.trim_end())
+        .expect("section");
+    assert!(child_at < section_at);
+}
+
+#[test]
+fn nothing_deferred_leaves_the_log_alone() {
+    let (dir, paths) = temp_paths();
+    let artifact =
+        write_run_log(&paths, 1_000, dir.path(), "cargo build", 0, "a\n").expect("write run log");
+    let before = std::fs::read_to_string(&artifact.path).expect("read log");
+    assert_eq!(
+        append_deferred_annotations(Some(&artifact), Some(&DeferredCacheDrain::default())),
+        0
+    );
+    assert_eq!(
+        std::fs::read_to_string(&artifact.path).expect("read log"),
+        before,
+        "an empty drain must not touch the log"
+    );
+    assert_eq!(
+        append_deferred_annotations(None, Some(&DeferredCacheDrain::default())),
+        0,
+        "no log means nothing to append to"
+    );
 }
 
 #[test]
