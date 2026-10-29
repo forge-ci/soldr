@@ -161,16 +161,22 @@ mod tests {
         let tail = CacheStateTail::start(journal, 0, None, BuildScope::default(), sink)
             .expect("tail started");
         tail.stop_and_join();
+        let drained = buffer.drain();
+        // Colour is on by design in CI (soldr#3437), so assert the text with
+        // the escape sequences removed rather than pinning a colour decision.
+        let plain: Vec<String> = drained
+            .lines
+            .iter()
+            .map(|line| super::super::porcelain::without_ansi(line).into_owned())
+            .collect();
         assert_eq!(
-            buffer.drain(),
-            DeferredCacheDrain {
-                lines: vec![
-                    "soldr[cache] serde [HIT!]".to_string(),
-                    "soldr[cache] soldr_cli [MISS]".to_string(),
-                ],
-                omitted: 0,
-            }
+            plain,
+            vec![
+                "soldr[cache] serde [HIT!]".to_string(),
+                "soldr[cache] soldr_cli [MISS]".to_string(),
+            ]
         );
+        assert_eq!(drained.omitted, 0);
     }
 
     /// The buffer is bounded, and what it leaves out is counted rather than

@@ -363,7 +363,7 @@ fn extract_errors(output: &str) -> (usize, Vec<String>) {
 /// `status: "failed"` with `error_count: 0, errors: []` -- the empty digest this
 /// mode exists to prevent. Borrow when there is nothing to strip, which is the
 /// common (piped, uncoloured) case.
-fn without_ansi(line: &str) -> std::borrow::Cow<'_, str> {
+pub(super) fn without_ansi(line: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     if !line.contains('\u{1b}') {
         return Cow::Borrowed(line);
