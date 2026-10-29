@@ -348,3 +348,184 @@ fn command_string_labels_the_run() {
         "cargo nextest run"
     );
 }
+
+#[test]
+fn failure_excerpt_carries_the_failing_test_and_its_assertion() {
+    // The measured shape of `cargo test` on a failing test: the digest's
+    // `errors` only names "error: test failed, to rerun pass `--lib`", which
+    // says nothing a caller can act on. The excerpt must carry the test name,
+    // the panic location and the assertion message, so the harness never needs
+    // to open `log_path` for an ordinary test failure.
+    let output = concat!(
+        "   Compiling pfail v0.1.0\n",
+        "    Finished `test` profile\n",
+        "     Running unittests src/lib.rs\n",
+        "test t::wrong_sum ... FAILED\n",
+        "\n",
+        "failures:\n",
+        "\n",
+        "---- t::wrong_sum stdout ----\n",
+        "\n",
+        "thread 't::wrong_sum' (1913010) panicked at src/lib.rs:6:9:\n",
+        "assertion `left == right` failed: two plus two should be five\n",
+        "note: run with `RUST_BACKTRACE=1` for a backtrace\n",
+        "\n",
+        "failures:\n",
+        "    t::wrong_sum\n",
+        "\n",
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n",
+        "error: test failed, to rerun pass `--lib`\n",
+    );
+    let summary = summarize("cargo test", 101, output);
+    let excerpt = summary.excerpt.join("\n");
+    assert!(excerpt.contains("t::wrong_sum"), "{excerpt}");
+    assert!(excerpt.contains("panicked at src/lib.rs:6:9:"), "{excerpt}");
+    assert!(
+        excerpt.contains("two plus two should be five"),
+        "the assertion message is the actionable line: {excerpt}"
+    );
+    assert!(excerpt.contains("test result: FAILED"), "{excerpt}");
+    assert!(
+        summary.excerpt.len() <= 8,
+        "a digest, not the stream: {:?}",
+        summary.excerpt
+    );
+    assert!(
+        !excerpt.contains("RUST_BACKTRACE"),
+        "panic boilerplate names no failure: {excerpt}"
+    );
+    assert!(
+        !excerpt.contains("Compiling pfail"),
+        "compile progress is not evidence: {excerpt}"
+    );
+    assert!(!summary.excerpt_truncated);
+}
+
+#[test]
+fn failure_excerpt_carries_the_compiler_location_for_a_build_error() {
+    let output = concat!(
+        "   Compiling demo v0.1.0\n",
+        "error[E0308]: mismatched types\n",
+        " --> src/main.rs:12:5\n",
+        "  |\n",
+        "12 |     let x: u32 = \"nope\";\n",
+        "  |            ---   ^^^^^^ expected `u32`, found `&str`\n",
+        "  |            |\n",
+        "  |            expected due to this\n",
+        "\n",
+        "error: could not compile `demo` (bin \"demo\") due to 1 previous error\n",
+    );
+    let summary = summarize("cargo build", 101, output);
+    assert!(
+        summary
+            .excerpt
+            .first()
+            .is_some_and(|l| l.starts_with("error[E0308]")),
+        "{:?}",
+        summary.excerpt
+    );
+    assert!(
+        summary
+            .excerpt
+            .iter()
+            .any(|l| l.contains("--> src/main.rs:12:5")),
+        "the location line is what makes the error actionable: {:?}",
+        summary.excerpt
+    );
+    assert!(
+        !summary
+            .excerpt
+            .iter()
+            .any(|l| l.trim_start().starts_with('|')),
+        "the caret art is noise in a digest: {:?}",
+        summary.excerpt
+    );
+}
+
+#[test]
+fn failure_excerpt_is_bounded_on_a_pathological_stream() {
+    let mut output = String::new();
+    for i in 0..5_000 {
+        output.push_str(&format!(
+            "error[E0308]: mismatched types {i} {}\n  --> src/lib.rs:{i}:1\n",
+            "x".repeat(500)
+        ));
+    }
+    let summary = summarize("cargo build", 101, &output);
+    assert_eq!(summary.error_count, 5_000, "the count stays truthful");
+    assert!(summary.excerpt.len() <= 8, "{}", summary.excerpt.len());
+    let bytes: usize = summary.excerpt.iter().map(|l| l.len() + 1).sum();
+    assert!(bytes <= 1_200, "{bytes} bytes");
+    assert!(
+        summary.excerpt.iter().all(|l| l.chars().count() <= 203),
+        "per-line cap: {:?}",
+        summary.excerpt.first().map(|l| l.chars().count())
+    );
+    assert!(
+        summary.excerpt_truncated,
+        "the caller must know it is partial"
+    );
+    // The excerpt must remain valid, single-line JSON -- no invented bytes.
+    let line = serde_json::to_string(&summary).expect("serialize");
+    assert!(!line.contains('\n'), "one JSON line");
+}
+
+#[test]
+fn failure_excerpt_uses_the_json_streams_rendered_message() {
+    let rendered = "error[E0432]: unresolved import `foo`\n --> src/lib.rs:3:5\n  |\n3 | use foo::Bar;\n  |     ^^^ no `foo` in the crate root\n";
+    let output = format!(
+        "{}\n",
+        serde_json::json!({
+            "reason": "compiler-message",
+            "message": {
+                "level": "error",
+                "code": {"code": "E0432"},
+                "message": "unresolved import `foo`",
+                "rendered": rendered,
+            }
+        })
+    );
+    let summary = summarize("cargo build", 101, &output);
+    let excerpt = summary.excerpt.join("\n");
+    assert!(excerpt.contains("error[E0432]"), "{excerpt}");
+    assert!(excerpt.contains("--> src/lib.rs:3:5"), "{excerpt}");
+    assert!(excerpt.contains("no `foo` in the crate root"), "{excerpt}");
+}
+
+#[test]
+fn failure_excerpt_is_colour_blind() {
+    // CI forces colour (soldr#3437); the panic header then carries escapes in
+    // front of `thread '`, which is exactly how a naive scan loses the message.
+    let output = "\u{1b}[31mthread 't::x' panicked at src/lib.rs:2:5:\u{1b}[0m\n\u{1b}[31massertion failed: false\u{1b}[0m\ntest result: FAILED. 0 passed; 1 failed\n";
+    let summary = summarize("cargo test", 101, output);
+    let excerpt = summary.excerpt.join("\n");
+    assert!(excerpt.contains("panicked at src/lib.rs:2:5:"), "{excerpt}");
+    assert!(excerpt.contains("assertion failed: false"), "{excerpt}");
+    assert!(!excerpt.contains('\u{1b}'), "no escape bytes in the digest");
+}
+
+#[test]
+fn success_carries_no_excerpt() {
+    let summary = summarize(
+        "cargo build",
+        0,
+        "   Compiling foo v0.1.0\n    Finished `dev` profile\n",
+    );
+    assert!(summary.excerpt.is_empty());
+    assert!(!summary.excerpt_truncated);
+}
+
+#[test]
+fn pre_capture_failure_reports_its_message_as_the_excerpt() {
+    let report = report_for_failure(
+        "cargo build",
+        FAILURE_EXIT_CODE,
+        None,
+        Some("soldr: could not start cargo\nmore detail"),
+    );
+    assert_eq!(
+        report.summary.excerpt,
+        vec!["soldr: could not start cargo".to_string()]
+    );
+    assert!(!report.summary.excerpt_truncated);
+}
