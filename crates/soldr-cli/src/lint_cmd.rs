@@ -216,8 +216,16 @@ impl LintPlan {
             steps.push(cross_clippy);
         }
 
+        // soldr#3930: a workspace whose Dylint is pre-expansion (it forbids
+        // `#[cfg]` outside the platform boundary) cannot be linted with
+        // `--all-targets`, because test and bench targets are full of it.
+        // When the caller named a target scope, pass exactly that scope; only
+        // an unscoped call keeps today's `--all-targets`.
         let mut dylint = vec!["dylint".into(), "--all".into(), "--".into()];
-        dylint.extend(["--workspace".into(), "--all-targets".into()]);
+        dylint.push("--workspace".into());
+        if !has_target_selector(&compiler_scope) {
+            dylint.push("--all-targets".into());
+        }
         dylint.extend(compiler_scope);
         if self.cross_dylint {
             steps.push(dylint.clone());

@@ -801,6 +801,14 @@ Soldr installs that nightly's `rust-std` for each target on demand before the
 workspace check; the catalogued driver remains prebuilt. A failed cross pass
 names the target and tool (`clippy` or `dylint`) and returns its exit code.
 
+**A caller's target scope reaches Dylint (soldr#3930).** The Dylint pass widens
+to `--all-targets` only when the invocation names no targets. A scope that
+already selects them — `--lib --bins`, `--tests`, `--bin <name>` — is passed
+through exactly as given, so a workspace whose Dylint is pre-expansion (a
+boundary lint that must not see test or bench targets) can run
+`soldr lint rust --lib --bins` instead of keeping a standalone
+`soldr dylint --all -- --workspace --lib --bins` call beside the suite.
+
 `--target <triple>` (repeatable; friendly aliases such as `win-x64`/`mac-arm64`
 are accepted) overrides the declared list for that invocation. `--host-only`
 skips cross-target Clippy entirely, even when targets are declared. It cannot
