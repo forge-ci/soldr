@@ -278,13 +278,17 @@ fn handle_aborted_cargo_run(
     // log from the capture path. Write a small failure log holding soldr's
     // own diagnosis and emit the single JSON line, then fall through to the
     // error that sets the process exit code.
+    //
+    // The reported code is the one this process will exit with: `Err` below
+    // reaches `report_and_exit`, which exits 1. Emitting `-1` here made the
+    // JSON disagree with `$?` for the same failed run.
     if prepared.porcelain {
         let message = augmented.to_string();
         let failure_log =
             porcelain::write_failure_log(paths, &porcelain::command_string(args), &message);
         porcelain::emit(&porcelain::report_for_failure(
             &porcelain::command_string(args),
-            -1,
+            porcelain::FAILURE_EXIT_CODE,
             failure_log,
             Some(&message),
         ));
@@ -316,14 +320,10 @@ fn complete_cargo_run(
         captured_stderr_for_diagnosis.as_deref(),
     );
     let effective_exit_code = strip_outcome.effective_exit_code(&status);
-    // Porcelain: build the single JSON report from the run so far. It is
-    // emitted at the tail (below), after the zthreads retry decision, so a
-    // retry -- which re-enters this front door as a porcelain child that
-    // emits its own line -- does not produce a second one.
     let porcelain_report = porcelain_log.as_ref().map(|artifact| {
         porcelain::report_for_run(&porcelain::RunReportInputs {
             command: &porcelain::command_string(&prepared.args),
-            exit_code: effective_exit_code,
+            exit_code: porcelain::process_exit_code(&status, effective_exit_code),
             started_at_ms: artifact.started_at_ms,
             ended_at_ms: current_unix_ms(),
             log_path: Some(artifact.path.clone()),

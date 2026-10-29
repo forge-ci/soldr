@@ -131,6 +131,59 @@ fn summarize_sees_nextest_failures_through_colour() {
 }
 
 #[test]
+fn summarize_counts_a_repeated_failure_once() {
+    // cargo-nextest prints the same FAIL line in the progress stream and again
+    // in its summary; one failing test must not read as two failures.
+    let output = concat!(
+        "FAIL [   0.008s] (  1/302) demo_big::late_failure the_one_that_fails\n",
+        "FAIL [   0.008s] (  1/302) demo_big::late_failure the_one_that_fails\n",
+        "error: test run failed\n",
+    );
+    let summary = summarize("cargo nextest run", 100, output);
+    assert_eq!(summary.error_count, 2, "one FAIL + one error line");
+    assert_eq!(
+        summary.errors,
+        vec![
+            "FAIL [   0.008s] (  1/302) demo_big::late_failure the_one_that_fails".to_string(),
+            "error: test run failed".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn failure_report_reports_the_process_exit_code() {
+    // soldr's own pre-status failures reach `report_and_exit`, which exits 1.
+    let report = report_for_failure(
+        "cargo build",
+        FAILURE_EXIT_CODE,
+        None,
+        Some("soldr: could not start cargo"),
+    );
+    assert_eq!(report.exit_code, FAILURE_EXIT_CODE);
+    assert_eq!(report.summary.exit_code, FAILURE_EXIT_CODE);
+    assert_eq!(report.summary.status, "failed");
+    assert_eq!(report.summary.error_count, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn signal_killed_child_reports_the_code_the_process_exits_with() {
+    use std::os::unix::process::ExitStatusExt;
+
+    // A signalled child has no numeric exit code, so `effective_exit_code`
+    // answers -1 while the process exits 1. The JSON must not disagree.
+    let signalled = std::process::ExitStatus::from_raw(0x000f); // SIGTERM
+    assert_eq!(signalled.code(), None);
+    assert_eq!(process_exit_code(&signalled, -1), 1);
+    assert_eq!(process_exit_code(&signalled, 1), 1);
+
+    // A normal failure code passes through untouched.
+    let exited = std::process::ExitStatus::from_raw(101 << 8);
+    assert_eq!(exited.code(), Some(101));
+    assert_eq!(process_exit_code(&exited, 101), 101);
+}
+
+#[test]
 fn summarize_prefers_the_cargo_json_stream_when_present() {
     let output = concat!(
         r#"{"reason":"compiler-message","message":{"level":"error","code":{"code":"E0432"},"message":"unresolved import `foo`\nsecond line"}}"#,

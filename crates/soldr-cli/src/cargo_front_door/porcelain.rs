@@ -39,6 +39,27 @@
 //!
 //! Nothing here is consulted unless [`enabled`] is true, so a CI run
 //! without the flag or the variable streams exactly as it does today.
+//!
+//! ## `exit_code` always equals `$?`
+//!
+//! The emitted `exit_code` is the code this process exits with, including
+//! the two cases that have no plain `ExitStatus::code`:
+//!
+//! * a child killed by a signal -- the process exits [`FAILURE_EXIT_CODE`]
+//!   (see [`process_exit_code`]); the durable log keeps the signal evidence;
+//! * soldr failing before a child status exists -- the report carries
+//!   [`FAILURE_EXIT_CODE`], which is what `report_and_exit` exits with.
+//!
+//! A harness can therefore branch on either the process status or the JSON
+//! field and get the same answer.
+//!
+//! ## Digest is colour-blind
+//!
+//! `summary` is scanned out of the child's captured bytes, including runs
+//! where the caller forces ANSI colour (`CARGO_TERM_COLOR=always`,
+//! `--color always`). Escape sequences are stripped per line before the
+//! error scan ([`without_ansi`]), so a coloured `error[E0308]` still counts
+//! and its identity carries no escape bytes.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -77,6 +98,16 @@ pub(super) const PORCELAIN_LOG_KEEP: usize = 200;
 /// `summary.error_count` always reports the true count.
 const MAX_ERROR_IDENTITIES: usize = 20;
 
+/// Upper bound on the distinct error lines remembered for de-duplication.
+/// Past it, repeated occurrences count as they arrive rather than growing the
+/// set without limit.
+const MAX_DEDUPE_ENTRIES: usize = 4096;
+
+/// Exit code the process uses when soldr itself fails before a child status
+/// exists (`soldr_main_helpers::report_and_exit`). The JSON reports this same
+/// value so `exit_code` always equals `$?`.
+pub(super) const FAILURE_EXIT_CODE: i32 = 1;
+
 /// Is the porcelain mode requested for this process?
 pub(super) fn enabled() -> bool {
     crate::core::flag(PORCELAIN_ENV_VAR)
@@ -104,7 +135,9 @@ pub(super) struct PorcelainSummary {
     pub(super) command: String,
     /// `"ok"` or `"failed"` -- `failed` whenever `exit_code != 0`.
     pub(super) status: String,
-    /// Total number of failures/errors recognized in the child stream.
+    /// Number of DISTINCT failures/errors recognized in the child stream --
+    /// one failure reported twice (nextest's progress line plus its summary)
+    /// counts once.
     pub(super) error_count: usize,
     /// Identities of the first [`MAX_ERROR_IDENTITIES`] failures/errors.
     pub(super) errors: Vec<String>,
@@ -137,6 +170,22 @@ pub(super) struct RunReportInputs<'a> {
     pub(super) log_path: Option<PathBuf>,
     /// The child's full captured stdout+stderr, when capture ran.
     pub(super) output: Option<&'a str>,
+}
+
+/// The exit code this process will actually report for `status`.
+///
+/// [`StripOutcome::effective_exit_code`] answers `-1` when the child died from a
+/// signal, because an `ExitStatus` carries no numeric code then. The process
+/// itself exits `status.code().unwrap_or(1)`, so emitting `-1` would make the
+/// JSON disagree with `$?` for the same run. Normalize to the code the process
+/// uses; the durable log keeps the signal evidence.
+///
+/// [`StripOutcome::effective_exit_code`]: super::strip_diagnostics::StripOutcome::effective_exit_code
+pub(super) fn process_exit_code(status: &std::process::ExitStatus, effective: i32) -> i32 {
+    if effective >= 0 {
+        return effective;
+    }
+    status.code().unwrap_or(FAILURE_EXIT_CODE)
 }
 
 /// Build the report for a run that reached the capture stage (success,
@@ -232,11 +281,21 @@ fn extract_errors(output: &str) -> (usize, Vec<String>) {
         return result;
     }
     let mut errors: Vec<String> = Vec::new();
+    // A single failure is often reported more than once: cargo-nextest prints
+    // the `FAIL ...` line in the progress stream AND again in its summary, so a
+    // raw occurrence count told a caller "3 errors" for ONE failing test. Count
+    // and list each distinct line once, in first-seen order.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut count = 0usize;
     for line in output.lines() {
         let line = without_ansi(line);
         let trimmed = line.trim();
         if !is_error_line(trimmed) {
+            continue;
+        }
+        // Bound the dedupe set so a pathological stream cannot grow it without
+        // limit; past the cap, occurrences are counted as they arrive.
+        if seen.len() < MAX_DEDUPE_ENTRIES && !seen.insert(trimmed.to_string()) {
             continue;
         }
         count += 1;
