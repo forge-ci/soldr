@@ -296,6 +296,21 @@ fn handle_aborted_cargo_run(
     Err(augmented)
 }
 
+/// Report a signal-terminated child before the exit code loses the signal
+/// (soldr#3938). Extracted so `complete_cargo_run` stays inside clippy's
+/// `too_many_lines` ceiling.
+fn warn_on_signal_termination(status: &std::process::ExitStatus) {
+    if status.code().is_none() {
+        let returncode = soldr_platform::process::test_child::returncode(status);
+        if returncode < 0 {
+            eprintln!(
+                "soldr: cargo terminated by signal {}",
+                returncode.saturating_neg()
+            );
+        }
+    }
+}
+
 /// The child cargo ran to completion: close the session, publish logs and
 /// artifacts, and apply the post-build fallbacks.
 fn complete_cargo_run(
@@ -311,12 +326,7 @@ fn complete_cargo_run(
     normalized: NormalizedArgs,
 ) -> Result<i32, SoldrError> {
     let paths = &prepared.paths;
-    if status.code().is_none() {
-        let returncode = soldr_platform::process::test_child::returncode(&status);
-        if returncode < 0 {
-            eprintln!("soldr: cargo terminated by signal {}", returncode.saturating_neg());
-        }
-    }
+    warn_on_signal_termination(&status);
     let captured_stderr_for_diagnosis = diagnostic_capture;
     crate::verdict::gate::note_output(captured_stderr_for_diagnosis.as_deref());
     let compile_fallback_log =
@@ -326,16 +336,13 @@ fn complete_cargo_run(
         captured_stderr_for_diagnosis.as_deref(),
     );
     let effective_exit_code = strip_outcome.effective_exit_code(&status);
-    let porcelain_report = porcelain_log.as_ref().map(|artifact| {
-        porcelain::report_for_run(&porcelain::RunReportInputs {
-            command: &porcelain::command_string(&prepared.args),
-            exit_code: porcelain::process_exit_code(effective_exit_code, status.code()),
-            started_at_ms: artifact.started_at_ms,
-            ended_at_ms: current_unix_ms(),
-            log_path: Some(artifact.path.clone()),
-            output: captured_stderr_for_diagnosis.as_deref(),
-        })
-    });
+    let porcelain_report = porcelain::captured_run_report(
+        porcelain_log.as_ref(),
+        &porcelain::command_string(&prepared.args),
+        &status,
+        effective_exit_code,
+        captured_stderr_for_diagnosis.as_deref(),
+    );
 
     // Phase 2: send BuildSessionEnd before the success/failure
     // branches do any further work. Best-effort — never affects the

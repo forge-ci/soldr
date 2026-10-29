@@ -191,6 +191,28 @@ pub(super) fn process_exit_code(effective: i32, status_code: Option<i32>) -> i32
     status_code.unwrap_or(FAILURE_EXIT_CODE)
 }
 
+/// Build the report for a run whose child completed, from its capture artifact.
+///
+/// Kept here (rather than inlined at the call site) so `complete_cargo_run`
+/// stays inside clippy's `too_many_lines` ceiling.
+pub(super) fn captured_run_report(
+    artifact: Option<&PorcelainLogArtifact>,
+    command: &str,
+    status: &std::process::ExitStatus,
+    effective_exit_code: i32,
+    output: Option<&str>,
+) -> Option<PorcelainReport> {
+    let artifact = artifact?;
+    Some(report_for_run(&RunReportInputs {
+        command,
+        exit_code: process_exit_code(effective_exit_code, status.code()),
+        started_at_ms: artifact.started_at_ms,
+        ended_at_ms: super::current_unix_ms(),
+        log_path: Some(artifact.path.clone()),
+        output,
+    }))
+}
+
 /// Build the report for a run that reached the capture stage (success,
 /// compiler failure, or post-spawn abort).
 pub(super) fn report_for_run(inputs: &RunReportInputs<'_>) -> PorcelainReport {
