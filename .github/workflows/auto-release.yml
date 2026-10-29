@@ -1,4 +1,4 @@
-name: Autonomous Release
+name: Auto Release
 
 # canonical Windows GNU target uses the shipped Windows x64 host artifact;
 # it is a supported cross-build ABI, not a ninth host-distribution archive.
@@ -870,7 +870,7 @@ jobs:
       source_ref: ${{ needs.prepare.outputs.commit_sha }}
       # bootstrap_artifact_name omitted (optional, default ""): ci.yml's
       # value names an artifact produced by its own e2e-cross-bootstrap-soldr
-      # job earlier in the *same* workflow run. release-auto.yml has no such
+      # job earlier in the *same* workflow run. auto-release.yml has no such
       # job, and artifacts do not cross workflow runs, so this falls back to
       # `_ci-cross-build-linux.yml`'s own actions/cache-or-bootstrap path.
 
@@ -1092,6 +1092,12 @@ jobs:
       - verify_github_release
       - smoke_macos_arm64
       - release_execution_contract
+    # Fleet pattern (kernal-api, bosn, clud, running-process): the PyPI trusted
+    # publisher is registered against workflow `auto-release.yml` with
+    # environment `pypi`, and the OIDC token is minted for that environment.
+    environment: pypi
+    permissions:
+      id-token: write
     # Explicit recovery can add missing PyPI files when an earlier partial
     # publish made the corresponding GitHub Release immutable.
     if: always() && needs.release_execution_contract.result == 'success' && needs.smoke_macos_arm64.result == 'success' && needs.prepare.outputs.should_publish_pypi == 'true' && (needs.verify_github_release.result == 'success' || (needs.prepare.outputs.github_release_immutable == 'true' && github.event_name == 'workflow_dispatch' && inputs.force_pypi_publish))

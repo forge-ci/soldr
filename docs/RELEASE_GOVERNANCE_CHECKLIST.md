@@ -15,7 +15,7 @@ If those settings drift, the workflow may remain correct while the operational r
 The intended release-governance state is:
 
 - release tags are protected by rulesets or an explicit platform constraint is documented
-- the normal release path goes through `.github/workflows/release-auto.yml`
+- the normal release path goes through `.github/workflows/auto-release.yml`
 - the `release` environment exists and requires explicit approval
 - immutable GitHub Releases are enabled
 - GitHub Actions requires full-SHA pinning for third-party actions

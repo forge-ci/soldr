@@ -70,7 +70,7 @@ def test_release_environment_pins_msvc_linker_to_lld_link(
     # blanket `LINKER=clang` placeholder, which clobbers `soldr prepare`'s
     # lld-link and makes rustc drive `clang -flavor link` — a hard clang
     # error that killed both Linux-hosted MSVC wheel lanes of every
-    # Autonomous Release attempt. The wheel build must always relink
+    # Auto Release attempt. The wheel build must always relink
     # through lld-link, even when the inherited env says otherwise.
     env = wheel.build_environment(target, {key: "clang"})
     assert env[key] == "lld-link"

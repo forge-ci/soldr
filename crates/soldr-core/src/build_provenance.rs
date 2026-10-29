@@ -2,12 +2,12 @@
 //! builds (soldr#1597 Phase 2).
 //!
 //! `build.rs` turns a CI-only `SOLDR_RELEASE_CI=1` env var (set solely by
-//! `release-auto.yml`'s publish step) into a compile-time
+//! `auto-release.yml`'s publish step) into a compile-time
 //! `SOLDR_OFFICIAL_BUILD` env constant, so this check is free at runtime
 //! and can't be spoofed by setting an env var against an already-built
 //! dev binary.
 
-/// `true` for binaries built by `release-auto.yml`'s publish step;
+/// `true` for binaries built by `auto-release.yml`'s publish step;
 /// `false` for any locally-built (`cargo build` / `soldr cargo build`)
 /// dev binary.
 pub fn is_official_build() -> bool {

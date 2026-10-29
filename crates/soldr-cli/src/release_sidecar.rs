@@ -1,6 +1,6 @@
 //! Release-archive debug sidecar classification (issue #786).
 //!
-//! When `release-auto.yml` stages a soldr release archive, it bundles
+//! When `auto-release.yml` stages a soldr release archive, it bundles
 //! every debug-symbol sidecar the platform build emits so post-mortem
 //! symbolication works on every target — not just the Windows
 //! `soldr.pdb` case PR #782 covered first. This module is the

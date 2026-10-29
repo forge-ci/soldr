@@ -375,7 +375,7 @@ pub const KNOWN_TOOLS: &[ToolSpec] = &[
         wraps_inner_cargo_build: false,
     },
     // `crgx` is bundled into the combined soldr release archive
-    // (release-auto.yml source-builds it from a pinned crgx tag), so
+    // (auto-release.yml source-builds it from a pinned crgx tag), so
     // first-use needs no network round trip. The registry entry is the
     // fallback path when the bundle is unavailable (sideloaded soldr
     // binary, custom install, etc.) — it pins to the same upstream
@@ -566,7 +566,7 @@ mod tests {
     #[test]
     fn crgx_is_registered_and_pinned_to_managed_version() {
         // soldr bundles crgx into the combined release archive (see
-        // release-auto.yml's `Build crgx from pinned source` step).
+        // auto-release.yml's `Build crgx from pinned source` step).
         // The registry entry MUST pin to `MANAGED_CRGX_VERSION` so the
         // fallback fetch path resolves to the same version the bundle
         // ships. If these drift apart, `soldr crgx` from a sideloaded

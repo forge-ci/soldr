@@ -93,7 +93,7 @@ def test_a_green_ci_dispatches_the_release_with_its_run_id() -> None:
     )
     assert REL.main(["start", "--sha", SHA], run=git) == 0
     (call,) = git.dispatched()
-    assert call[3] == "release-auto.yml"
+    assert call[3] == "auto-release.yml"
     assert f"candidate_sha={SHA}" in call and "full_ci_run_id=8" in call
 
 
@@ -107,7 +107,7 @@ def test_runs_for_another_sha_are_ignored() -> None:
 def test_resume_after_the_tag_exists_at_the_same_sha() -> None:
     git = FakeGit(tag_sha=SHA, ci_runs=[ci_run(8, "completed", "success")])
     assert REL.main(["start", "--sha", SHA], run=git) == 0
-    assert git.dispatched()[0][3] == "release-auto.yml"
+    assert git.dispatched()[0][3] == "auto-release.yml"
 
 
 @pytest.mark.parametrize(
@@ -151,7 +151,7 @@ def test_resume_appends_to_the_existing_attempt() -> None:
     assert REL.main(["start", "--sha", SHA], run=git) == 0
     assert not [c for c in git.calls if c[:3] == ["gh", "issue", "create"]]
     (comment,) = [c for c in git.calls if c[:3] == ["gh", "issue", "comment"]]
-    assert comment[3] == "77" and "release-auto.yml" in comment[-1]
+    assert comment[3] == "77" and "auto-release.yml" in comment[-1]
 
 
 def test_a_refusal_opens_no_attempt() -> None:

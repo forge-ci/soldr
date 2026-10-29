@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Release wheel-filename lints, extracted from release-auto.yml (soldr#2469 2.2).
+"""Release wheel-filename lints, extracted from auto-release.yml (soldr#2469 2.2).
 
 Three independently-runnable gates over ``dist/*.whl``:
 

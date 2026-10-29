@@ -15,7 +15,7 @@ from conftest import load_script_module
 
 REPO_ROOT = Path(__file__).parents[1]
 SCRIPTS = REPO_ROOT / ".github" / "scripts"
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-auto.yml"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "auto-release.yml"
 CONTRACT = REPO_ROOT / "ci" / "canonical-targets.json"
 
 support = load_script_module(

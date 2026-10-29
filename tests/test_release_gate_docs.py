@@ -19,7 +19,7 @@ from pathlib import Path
 import yaml
 
 REPO_ROOT = Path(__file__).parents[1]
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-auto.yml"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "auto-release.yml"
 VERIFICATION = REPO_ROOT / "docs" / "RELEASE_VERIFICATION.md"
 RELEASE_MD = REPO_ROOT / "RELEASE.md"
 SECURITY_MD = REPO_ROOT / "SECURITY.md"
@@ -46,23 +46,24 @@ def jobs_declaring_an_environment() -> set[str]:
     return {name for name, job in workflow_jobs().items() if job.get("environment")}
 
 
-def test_only_npm_publication_declares_an_environment() -> None:
+def test_publications_declare_the_fleet_pypi_and_release_environments() -> None:
     """The fact the verification doc now states.
 
-    When soldr#2469 Phase 4 puts the other publications behind an environment,
-    this fails -- and the doc claiming a gate must be updated in the same
-    change. That coupling is the point: the previous wording ("final
-    publication happens in the `release` environment") was true of exactly one
-    of three surfaces, which read as though all of them were gated.
+    PyPI trusted publishing needs the OIDC token minted for the environment the
+    PyPI publisher is registered against (`pypi`), which is the pattern shared
+    with kernal-api / bosn / clud / running-process; npm keeps `release`. When a
+    publication's environment changes, this fails -- and the doc claiming a gate
+    must be updated in the same change.
     """
-    assert jobs_declaring_an_environment() == {"publish-npm"}
+    assert jobs_declaring_an_environment() == {"publish-pypi", "publish-npm"}
 
 
 def test_the_verification_doc_does_not_imply_a_blanket_environment_gate() -> None:
     text = flowed(VERIFICATION)
     assert "final publication happens in the `release` environment" not in text
     # It must name which surface is involved rather than generalizing.
-    assert "only the **npm** publication runs in the `release` environment" in text
+    assert "**PyPI** runs in the `pypi`" in text
+    assert "**npm** runs in the `release` environment" in text
 
 
 def test_docs_do_not_claim_branch_protection() -> None:
@@ -86,7 +87,7 @@ def test_docs_do_not_claim_release_time_revalidation() -> None:
     jobs = set(workflow_jobs())
     for suspect in ("lint", "test", "e2e", "clippy", "fmt"):
         assert suspect not in jobs, (
-            f"release-auto.yml gained a {suspect!r} job; the docs saying it does "
+            f"auto-release.yml gained a {suspect!r} job; the docs saying it does "
             "NOT re-validate before publishing are now wrong (soldr#2469 Phase 1)"
         )
     for path in (SECURITY_MD, VERIFICATION):

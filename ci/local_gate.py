@@ -332,7 +332,7 @@ def checks() -> list[Check]:
         ),
         # Three lanes assert the glibc floor of a binary soldr builds, and
         # they arrived in three separate PRs with nothing tying them
-        # together. `release-auto.yml` is excluded on purpose — its ceiling
+        # together. `auto-release.yml` is excluded on purpose — its ceiling
         # also covers crgx / cargo-chef, which soldr fetches prebuilt at
         # 2.39, so it legitimately differs (soldr#2170).
         Check(

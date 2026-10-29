@@ -9,7 +9,7 @@ from conftest import load_script_module
 
 ROOT = Path(__file__).parents[1]
 CONTRACT = ROOT / "ci" / "canonical-targets.json"
-WORKFLOW = ROOT / ".github" / "workflows" / "release-auto.yml"
+WORKFLOW = ROOT / ".github" / "workflows" / "auto-release.yml"
 MODULE = load_script_module(
     ROOT / ".github" / "scripts" / "release_completeness.py",
     "release_execution_contract",
@@ -70,7 +70,7 @@ def _workflow(tmp_path: Path, body: str) -> Path:
 
 
 def _release_workflow(tmp_path: Path, gate_job: str = "smoke_macos_arm64") -> Path:
-    path = tmp_path / "release-auto.yml"
+    path = tmp_path / "auto-release.yml"
     path.write_text(
         "jobs:\n"
         f"  {gate_job}:\n"
