@@ -85,6 +85,7 @@
         "cli_cargo_trampoline_workspace",
         "cli_cargo_zccache_mode",
         "cli_dispatch",
+        "cli_cargo_signal_diagnostics",
         "cli_dylint_wrapper",
         "cli_reentrancy_guard",
         "cli_reentrancy_guard_canary",

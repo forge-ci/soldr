@@ -1,16 +1,13 @@
-import importlib.util
 import json
 from pathlib import Path
+
+from conftest import load_script_module
 
 
 def _load_release_completeness():
     """Load the contract helper by path; `.github/scripts` is not a package."""
     path = Path(__file__).parents[1] / ".github" / "scripts" / "release_completeness.py"
-    spec = importlib.util.spec_from_file_location("release_completeness", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_script_module(path, "release_completeness")
 
 
 release_completeness = _load_release_completeness()
@@ -39,7 +36,7 @@ def test_release_workflow_builds_and_publishes_musllinux_wheels() -> None:
         REPO_ROOT / ".github" / "scripts" / "release_detect.py"
     ).read_text(encoding="utf-8")
     assert (
-        "uses: zackees/setup-soldr@a07bab94f16124b5c6857b137a237a53a61e06d1" in workflow
+        "uses: zackees/setup-soldr@2f4be9f8f5806fbe0e8e16cc3534489d147da094" in workflow
     )
     assert "version: 0.9.27" not in workflow  # one pin: setup-soldr's default
     assert "cross-targets: ${{ matrix.setup_target }}" in workflow
