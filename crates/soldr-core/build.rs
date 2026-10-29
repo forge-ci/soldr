@@ -2,7 +2,7 @@
 // the panic message and fails the build cleanly.
 #![allow(clippy::expect_used)]
 
-/// soldr#1597 Phase 2: `release-auto.yml` sets `SOLDR_RELEASE_CI=1` only
+/// soldr#1597 Phase 2: `auto-release.yml` sets `SOLDR_RELEASE_CI=1` only
 /// for the build step that produces published release artifacts. Turn
 /// that into a compile-time `SOLDR_OFFICIAL_BUILD` env constant so the
 /// official-vs-dev check (`build_provenance::is_official_build`) has

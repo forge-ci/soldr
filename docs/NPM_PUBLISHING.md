@@ -43,7 +43,7 @@ The npm postinstall picks the Linux artifact with `detectLibc()` in
    before staging and therefore also runs correctly on glibc hosts.
 
 `MIN_GLIBC_FOR_GNU` is currently `2.39`. It is kept in lockstep with the
-`--max-glibc` ceiling that `release-auto.yml` passes to the bundled-archive
+`--max-glibc` ceiling that `auto-release.yml` passes to the bundled-archive
 check (`verify_release_bundle.py --check glibc-baseline`) by an assertion in
 `scripts/test-npm-package.js`. It tracks the archive rather than soldr's own
 binary: `soldr` and `soldr-daemon` already need only glibc 2.17, but the
@@ -100,7 +100,7 @@ connected to GitHub Actions OIDC.
 2. In the package publishing settings, add this GitHub trusted publisher:
    - repository owner: `zackees`
    - repository name: `soldr`
-   - workflow filename: `release-auto.yml`
+   - workflow filename: `auto-release.yml`
    - environment: `release`
 3. Keep the repository URL in `package.json` pointed at
    `git+https://github.com/zackees/soldr.git`; npm checks that for trusted
@@ -110,7 +110,7 @@ connected to GitHub Actions OIDC.
 
 The workflow uses npm Trusted Publishing directly:
 
-- `.github/workflows/release-auto.yml`
+- `.github/workflows/auto-release.yml`
 - job: `publish-npm`
 - environment: `release`
 - permissions: `id-token: write`, `contents: read`

@@ -191,7 +191,7 @@
       "test_files": [
         "contracts/zccache-runtime.v1.json",
         "contracts/zccache-integration-guardrails.v1.json",
-        ".github/workflows/release-auto.yml",
+        ".github/workflows/auto-release.yml",
         "scripts/zccache-contract.js",
         "scripts/test-npm-package.js",
         "tests/test_zccache_runtime_contract.py"

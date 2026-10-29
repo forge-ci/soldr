@@ -7,7 +7,7 @@ gate must inspect all four, or a prebuilt support binary can drift beyond its
 published compatibility promise unnoticed.
 
 This collects the staged files and delegates to the established per-format
-verifiers.  Extracted from release-auto.yml for soldr#2469 step 2.2.
+verifiers.  Extracted from auto-release.yml for soldr#2469 step 2.2.
 
 Usage (CI):
     python3 .github/scripts/verify_release_bundle.py \

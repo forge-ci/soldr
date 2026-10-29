@@ -7,7 +7,7 @@ a musl edge case. soldr#1060 says so directly, and names glibc 2.17 as the
 target baseline -- Rust's Tier 1 minimum and the `manylinux_2_17` floor.
 
 The RFC also warns, in as many words: *"do not build on modern Ubuntu and call
-it portable."* That is exactly what happens today. `release-auto.yml` builds
+it portable."* That is exactly what happens today. `auto-release.yml` builds
 these binaries natively on `ubuntu-24.04`, so they carry a `GLIBC_2.39`
 requirement and refuse to start on RHEL 9 (2.34), Debian 12 (2.36) or
 Ubuntu 22.04 (2.35) -- measured on the published v0.8.29 artifacts, both

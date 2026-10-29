@@ -11,7 +11,7 @@ is the worst place to find out.
 
 This is the RFC's fourth acceptance item ("static-link verification step
 (`readelf -d` must show 'no dynamic section') added to release CI"), which
-stands alone: it guards the musl artifacts release-auto.yml already produces,
+stands alone: it guards the musl artifacts auto-release.yml already produces,
 independent of the artifact-renaming and installer-default work the RFC
 defers.
 

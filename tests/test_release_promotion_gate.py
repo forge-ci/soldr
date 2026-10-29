@@ -17,7 +17,7 @@ BUILDS = ["Linux x64 (glibc)", "Windows x64 (Linux cross)"]
 
 def source(**overrides: str):
     fields = {
-        "path": ".github/workflows/release-auto.yml",
+        "path": ".github/workflows/auto-release.yml",
         "event": "workflow_dispatch",
         "repository": "zackees/soldr",
         "title": f"Release dry run {SHA}",
@@ -74,7 +74,7 @@ def test_a_run_without_smokes_is_refused() -> None:
 
 
 def test_the_workflow_wires_promotion_end_to_end() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "release-auto.yml").read_text(
+    workflow = (ROOT / ".github" / "workflows" / "auto-release.yml").read_text(
         encoding="utf-8"
     )
     assert (

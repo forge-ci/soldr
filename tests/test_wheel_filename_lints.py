@@ -91,7 +91,7 @@ def test_empty_dist_is_a_hard_error(tmp_path: Path) -> None:
 
 def test_the_workflow_invokes_both_gates() -> None:
     workflow = (
-        Path(__file__).parents[1] / ".github" / "workflows" / "release-auto.yml"
+        Path(__file__).parents[1] / ".github" / "workflows" / "auto-release.yml"
     ).read_text(encoding="utf-8")
     assert "wheel_filename_lints.py version" in workflow
     assert "wheel_filename_lints.py manylinux" in workflow

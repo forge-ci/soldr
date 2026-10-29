@@ -4,7 +4,7 @@ This document is the concrete execution list for the first attested secure `sold
 
 It assumes the current repository state on April 19, 2026:
 
-- `.github/workflows/release-auto.yml` is the only release workflow
+- `.github/workflows/auto-release.yml` is the only release workflow
 - the workflow derives the version directly from `Cargo.toml` on `main`
 - publication uses a dedicated GitHub App
 - `v*.*.*` tags are protected by repository rulesets
@@ -51,7 +51,7 @@ Inputs to choose:
 Required checks:
 
 - the PR passes lint, test, and all supported e2e bootstrap jobs
-- after merge, `release-auto.yml` starts automatically from the `main` push
+- after merge, `auto-release.yml` starts automatically from the `main` push
 - the workflow reaches the `release` environment approval gate
 - the GitHub App token step succeeds
 - checksums and provenance attestation steps succeed
@@ -100,7 +100,7 @@ Required setup:
 - add the GitHub Actions trusted publisher on PyPI for:
   - owner: `zackees`
   - repository: `soldr`
-  - workflow: `.github/workflows/release-auto.yml`
+  - workflow: `.github/workflows/auto-release.yml`
   - environment: `release`
 - confirm the existing `soldr` PyPI project is the correct project and that stale pre-Trusted-Publishing metadata will be superseded by the next upload
 
@@ -110,7 +110,7 @@ Recommended GitHub-release verification commands:
 gh release view v0.5.0-rc1 --repo zackees/soldr
 gh attestation verify soldr-v0.5.0-rc1-x86_64-unknown-linux-gnu.tar.gz \
   --repo zackees/soldr \
-  --signer-workflow zackees/soldr/.github/workflows/release-auto.yml
+  --signer-workflow zackees/soldr/.github/workflows/auto-release.yml
 ```
 
 ## 7. Audit The First Published Release

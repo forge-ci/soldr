@@ -65,7 +65,7 @@ const EMBEDDED_ZCCACHE_VERSION: &str = zccache::core::VERSION;
 const SOLDR_REQUIRED_ARCHIVE_BINARIES: &[&str] = &["soldr-daemon"];
 
 /// zstd compression level for `soldr archive` output. Matches the
-/// release-workflow setting documented in `.github/workflows/release-auto.yml`
+/// release-workflow setting documented in `.github/workflows/auto-release.yml`
 /// ("Package combined archive (tar.zst level 19)").
 pub const ARCHIVE_ZSTD_LEVEL: i32 = 19;
 

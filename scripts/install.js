@@ -33,7 +33,7 @@ const TARGETS = {
 };
 
 // Files we expect to find at the root of every extracted release
-// archive. Names line up with what `release-auto.yml`'s
+// archive. Names line up with what `auto-release.yml`'s
 // `Stage soldr release binaries`, `Build crgx from pinned source`, and
 // `Build cargo-chef from pinned source` steps drop into `dist/package/`
 // before the tar.zst is built. `.exe` suffix is appended at install
@@ -43,7 +43,7 @@ const BUNDLED_BINARIES = zccacheContract.RELEASE_BUNDLED_BINARIES;
 // The lowest glibc a host must have before the `-gnu` artifact is worth
 // downloading (soldr#1060).
 //
-// This tracks release-auto.yml's BUNDLED-ARCHIVE glibc ceiling
+// This tracks auto-release.yml's BUNDLED-ARCHIVE glibc ceiling
 // (`verify_release_bundle.py --check glibc-baseline`), because the installer
 // downloads the whole archive. soldr's own binaries reach glibc 2.17 through
 // the managed sysroot (soldr#1060, verified in manylinux2014), but the
@@ -81,7 +81,7 @@ function compareVersions(left, right) {
 //   3. Anything else → musl.
 //
 // musl is the safe end of every unknown because that artifact is verified
-// statically linked before it is ever staged (release-auto.yml → "Verify musl
+// statically linked before it is ever staged (auto-release.yml → "Verify musl
 // binary is statically linked"), so it has no dynamic loader dependency and
 // runs on glibc hosts too. The mistakes are not symmetric:
 //

@@ -88,7 +88,7 @@ fn ensure_relocated_exe_copies_to_hash_keyed_runtime_dir() {
 fn relocation_dir_name_is_hash_free_only_for_official_builds() {
     // soldr#1597 Phase 3: dev/manual builds keep the hash-keyed name
     // unconditionally (same-version-different-content safety); only
-    // an official (release-auto.yml-stamped) build gets the
+    // an official (auto-release.yml-stamped) build gets the
     // hash-free, version-rooted name.
     assert_eq!(relocation_dir_name("1.2.3", "deadbeef"), "v1.2.3-deadbeef");
 }

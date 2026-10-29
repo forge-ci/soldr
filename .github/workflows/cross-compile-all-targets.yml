@@ -190,7 +190,7 @@ jobs:
       # to the soldr#1060 target baseline, 2.17 (Rust Tier 1 / manylinux_2_17).
       #
       # This is what makes that claim checkable on a PR instead of only
-      # after a release: the release-lane ratchets in `release-auto.yml` are
+      # after a release: the release-lane ratchets in `auto-release.yml` are
       # still 2.39, and lowering them without evidence would either assert a
       # number nothing observes or turn a release red. Whichever way this
       # step lands, it is the measurement that decides.
