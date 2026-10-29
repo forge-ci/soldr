@@ -147,6 +147,20 @@ Place it BEFORE `cargo`, as with --timestamp-lines."
     /// soldr#2302 — suppress per-unit cache HIT/MISS lines + stats summary (SOLDR_NO_CACHE_STATES=1); place before `cargo`, as with --no-cache.
     #[arg(long, help = "Suppress cache HIT/MISS lines + the stats summary")]
     pub(crate) no_cache_states: bool,
+    /// machine-readable front-door output: one JSON line on stdout (SOLDR_PORCELAIN=1); place before `cargo`, as with --no-cache.
+    #[arg(
+        long,
+        help = "Emit one machine-readable JSON line instead of relaying cargo output",
+        long_help = "Replace the relayed cargo/nextest output with exactly ONE line of JSON on stdout \
+(agent-harness mode).\n\nThe child's complete stdout+stderr is preserved in a durable log under \
+`<soldr root>/logs/porcelain/`, readable afterwards from the JSON's `log_path`; the JSON also \
+carries `schema_version`, `command`, `exit_code`, `duration_ms`, `expires_at` and a `summary` \
+digest of the run's failures.\n\nEquivalent to SOLDR_PORCELAIN=1, which is what an agent harness \
+sets. Place it BEFORE `cargo`, as in `soldr --porcelain cargo build`: everything after `cargo` is \
+passed through to cargo untouched. Without the flag or the variable, output streams exactly as it \
+does today."
+    )]
+    pub(crate) porcelain: bool,
     /// soldr#2546 — opt-in build process-tree tracing.
     #[arg(
         long,
@@ -255,6 +269,12 @@ impl Cli {
                 crate::cargo_front_door::cache_states::NO_CACHE_STATES_ENV_VAR,
                 "1",
             );
+        }
+        // Porcelain. Publish the env spelling `porcelain::enabled()` reads, so
+        // nested soldr invocations (the zthreads/no-cache retries) inherit the
+        // mode and emit the one JSON line themselves.
+        if self.porcelain {
+            std::env::set_var(crate::cargo_front_door::porcelain::PORCELAIN_ENV_VAR, "1");
         }
         // soldr#2546. Publish the env spelling `debug_trace::enabled()` reads,
         // so nested soldr invocations (shims, lint children) inherit tracing.

@@ -54,6 +54,7 @@ pub(crate) fn is_invocation(args: &[String]) -> bool {
             | "--timestamp-lines"
             | "--no-timestamp-lines"
             | "--no-cache-states"
+            | "--porcelain"
             | "--debug" => {}
             "--zccache" | "--jobs" | "--zccache-mode" => {
                 if iter.next().is_none() {
@@ -226,6 +227,7 @@ mod tests {
             "zccache",
             "jobs",
             "zccache-mode",
+            "porcelain",
         ]
         .into_iter()
         .map(str::to_owned)

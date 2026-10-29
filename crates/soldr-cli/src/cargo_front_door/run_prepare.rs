@@ -18,6 +18,8 @@ struct PreparedCargo {
     cargo_job_budget: Option<job_budget::AppliedCargoJobBudget>,
     capture_cargo_artifacts: bool,
     capture_for_diagnostics: bool,
+    /// `--porcelain` / `SOLDR_PORCELAIN`: the machine-readable front-door mode.
+    porcelain: bool,
     unrecorded_debug_warning: Option<profile_debug::UnrecordedDebugWarning>,
     // Declared rustfmt-first so they drop in the original order.
     _rustfmt_shim_guard: Option<crate::shim_dir::ShimDirGuard>,
@@ -190,6 +192,7 @@ async fn prepare_child_cargo(
         cargo_job_budget,
         capture_cargo_artifacts,
         capture_for_diagnostics,
+        porcelain: porcelain::enabled(),
         unrecorded_debug_warning: child_path.unrecorded_debug_warning,
         _rustfmt_shim_guard: child_path.rustfmt_shim_guard,
         _dylint_shim_guard: child_path.dylint_shim_guard,

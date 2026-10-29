@@ -3,6 +3,41 @@ pub(crate) async fn run_cargo_front_door(
     cache_enabled: bool,
     trust_inherited_soldr_env: bool,
 ) -> Result<i32, SoldrError> {
+    let result = run_cargo_front_door_gated(args, cache_enabled, trust_inherited_soldr_env).await;
+    emit_porcelain_catch_all(args, &result);
+    result
+}
+
+/// Porcelain's last chance at the contract: exactly one JSON line must reach
+/// the caller even when the run returned before the capture stage (a replayed
+/// check, a front-door configuration error) or bailed out of the tail after
+/// it. `porcelain::already_emitted` keeps this from doubling a report the run
+/// already produced, so the invariant "exactly one line" holds on every path.
+fn emit_porcelain_catch_all(args: &[String], result: &Result<i32, SoldrError>) {
+    if !porcelain::enabled() || porcelain::already_emitted() {
+        return;
+    }
+    let (exit_code, message) = match result {
+        Ok(code) => (*code, None),
+        Err(err) => (1, Some(err.to_string())),
+    };
+    let log = message.as_deref().and_then(|message| {
+        let paths = crate::core::SoldrPaths::new().ok()?;
+        porcelain::write_failure_log(&paths, &porcelain::command_string(args), message)
+    });
+    porcelain::emit(&porcelain::report_for_failure(
+        &porcelain::command_string(args),
+        exit_code,
+        log,
+        message.as_deref(),
+    ));
+}
+
+async fn run_cargo_front_door_gated(
+    args: &[String],
+    cache_enabled: bool,
+    trust_inherited_soldr_env: bool,
+) -> Result<i32, SoldrError> {
     // soldr#3896: a pure check whose exact inputs already passed is replayed
     // before any setup; otherwise a pass is recorded for the next run.
     let armed = match crate::verdict::gate::open(args) {

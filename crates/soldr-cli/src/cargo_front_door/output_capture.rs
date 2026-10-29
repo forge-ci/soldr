@@ -364,6 +364,160 @@ fn run_command_capturing_diagnostic_tail(
     Ok((status, captured))
 }
 
+/// What [`run_command_capturing_porcelain`] returns: the child's exit
+/// status, its joined stdout+stderr, the artifact closure when the
+/// packed-DWARF capture asked for it, and the durable porcelain run log.
+type PorcelainCaptureResult = (
+    std::process::ExitStatus,
+    String,
+    Option<Vec<String>>,
+    Option<porcelain::PorcelainLogArtifact>,
+);
+
+/// Run cargo for `--porcelain` / `SOLDR_PORCELAIN`: pipe BOTH streams,
+/// relay NEITHER to this process's terminal, and write the child's full
+/// stdout+stderr to a durable porcelain log.
+///
+/// This is [`run_command_capturing_cargo_json`] with the terminal tee
+/// removed (that relay is the entire point of the feature) and the two
+/// streams joined into one durable file. It reuses the same primitives:
+/// the capture pipe readers, the post-exit drain, `wait_for_cargo_child_guarded`,
+/// `debug_trace::spawn_traced` and `finish_observation_after_wait`.
+///
+/// `capture_artifacts` mirrors `run_command_capturing_cargo_json`'s
+/// artifact-closure parse: when the soldr#1775 packed-DWARF capture is on,
+/// the command already carries `--message-format=json`, so the closure is
+/// recovered from the captured stdout. Porcelain takes precedence over the
+/// cargo-JSON capture mode (the terminal tee of which is the relay being
+/// suppressed) and composes with it rather than disabling it.
+///
+/// Returns `(status, combined_output, artifact_closure, porcelain_log)`.
+/// The log write is best-effort: a failure warns on stderr and yields
+/// `None` rather than failing the build.
+fn run_command_capturing_porcelain(
+    command: &mut std::process::Command,
+    target_dir: &Path,
+    timeout: Option<Duration>,
+    guard: Option<&Arc<NestedCargoGuard>>,
+    capture_artifacts: bool,
+    paths: &SoldrPaths,
+    command_label: &str,
+) -> Result<PorcelainCaptureResult, SoldrError> {
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    configure_cargo_child_for_timeout(command);
+    let started_at_ms = current_unix_ms();
+    // soldr#2024 misattribution: porcelain is the one capture mode that both
+    // (a) does NOT inherit stdio -- it pipes the child into the porcelain log
+    // and relays nothing -- and (b) skips `log_summary::emit_session_log_summary`,
+    // which is suppressed under `prepared.porcelain` and is the *other* place
+    // that calls `mark_spoke()`. With neither signal the process-wide `SPOKE`
+    // latch stayed clear, so `exit_guard` saw a non-zero exit that "ran no
+    // child process" and appended this to an ordinary child compile failure:
+    //
+    //   soldr: exiting 101 -- soldr emitted no diagnostic and ran no child
+    //   process, so nothing has explained this failure.
+    //   soldr: this is a fault in soldr itself, not a compile error in your
+    //   project; please report it with the command you ran (soldr#2024).
+    //
+    // That is false and harmful: the child DID run, its diagnostic DID reach
+    // the caller -- in the porcelain log the single JSON line points at -- and
+    // a harness would be told to file a bogus soldr bug on every red build.
+    //
+    // Marking before the spawn, exactly as `exit_guard::run_child_command`
+    // does, records that soldr handed the child's output off (to the
+    // porcelain log). A child that dies before writing a byte still suppresses
+    // the annotation, because soldr handed the output off either way and the
+    // exit code remains the child's.
+    crate::exit_guard::mark_spoke();
+    let mut child = debug_trace::spawn_traced(command, "cargo porcelain capture")
+        .map_err(|err| SoldrError::Other(format!("spawn cargo for porcelain capture failed: {err}")))?;
+    // Same post-hoc descendant attach as the JSON and diagnostic capture modes.
+    let observation = debug_trace::DescendantObservation::attach(
+        child.id(),
+        "cargo porcelain capture",
+        guard.cloned(),
+    );
+    let stdout_rx = spawn_capture_pipe_reader_silent(child.stdout.take().expect("piped"));
+    let stderr_rx = spawn_capture_pipe_reader_silent(child.stderr.take().expect("piped"));
+    let status = wait_for_cargo_child_guarded(
+        &mut child,
+        "cargo porcelain capture",
+        timeout,
+        Duration::from_secs(CARGO_WAIT_HEARTBEAT_SECS),
+        guard.map(Arc::as_ref),
+    );
+    let status = finish_observation_after_wait(observation, status)?;
+    let stdout = drain_capture_pipe_after_child_exit(&stdout_rx, "cargo porcelain stdout");
+    let stderr = drain_capture_pipe_after_child_exit(&stderr_rx, "cargo porcelain stderr");
+    // The artifact closure is parsed from raw stdout, exactly as the JSON
+    // capture mode does, before the streams are joined for the log.
+    let artifact_closure = capture_artifacts.then(|| parse_cargo_artifact_closure(&stdout, target_dir));
+    let combined = join_captured_streams(&stdout, &stderr);
+    let exit_code = status.code().unwrap_or(-1);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let log = match porcelain::write_run_log(
+        paths,
+        started_at_ms,
+        &cwd,
+        command_label,
+        exit_code,
+        &combined,
+    ) {
+        Ok(artifact) => Some(artifact),
+        Err(err) => {
+            eprintln!("soldr warning: failed to write porcelain run log: {err}");
+            None
+        }
+    };
+    Ok((status, combined, artifact_closure, log))
+}
+
+/// Join the two captured child streams into one log body. Each side is
+/// kept in its own labelled section so the raw bytes stay unambiguous.
+fn join_captured_streams(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut out = String::with_capacity(stdout.len() + stderr.len() + 64);
+    out.push_str("--- stdout ---\n");
+    let stdout = String::from_utf8_lossy(stdout);
+    out.push_str(&stdout);
+    if !stdout.is_empty() && !stdout.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("--- stderr ---\n");
+    let stderr = String::from_utf8_lossy(stderr);
+    out.push_str(&stderr);
+    if !stderr.is_empty() && !stderr.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// A capture pipe reader that relays NOTHING to this process's terminal --
+/// only to the capture channel. Used by the porcelain mode, where the
+/// whole point is that the child's bytes never reach the caller's stdio.
+fn spawn_capture_pipe_reader_silent<R>(
+    mut reader: R,
+) -> std::sync::mpsc::Receiver<CapturePipeMessage>
+where
+    R: std::io::Read + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let _ = tx.send(CapturePipeMessage::Chunk(chunk[..n].to_vec()));
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = tx.send(CapturePipeMessage::Eof);
+    });
+    rx
+}
+
 enum CapturePipeMessage {
     Chunk(Vec<u8>),
     Eof,

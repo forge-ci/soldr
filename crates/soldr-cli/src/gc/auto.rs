@@ -134,6 +134,10 @@ pub(crate) fn run_gc_auto_sweep_command() -> Result<(), crate::core::SoldrError>
         crate::build_log::BUILD_LOG_KEEP,
     );
     tracing::debug!(deleted, "pruned per-build XML logs");
+    // Porcelain: same pass, same throttle. `expires_at` in the JSON is this
+    // TTL, and it is enforced here rather than by a new sweeper.
+    let porcelain_deleted = crate::cargo_front_door::porcelain::prune(&paths);
+    tracing::debug!(porcelain_deleted, "pruned porcelain run logs");
     run_auto_gc_background(paths.root.clone(), log_path);
     Ok(())
 }

@@ -129,13 +129,34 @@ fn run_child_cargo(prepared: &mut PreparedCargo, setup: &FrontDoorSetup) -> Carg
     let guard = guard.as_ref();
     let cargo_wait_timeout = setup.cargo_wait_timeout;
     let command = &mut prepared.command;
-    if prepared.capture_cargo_artifacts {
+    if prepared.porcelain {
+        // `--porcelain` / `SOLDR_PORCELAIN` takes precedence over every other
+        // capture mode: its whole contract is that the child's bytes never
+        // reach the caller's stdio. It still recovers the artifact closure
+        // from the (already `--message-format=json`) stdout when the
+        // packed-DWARF capture is on, so the two compose rather than cancel.
+        let target_dir = prepared
+            .cache_plan
+            .target_dir_for_hooks(&prepared.args)
+            .unwrap_or_else(|| disk::cargo_disk_space_probe_path(&prepared.args));
+        let label = porcelain::command_string(&prepared.args);
+        run_command_capturing_porcelain(
+            command,
+            &target_dir,
+            cargo_wait_timeout,
+            guard,
+            prepared.capture_cargo_artifacts,
+            &prepared.paths,
+            &label,
+        )
+        .map(|(status, captured, paths, log)| (status, Some(captured), paths, log))
+    } else if prepared.capture_cargo_artifacts {
         let target_dir = prepared
             .cache_plan
             .target_dir_for_hooks(&prepared.args)
             .unwrap_or_else(|| disk::cargo_disk_space_probe_path(&prepared.args));
         run_command_capturing_cargo_json(command, &target_dir, cargo_wait_timeout, guard)
-            .map(|(status, captured, paths)| (status, Some(captured), Some(paths)))
+            .map(|(status, captured, paths)| (status, Some(captured), Some(paths), None))
     } else if prepared.capture_for_diagnostics && !debug_trace::observed_spawn_required() {
         // soldr#2546 slice 3: the diagnostic-tail capture observes
         // descendants by attaching the monitor to the spawned pid
@@ -147,7 +168,7 @@ fn run_child_cargo(prepared: &mut PreparedCargo, setup: &FrontDoorSetup) -> Carg
         // instead: its descendant discovery is the Job Object wired at
         // spawn, so a post-hoc attach observes nothing there.
         run_command_capturing_diagnostic_tail(command, cargo_wait_timeout, guard)
-            .map(|(status, captured)| (status, Some(captured), None))
+            .map(|(status, captured)| (status, Some(captured), None, None))
     } else {
         // soldr#2546 slice 2: under --debug on a terminal, builds run
         // inherited-stdio through the running-process observer
@@ -156,7 +177,7 @@ fn run_child_cargo(prepared: &mut PreparedCargo, setup: &FrontDoorSetup) -> Carg
         // artifact-capture mode above keeps its load-bearing pipe
         // plumbing and observes via the same post-hoc attach.
         run_command_inheriting_stdio(command, cargo_wait_timeout, guard)
-            .map(|status| (status, None, None))
+            .map(|status| (status, None, None, None))
     }
 }
 
@@ -193,14 +214,16 @@ fn handle_aborted_cargo_run(
     // soldr#1813: an aborted/timed-out cargo run is exactly when the
     // user most needs the log paths, and this arm always returns early —
     // so the summary is emitted here too rather than at the shared tail.
-    log_summary::emit_session_log_summary(
-        &log_summary::SessionLogs {
-            build_log,
-            build_log_paths,
-            compile_fallback_log,
-        },
-        -1,
-    );
+    if !prepared.porcelain {
+        log_summary::emit_session_log_summary(
+            &log_summary::SessionLogs {
+                build_log,
+                build_log_paths,
+                compile_fallback_log,
+            },
+            -1,
+        );
+    }
     if let Err(finish_err) = finish_result {
         eprintln!(
             "soldr warning: failed to finish zccache session after aborted cargo run: {finish_err}"
@@ -228,9 +251,11 @@ fn handle_aborted_cargo_run(
         }
     }
     if auto_retry_planned {
-        eprintln!(
-            "soldr: retrying timed-out cargo run without cache: soldr --no-cache cargo <same args>"
-        );
+        if !prepared.porcelain {
+            eprintln!(
+                "soldr: retrying timed-out cargo run without cache: soldr --no-cache cargo <same args>"
+            );
+        }
         return match retry_timed_out_cargo_without_cache(
             args,
             prepared.explicit_toolchain.as_deref(),
@@ -239,7 +264,9 @@ fn handle_aborted_cargo_run(
                 let code = status
                     .code()
                     .unwrap_or(if status.success() { 0 } else { 1 });
-                eprintln!("soldr: no-cache cargo retry exited with code {code}");
+                if !prepared.porcelain {
+                    eprintln!("soldr: no-cache cargo retry exited with code {code}");
+                }
                 Ok(code)
             }
             Err(retry_err) => Err(SoldrError::Other(format!(
@@ -247,16 +274,51 @@ fn handle_aborted_cargo_run(
             ))),
         };
     }
+    // Porcelain: the cargo run never produced a status, so there is no run
+    // log from the capture path. Write a small failure log holding soldr's
+    // own diagnosis and emit the single JSON line, then fall through to the
+    // error that sets the process exit code.
+    //
+    // The reported code is the one this process will exit with: `Err` below
+    // reaches `report_and_exit`, which exits 1. Emitting `-1` here made the
+    // JSON disagree with `$?` for the same failed run.
+    if prepared.porcelain {
+        let message = augmented.to_string();
+        let failure_log =
+            porcelain::write_failure_log(paths, &porcelain::command_string(args), &message);
+        porcelain::emit(&porcelain::report_for_failure(
+            &porcelain::command_string(args),
+            porcelain::FAILURE_EXIT_CODE,
+            failure_log,
+            Some(&message),
+        ));
+    }
     Err(augmented)
+}
+
+/// Report a signal-terminated child before the exit code loses the signal
+/// (soldr#3938). Extracted so `complete_cargo_run` stays inside clippy's
+/// `too_many_lines` ceiling.
+fn warn_on_signal_termination(status: &std::process::ExitStatus) {
+    if status.code().is_none() {
+        let returncode = soldr_platform::process::test_child::returncode(status);
+        if returncode < 0 {
+            eprintln!(
+                "soldr: cargo terminated by signal {}",
+                returncode.saturating_neg()
+            );
+        }
+    }
 }
 
 /// The child cargo ran to completion: close the session, publish logs and
 /// artifacts, and apply the post-build fallbacks.
 fn complete_cargo_run(
-    (status, diagnostic_capture, cargo_artifact_paths): (
+    (status, diagnostic_capture, cargo_artifact_paths, porcelain_log): (
         std::process::ExitStatus,
         Option<String>,
         Option<Vec<String>>,
+        Option<porcelain::PorcelainLogArtifact>,
     ),
     prepared: &PreparedCargo,
     mut session: FrontDoorBuildSession,
@@ -264,12 +326,7 @@ fn complete_cargo_run(
     normalized: NormalizedArgs,
 ) -> Result<i32, SoldrError> {
     let paths = &prepared.paths;
-    if status.code().is_none() {
-        let returncode = soldr_platform::process::test_child::returncode(&status);
-        if returncode < 0 {
-            eprintln!("soldr: cargo terminated by signal {}", returncode.saturating_neg());
-        }
-    }
+    warn_on_signal_termination(&status);
     let captured_stderr_for_diagnosis = diagnostic_capture;
     crate::verdict::gate::note_output(captured_stderr_for_diagnosis.as_deref());
     let compile_fallback_log =
@@ -279,6 +336,13 @@ fn complete_cargo_run(
         captured_stderr_for_diagnosis.as_deref(),
     );
     let effective_exit_code = strip_outcome.effective_exit_code(&status);
+    let porcelain_report = porcelain::captured_run_report(
+        porcelain_log.as_ref(),
+        &porcelain::command_string(&prepared.args),
+        &status,
+        effective_exit_code,
+        captured_stderr_for_diagnosis.as_deref(),
+    );
 
     // Phase 2: send BuildSessionEnd before the success/failure
     // branches do any further work. Best-effort — never affects the
@@ -334,14 +398,20 @@ fn complete_cargo_run(
     // soldr#1813: tell the user where the logs went. Printed here because this
     // is the last point both the success and the compiler-failure paths pass
     // through — everything below can bail out via `?` or the zthreads retry.
-    log_summary::emit_session_log_summary(
-        &log_summary::SessionLogs {
-            build_log,
-            build_log_paths,
-            compile_fallback_log,
-        },
-        effective_exit_code,
-    );
+    //
+    // Porcelain suppresses this block: the run log's path is already the
+    // JSON `log_path`, so the human summary would be pure noise a caller
+    // asked not to receive.
+    if !prepared.porcelain {
+        log_summary::emit_session_log_summary(
+            &log_summary::SessionLogs {
+                build_log,
+                build_log_paths,
+                compile_fallback_log,
+            },
+            effective_exit_code,
+        );
+    }
     // History is now copied, sanitized, indexed, and marked complete. Keep the
     // lease through that publication boundary so migration GC cannot remove a
     // half-written archive.
@@ -366,6 +436,12 @@ fn complete_cargo_run(
         ) {
             return retried;
         }
+    }
+    // Porcelain: exactly one JSON line on stdout, emitted last (after every
+    // early `?` and after the retry decision above) so the caller always
+    // sees it exactly once.
+    if let Some(report) = porcelain_report.as_ref() {
+        porcelain::emit(report);
     }
     drop(normalized);
     Ok(status.code().unwrap_or(1))
