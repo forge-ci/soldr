@@ -398,20 +398,29 @@ fn dylint_unavailable_error(component: &str, version: &str, error: &SoldrError) 
 /// reports "Could not find `lib<lint>@<toolchain>.so` despite successful
 /// build"). Such a binary is skipped in favour of the managed pin.
 fn path_dylint_matches_pin(binary: &Path, pinned: &str) -> bool {
-    let mut command = std::process::Command::new(binary);
-    command.args(["dylint", "--version"]);
-    suppress_windows_console_window(&mut command);
-    let reported = crate::core::tool_output::capture_small_tool(
-        &mut command,
-        "cargo-dylint dylint --version",
-        Some(Duration::from_secs(2)),
-    )
-    .ok()
-    .filter(|output| output.status.success())
-    .and_then(|output| {
-        crate::dylint_driver::dylint_driver_version(&String::from_utf8_lossy(&output.stdout))
-            .map(str::to_owned)
-    });
+    // Invoked directly, cargo-dylint only answers `dylint --version`; a bare
+    // `--version` is tried first because it is the cheaper, side-effect-free
+    // spelling wrappers and test doubles answer.
+    let reported = [&["--version"][..], &["dylint", "--version"][..]]
+        .into_iter()
+        .find_map(|args| {
+            let mut command = std::process::Command::new(binary);
+            command.args(args);
+            suppress_windows_console_window(&mut command);
+            crate::core::tool_output::capture_small_tool(
+                &mut command,
+                &format!("cargo-dylint {}", args.join(" ")),
+                Some(Duration::from_secs(2)),
+            )
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| {
+                crate::dylint_driver::dylint_driver_version(&String::from_utf8_lossy(
+                    &output.stdout,
+                ))
+                .map(str::to_owned)
+            })
+        });
     if reported.as_deref() == Some(pinned) {
         return true;
     }
