@@ -35,6 +35,17 @@
       ],
       "rationale": "zackees/ci.yml#198 pilot: one ~330-byte entry per attested gate per PR head (7 gates). Carved from experiment-lanes, which evicts least-recently-used."
     },
+    "verdict-manifest": {
+      "ci_toml_families": [
+        "verdict-manifest"
+      ],
+      "evict": "lru",
+      "evict_rationale": "One manifest per run, keyed by the run id, so every entry is stale as soon as its run is done; losing one only makes a later job re-run the checks instead of reusing their verdicts.",
+      "entries": [
+        "setup-soldr-verdict-manifest"
+      ],
+      "rationale": "setup-soldr's verdict ledger, remote tier (soldr#3894): one sub-KiB JSON per run listing the verdict keys that run recorded, restored by prefix so a later job can rekey the manifest and hydrate exactly those verdicts. Its key carries the run id, so it churns per run and never displaces a durable layer."
+    },
     "pinned-immutable-download": {
       "ci_toml_families": [
         "rustup",
@@ -190,6 +201,14 @@
       "mechanism": "actions/cache",
       "tier": "attestation-evidence",
       "rationale": "Per-gate ci-attestation evidence (compact JSON) keyed by lineage label; listed, never restored into a build."
+    },
+    {
+      "id": "setup-soldr-verdict-manifest",
+      "workflow": "ci.yml",
+      "step": "setup-soldr post: save this run's verdict manifest (soldr-verdict-manifest-v1-<scope>-<run>-<attempt>)",
+      "mechanism": "actions/cache",
+      "tier": "attestation-evidence",
+      "rationale": "One sub-KiB JSON per run listing the verdict keys that run recorded; restored by prefix by a later job to rekey and hydrate exactly those verdicts. Run-id keyed, so it churns per run and is never a build product."
     },
     {
       "id": "bootstrap-e2e-rustup-toolchain",
