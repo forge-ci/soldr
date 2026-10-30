@@ -57,7 +57,7 @@ def test_required_ci_runs_root_dylint_policy() -> None:
 
     for manifest_path in (ROOT / "dylints").glob("*/Cargo.toml"):
         manifest_text = manifest_path.read_text(encoding="utf-8")
-        assert 'dylint_testing = "=6.0.3"' in manifest_text
+        assert 'dylint_testing = "=6.2.0"' in manifest_text
 
 
 def test_process_boundary_has_required_ui_fixtures() -> None:

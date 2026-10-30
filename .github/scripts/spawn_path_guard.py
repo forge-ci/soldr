@@ -81,6 +81,12 @@ ALLOWLIST: tuple[AllowedSpawns, ...] = (
         "parallel lint-deps children (soldr re-exec per dependency tool)",
     ),
     AllowedSpawns(
+        "crates/soldr-cli/src/lint_steps.rs",
+        1,
+        "soldr lint extra repo commands and porcelain step children "
+        "(soldr#3958); waits go through wait::wait_for",
+    ),
+    AllowedSpawns(
         "crates/soldr-cli/src/ci_test/execute.rs",
         1,
         "prescribed ci-test DAG children; every command is a frozen soldr "

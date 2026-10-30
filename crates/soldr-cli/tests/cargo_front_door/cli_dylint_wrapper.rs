@@ -41,7 +41,7 @@ exec "{cargo_dylint}" "$@"
             r#"#!/bin/sh
 echo "cargo-dylint argv=$* wrapper=${{RUSTC_WRAPPER:-}}" >> "{log}"
 case "${{1:-}}" in
-  --version) printf 'cargo-dylint 6.0.3\n'; exit 0 ;;
+  --version) printf 'cargo-dylint 6.2.0\n'; exit 0 ;;
   --help) exit 0 ;;
 esac
 echo "cargo-dylint pair wrapper=${{RUSTC_WRAPPER:-<unset>}} mirror=${{SOLDR_EFFECTIVE_RUSTC_WRAPPER:-<unset>}}" >> "{log}"
@@ -133,7 +133,7 @@ fi
         .expect("create prebuilt driver dir");
     write_script(
         &prebuilt_driver,
-        "#!/bin/sh\nprintf 'dylint-driver 6.0.3\\n'\n".to_string(),
+        "#!/bin/sh\nprintf 'dylint-driver 6.2.0\\n'\n".to_string(),
     );
 
     (cargo, rustc, zccache, driver_root)

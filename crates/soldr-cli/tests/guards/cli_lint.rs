@@ -5,6 +5,7 @@ use std::{
     fs,
     io::Read,
     path::Path,
+    path::PathBuf,
     process::Stdio,
     time::{Duration, Instant},
 };
@@ -266,9 +267,9 @@ fn lint_rust_uses_canonical_commands_without_a_redundant_check() {
         soldr_platform::host::facts::os(),
         soldr_platform::host::facts::HostOs::Windows
     ) {
-        "@echo off\necho dylint-driver 6.0.3\nexit /b 0\n"
+        "@echo off\necho dylint-driver 6.2.0\nexit /b 0\n"
     } else {
-        "#!/bin/sh\nprintf 'dylint-driver 6.0.3\\n'\n"
+        "#!/bin/sh\nprintf 'dylint-driver 6.2.0\\n'\n"
     };
     write_fake_script(&driver, driver_script);
     let rustc = install_versioned_fake_rustc(
@@ -426,5 +427,129 @@ fn dependency_failure_cancels_sibling_lint_children() {
          so its `sleep`/`ping` grandchild inherits this stderr for the full \
          {SIBLING_SLEEP_SECS}s. Look for a descendant outside the killed \
          tree, not at the cancellation logic.\nstderr:\n{stderr}"
+    );
+}
+
+// ---- soldr#3958: `SOLDR_PORCELAIN=1 soldr lint` and the declared step list ----
+
+const LINT_NOISE_MARKER: &str = "LINT_PASSING_STEP_NOISE_3958";
+const LINT_FMT_DIFF: &str = "Diff in src/lib.rs:1:";
+
+/// A fake cargo whose `fmt` step fails with a rustfmt-style diff when
+/// `fail_fmt`, and whose every other step prints a noise line and passes.
+fn porcelain_lint_cargo_script(fail_fmt: bool) -> String {
+    if matches!(
+        soldr_platform::host::facts::os(),
+        soldr_platform::host::facts::HostOs::Windows
+    ) {
+        let fmt = if fail_fmt {
+            format!("echo {LINT_FMT_DIFF}\r\necho -fn  a(){{}}\r\necho +fn a() {{}}\r\nexit /b 1")
+        } else {
+            "exit /b 0".to_string()
+        };
+        format!(
+            "@echo off\r\nif \"%~1\"==\"metadata\" exit /b 0\r\nif \"%~1\"==\"fmt\" (\r\n{fmt}\r\n)\r\necho {LINT_NOISE_MARKER}\r\nexit /b 0\r\n"
+        )
+    } else {
+        let fmt = if fail_fmt {
+            format!("printf '%s\\n' '{LINT_FMT_DIFF}' '-fn  a(){{}}' '+fn a() {{}}'; exit 1")
+        } else {
+            "printf '%s\\n' '{NOISE}'; exit 0".replace("{NOISE}", LINT_NOISE_MARKER)
+        };
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = metadata ]; then exit 0; fi\nif [ \"$1\" = fmt ]; then {fmt}; fi\nprintf '%s\\n' '{LINT_NOISE_MARKER}'\nexit 0\n"
+        )
+    }
+}
+
+fn run_porcelain_lint(label: &str, fail_fmt: bool) -> (std::process::Output, PathBuf) {
+    let root = unique_temp_dir(label);
+    let workspace = root.join("workspace");
+    fs::create_dir_all(workspace.join("src")).expect("workspace source dir");
+    fs::write(
+        workspace.join("Cargo.toml"),
+        "[package]\nname = \"lint_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         [workspace]\n\n[workspace.metadata.soldr.lint]\nsteps = [\"fmt\", \"clippy\"]\n",
+    )
+    .expect("manifest");
+    fs::write(workspace.join("src/lib.rs"), "pub fn a() {}\n").expect("source");
+    let tool_dir = root.join("tool");
+    fs::create_dir_all(&tool_dir).expect("tool dir");
+    let cargo = fake_script_path(&tool_dir, "cargo");
+    write_fake_script(&cargo, &porcelain_lint_cargo_script(fail_fmt));
+    let output = isolated_soldr_command()
+        .args(["--no-cache", "lint", "rust"])
+        .current_dir(&workspace)
+        .env("SOLDR_PORCELAIN", "1")
+        .env("SOLDR_CACHE_DIR", root.join("cache"))
+        .env("CARGO_TARGET_DIR", root.join("target"))
+        .env("SOLDR_TEST_CARGO_BIN", &cargo)
+        .output()
+        .expect("run soldr lint");
+    (output, root)
+}
+
+#[test]
+fn porcelain_lint_success_prints_exactly_one_summary_line() {
+    let (output, _root) = run_porcelain_lint("lint-porcelain-ok", false);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(stdout.lines().count(), 1, "stdout:\n{stdout}");
+    assert!(!stdout.contains(LINT_NOISE_MARKER) && !stderr.contains(LINT_NOISE_MARKER));
+    let report: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON line");
+    assert_eq!(report["summary"]["status"], "ok");
+    assert_eq!(report["exit_code"], 0);
+    let names: Vec<_> = report["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .map(|step| {
+            (
+                step["name"].as_str().unwrap_or_default().to_string(),
+                step["ok"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            ("fmt".to_string(), serde_json::json!(true)),
+            ("clippy".to_string(), serde_json::json!(true)),
+        ]
+    );
+    let log = fs::read_to_string(report["log_path"].as_str().expect("log_path")).expect("log");
+    assert!(
+        log.contains(LINT_NOISE_MARKER),
+        "the folded output lives in the log:\n{log}"
+    );
+}
+
+#[test]
+fn porcelain_lint_failure_shows_the_fmt_diff_in_full() {
+    let (output, _root) = run_porcelain_lint("lint-porcelain-fmt", true);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(LINT_FMT_DIFF),
+        "the diff is never folded:\n{stderr}"
+    );
+    assert_eq!(stdout.lines().count(), 1, "stdout:\n{stdout}");
+    let report: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON line");
+    assert_eq!(report["summary"]["status"], "failed");
+    assert_eq!(report["failed_step"], "fmt");
+    assert_eq!(report["exit_code"], 1);
+    assert_eq!(
+        report["steps"].as_array().map(Vec::len),
+        Some(1),
+        "lint stops at the failing step"
     );
 }

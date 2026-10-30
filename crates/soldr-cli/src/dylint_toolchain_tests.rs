@@ -765,7 +765,7 @@ fn driver_diagnostic_names_the_provenance_and_the_missing_asset() {
         "the diagnostic must name the tier that chose the channel: {message}"
     );
     assert!(
-        message.contains("dylint-driver 6.0.3-nightly-2026-01-18"),
+        message.contains("dylint-driver 6.2.0-nightly-2026-01-18"),
         "{message}"
     );
     assert!(message.contains("/soldr/dylint/drivers/"), "{message}");
@@ -799,13 +799,13 @@ fn the_driver_build_opt_in_is_off_by_default_and_warns_when_set() {
     let plan = sample_plan().with_provenance(ChannelProvenance::LintLibraries);
     let warning = driver_source_build_warning(
         &plan,
-        "6.0.3",
+        "6.2.0",
         &SoldrError::Other("catalogue has no asset row".into()),
     );
     assert!(warning.contains("WARNING"), "{warning}");
     assert!(warning.contains("nightly-2026-01-18"), "{warning}");
     assert!(
-        warning.contains("dylint-driver 6.0.3-nightly-2026-01-18"),
+        warning.contains("dylint-driver 6.2.0-nightly-2026-01-18"),
         "{warning}"
     );
     assert!(

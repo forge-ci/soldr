@@ -2635,7 +2635,7 @@ fn dylint_smoke_failure_never_calls_source_build() {
         "unexpected error: {message}"
     );
     assert!(
-        message.contains("Dylint v6.0.3 is not built for this machine"),
+        message.contains("Dylint v6.2.0 is not built for this machine"),
         "unexpected error: {message}"
     );
     assert!(

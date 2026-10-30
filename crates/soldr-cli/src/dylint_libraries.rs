@@ -13,7 +13,7 @@
 //!   **stable** channel through `rust-nightly-versions.v1.json`. In this repo
 //!   that produced `nightly-2026-02-28`, for which no Dylint driver has ever
 //!   been published — so `soldr dylint` failed at the driver gate while the
-//!   six lint manifests all pinned `nightly-2026-05-28`, whose driver was
+//!   six lint manifests all pinned `nightly-2026-08-15`, whose driver was
 //!   already on disk.
 //! * `ci_test/plan.rs` read the libraries directly, off a hard-coded list of
 //!   six directory names, and got the right answer.
@@ -55,8 +55,8 @@ pub(crate) enum LibraryToolchainState {
 }
 
 /// Reduce a channel to the identity the Dylint driver is keyed on: a dated
-/// nightly without its host-triple suffix. `nightly-2026-05-28-x86_64-pc-
-/// windows-msvc` and `nightly-2026-05-28` name the same driver; anything that
+/// nightly without its host-triple suffix. `nightly-2026-08-15-x86_64-pc-
+/// windows-msvc` and `nightly-2026-08-15` name the same driver; anything that
 /// is not a nightly (a stable `1.95.0`, say) is returned unchanged.
 pub(crate) fn canonical_channel(channel: &str) -> &str {
     channel
@@ -347,15 +347,15 @@ mod tests {
     }
 
     const SIX: &[(&str, &str)] = &[
-        ("dylints/ban_raw_process_creation", "nightly-2026-05-28"),
-        ("dylints/ban_raw_network_access", "nightly-2026-05-28"),
-        ("dylints/ban_raw_local_socket_name", "nightly-2026-05-28"),
-        ("dylints/ban_raw_ipc_transport", "nightly-2026-05-28"),
+        ("dylints/ban_raw_process_creation", "nightly-2026-08-15"),
+        ("dylints/ban_raw_network_access", "nightly-2026-08-15"),
+        ("dylints/ban_raw_local_socket_name", "nightly-2026-08-15"),
+        ("dylints/ban_raw_ipc_transport", "nightly-2026-08-15"),
         (
             "dylints/ban_platform_cfg_outside_boundary",
-            "nightly-2026-05-28",
+            "nightly-2026-08-15",
         ),
-        ("dylints/ban_raw_env_flag", "nightly-2026-05-28"),
+        ("dylints/ban_raw_env_flag", "nightly-2026-08-15"),
     ];
 
     /// The defect soldr#2945 was filed for: `dylints/*` must enumerate every
@@ -375,7 +375,7 @@ mod tests {
         else {
             panic!("libraries must report their shared pin");
         };
-        assert_eq!(channel, "nightly-2026-05-28");
+        assert_eq!(channel, "nightly-2026-08-15");
         assert_eq!(
             libraries,
             vec![
@@ -393,7 +393,7 @@ mod tests {
     fn glob_expansion_skips_files_and_dot_directories() {
         let temp = workspace(
             "{path='dylints/*'}",
-            &[("dylints/one", "nightly-2026-05-28")],
+            &[("dylints/one", "nightly-2026-08-15")],
         );
         std::fs::create_dir_all(temp.path().join("dylints/.scratch")).expect("dot dir");
         std::fs::write(temp.path().join("dylints/README.md"), "x").expect("stray file");
@@ -405,7 +405,7 @@ mod tests {
     fn overlapping_declarations_report_each_library_once() {
         let temp = workspace(
             "{path='dylints/*'},{path='dylints/one'}",
-            &[("dylints/one", "nightly-2026-05-28")],
+            &[("dylints/one", "nightly-2026-08-15")],
         );
         let directories = library_directories(temp.path()).expect("expand libraries");
         assert_eq!(directories.len(), 1, "{directories:?}");
@@ -441,10 +441,10 @@ mod tests {
         let temp = workspace(
             "{path='dylints/*'}",
             &[
-                ("dylints/lint-a", "nightly-2026-05-28"),
+                ("dylints/lint-a", "nightly-2026-08-15"),
                 (
                     "dylints/lint-b",
-                    "nightly-2026-05-28-x86_64-unknown-linux-gnu",
+                    "nightly-2026-08-15-x86_64-unknown-linux-gnu",
                 ),
             ],
         );
@@ -453,7 +453,7 @@ mod tests {
         else {
             panic!("libraries must report their shared pin");
         };
-        assert_eq!(channel, "nightly-2026-05-28");
+        assert_eq!(channel, "nightly-2026-08-15");
     }
 
     /// `ci/fixtures/dylint-cache` is exactly this shape: one library with no
@@ -478,7 +478,7 @@ mod tests {
         let temp = workspace(
             "{path='dylints/*'}",
             &[
-                ("dylints/lint-a", "nightly-2026-05-28"),
+                ("dylints/lint-a", "nightly-2026-08-15"),
                 ("dylints/lint-b", ""),
             ],
         );
@@ -486,7 +486,7 @@ mod tests {
             .expect_err("a half-pinned workspace must not resolve")
             .to_string();
         assert!(
-            error.contains("dylints/lint-a (nightly-2026-05-28)"),
+            error.contains("dylints/lint-a (nightly-2026-08-15)"),
             "{error}"
         );
         assert!(error.contains("dylints/lint-b"), "{error}");
@@ -563,12 +563,12 @@ mod tests {
     #[test]
     fn canonical_channel_drops_the_host_suffix_only_for_nightlies() {
         assert_eq!(
-            canonical_channel("nightly-2026-05-28-x86_64-pc-windows-msvc"),
-            "nightly-2026-05-28"
+            canonical_channel("nightly-2026-08-15-x86_64-pc-windows-msvc"),
+            "nightly-2026-08-15"
         );
         assert_eq!(
-            canonical_channel("nightly-2026-05-28"),
-            "nightly-2026-05-28"
+            canonical_channel("nightly-2026-08-15"),
+            "nightly-2026-08-15"
         );
         assert_eq!(canonical_channel("1.95.0"), "1.95.0");
     }

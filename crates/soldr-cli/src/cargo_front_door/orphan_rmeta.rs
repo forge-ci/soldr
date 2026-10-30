@@ -163,7 +163,7 @@ fn prune_orphan_rmetas_in_deps(deps_dir: &std::path::Path) -> usize {
         let Some(stem) = rmeta.file_stem() else {
             continue;
         };
-        if companion_stems.contains(stem) {
+        if companion_stems.contains(stem) || is_metadata_only_unit(&rmeta) {
             continue;
         }
         match std::fs::remove_file(&rmeta) {
@@ -175,6 +175,49 @@ fn prune_orphan_rmetas_in_deps(deps_dir: &std::path::Path) -> usize {
         }
     }
     deleted
+}
+
+/// True when rustc's dep-info for the unit owning `rmeta` declares the
+/// `.rmeta` as its only library output: a `cargo check`/`clippy`/Dylint unit
+/// (`--emit=dep-info,metadata`) that completed and never owes an `.rlib`.
+/// Such an rmeta is a valid, cached result, not a soldr#410 orphan; pruning
+/// it after a failed lint forced the next run to recheck every dependency
+/// (soldr#3968). Missing or unreadable dep-info keeps the soldr#410 prune.
+fn is_metadata_only_unit(rmeta: &std::path::Path) -> bool {
+    let (Some(dir), Some(name)) = (rmeta.parent(), rmeta.file_stem().and_then(|s| s.to_str()))
+    else {
+        return false;
+    };
+    let unit = name.strip_prefix("lib").unwrap_or(name);
+    let Ok(dep_info) = std::fs::read_to_string(dir.join(format!("{unit}.d"))) else {
+        return false;
+    };
+    let mut lists_rmeta = false;
+    for target in dep_info_targets(&dep_info) {
+        let path = std::path::Path::new(target);
+        if path.file_stem().and_then(|s| s.to_str()) != Some(name) {
+            continue;
+        }
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("rmeta") => lists_rmeta = true,
+            Some(_) => return false,
+            None => {}
+        }
+    }
+    lists_rmeta
+}
+
+/// Output paths of a Makefile-style dep-info file: each unindented,
+/// non-comment rule line's text before the `: ` separator.
+fn dep_info_targets(dep_info: &str) -> impl Iterator<Item = &str> {
+    dep_info.lines().filter_map(|line| {
+        if line.starts_with('#') || line.starts_with(char::is_whitespace) {
+            return None;
+        }
+        line.split_once(": ")
+            .map(|(target, _)| target)
+            .or_else(|| line.strip_suffix(':'))
+    })
 }
 
 #[cfg(test)]
@@ -210,5 +253,47 @@ mod tests {
         let (root, _profile, rmeta) = profile_with_rmeta();
         assert_eq!(prune_orphan_rmetas_after_failed_build(root.path()), 1);
         assert!(!rmeta.exists());
+    }
+
+    /// soldr#3968: `cargo check`/`clippy`/Dylint emit metadata-only units, so
+    /// their `.rmeta` never has an `.rlib`. Rustc's dep-info names the outputs
+    /// the unit was asked for; one that lists only `.rmeta` is a complete
+    /// check result, not an orphan, and must survive a failed lint.
+    #[test]
+    fn prune_keeps_metadata_only_check_outputs_after_a_failed_lint() {
+        let root = tempfile::tempdir().expect("temp root");
+        let deps = root.path().join("x86_64-unknown-linux-gnu/debug/deps");
+        std::fs::create_dir_all(&deps).expect("deps");
+        let check = deps.join("libsoup-1111.rmeta");
+        std::fs::write(&check, b"meta").expect("rmeta");
+        std::fs::write(
+            deps.join("soup-1111.d"),
+            format!(
+                "{0}/soup-1111.d: src/lib.rs\n\n{0}/libsoup-1111.rmeta: src/lib.rs\n\nsrc/lib.rs:\n",
+                deps.display()
+            ),
+        )
+        .expect("dep-info");
+        // soldr#410: a codegen unit that aborted after emitting metadata.
+        let orphan = deps.join("libpango-2222.rmeta");
+        std::fs::write(&orphan, b"meta").expect("rmeta");
+        std::fs::write(
+            deps.join("pango-2222.d"),
+            format!(
+                "{0}/libpango-2222.rlib: src/lib.rs\n\n{0}/libpango-2222.rmeta: src/lib.rs\n\nsrc/lib.rs:\n",
+                deps.display()
+            ),
+        )
+        .expect("dep-info");
+
+        assert_eq!(prune_orphan_rmetas_after_failed_build(root.path()), 1);
+        assert!(
+            check.exists(),
+            "a check-mode .rmeta is a valid cached output"
+        );
+        assert!(
+            !orphan.exists(),
+            "a codegen unit missing its .rlib is still pruned"
+        );
     }
 }

@@ -15,7 +15,7 @@ const DYLINT_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
 fn dylint_channel() -> String {
     format!(
-        "nightly-2026-05-28-{}",
+        "nightly-2026-08-15-{}",
         soldr_cli::pyo3_detect::host_triple()
     )
 }

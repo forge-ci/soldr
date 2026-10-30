@@ -161,6 +161,20 @@ pub(super) struct PorcelainSummary {
     /// stderr and into `log_path`. Additive: an older reader ignores it, and
     /// `0` is the honest answer for a run that deferred nothing.
     pub(super) cache_lines: usize,
+    /// Failing tests (first 10) with panic location and message lines
+    /// (soldr#3961). Omitted when no test failed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) failed_tests: Vec<super::porcelain_failures::FailedTest>,
+    /// Failing tests beyond the cap ("+N more"). Omitted when zero.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(super) failed_tests_more: usize,
+    /// Per-binary `test result: FAILED. ...` lines. Omitted when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) test_results: Vec<String>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// The JSON object emitted on stdout in porcelain mode.
@@ -176,6 +190,23 @@ pub(super) struct PorcelainReport {
     /// Unix-ms instant at which the log becomes eligible for deletion.
     pub(super) expires_at: Option<i64>,
     pub(super) summary: PorcelainSummary,
+    /// Per-step outcomes for a multi-step run (`soldr lint`, soldr#3958).
+    /// Omitted for single-command runs, so the `soldr cargo` shape is
+    /// unchanged. Additive: does not bump [`SCHEMA_VERSION`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) steps: Vec<PorcelainStep>,
+    /// Name of the step that failed, when a multi-step run stopped on one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) failed_step: Option<String>,
+}
+
+/// One step of a multi-step porcelain run (`soldr lint`, soldr#3958).
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub(super) struct PorcelainStep {
+    pub(super) name: String,
+    pub(super) ok: bool,
+    pub(super) exit_code: i32,
+    pub(super) duration_ms: u64,
 }
 
 /// Inputs to [`report_for_run`].
@@ -254,6 +285,8 @@ pub(super) fn report_for_run(inputs: &RunReportInputs<'_>) -> PorcelainReport {
             .as_ref()
             .map(|_| inputs.started_at_ms + PORCELAIN_LOG_TTL_MS),
         summary,
+        steps: Vec::new(),
+        failed_step: None,
     }
 }
 
@@ -280,6 +313,9 @@ pub(super) fn report_for_failure(
         },
         diagnostic: None,
         cache_lines: 0,
+        failed_tests: Vec::new(),
+        failed_tests_more: 0,
+        test_results: Vec::new(),
     };
     let now = super::current_unix_ms();
     let log_path = log_path.map(|path| path.display().to_string());
@@ -292,6 +328,8 @@ pub(super) fn report_for_failure(
         log_path,
         expires_at,
         summary,
+        steps: Vec::new(),
+        failed_step: None,
     }
 }
 
@@ -313,7 +351,19 @@ pub(super) fn command_string(args: &[String]) -> String {
 /// when one matches.
 pub(super) fn summarize(command: &str, exit_code: i32, output: &str) -> PorcelainSummary {
     let (error_count, errors) = extract_errors(output);
+    let failures = if exit_code == 0 {
+        super::porcelain_failures::FailureDigest::default()
+    } else {
+        let lines: Vec<String> = output
+            .lines()
+            .map(|l| without_ansi(l).into_owned())
+            .collect();
+        super::porcelain_failures::digest(&lines)
+    };
     PorcelainSummary {
+        failed_tests: failures.tests,
+        failed_tests_more: failures.more,
+        test_results: failures.results,
         exit_code,
         command: command.to_string(),
         status: if exit_code == 0 { "ok" } else { "failed" }.to_string(),
@@ -602,7 +652,7 @@ pub(super) fn write_failure_log(
         .map(|artifact| artifact.path)
 }
 
-fn unique_path(dir: &Path, filename: &str) -> PathBuf {
+pub(super) fn unique_path(dir: &Path, filename: &str) -> PathBuf {
     let mut candidate = dir.join(filename);
     if !candidate.exists() {
         return candidate;
