@@ -1311,6 +1311,7 @@ jobs:
       CI_NEEDS_JSON: ${{ toJSON(needs) }}
       CI_MODE: ${{ needs.ci-mode.outputs.mode }}
       CI_TRUSTED: ${{ needs.ci-mode.outputs.trusted }}
+      CI_SKIP_LINT: ${{ needs.ci-mode.outputs.skip_lint }}
       DOCS_ONLY: ${{ needs.path-selection.outputs.docs_only }}
       AUTHOR_PERMISSION: ${{ needs.ci-mode.outputs.author_permission }}
       GITHUB_TOKEN: ${{ github.token }}
