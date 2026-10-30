@@ -649,7 +649,8 @@ fn unpublished_driver_pin_is_an_error_under_clud() {
         .expect_err("an unpublished pin must fail under clud")
         .to_string();
     assert!(
-        error.contains("no pre-deployed driver for nightly-2026-05-28"),
+        error.starts_with("ERROR: refusing to build the Dylint driver from source under clud")
+            && error.contains("no pre-deployed driver for nightly-2026-05-28"),
         "{error}"
     );
     assert!(
