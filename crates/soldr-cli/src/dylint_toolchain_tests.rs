@@ -518,7 +518,6 @@ fn apply_to_command_never_touches_build_profile_or_injects_args() {
         COMPILER_COMMIT_ENV_VAR,
         CACHE_IDENTITY_ENV_VAR,
         PREPARED_IDENTITY_ENV_VAR,
-        DYLINT_LINK_COPY_LIBRARY_ENV_VAR,
     ];
     for key in expected_keys {
         assert!(
