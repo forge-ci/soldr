@@ -642,7 +642,8 @@ pub(super) fn prune_porcelain_logs(dir: &Path, keep: usize, ttl_ms: i64) -> usiz
 /// object rather than printing a second line or panicking.
 pub(super) fn emit(report: &PorcelainReport) {
     let skew = crate::broker_spawn::observed_broker_skew();
-    let line = serialize_report(report, skew.as_ref()).unwrap_or_else(|_| {
+    let installed = super::install_notice::installed_paths();
+    let line = serialize_report(report, skew.as_ref(), &installed).unwrap_or_else(|_| {
         format!(
             "{{\"schema_version\":{SCHEMA_VERSION},\"command\":{:?},\"exit_code\":{}}}",
             report.command, report.exit_code
@@ -657,14 +658,21 @@ pub(super) fn emit(report: &PorcelainReport) {
 }
 
 /// Serialize `report`, adding `broker_skew` when this process saw a
-/// broker/front-door identity skew (soldr#3985). Additive field: no schema bump.
+/// broker/front-door identity skew (soldr#3985), and `installed` when a
+/// `cargo install` wrote binaries (soldr#3960). Additive fields: no schema bump.
 pub(super) fn serialize_report(
     report: &PorcelainReport,
     skew: Option<&crate::broker_spawn::BrokerSkew>,
+    installed: &[String],
 ) -> serde_json::Result<String> {
     let mut value = serde_json::to_value(report)?;
-    if let (Some(skew), Some(object)) = (skew, value.as_object_mut()) {
-        object.insert("broker_skew".to_string(), serde_json::to_value(skew)?);
+    if let Some(object) = value.as_object_mut() {
+        if let Some(skew) = skew {
+            object.insert("broker_skew".to_string(), serde_json::to_value(skew)?);
+        }
+        if !installed.is_empty() {
+            object.insert("installed".to_string(), serde_json::to_value(installed)?);
+        }
     }
     serde_json::to_string(&value)
 }

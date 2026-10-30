@@ -50,6 +50,7 @@ mod disk;
 mod fingerprint_noise;
 mod host_tooling;
 mod inputs;
+mod install_notice;
 mod job_budget;
 mod line_endings;
 mod lockfile_proof;

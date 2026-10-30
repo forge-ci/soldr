@@ -437,16 +437,27 @@ fn success_summary_stays_free_of_failure_fields() {
 #[test]
 fn serialize_report_adds_broker_skew_only_when_observed() {
     let report = report_for_failure("soldr cargo test", 1, None, Some("boom"));
-    let plain = serialize_report(&report, None).expect("serialize");
+    let plain = serialize_report(&report, None, &[]).expect("serialize");
     assert!(!plain.contains("broker_skew"), "{plain}");
     let skew = crate::broker_spawn::BrokerSkew {
         running_broker: "soldr-0.9.44-aaaa".into(),
         this_soldr: "soldr-0.9.46-bbbb".into(),
         remedy: crate::broker_spawn::BROKER_REMOVE_COMMAND,
     };
-    let line = serialize_report(&report, Some(&skew)).expect("serialize");
+    let line = serialize_report(&report, Some(&skew), &[]).expect("serialize");
     let value: serde_json::Value = serde_json::from_str(&line).expect("json");
     assert_eq!(value["broker_skew"]["running_broker"], "soldr-0.9.44-aaaa");
     assert_eq!(value["broker_skew"]["remedy"], "soldr broker remove");
     assert_eq!(line.lines().count(), 1);
+}
+
+/// soldr#3960: porcelain lists installed binaries as `installed`.
+#[test]
+fn serialize_report_adds_installed_paths() {
+    let report = report_for_failure("soldr cargo install", 0, None, None);
+    let line = serialize_report(&report, None, &["/x/bin/ghd".to_string()]).expect("serialize");
+    let value: serde_json::Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(value["installed"][0], "/x/bin/ghd");
+    let none = serialize_report(&report, None, &[]).expect("serialize");
+    assert!(!none.contains("installed"), "{none}");
 }
