@@ -236,6 +236,7 @@ pub(crate) mod broker_purge;
 pub(crate) mod broker_reaper;
 pub(crate) mod broker_retry;
 pub(crate) mod broker_server;
+pub mod broker_skew;
 pub mod broker_spawn;
 /// soldr#2900 — Soldr-owned per-build cache bookkeeping. Replaces the
 /// retired private-zccache lifecycle module, which still carried subprocess

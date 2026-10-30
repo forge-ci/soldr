@@ -266,9 +266,11 @@ fn image_mismatch_warning_is_actionable_and_names_the_remove_command() {
     let expected = format!("soldr-0.9.0-{}", "1".repeat(64));
     let warning = broker_image_mismatch_warning(&observed, &expected);
 
-    assert!(warning.contains(&observed), "{warning}");
-    assert!(warning.contains(&expected), "{warning}");
+    assert!(warning.contains("0.9.0-00000000"), "{warning}");
+    assert!(warning.contains("0.9.0-11111111"), "{warning}");
     assert!(warning.contains(BROKER_REMOVE_COMMAND), "{warning}");
+    // soldr#3985: one line, not a five-line block.
+    assert_eq!(warning.lines().count(), 1, "{warning}");
     assert_eq!(BROKER_REMOVE_COMMAND, "soldr broker remove");
     // Never promise a lifecycle action the front door no longer performs.
     for forbidden in ["replacing", "restarting", "stopping the broker"] {
@@ -356,4 +358,29 @@ fn archived_replay_never_starts_broker() {
         let raw: Vec<String> = args.into_iter().map(str::to_owned).collect();
         assert!(!front_door_command_shape(&raw));
     }
+}
+
+/// soldr#3985: the notice prints once per broker generation. The marker
+/// records the (broker, front door) pair; a new pair warns again.
+#[test]
+fn skew_marker_suppresses_repeat_notice_for_the_same_generation() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let marker = root.path().join(BROKER_SKEW_MARKER);
+    let old = format!("soldr-0.9.44-{}", "a".repeat(64));
+    let new = format!("soldr-0.9.46-{}", "b".repeat(64));
+    let newer = format!("soldr-0.9.47-{}", "c".repeat(64));
+    assert!(!skew_already_warned(&marker, &old, &new));
+    std::fs::write(&marker, skew_marker_content(&old, &new)).expect("write marker");
+    assert!(skew_already_warned(&marker, &old, &new));
+    assert!(!skew_already_warned(&marker, &old, &newer));
+    assert!(!skew_already_warned(&marker, &newer, &new));
+}
+
+#[test]
+fn short_broker_identity_keeps_version_and_digest_prefix() {
+    assert_eq!(
+        short_broker_identity(&format!("soldr-0.9.44-feecbd53{}", "0".repeat(56))),
+        "0.9.44-feecbd53"
+    );
+    assert_eq!(short_broker_identity("opaque"), "opaque");
 }

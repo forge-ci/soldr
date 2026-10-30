@@ -641,7 +641,8 @@ pub(super) fn prune_porcelain_logs(dir: &Path, keep: usize, ttl_ms: i64) -> usiz
 /// failure (impossible for this fixed shape) degrades to a minimal
 /// object rather than printing a second line or panicking.
 pub(super) fn emit(report: &PorcelainReport) {
-    let line = serde_json::to_string(report).unwrap_or_else(|_| {
+    let skew = crate::broker_spawn::observed_broker_skew();
+    let line = serialize_report(report, skew.as_ref()).unwrap_or_else(|_| {
         format!(
             "{{\"schema_version\":{SCHEMA_VERSION},\"command\":{:?},\"exit_code\":{}}}",
             report.command, report.exit_code
@@ -653,6 +654,19 @@ pub(super) fn emit(report: &PorcelainReport) {
     let _ = writeln!(lock, "{line}");
     let _ = lock.flush();
     mark_emitted();
+}
+
+/// Serialize `report`, adding `broker_skew` when this process saw a
+/// broker/front-door identity skew (soldr#3985). Additive field: no schema bump.
+pub(super) fn serialize_report(
+    report: &PorcelainReport,
+    skew: Option<&crate::broker_spawn::BrokerSkew>,
+) -> serde_json::Result<String> {
+    let mut value = serde_json::to_value(report)?;
+    if let (Some(skew), Some(object)) = (skew, value.as_object_mut()) {
+        object.insert("broker_skew".to_string(), serde_json::to_value(skew)?);
+    }
+    serde_json::to_string(&value)
 }
 
 static EMITTED: AtomicBool = AtomicBool::new(false);
