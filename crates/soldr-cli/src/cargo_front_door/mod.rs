@@ -61,6 +61,10 @@ pub(crate) mod no_cache_detach;
 mod orphan_rmeta;
 /// `--porcelain` / `SOLDR_PORCELAIN` machine-readable front-door mode.
 pub(crate) mod porcelain;
+/// Failing-test digest for the porcelain summary (soldr#3961).
+mod porcelain_failures;
+/// `soldr lint` porcelain report and log (soldr#3958).
+pub(crate) mod porcelain_lint;
 mod profile_debug;
 pub(crate) mod provision;
 mod strip_diagnostics;

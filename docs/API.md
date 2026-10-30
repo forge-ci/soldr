@@ -801,6 +801,14 @@ Soldr installs that nightly's `rust-std` for each target on demand before the
 workspace check; the catalogued driver remains prebuilt. A failed cross pass
 names the target and tool (`clippy` or `dylint`) and returns its exit code.
 
+**A caller's target scope reaches Dylint (soldr#3930).** The Dylint pass widens
+to `--all-targets` only when the invocation names no targets. A scope that
+already selects them — `--lib --bins`, `--tests`, `--bin <name>` — is passed
+through exactly as given, so a workspace whose Dylint is pre-expansion (a
+boundary lint that must not see test or bench targets) can run
+`soldr lint rust --lib --bins` instead of keeping a standalone
+`soldr dylint --all -- --workspace --lib --bins` call beside the suite.
+
 `--target <triple>` (repeatable; friendly aliases such as `win-x64`/`mac-arm64`
 are accepted) overrides the declared list for that invocation. `--host-only`
 skips cross-target Clippy entirely, even when targets are declared. It cannot
@@ -809,6 +817,36 @@ are valid only for the `rust`/`all` suites and are stripped from the cargo scope
 before it reaches fmt/Clippy/Dylint. An unknown or unsupported triple — declared
 or explicit — is a clear error raised before any compile starts, not a silent
 skip; the host's own triple is never run twice.
+
+**Declared steps and repo commands (soldr#3958).** A repo whose lint is more
+than Rust declares the whole step list next to `targets`, so one `soldr lint`
+call runs everything:
+
+```toml
+[workspace.metadata.soldr.lint]
+steps = ["fmt", "clippy", "dylint"]   # built-ins, run in this order
+extra = [["ruff", "check", "."], ["python", "ci/guard.py"]]  # repo commands
+```
+
+`steps` selects and orders the built-ins (`fmt`, `clippy`, `dylint`); omitting
+it runs all three, and omitting the whole table keeps today's behavior. `extra`
+entries are `[program, args...]`, run after the built-ins, in the directory of
+the manifest that declares them, with the caller's environment. The table is
+validated before any step starts: an unknown or repeated step name, an unknown
+key, or an `extra` tool that cannot be found (the error names it) is a hard
+error. Applies to the `rust` and `all` suites. The first failing step stops the run.
+
+**Porcelain (soldr#3958).** With `SOLDR_PORCELAIN=1` (or `soldr --porcelain
+lint`), `soldr lint rust` prints ONE JSON line on stdout and nothing else when
+every step passes. It is the same report `soldr cargo` emits under porcelain
+(`schema_version`, `command`, `exit_code`, `duration_ms`, `log_path`,
+`expires_at`, `summary` with `status` `ok`/`failed`), plus two additive fields:
+`steps` (`name`, `ok`, `exit_code`, `duration_ms` per step run) and, on failure,
+`failed_step`. Every step's stdout+stderr is appended to the single log at
+`log_path`. When a step fails, its complete output (the rustfmt diff, Clippy
+errors and warnings) is printed unfolded on stderr before the JSON line; only
+the output of steps that passed is folded into the log. The `deps`, `ci` and
+`all` suites are unchanged.
 
 ### `soldr ci-test`
 

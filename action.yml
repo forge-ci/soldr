@@ -48,6 +48,27 @@ inputs:
       repo-side configuration. Set to "false" to opt out.
     required: false
     default: "true"
+  s3-bucket:
+    description: >-
+      Optional S3-compatible bucket (e.g. a DigitalOcean Space) used as the
+      remote cache instead of actions/cache. Off when empty, or when the
+      SOLDR_S3_CACHE_ACCESS_KEY / SOLDR_S3_CACHE_SECRET_KEY env vars (from
+      workflow secrets) are absent. Save with the `s3-save` sub-action
+      (.github/actions/setup-soldr/s3-save) at the end of the job.
+    required: false
+    default: ""
+  s3-endpoint:
+    description: S3 endpoint host, e.g. nyc3.digitaloceanspaces.com.
+    required: false
+    default: ""
+  s3-region:
+    description: SigV4 region. Empty derives it from a DigitalOcean endpoint (nyc3), else us-east-1.
+    required: false
+    default: ""
+  s3-cache-limit:
+    description: High watermark for the bucket (e.g. 50G, 500GiB, 1TB). Enforced only on merge_group runs. Empty means 50G.
+    required: false
+    default: ""
   target-cache:
     description: 'Deprecated no-op. soldr#2996 removed the target cache; soldr cook and zccache own compiler caching. Accepted for compatibility and ignored (a warning is printed when enabled).'
     required: false
@@ -174,8 +195,29 @@ runs:
         }
         zstd --version
 
+    # Optional remote S3 cache (off unless s3-bucket + secret env are set).
+    # When it reports enabled=true it replaces the actions/cache steps below.
+    - id: s3-restore
+      if: ${{ inputs.s3-bucket != '' }}
+      shell: pwsh
+      env:
+        INPUT_S3_BUCKET: ${{ inputs.s3-bucket }}
+        INPUT_S3_ENDPOINT: ${{ inputs.s3-endpoint }}
+        INPUT_S3_REGION: ${{ inputs.s3-region }}
+        INPUT_S3_CACHE_LIMIT: ${{ inputs.s3-cache-limit }}
+        INPUT_CACHE: ${{ inputs.cache }}
+        INPUT_BUILD_CACHE: ${{ inputs.build-cache }}
+        SETUP_CACHE_ROOT: ${{ steps.resolve.outputs.cache_root }}
+        SETUP_CACHE_KEY: ${{ steps.resolve.outputs.cache_key }}
+        SETUP_CACHE_RESTORE_PREFIX: ${{ steps.resolve.outputs.cache_restore_prefix }}
+        SETUP_BUILD_CACHE_PATH: ${{ steps.resolve.outputs.build_cache_path }}
+        SETUP_BUILD_CACHE_KEY: ${{ steps.resolve.outputs.build_cache_key }}
+        SETUP_BUILD_CACHE_RESTORE_TOOLCHAIN: ${{ steps.resolve.outputs.build_cache_restore_key_toolchain }}
+        SETUP_BUILD_CACHE_RESTORE_OS_ARCH: ${{ steps.resolve.outputs.build_cache_restore_key_os_arch }}
+      run: python "${{ github.action_path }}/.github/actions/setup-soldr/s3_cache.py" restore
+
     - id: cache
-      if: ${{ inputs.cache == 'true' }}
+      if: ${{ inputs.cache == 'true' && steps.s3-restore.outputs.enabled != 'true' }}
       uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: ${{ steps.resolve.outputs.cache_root }}
@@ -184,7 +226,7 @@ runs:
           ${{ steps.resolve.outputs.cache_restore_prefix }}
 
     - id: build-cache-restore
-      if: ${{ inputs.build-cache == 'true' }}
+      if: ${{ inputs.build-cache == 'true' && steps.s3-restore.outputs.enabled != 'true' }}
       uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: ${{ steps.resolve.outputs.build_cache_path }}
@@ -227,8 +269,8 @@ runs:
     - id: cache-meta
       shell: pwsh
       env:
-        RAW_CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
-        RAW_BUILD_CACHE_HIT: ${{ steps.build-cache-restore.outputs.cache-hit }}
+        RAW_CACHE_HIT: ${{ steps.cache.outputs.cache-hit || steps.s3-restore.outputs.cache_hit }}
+        RAW_BUILD_CACHE_HIT: ${{ steps.build-cache-restore.outputs.cache-hit || steps.s3-restore.outputs.build_cache_hit }}
         BUILD_CACHE_ENABLED: ${{ inputs.build-cache }}
       run: |
         $value = $env:RAW_CACHE_HIT

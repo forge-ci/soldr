@@ -350,12 +350,13 @@ fn command_string_labels_the_run() {
 }
 
 #[test]
-fn failure_excerpt_carries_the_failing_test_and_its_assertion() {
-    // The measured shape of `cargo test` on a failing test: the digest's
-    // `errors` only names "error: test failed, to rerun pass `--lib`", which
-    // says nothing a caller can act on. The excerpt must carry the test name,
-    // the panic location and the assertion message, so the harness never needs
-    // to open `log_path` for an ordinary test failure.
+fn test_failure_uses_the_structured_digest_not_a_duplicate_excerpt() {
+    // soldr#3961 landed `failed_tests` / `test_results` on main while this
+    // branch was open: a named test failure is now described field-by-field
+    // (name, panic `file:line:col`, message) and the count lines live in
+    // `test_results`. Repeating that in `excerpt` would double the digest for
+    // no new evidence, so the excerpt stays empty here -- and the caller still
+    // never has to open `log_path`.
     let output = concat!(
         "   Compiling pfail v0.1.0\n",
         "    Finished `test` profile\n",
@@ -377,28 +378,32 @@ fn failure_excerpt_carries_the_failing_test_and_its_assertion() {
         "error: test failed, to rerun pass `--lib`\n",
     );
     let summary = summarize("cargo test", 101, output);
-    let excerpt = summary.excerpt.join("\n");
-    assert!(excerpt.contains("t::wrong_sum"), "{excerpt}");
-    assert!(excerpt.contains("panicked at src/lib.rs:6:9:"), "{excerpt}");
     assert!(
-        excerpt.contains("two plus two should be five"),
-        "the assertion message is the actionable line: {excerpt}"
-    );
-    assert!(excerpt.contains("test result: FAILED"), "{excerpt}");
-    assert!(
-        summary.excerpt.len() <= 8,
-        "a digest, not the stream: {:?}",
+        summary.excerpt.is_empty(),
+        "the structured digest already carries this failure: {:?}",
         summary.excerpt
     );
-    assert!(
-        !excerpt.contains("RUST_BACKTRACE"),
-        "panic boilerplate names no failure: {excerpt}"
-    );
-    assert!(
-        !excerpt.contains("Compiling pfail"),
-        "compile progress is not evidence: {excerpt}"
-    );
     assert!(!summary.excerpt_truncated);
+    assert_eq!(summary.failed_tests.len(), 1, "{:?}", summary.failed_tests);
+    let failed = &summary.failed_tests[0];
+    assert_eq!(failed.name, "t::wrong_sum");
+    assert_eq!(failed.location.as_deref(), Some("src/lib.rs:6:9"));
+    assert!(
+        failed
+            .message
+            .iter()
+            .any(|m| m.contains("two plus two should be five")),
+        "the assertion message is the actionable line: {:?}",
+        failed.message
+    );
+    assert!(
+        summary
+            .test_results
+            .iter()
+            .any(|r| r.contains("test result: FAILED")),
+        "{:?}",
+        summary.test_results
+    );
 }
 
 #[test]
@@ -528,4 +533,88 @@ fn pre_capture_failure_reports_its_message_as_the_excerpt() {
         vec!["soldr: could not start cargo".to_string()]
     );
     assert!(!report.summary.excerpt_truncated);
+}
+
+fn libtest_failure(name: &str, line: u32) -> String {
+    format!(
+        "---- {name} stdout ----\n\nthread '{name}' panicked at crates/x/src/lib.rs:{line}:5:\n\
+         assertion `left == right` failed: contract broke\n  left: 1\n right: 2\n\
+         note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n"
+    )
+}
+
+#[test]
+fn summarize_names_the_failing_test_its_location_and_assertion() {
+    let output = format!(
+        "running 2 tests\ntest shim::ok ... ok\ntest shim::broken ... FAILED\n\nfailures:\n\n{}\
+         failures:\n    shim::broken\n\ntest result: FAILED. 1 passed; 1 failed; 0 ignored\n\
+         error: test failed, to rerun pass `-p clud --lib`\n",
+        libtest_failure("shim::broken", 410)
+    );
+    let summary = summarize("cargo test", 101, &output);
+    assert_eq!(summary.failed_tests.len(), 1);
+    let test = &summary.failed_tests[0];
+    assert_eq!(test.name, "shim::broken");
+    assert_eq!(test.location.as_deref(), Some("crates/x/src/lib.rs:410:5"));
+    assert!(
+        test.message[0].contains("contract broke"),
+        "{:?}",
+        test.message
+    );
+    assert!(test.message.iter().any(|l| l.contains("right: 2")));
+    assert!(test.message.iter().all(|l| !l.contains("RUST_BACKTRACE")));
+    assert_eq!(summary.failed_tests_more, 0);
+    assert_eq!(summary.test_results.len(), 1);
+    assert!(summary.test_results[0].starts_with("test result: FAILED. 1 passed; 1 failed"));
+    assert_eq!(summary.errors.len(), 1, "compiler/cargo errors are kept");
+}
+
+#[test]
+fn many_failing_tests_are_capped_with_a_more_count() {
+    let mut output = String::from("failures:\n\n");
+    for n in 0..25 {
+        output.push_str(&libtest_failure(&format!("t::case_{n}"), 10 + n));
+    }
+    output.push_str("test result: FAILED. 0 passed; 25 failed\n");
+    let summary = summarize("cargo test", 101, &output);
+    assert_eq!(summary.failed_tests.len(), 10);
+    assert_eq!(summary.failed_tests_more, 15);
+    assert_eq!(summary.failed_tests[9].name, "t::case_9");
+}
+
+#[test]
+fn a_long_panic_message_is_capped_per_failure() {
+    let mut output =
+        String::from("---- t::big stdout ----\nthread 't::big' panicked at a.rs:1:1:\n");
+    for n in 0..100 {
+        output.push_str(&format!("line {n}\n"));
+    }
+    output.push_str("\nfailures:\n");
+    let summary = summarize("cargo test", 101, &output);
+    assert_eq!(summary.failed_tests[0].message.len(), 20);
+}
+
+#[test]
+fn nextest_stderr_block_yields_the_panic_detail() {
+    let output = "        FAIL [   0.010s] clud shim::broken\n\
+        --- STDERR:              clud shim::broken ---\n\
+        thread 'shim::broken' panicked at src/shim.rs:410:5:\n\
+        boom\n\
+        \n\
+        ------------\n";
+    let summary = summarize("cargo nextest run", 100, output);
+    assert_eq!(summary.failed_tests[0].name, "shim::broken");
+    assert_eq!(
+        summary.failed_tests[0].location.as_deref(),
+        Some("src/shim.rs:410:5")
+    );
+    assert_eq!(summary.failed_tests[0].message, vec!["boom".to_string()]);
+}
+
+#[test]
+fn success_summary_stays_free_of_failure_fields() {
+    let summary = summarize("cargo test", 0, &libtest_failure("a::b", 1));
+    let json = serde_json::to_string(&summary).expect("serialize");
+    assert!(!json.contains("failed_tests"), "{json}");
+    assert!(!json.contains("test_results"), "{json}");
 }
