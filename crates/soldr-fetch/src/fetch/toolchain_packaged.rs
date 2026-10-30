@@ -567,17 +567,17 @@ mod tests {
         for triple in targets {
             let target = TargetTriple::from_triple(triple).unwrap();
             assert_eq!(
-                asset_name("cargo-dylint", "v6.0.3", &target),
-                Some(format!("cargo-dylint-6.0.3-{triple}.tar.gz"))
+                asset_name("cargo-dylint", "v6.2.0", &target),
+                Some(format!("cargo-dylint-6.2.0-{triple}.tar.gz"))
             );
             assert_eq!(
-                asset_name("dylint-link", "6.0.3", &target),
-                Some(format!("dylint-link-6.0.3-{triple}.tar.gz"))
+                asset_name("dylint-link", "6.2.0", &target),
+                Some(format!("dylint-link-6.2.0-{triple}.tar.gz"))
             );
             assert_eq!(
-                asset_name("dylint-driver", "6.0.3-nightly-2026-05-28", &target),
+                asset_name("dylint-driver", "6.2.0-nightly-2026-08-15", &target),
                 Some(format!(
-                    "dylint-driver-6.0.3-nightly-2026-05-28-{triple}.tar.gz"
+                    "dylint-driver-6.2.0-nightly-2026-08-15-{triple}.tar.gz"
                 ))
             );
         }
