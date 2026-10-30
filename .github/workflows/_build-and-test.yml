@@ -197,7 +197,7 @@ jobs:
       # bootstrap-embeds-zccache: 1.15.0
       # bootstrap-zccache-pending: 1.15.5
       - name: Setup pinned soldr toolchain
-        uses: zackees/setup-soldr@2f4be9f8f5806fbe0e8e16cc3534489d147da094
+        uses: zackees/setup-soldr@794fb3083729fd6be3396ab6cbd573c9f756d2f5
         with:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
           cook-delta: false

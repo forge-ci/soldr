@@ -41,7 +41,7 @@ jobs:
       # installs the pinned Cargo/rustup toolchain before the source build and
       # before the telemetry runner isolates each case's cache/target trees.
       - name: Prepare pinned Rust and Cargo toolchain
-        uses: zackees/setup-soldr@2f4be9f8f5806fbe0e8e16cc3534489d147da094
+        uses: zackees/setup-soldr@794fb3083729fd6be3396ab6cbd573c9f756d2f5
         with:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
           cook-delta: false
@@ -60,7 +60,7 @@ jobs:
         run: soldr cargo build -p soldr-cli --bin soldr
 
       - name: Stop setup-soldr builder cache before source telemetry
-        uses: zackees/setup-soldr/cleanup@2f4be9f8f5806fbe0e8e16cc3534489d147da094
+        uses: zackees/setup-soldr/cleanup@794fb3083729fd6be3396ab6cbd573c9f756d2f5
 
       - name: Retire the bootstrap broker before source telemetry
         shell: bash
