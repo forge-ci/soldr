@@ -122,7 +122,7 @@ max-age-hours = 24
 # worst case is steady + the lockfile-change peak (no writer flow pre-prunes;
 # see [flow.main]) + [cache.pr].budget. The janitor's own target is
 # steady <= 8.5 GiB -- the old `total_max_bytes`.
-# They sum to 8685 MiB (8.48 GiB). Sized 2026-10-09 from the live listing
+# They sum to 8686 MiB (8.48 GiB). Sized 2026-10-09 from the live listing
 # (`gh api 'repos/zackees/soldr/actions/caches?per_page=100' --paginate`,
 # 93 entries, 7.39 GiB); re-measure before retuning.
 #
@@ -142,6 +142,14 @@ pr       = { mode = "delta", families = ["compile"], max-per-pr = "128MB", budge
 [cache.family]
 # -- group attestation-evidence: ~450 B ci-attestation markers (GATE-010).
 att1                   = { prefix = "att1-",                               max = "16MB",   evict = "lru" }
+
+# -- group verdict-manifest: one sub-KiB JSON per run holding the verdict keys
+#    that run recorded (setup-soldr, soldr#3894). Keyed
+#    `soldr-verdict-manifest-v1-<scope>-<run>-<attempt>` and restored by prefix,
+#    so a later job rekeys the manifest and hydrates exactly those verdicts. Run
+#    id in the key means it churns per run instead of accumulating; it lives
+#    longer than one job, so it is not a same-run artifact.
+verdict-manifest       = { prefix = "soldr-verdict-manifest-v1-",          max = "1MB",    evict = "lru" }
 
 # -- group pinned-immutable-download (janitor: newest-per-lineage), 1056 MiB.
 rustup                 = { prefix = "rustup-",                             max = "240MB",  evict = "lru" }

@@ -216,8 +216,16 @@ impl LintPlan {
             steps.push(cross_clippy);
         }
 
+        // soldr#3930: a workspace whose Dylint is pre-expansion (it forbids
+        // `#[cfg]` outside the platform boundary) cannot be linted with
+        // `--all-targets`, because test and bench targets are full of it.
+        // When the caller named a target scope, pass exactly that scope; only
+        // an unscoped call keeps today's `--all-targets`.
         let mut dylint = vec!["dylint".into(), "--all".into(), "--".into()];
-        dylint.extend(["--workspace".into(), "--all-targets".into()]);
+        dylint.push("--workspace".into());
+        if !has_target_selector(&compiler_scope) {
+            dylint.push("--all-targets".into());
+        }
         dylint.extend(compiler_scope);
         if self.cross_dylint {
             steps.push(dylint.clone());
@@ -268,6 +276,31 @@ impl LintPlan {
         udeps.extend(scope);
         Ok(vec![udeps, vec!["semver-checks".into()]])
     }
+}
+
+/// Does this cargo scope name the targets to build?
+///
+/// The Dylint stage widens an unscoped call to `--all-targets`; a scope that
+/// already selects targets (`--lib --bins` for a pre-expansion boundary lint,
+/// soldr#3930) must be passed through as given, never widened. Both the bare
+/// and the `--flag=value` spellings count.
+fn has_target_selector(scope: &[String]) -> bool {
+    const SELECTORS: [&str; 10] = [
+        "--lib",
+        "--bins",
+        "--bin",
+        "--tests",
+        "--test",
+        "--benches",
+        "--bench",
+        "--examples",
+        "--example",
+        "--all-targets",
+    ];
+    scope.iter().any(|arg| {
+        let flag = arg.split('=').next().unwrap_or(arg.as_str());
+        SELECTORS.contains(&flag)
+    })
 }
 
 /// Extract Soldr's `--target <value>` (repeatable, both `--target` /
@@ -620,6 +653,58 @@ mod tests {
                 strings(&["dylint", "--all", "--", "--workspace", "--all-targets"]),
             ]
         );
+    }
+
+    #[test]
+    fn dylint_stage_passes_the_callers_target_scope_through() {
+        // soldr#3930. A pre-expansion Dylint must not see test or bench
+        // targets, so `--lib --bins` replaces the forced `--all-targets`.
+        let plan = LintPlan::parse(&strings(&["rust", "--lib", "--bins"])).unwrap();
+        let steps = plan.rust_steps(false, &[]).unwrap();
+        assert_eq!(
+            steps[2],
+            strings(&["dylint", "--all", "--", "--workspace", "--lib", "--bins"])
+        );
+    }
+
+    #[test]
+    fn dylint_stage_keeps_other_selectors_without_widening() {
+        let plan =
+            LintPlan::parse(&strings(&["rust", "--tests", "--package", "soldr-cli"])).unwrap();
+        let steps = plan.rust_steps(false, &[]).unwrap();
+        assert_eq!(
+            steps[2],
+            strings(&[
+                "dylint",
+                "--all",
+                "--",
+                "--workspace",
+                "--tests",
+                "--package",
+                "soldr-cli"
+            ])
+        );
+        assert!(!steps[2].contains(&"--all-targets".to_string()));
+    }
+
+    #[test]
+    fn target_selector_detection_covers_both_spellings() {
+        for scope in [
+            strings(&["--lib"]),
+            strings(&["--bin=soldr"]),
+            strings(&["--example", "demo"]),
+            strings(&["--all-targets"]),
+        ] {
+            assert!(has_target_selector(&scope), "{scope:?}");
+        }
+        for scope in [
+            Vec::new(),
+            strings(&["--package", "soldr-cli"]),
+            strings(&["--target", "x86_64-unknown-linux-musl"]),
+            strings(&["--all-features"]),
+        ] {
+            assert!(!has_target_selector(&scope), "{scope:?}");
+        }
     }
 
     #[test]
