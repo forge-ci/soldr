@@ -6,10 +6,12 @@
 //! resolution without compiler-cache startup for deny, audit, or machete.
 
 use crate::cargo_front_door;
+use crate::cargo_metadata_soldr::LintStep;
 use crate::core::SoldrError;
 use crate::current_soldr_binary;
 use crate::lint_ci;
 use crate::lint_ci::model::OutputFormat;
+use crate::lint_steps::{self, PlannedStep};
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::Duration;
@@ -176,11 +178,13 @@ impl LintPlan {
         std::env::current_dir().map_err(|e| SoldrError::Other(format!("lint: cwd: {e}")))
     }
 
-    fn rust_steps(
+    /// The built-in steps as `(kind, label, argv)`, in today's order:
+    /// fmt, host Clippy plus one Clippy per cross target, then Dylint.
+    fn rust_step_args(
         &self,
         all_features: bool,
         cross_targets: &[String],
-    ) -> Result<Vec<Vec<String>>, SoldrError> {
+    ) -> Result<Vec<(LintStep, String, Vec<String>)>, SoldrError> {
         let mut compiler_scope = self.scope.clone();
         if all_features {
             add_all_features(&mut compiler_scope)?;
@@ -198,7 +202,10 @@ impl LintPlan {
         clippy.extend(compiler_scope.iter().cloned());
         clippy.extend(["--".into(), "-D".into(), "warnings".into()]);
 
-        let mut steps = vec![fmt, clippy];
+        let mut steps = vec![
+            (LintStep::Fmt, "fmt".to_string(), fmt),
+            (LintStep::Clippy, "clippy".to_string(), clippy),
+        ];
 
         // soldr#3378: one additional Clippy pass per declared/explicit cross
         // target, each landing under cargo's own `target/<triple>/`
@@ -213,7 +220,11 @@ impl LintPlan {
             ];
             cross_clippy.extend(compiler_scope.iter().cloned());
             cross_clippy.extend(["--".into(), "-D".into(), "warnings".into()]);
-            steps.push(cross_clippy);
+            steps.push((
+                LintStep::Clippy,
+                format!("clippy --target {target}"),
+                cross_clippy,
+            ));
         }
 
         // soldr#3930: a workspace whose Dylint is pre-expansion (it forbids
@@ -228,17 +239,66 @@ impl LintPlan {
         }
         dylint.extend(compiler_scope);
         if self.cross_dylint {
-            steps.push(dylint.clone());
+            steps.push((LintStep::Dylint, "dylint".to_string(), dylint.clone()));
             for target in cross_targets {
                 let mut cross_dylint = dylint.clone();
                 cross_dylint.extend(["--target".into(), target.clone()]);
-                steps.push(cross_dylint);
+                steps.push((
+                    LintStep::Dylint,
+                    format!("dylint --target {target}"),
+                    cross_dylint,
+                ));
             }
         } else {
-            steps.push(dylint);
+            steps.push((LintStep::Dylint, "dylint".to_string(), dylint));
         }
 
         Ok(steps)
+    }
+
+    /// The built-in steps for the unconfigured default (all of them).
+    #[cfg(test)]
+    fn rust_steps(
+        &self,
+        all_features: bool,
+        cross_targets: &[String],
+    ) -> Result<Vec<Vec<String>>, SoldrError> {
+        Ok(self
+            .rust_step_args(all_features, cross_targets)?
+            .into_iter()
+            .map(|(_, _, args)| args)
+            .collect())
+    }
+
+    /// The rust-suite plan (soldr#3958): the declared built-ins in declared
+    /// order (all of them when `[workspace.metadata.soldr.lint]` is absent),
+    /// then the declared `extra` repo commands. Invalid metadata and missing
+    /// extra tools fail here, before any step runs.
+    fn rust_plan(
+        &self,
+        all_features: bool,
+        cross_targets: &[String],
+    ) -> Result<Vec<PlannedStep>, SoldrError> {
+        let (config, root) =
+            crate::cargo_metadata_soldr::lint_config_from(&self.manifest_scope_dir()?)?;
+        let built_ins = self.rust_step_args(all_features, cross_targets)?;
+        let mut plan = Vec::new();
+        for kind in &config.steps {
+            plan.extend(built_ins.iter().filter(|(step, _, _)| step == kind).map(
+                |(_, label, args)| PlannedStep::Cargo {
+                    label: label.clone(),
+                    args: args.clone(),
+                },
+            ));
+        }
+        let root = match root {
+            Some(root) => root,
+            None => {
+                std::env::current_dir().map_err(|e| SoldrError::Other(format!("lint: cwd: {e}")))?
+            }
+        };
+        plan.extend(lint_steps::plan_extras(&config.extra, &root)?);
+        Ok(plan)
     }
 
     fn dependency_steps(&self) -> Result<Vec<Vec<String>>, SoldrError> {
@@ -416,12 +476,12 @@ pub(crate) async fn run_lint(
         LintMode::Rust => {
             // soldr#3378: resolved (and validated) before any compile starts.
             let cross_targets = plan.resolve_cross_targets()?;
-            run_compile_steps(
-                plan.rust_steps(false, &cross_targets)?,
-                cache_enabled,
-                trust_inherited_soldr_env,
-            )
-            .await
+            let steps = plan.rust_plan(false, &cross_targets)?;
+            if cargo_front_door::porcelain_lint::requested() {
+                // soldr#3958: one folded summary for the whole plan.
+                return lint_steps::run_porcelain(steps, cache_enabled, trust_inherited_soldr_env);
+            }
+            lint_steps::run_planned_steps(steps, cache_enabled, trust_inherited_soldr_env).await
         }
         LintMode::Deps => run_dependency_steps(plan.dependency_steps()?, trust_inherited_soldr_env),
         LintMode::Ci => run_ci_suite(plan.ci_format),
@@ -434,8 +494,8 @@ pub(crate) async fn run_lint(
             }
             // soldr#3378: resolved (and validated) before any compile starts.
             let cross_targets = plan.resolve_cross_targets()?;
-            let code = run_compile_steps(
-                plan.rust_steps(true, &cross_targets)?,
+            let code = lint_steps::run_planned_steps(
+                plan.rust_plan(true, &cross_targets)?,
                 cache_enabled,
                 trust_inherited_soldr_env,
             )
@@ -447,7 +507,7 @@ pub(crate) async fn run_lint(
             if code != 0 {
                 return Ok(code);
             }
-            run_compile_steps(
+            lint_steps::run_compile_steps(
                 plan.exhaustive_steps()?,
                 cache_enabled,
                 trust_inherited_soldr_env,
@@ -470,53 +530,6 @@ fn run_ci_suite(format: OutputFormat) -> Result<i32, SoldrError> {
     // "soldr emitted no diagnostic" annotation.
     crate::exit_guard::mark_spoke();
     Ok(code)
-}
-
-async fn run_compile_steps(
-    steps: Vec<Vec<String>>,
-    cache_enabled: bool,
-    trust_inherited_soldr_env: bool,
-) -> Result<i32, SoldrError> {
-    for args in steps {
-        let dylint = cargo_front_door::first_cargo_subcommand(&args) == Some("dylint");
-        let cross_target = target_arg_value(&args);
-        if !dylint {
-            if let Some(target) = &cross_target {
-                // Clippy only needs the target's std, not a full cross linker.
-                // `rustup_add_target` is idempotent, a no-op for the host triple,
-                // and routes through soldr's managed rustup/cargo homes rather
-                // than a bare `rustup` on PATH.
-                crate::prepare_cmd::rustup_add_target(target)?;
-            }
-        }
-        let code =
-            cargo_front_door::run_cargo_front_door(&args, cache_enabled, trust_inherited_soldr_env)
-                .await?;
-        if code != 0 {
-            if let Some(target) = target_arg_value(&args) {
-                let command = if dylint { "dylint" } else { "clippy" };
-                eprintln!("soldr lint: {command} failed for target {target}");
-            }
-            return Ok(code);
-        }
-    }
-    Ok(0)
-}
-
-/// Extract the `--target <value>` (either spelling) argument from a cargo
-/// invocation's argv, if present.
-fn target_arg_value(args: &[String]) -> Option<String> {
-    let mut index = 0;
-    while index < args.len() {
-        if let Some(value) = args[index].strip_prefix("--target=") {
-            return Some(value.to_string());
-        }
-        if args[index] == "--target" {
-            return args.get(index + 1).cloned();
-        }
-        index += 1;
-    }
-    None
 }
 
 fn run_dependency_steps(

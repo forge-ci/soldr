@@ -173,6 +173,23 @@ pub(super) struct PorcelainReport {
     /// Unix-ms instant at which the log becomes eligible for deletion.
     pub(super) expires_at: Option<i64>,
     pub(super) summary: PorcelainSummary,
+    /// Per-step outcomes for a multi-step run (`soldr lint`, soldr#3958).
+    /// Omitted for single-command runs, so the `soldr cargo` shape is
+    /// unchanged. Additive: does not bump [`SCHEMA_VERSION`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) steps: Vec<PorcelainStep>,
+    /// Name of the step that failed, when a multi-step run stopped on one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) failed_step: Option<String>,
+}
+
+/// One step of a multi-step porcelain run (`soldr lint`, soldr#3958).
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub(super) struct PorcelainStep {
+    pub(super) name: String,
+    pub(super) ok: bool,
+    pub(super) exit_code: i32,
+    pub(super) duration_ms: u64,
 }
 
 /// Inputs to [`report_for_run`].
@@ -246,6 +263,8 @@ pub(super) fn report_for_run(inputs: &RunReportInputs<'_>) -> PorcelainReport {
             .as_ref()
             .map(|_| inputs.started_at_ms + PORCELAIN_LOG_TTL_MS),
         summary,
+        steps: Vec::new(),
+        failed_step: None,
     }
 }
 
@@ -286,6 +305,8 @@ pub(super) fn report_for_failure(
         log_path,
         expires_at,
         summary,
+        steps: Vec::new(),
+        failed_step: None,
     }
 }
 
@@ -545,7 +566,7 @@ pub(super) fn write_failure_log(
         .map(|artifact| artifact.path)
 }
 
-fn unique_path(dir: &Path, filename: &str) -> PathBuf {
+pub(super) fn unique_path(dir: &Path, filename: &str) -> PathBuf {
     let mut candidate = dir.join(filename);
     if !candidate.exists() {
         return candidate;

@@ -407,6 +407,12 @@ pub(crate) enum Commands {
     /// targets entirely. `--cross-dylint` opts in to a custom-lint pass for
     /// each selected cross target using the lint libraries' exact nightly.
     /// These flags are valid only for `rust`/`all`.
+    ///
+    /// soldr#3958: `[workspace.metadata.soldr.lint]` declares the step list
+    /// (`steps = ["fmt", "clippy", "dylint"]`, built-ins in order) and repo
+    /// commands (`extra = [["ruff", "check", "."]]`) for the `rust`/`all`
+    /// suites. With `SOLDR_PORCELAIN=1`, `lint rust` prints one JSON summary
+    /// line on success; a failing step's output is printed in full.
     Lint {
         /// Suite selector (`rust`, `deps`, `ci`, or `all`). Rust/deps/all
         /// accept cargo scope flags; `ci` accepts only `--format json|human`.

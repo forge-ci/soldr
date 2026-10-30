@@ -77,6 +77,161 @@ pub struct SoldrMetadata {
     /// reader does no validation of its own.
     #[serde(default)]
     pub linker: Option<String>,
+    /// `[workspace.metadata.soldr.lint]` (soldr#3958): the declared `soldr lint`
+    /// step list. Raw as written; [`LintMetadata::resolve`] validates it.
+    #[serde(default)]
+    pub lint: Option<LintMetadata>,
+}
+
+/// `[workspace.metadata.soldr.lint]` as written in the manifest.
+///
+/// ```toml
+/// [workspace.metadata.soldr.lint]
+/// steps = ["fmt", "clippy", "dylint"]   # built-ins, in order
+/// extra = [["ruff", "check", "."]]       # repo commands, run in the workspace root
+/// ```
+#[derive(Debug, Deserialize, Default, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LintMetadata {
+    /// Built-in steps to run, in order. Absent means every built-in.
+    #[serde(default)]
+    pub steps: Option<Vec<String>>,
+    /// Repo commands (`[program, args...]`) run after the built-ins.
+    #[serde(default)]
+    pub extra: Vec<Vec<String>>,
+}
+
+/// A built-in `soldr lint rust` step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LintStep {
+    Fmt,
+    Clippy,
+    Dylint,
+}
+
+impl LintStep {
+    /// Every built-in step, in today's order.
+    pub const ALL: [LintStep; 3] = [LintStep::Fmt, LintStep::Clippy, LintStep::Dylint];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            LintStep::Fmt => "fmt",
+            LintStep::Clippy => "clippy",
+            LintStep::Dylint => "dylint",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|step| step.name() == name)
+    }
+}
+
+/// A validated `[*.metadata.soldr.lint]` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LintConfig {
+    pub steps: Vec<LintStep>,
+    pub extra: Vec<Vec<String>>,
+}
+
+impl Default for LintConfig {
+    /// No table: today's behavior (every built-in, no extras).
+    fn default() -> Self {
+        Self {
+            steps: LintStep::ALL.to_vec(),
+            extra: Vec::new(),
+        }
+    }
+}
+
+/// Why a `lint` metadata table was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LintConfigError {
+    UnknownStep { name: String },
+    DuplicateStep { name: String },
+    EmptyExtraCommand { index: usize },
+}
+
+impl std::fmt::Display for LintConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownStep { name } => write!(
+                f,
+                "lint: unknown step {name:?} in [workspace.metadata.soldr.lint].steps; \
+                 expected fmt, clippy, or dylint (repo commands belong in `extra`)"
+            ),
+            Self::DuplicateStep { name } => write!(
+                f,
+                "lint: step {name:?} is listed twice in [workspace.metadata.soldr.lint].steps"
+            ),
+            Self::EmptyExtraCommand { index } => write!(
+                f,
+                "lint: [workspace.metadata.soldr.lint].extra[{index}] names no program; \
+                 each entry is [program, args...]"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LintConfigError {}
+
+impl From<LintConfigError> for SoldrError {
+    fn from(error: LintConfigError) -> Self {
+        SoldrError::Other(error.to_string())
+    }
+}
+
+impl LintMetadata {
+    /// Validate at the boundary: unknown or repeated step names and empty
+    /// `extra` commands are typed errors, never silently dropped.
+    pub fn resolve(&self) -> Result<LintConfig, LintConfigError> {
+        let steps = match &self.steps {
+            None => LintStep::ALL.to_vec(),
+            Some(names) => {
+                let mut steps = Vec::with_capacity(names.len());
+                for name in names {
+                    let step = LintStep::parse(name)
+                        .ok_or_else(|| LintConfigError::UnknownStep { name: name.clone() })?;
+                    if steps.contains(&step) {
+                        return Err(LintConfigError::DuplicateStep { name: name.clone() });
+                    }
+                    steps.push(step);
+                }
+                steps
+            }
+        };
+        for (index, command) in self.extra.iter().enumerate() {
+            if command
+                .first()
+                .is_none_or(|program| program.trim().is_empty())
+            {
+                return Err(LintConfigError::EmptyExtraCommand { index });
+            }
+        }
+        Ok(LintConfig {
+            steps,
+            extra: self.extra.clone(),
+        })
+    }
+}
+
+/// The lint table that applies to `start` (a `Cargo.toml` or a directory to
+/// walk up from), plus the directory extras run in -- the manifest's own
+/// directory. No manifest or no table means [`LintConfig::default`] and `None`.
+pub fn lint_config_from(start: &Path) -> Result<(LintConfig, Option<PathBuf>), SoldrError> {
+    let manifest = if start.is_file() {
+        start.to_path_buf()
+    } else {
+        match find_cargo_toml(start) {
+            Some(path) => path,
+            None => return Ok((LintConfig::default(), None)),
+        }
+    };
+    let root = manifest.parent().map(Path::to_path_buf);
+    let config = match read_soldr_metadata(&manifest)?.lint {
+        Some(table) => table.resolve()?,
+        None => LintConfig::default(),
+    };
+    Ok((config, root))
 }
 
 /// Read soldr metadata from the `Cargo.toml` at `path`. Returns the
@@ -485,5 +640,101 @@ version = "0.1.0"
         // We can't guarantee no Cargo.toml exists above tmpdir on
         // every host, so only assert this is a safe call (no panic).
         let _ = find_cargo_toml(&nested);
+    }
+
+    #[test]
+    fn lint_table_absent_means_todays_behavior() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let p = write_fixture(tmp.path(), "[workspace]\n");
+        let (config, root) = lint_config_from(&p).expect("config");
+        assert_eq!(config, LintConfig::default());
+        assert_eq!(root.as_deref(), Some(tmp.path()));
+    }
+
+    #[test]
+    fn lint_table_parses_steps_in_order_and_extras() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let p = write_fixture(
+            tmp.path(),
+            r#"
+[workspace]
+
+[workspace.metadata.soldr.lint]
+steps = ["dylint", "fmt"]
+extra = [["ruff", "check", "."], ["python", "ci/guard.py"]]
+"#,
+        );
+        let (config, _) = lint_config_from(&p).expect("config");
+        assert_eq!(config.steps, vec![LintStep::Dylint, LintStep::Fmt]);
+        assert_eq!(
+            config.extra,
+            vec![
+                vec!["ruff".to_string(), "check".into(), ".".into()],
+                vec!["python".to_string(), "ci/guard.py".into()],
+            ]
+        );
+    }
+
+    #[test]
+    fn lint_extra_without_steps_keeps_every_builtin() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let p = write_fixture(
+            tmp.path(),
+            "[workspace]\n[workspace.metadata.soldr.lint]\nextra = [[\"ruff\"]]\n",
+        );
+        let (config, _) = lint_config_from(&p).expect("config");
+        assert_eq!(config.steps, LintStep::ALL.to_vec());
+        assert_eq!(config.extra.len(), 1);
+    }
+
+    #[test]
+    fn lint_unknown_step_is_a_typed_error() {
+        let table = LintMetadata {
+            steps: Some(vec!["fmt".into(), "ruff".into()]),
+            extra: Vec::new(),
+        };
+        assert_eq!(
+            table.resolve(),
+            Err(LintConfigError::UnknownStep {
+                name: "ruff".into()
+            })
+        );
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let p = write_fixture(
+            tmp.path(),
+            "[workspace]\n[workspace.metadata.soldr.lint]\nsteps = [\"fmt\", \"ruff\"]\n",
+        );
+        let error = lint_config_from(&p).expect_err("unknown step").to_string();
+        assert!(error.contains("\"ruff\""), "{error}");
+    }
+
+    #[test]
+    fn lint_duplicate_step_and_empty_extra_are_rejected() {
+        let dup = LintMetadata {
+            steps: Some(vec!["fmt".into(), "fmt".into()]),
+            extra: Vec::new(),
+        };
+        assert_eq!(
+            dup.resolve(),
+            Err(LintConfigError::DuplicateStep { name: "fmt".into() })
+        );
+        let empty = LintMetadata {
+            steps: None,
+            extra: vec![vec![]],
+        };
+        assert_eq!(
+            empty.resolve(),
+            Err(LintConfigError::EmptyExtraCommand { index: 0 })
+        );
+    }
+
+    #[test]
+    fn lint_table_rejects_unknown_keys() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let p = write_fixture(
+            tmp.path(),
+            "[workspace]\n[workspace.metadata.soldr.lint]\nstep = [\"fmt\"]\n",
+        );
+        assert!(lint_config_from(&p).is_err());
     }
 }
