@@ -395,6 +395,11 @@ pub const KNOWN_TOOLS: &[ToolSpec] = &[
 
 /// Pinned `cargo-chef` release that `soldr cook` resolves by default. See the
 /// `cargo-chef` entry in [`KNOWN_TOOLS`] for the rationale.
+/// The nightly soldr-toolchain publishes the pinned `cargo-dylint` driver for,
+/// on every supported host. Lint libraries must pin this channel in their
+/// `rust-toolchain.toml`; any other channel has no pre-deployed driver.
+pub const DYLINT_DRIVER_NIGHTLY: &str = "nightly-2026-08-15";
+
 pub const CARGO_CHEF_PINNED_VERSION: &str = "0.1.73";
 
 /// Exact cargo-nextest release consumed by the cross-build archive pipeline.

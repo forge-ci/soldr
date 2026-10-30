@@ -621,3 +621,64 @@ fn replace_installed_file_falls_back_to_remove_then_rename_when_rename_refuses()
     assert_eq!(std::fs::read(&destination).unwrap(), b"new-driver");
     assert!(!temporary.exists());
 }
+
+// ---------------------------------------------------------------------
+// Unpublished driver pin: error under clud, warning elsewhere.
+// ---------------------------------------------------------------------
+
+#[test]
+fn published_driver_nightly_passes_the_pin_check_everywhere() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _clud = crate::EnvVarGuard::set(crate::core::CLUD_SESSION_ENV_VAR, "test-session");
+    let plan = DylintToolchainPlan::identity(
+        format!(
+            "{}-x86_64-unknown-linux-gnu",
+            crate::fetch::known_tools::DYLINT_DRIVER_NIGHTLY
+        ),
+        "1.99.0-nightly".to_string(),
+        "0123456789abcdef".to_string(),
+    );
+    unpublished_driver_pin_check(&plan, "6.2.0").expect("published nightly passes");
+}
+
+#[test]
+fn unpublished_driver_pin_is_an_error_under_clud() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _clud = crate::EnvVarGuard::set(crate::core::CLUD_SESSION_ENV_VAR, "test-session");
+    let error = unpublished_driver_pin_check(&sample_plan(), "6.2.0")
+        .expect_err("an unpublished pin must fail under clud")
+        .to_string();
+    assert!(
+        error.contains("no pre-deployed driver for nightly-2026-05-28"),
+        "{error}"
+    );
+    assert!(
+        error.contains(&format!(
+            "channel = \"{}\"",
+            crate::fetch::known_tools::DYLINT_DRIVER_NIGHTLY
+        )),
+        "{error}"
+    );
+    assert!(error.contains("`=6.2.0`"), "{error}");
+}
+
+#[test]
+fn unpublished_driver_pin_only_warns_outside_clud() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _clud = crate::EnvVarGuard::remove(crate::core::CLUD_SESSION_ENV_VAR);
+    unpublished_driver_pin_check(&sample_plan(), "6.2.0").expect("warning, not error");
+}
+
+/// The published-driver constant and the in-tree lint libraries must name
+/// one nightly, or soldr's own lint lane would hit the unpublished-pin path.
+#[test]
+fn in_tree_lint_libraries_pin_the_published_driver_nightly() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    match crate::dylint_libraries::toolchain_state(&root).expect("lint manifests parse") {
+        crate::dylint_libraries::LibraryToolchainState::Pinned { channel, .. } => assert_eq!(
+            crate::dylint_libraries::canonical_channel(&channel),
+            crate::fetch::known_tools::DYLINT_DRIVER_NIGHTLY
+        ),
+        other => panic!("expected pinned lint libraries, got {other:?}"),
+    }
+}

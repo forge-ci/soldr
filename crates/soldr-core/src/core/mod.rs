@@ -24,6 +24,7 @@ use wait_timeout::ChildExt;
 /// `Cargo.toml`; a parity test enforces byte-equality.
 pub mod canonical_targets;
 pub mod cargo_target_dir;
+pub mod clud;
 pub mod cpu_topology;
 pub mod env_flag;
 pub mod git;
@@ -48,6 +49,7 @@ mod toolchain_resolve;
 pub mod wire;
 
 pub use canonical_targets::{canonical_targets, is_canonical, CANONICAL_TARGETS};
+pub use clud::{running_under_clud, CLUD_SESSION_ENV_VAR};
 pub use env_flag::{flag, flag_value, foreign_flag, foreign_flag_value, is_off_value};
 pub use installer_watchdog::{
     installer_safety_timeout, installer_stall_timeout, run_installer_command,
