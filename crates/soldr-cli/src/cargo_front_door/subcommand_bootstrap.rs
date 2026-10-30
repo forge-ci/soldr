@@ -142,7 +142,10 @@ pub(crate) async fn ensure_known_subcommand_tool(
     let mut extra_env: Vec<(String, String)> = Vec::new();
     let mut extra_cargo_args: Vec<String> = Vec::new();
 
-    if let Some(path) = path_deferred_subcommand_tool(sub) {
+    let deferred = path_deferred_subcommand_tool(sub).filter(|path| {
+        sub != "dylint" || path_dylint_matches_pin(path, spec.pinned_version.unwrap_or("unknown"))
+    });
+    if let Some(path) = deferred {
         let exe_name = format!("cargo-{sub}");
             if sub == "dylint" {
                 let version = spec.pinned_version.unwrap_or("unknown");
@@ -388,6 +391,38 @@ fn dylint_unavailable_error(component: &str, version: &str, error: &SoldrError) 
          (and dylint-driver under DYLINT_DRIVER_PATH), publish matching prebuilt release assets, \
          or select a Dylint version that provides {host} prebuilts."
     ))
+}
+
+/// A PATH `cargo-dylint` of another release than the pin builds lint
+/// libraries its paired driver cannot load (6.0.3 against a 6.2.0 driver
+/// reports "Could not find `lib<lint>@<toolchain>.so` despite successful
+/// build"). Such a binary is skipped in favour of the managed pin.
+fn path_dylint_matches_pin(binary: &Path, pinned: &str) -> bool {
+    let mut command = std::process::Command::new(binary);
+    command.args(["dylint", "--version"]);
+    suppress_windows_console_window(&mut command);
+    let reported = crate::core::tool_output::capture_small_tool(
+        &mut command,
+        "cargo-dylint dylint --version",
+        Some(Duration::from_secs(2)),
+    )
+    .ok()
+    .filter(|output| output.status.success())
+    .and_then(|output| {
+        crate::dylint_driver::dylint_driver_version(&String::from_utf8_lossy(&output.stdout))
+            .map(str::to_owned)
+    });
+    if reported.as_deref() == Some(pinned) {
+        return true;
+    }
+    eprintln!(
+        "soldr: WARNING: ignoring cargo-dylint {} on PATH at {}; Soldr pins Dylint v{pinned} \
+         and uses its managed copy. Remove the stale install with \
+         `soldr cargo uninstall cargo-dylint dylint-link`.",
+        reported.as_deref().unwrap_or("<unknown version>"),
+        binary.display()
+    );
+    false
 }
 
 fn validate_dylint_path_binary(
