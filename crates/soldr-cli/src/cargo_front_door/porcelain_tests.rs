@@ -348,3 +348,131 @@ fn command_string_labels_the_run() {
         "cargo nextest run"
     );
 }
+
+/// A build that exits zero can still emit warnings. The digest has to say so,
+/// or the caller must open the whole log to find out whether there is anything
+/// to fix (the success half of the #3924 "warnings" clause).
+#[test]
+fn summarize_reports_warnings_on_a_successful_build() {
+    let output = concat!(
+        "warning: unused variable: `spare`\n",
+        " --> src/lib.rs:2:9\n",
+        "  |\n",
+        "2 |     let spare = 41;\n",
+        "  |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_spare`\n",
+        "  |\n",
+        "  = note: `#[warn(unused_variables)]` on by default\n",
+        "\n",
+        "warning: unused import: `std::fmt`\n",
+        " --> src/lib.rs:1:5\n",
+        "\n",
+        "warning: `warny` (lib) generated 2 warnings\n",
+    );
+
+    let summary = summarize("cargo build", 0, output);
+
+    assert_eq!(summary.status, "ok");
+    assert_eq!(summary.exit_code, 0);
+    assert_eq!(summary.error_count, 0);
+    assert!(summary.errors.is_empty());
+    // The tally line is not a warning of its own.
+    assert_eq!(summary.warning_count, 2);
+    assert_eq!(
+        summary.warnings,
+        vec![
+            "warning: unused variable: `spare` [src/lib.rs:2:9]".to_string(),
+            "warning: unused import: `std::fmt` [src/lib.rs:1:5]".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn summarize_reports_no_warnings_for_a_clean_run() {
+    let summary = summarize(
+        "cargo build",
+        0,
+        "   Compiling warny v0.1.0\n    Finished dev\n",
+    );
+    assert_eq!(summary.warning_count, 0);
+    assert!(summary.warnings.is_empty());
+}
+
+/// Only the tally line: nothing to report.
+#[test]
+fn summarize_does_not_count_a_warning_tally_as_a_warning() {
+    let summary = summarize(
+        "cargo build",
+        0,
+        "warning: `warny` (lib) generated 3 warnings\n",
+    );
+    assert_eq!(summary.warning_count, 0);
+    assert!(summary.warnings.is_empty());
+}
+
+#[test]
+fn summarize_sees_coloured_warnings() {
+    let output = concat!(
+        "\u{1b}[1m\u{1b}[33mwarning\u{1b}[0m\u{1b}[1m: unused variable: `spare`\u{1b}[0m\n",
+        " \u{1b}[1m\u{1b}[94m-->\u{1b}[0m src/lib.rs:2:9\n",
+    );
+    let summary = summarize("cargo build", 0, output);
+    assert_eq!(summary.warning_count, 1);
+    assert_eq!(
+        summary.warnings,
+        vec!["warning: unused variable: `spare` [src/lib.rs:2:9]".to_string()]
+    );
+}
+
+#[test]
+fn summarize_counts_a_repeated_warning_once() {
+    let output = concat!(
+        "warning: unused variable: `spare`\n",
+        " --> src/lib.rs:2:9\n",
+        "warning: unused variable: `spare`\n",
+        " --> src/lib.rs:2:9\n",
+    );
+    let summary = summarize("cargo test", 0, output);
+    assert_eq!(summary.warning_count, 1);
+    assert_eq!(summary.warnings.len(), 1);
+}
+
+#[test]
+fn summarize_reads_warnings_from_the_cargo_json_stream() {
+    let output = concat!(
+        r#"{"reason":"compiler-message","message":{"level":"warning","message":"unused variable: `spare`","code":null,"spans":[{"file_name":"src/lib.rs","line_start":2,"column_start":9}]}}"#,
+        "\n",
+        r#"{"reason":"compiler-message","message":{"level":"error","message":"mismatched types","code":{"code":"E0308"},"spans":[]}}"#,
+        "\n",
+        r#"{"reason":"build-finished","success":false}"#,
+        "\n",
+    );
+
+    let summary = summarize("cargo build --message-format=json", 1, output);
+
+    assert_eq!(summary.error_count, 1);
+    assert_eq!(summary.warning_count, 1);
+    assert_eq!(
+        summary.warnings,
+        vec!["warning: unused variable: `spare` [src/lib.rs:2:9]".to_string()]
+    );
+}
+
+#[test]
+fn failure_report_carries_no_warning_identities() {
+    let report = report_for_failure("cargo build", 1, None, Some("front door error"));
+    assert_eq!(report.summary.warning_count, 0);
+    assert!(report.summary.warnings.is_empty());
+}
+
+/// Cargo appends a `cargo fix` suggestion to a single-warning tally; that
+/// suffix once slipped past a pure suffix test and was counted as a warning.
+#[test]
+fn summarize_does_not_count_a_warning_tally_with_a_fix_suggestion() {
+    let summary = summarize(
+        "cargo build",
+        0,
+        "warning: `warny` (lib) generated 1 warning (run `cargo fix --lib -p warny` to apply 1 suggestion)\n",
+    );
+    assert_eq!(summary.warning_count, 0);
+    assert!(summary.warnings.is_empty());
+}

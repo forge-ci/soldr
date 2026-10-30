@@ -98,6 +98,17 @@ pub(super) const PORCELAIN_LOG_KEEP: usize = 200;
 /// `summary.error_count` always reports the true count.
 const MAX_ERROR_IDENTITIES: usize = 20;
 
+/// Upper bound on the distinct warning identities carried in `summary`.
+///
+/// Warnings are not failures, so the digest only has to be enough for a
+/// caller to decide whether to open `log_path` -- five distinct identities
+/// covers the ordinary "one or two new lints" case without turning the
+/// digest back into the relay this mode replaces.
+const MAX_WARNING_IDENTITIES: usize = 5;
+
+/// Upper bound on one warning identity's length (message plus location).
+const MAX_WARNING_IDENTITY_CHARS: usize = 200;
+
 /// Upper bound on the distinct error lines remembered for de-duplication.
 /// Past it, repeated occurrences count as they arrive rather than growing the
 /// set without limit.
@@ -144,6 +155,15 @@ pub(super) struct PorcelainSummary {
     /// soldr's own classification of the failure, when one of the
     /// existing `cargo_diagnostics` / strip classifiers matched.
     pub(super) diagnostic: Option<String>,
+    /// Number of DISTINCT warnings recognized in the child stream. Present on
+    /// a successful run too: a build that exits zero can still emit warnings,
+    /// and a caller that cannot see them has to read the whole log to learn
+    /// whether there is anything to fix.
+    pub(super) warning_count: usize,
+    /// Identities of the first [`MAX_WARNING_IDENTITIES`] warnings, each
+    /// `warning: <message> [<file>:<line>:<col>]` where rustc printed a
+    /// location. Empty when the run emitted none.
+    pub(super) warnings: Vec<String>,
 }
 
 /// The JSON object emitted on stdout in porcelain mode.
@@ -257,6 +277,8 @@ pub(super) fn report_for_failure(
             Vec::new()
         },
         diagnostic: None,
+        warning_count: 0,
+        warnings: Vec::new(),
     };
     let now = super::current_unix_ms();
     let log_path = log_path.map(|path| path.display().to_string());
@@ -290,6 +312,7 @@ pub(super) fn command_string(args: &[String]) -> String {
 /// when one matches.
 pub(super) fn summarize(command: &str, exit_code: i32, output: &str) -> PorcelainSummary {
     let (error_count, errors) = extract_errors(output);
+    let (warning_count, warnings) = extract_warnings(output);
     PorcelainSummary {
         exit_code,
         command: command.to_string(),
@@ -297,6 +320,8 @@ pub(super) fn summarize(command: &str, exit_code: i32, output: &str) -> Porcelai
         error_count,
         errors,
         diagnostic: classify_diagnostic(output),
+        warning_count,
+        warnings,
     }
 }
 
@@ -329,6 +354,159 @@ fn extract_errors(output: &str) -> (usize, Vec<String>) {
         }
     }
     (count, errors)
+}
+
+/// Count and name the DISTINCT warnings in a child stream.
+///
+/// A porcelain success digest used to say only `status: "ok", error_count: 0`,
+/// so a build that exited zero *with* warnings looked clean and the caller had
+/// to open `log_path` to find out. The identity here is rustc's header line
+/// plus the ` --> file:line:col` location when one is printed; the caret,
+/// help and note lines below it stay in the durable log.
+///
+/// Cargo's trailing tally (``warning: `crate` (lib) generated 2 warnings``) is
+/// not a warning, so it is not counted. Returns `(distinct_count,
+/// capped_identities)`.
+fn extract_warnings(output: &str) -> (usize, Vec<String>) {
+    if let Some(result) = extract_cargo_json_warnings(output) {
+        return result;
+    }
+    let lines: Vec<&str> = output.lines().collect();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut count = 0usize;
+    for (index, line) in lines.iter().enumerate() {
+        let line = without_ansi(line);
+        let trimmed = line.trim();
+        if !is_warning_header(trimmed) || is_warning_summary(trimmed) {
+            continue;
+        }
+        let identity = bounded_identity(&with_location(trimmed, &lines[index + 1..]));
+        if seen.len() < MAX_DEDUPE_ENTRIES && !seen.insert(identity.clone()) {
+            continue;
+        }
+        count += 1;
+        if warnings.len() < MAX_WARNING_IDENTITIES {
+            warnings.push(identity);
+        }
+    }
+    (count, warnings)
+}
+
+/// Does this captured line open a rustc warning block?
+///
+/// `warning: <message>` is the common form; `warning[<lint>]: <message>` is the
+/// structured spelling. `error: warnings emitted` is excluded because it is
+/// built from the same word and is a tally.
+fn is_warning_header(trimmed: &str) -> bool {
+    trimmed.starts_with("warning:") || trimmed.starts_with("warning[")
+}
+
+/// Cargo's per-crate tally, in any of the shapes it prints:
+///
+/// * ``warning: `warny` (lib) generated 2 warnings``
+/// * ``warning: `warny` (lib) generated 1 warning (run `cargo fix ...`)``
+/// * ``warning: 3 warnings emitted``
+///
+/// All of them are built from the word `warning` and a count, so they are
+/// matched by shape rather than by a suffix test (the suffix test missed the
+/// `cargo fix` suggestion cargo appends to a single-warning tally).
+fn is_warning_summary(trimmed: &str) -> bool {
+    if let Some((_, rest)) = trimmed.split_once(" generated ") {
+        let count_leads = rest.starts_with(|ch: char| ch.is_ascii_digit());
+        return count_leads && rest.contains("warning");
+    }
+    trimmed.starts_with("warning: ") && trimmed.ends_with("emitted")
+}
+
+/// Append rustc's `--> file:line:col` location, when the block prints one
+/// within the next few lines.
+fn with_location(header: &str, following: &[&str]) -> String {
+    for line in following.iter().take(4) {
+        let line = without_ansi(line);
+        let trimmed = line.trim();
+        if let Some(location) = trimmed.strip_prefix("--> ") {
+            return format!("{header} [{}]", location.trim());
+        }
+        // The caret block before the location would mean rustc printed no
+        // location at all; stop rather than scanning unrelated output.
+        if trimmed.starts_with('|') || trimmed.starts_with("= ") {
+            break;
+        }
+    }
+    header.to_string()
+}
+
+/// Cap one identity so a pathological lint message cannot re-inflate the digest.
+fn bounded_identity(identity: &str) -> String {
+    if identity.chars().count() <= MAX_WARNING_IDENTITY_CHARS {
+        return identity.to_string();
+    }
+    let mut capped: String = identity.chars().take(MAX_WARNING_IDENTITY_CHARS).collect();
+    capped.push_str("...");
+    capped
+}
+
+/// Warnings from cargo's `--message-format=json` stream, when this stream is
+/// one. `None` means "not a JSON stream" so the plain scan takes over.
+fn extract_cargo_json_warnings(output: &str) -> Option<(usize, Vec<String>)> {
+    let mut saw_message = false;
+    let mut warnings: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    for line in output.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(reason) = value.get("reason").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        saw_message = true;
+        if reason != "compiler-message" {
+            continue;
+        }
+        if value
+            .pointer("/message/level")
+            .and_then(serde_json::Value::as_str)
+            != Some("warning")
+        {
+            continue;
+        }
+        total += 1;
+        if warnings.len() < MAX_WARNING_IDENTITIES {
+            warnings.push(bounded_identity(&json_warning_identity(&value)));
+        }
+    }
+    saw_message.then_some((total, warnings))
+}
+
+/// Identity for one cargo JSON `compiler-message` warning: the message's first
+/// line, with the primary span appended when cargo reports one.
+fn json_warning_identity(value: &serde_json::Value) -> String {
+    let message = value
+        .pointer("/message/message")
+        .and_then(serde_json::Value::as_str)
+        .map(first_line)
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| "warning".to_string());
+    let span = value.pointer("/message/spans/0");
+    let location = span
+        .and_then(|span| span.get("file_name"))
+        .and_then(serde_json::Value::as_str)
+        .map(|file| {
+            let line = span
+                .and_then(|span| span.get("line_start"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default();
+            let column = span
+                .and_then(|span| span.get("column_start"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default();
+            format!("{file}:{line}:{column}")
+        });
+    match location {
+        Some(location) => format!("warning: {message} [{location}]"),
+        None => format!("warning: {message}"),
+    }
 }
 
 /// Strip ANSI escapes from one captured line.
