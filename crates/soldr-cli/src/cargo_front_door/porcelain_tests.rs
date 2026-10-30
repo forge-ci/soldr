@@ -348,3 +348,87 @@ fn command_string_labels_the_run() {
         "cargo nextest run"
     );
 }
+
+fn libtest_failure(name: &str, line: u32) -> String {
+    format!(
+        "---- {name} stdout ----\n\nthread '{name}' panicked at crates/x/src/lib.rs:{line}:5:\n\
+         assertion `left == right` failed: contract broke\n  left: 1\n right: 2\n\
+         note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n"
+    )
+}
+
+#[test]
+fn summarize_names_the_failing_test_its_location_and_assertion() {
+    let output = format!(
+        "running 2 tests\ntest shim::ok ... ok\ntest shim::broken ... FAILED\n\nfailures:\n\n{}\
+         failures:\n    shim::broken\n\ntest result: FAILED. 1 passed; 1 failed; 0 ignored\n\
+         error: test failed, to rerun pass `-p clud --lib`\n",
+        libtest_failure("shim::broken", 410)
+    );
+    let summary = summarize("cargo test", 101, &output);
+    assert_eq!(summary.failed_tests.len(), 1);
+    let test = &summary.failed_tests[0];
+    assert_eq!(test.name, "shim::broken");
+    assert_eq!(test.location.as_deref(), Some("crates/x/src/lib.rs:410:5"));
+    assert!(
+        test.message[0].contains("contract broke"),
+        "{:?}",
+        test.message
+    );
+    assert!(test.message.iter().any(|l| l.contains("right: 2")));
+    assert!(test.message.iter().all(|l| !l.contains("RUST_BACKTRACE")));
+    assert_eq!(summary.failed_tests_more, 0);
+    assert_eq!(summary.test_results.len(), 1);
+    assert!(summary.test_results[0].starts_with("test result: FAILED. 1 passed; 1 failed"));
+    assert_eq!(summary.errors.len(), 1, "compiler/cargo errors are kept");
+}
+
+#[test]
+fn many_failing_tests_are_capped_with_a_more_count() {
+    let mut output = String::from("failures:\n\n");
+    for n in 0..25 {
+        output.push_str(&libtest_failure(&format!("t::case_{n}"), 10 + n));
+    }
+    output.push_str("test result: FAILED. 0 passed; 25 failed\n");
+    let summary = summarize("cargo test", 101, &output);
+    assert_eq!(summary.failed_tests.len(), 10);
+    assert_eq!(summary.failed_tests_more, 15);
+    assert_eq!(summary.failed_tests[9].name, "t::case_9");
+}
+
+#[test]
+fn a_long_panic_message_is_capped_per_failure() {
+    let mut output =
+        String::from("---- t::big stdout ----\nthread 't::big' panicked at a.rs:1:1:\n");
+    for n in 0..100 {
+        output.push_str(&format!("line {n}\n"));
+    }
+    output.push_str("\nfailures:\n");
+    let summary = summarize("cargo test", 101, &output);
+    assert_eq!(summary.failed_tests[0].message.len(), 20);
+}
+
+#[test]
+fn nextest_stderr_block_yields_the_panic_detail() {
+    let output = "        FAIL [   0.010s] clud shim::broken\n\
+        --- STDERR:              clud shim::broken ---\n\
+        thread 'shim::broken' panicked at src/shim.rs:410:5:\n\
+        boom\n\
+        \n\
+        ------------\n";
+    let summary = summarize("cargo nextest run", 100, output);
+    assert_eq!(summary.failed_tests[0].name, "shim::broken");
+    assert_eq!(
+        summary.failed_tests[0].location.as_deref(),
+        Some("src/shim.rs:410:5")
+    );
+    assert_eq!(summary.failed_tests[0].message, vec!["boom".to_string()]);
+}
+
+#[test]
+fn success_summary_stays_free_of_failure_fields() {
+    let summary = summarize("cargo test", 0, &libtest_failure("a::b", 1));
+    let json = serde_json::to_string(&summary).expect("serialize");
+    assert!(!json.contains("failed_tests"), "{json}");
+    assert!(!json.contains("test_results"), "{json}");
+}
