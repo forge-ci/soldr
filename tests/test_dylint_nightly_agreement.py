@@ -155,3 +155,16 @@ def test_dylint_target_guard_requires_materialized_shared_dependencies(tmp_path:
 
     (shared / "debug" / "deps" / "dylint_testing.rlib").touch()
     assert TARGET_GUARD.has_materialized_shared_dependencies(shared)
+
+
+def test_published_driver_nightly_constant_matches_the_lint_pins():
+    """`known_tools::DYLINT_DRIVER_NIGHTLY` names the nightly the in-tree lints pin.
+
+    A drift would send soldr's own lint lane down the unpublished-pin path.
+    """
+    known_tools = (
+        REPO_ROOT / "crates/soldr-fetch/src/fetch/known_tools.rs"
+    ).read_text(encoding="utf-8")
+    match = re.search(r'pub const DYLINT_DRIVER_NIGHTLY: &str = "([^"]+)";', known_tools)
+    assert match, "DYLINT_DRIVER_NIGHTLY constant not found"
+    assert DYLINT_NIGHTLY.startswith(match.group(1) + "-")

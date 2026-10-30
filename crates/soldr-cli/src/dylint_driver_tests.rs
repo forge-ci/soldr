@@ -669,16 +669,3 @@ fn unpublished_driver_pin_only_warns_outside_clud() {
     unpublished_driver_pin_check(&sample_plan(), "6.2.0").expect("warning, not error");
 }
 
-/// The published-driver constant and the in-tree lint libraries must name
-/// one nightly, or soldr's own lint lane would hit the unpublished-pin path.
-#[test]
-fn in_tree_lint_libraries_pin_the_published_driver_nightly() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    match crate::dylint_libraries::toolchain_state(&root).expect("lint manifests parse") {
-        crate::dylint_libraries::LibraryToolchainState::Pinned { channel, .. } => assert_eq!(
-            crate::dylint_libraries::canonical_channel(&channel),
-            crate::fetch::known_tools::DYLINT_DRIVER_NIGHTLY
-        ),
-        other => panic!("expected pinned lint libraries, got {other:?}"),
-    }
-}
