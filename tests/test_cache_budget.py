@@ -1252,6 +1252,9 @@ def test_real_manifest_declares_evict_only_for_the_safe_families() -> None:
         # zackees/ci.yml#198: tiny attestation evidence; an evicted entry only
         # makes hydration pick an older (or no) attested ancestor.
         "attestation-evidence": "lru",
+        # setup-soldr's verdict ledger remote tier: one manifest per run, keyed
+        # by the run id, so an evicted entry only costs a re-run, not a build.
+        "verdict-manifest": "lru",
         "experiment-lanes": "lru",
         "pinned-immutable-download": "newest-per-lineage",
         # soldr#3545: superseded lock/toolchain generations are safe-pruned
