@@ -668,4 +668,3 @@ fn unpublished_driver_pin_only_warns_outside_clud() {
     let _clud = crate::EnvVarGuard::remove(crate::core::CLUD_SESSION_ENV_VAR);
     unpublished_driver_pin_check(&sample_plan(), "6.2.0").expect("warning, not error");
 }
-
