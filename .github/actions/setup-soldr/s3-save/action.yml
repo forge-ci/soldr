@@ -1,0 +1,24 @@
+name: setup-soldr S3 cache save
+description: >-
+  Upload setup-soldr's action-managed roots to the optional S3 remote cache.
+  Composite actions have no post step, so call this at the end of the job
+  with the same s3-* inputs given to setup-soldr. On merge_group runs
+  it also enforces s3-cache-limit (the singleton janitor); on every other
+  event it only writes this run's keys. No-op when S3 was not enabled.
+inputs:
+  s3-bucket: {required: false, default: ""}
+  s3-endpoint: {required: false, default: ""}
+  s3-region: {required: false, default: ""}
+  s3-cache-limit: {required: false, default: ""}
+runs:
+  using: composite
+  steps:
+    - shell: pwsh
+      if: ${{ inputs.s3-bucket != '' }}
+      env:
+        INPUT_S3_BUCKET: ${{ inputs.s3-bucket }}
+        INPUT_S3_ENDPOINT: ${{ inputs.s3-endpoint }}
+        INPUT_S3_REGION: ${{ inputs.s3-region }}
+        INPUT_S3_CACHE_LIMIT: ${{ inputs.s3-cache-limit }}
+        SOLDR_S3_EVENT_NAME: ${{ github.event_name }}
+      run: python "${{ github.action_path }}/../s3_cache.py" save
