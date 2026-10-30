@@ -53,6 +53,18 @@
 //! A harness can therefore branch on either the process status or the JSON
 //! field and get the same answer.
 //!
+//! ## soldr's own annotations go to the log too
+//!
+//! Suppressing the child's streams is only half the contract: soldr prints its
+//! own per-unit `soldr[cache] <crate> [HIT!/MISS]` annotations (soldr#2302) to
+//! stderr, and those leaked into a `--porcelain` caller's transcript even
+//! though its JSON already carries the counts. They are now deferred by
+//! [`super::cache_annotations::CacheLineSink::for_capture`] and appended to the run
+//! log as their own labelled section
+//! ([`append_deferred_annotations`]) — preserved, not dropped, and identified
+//! as a separate source because their order is the compile journal's rather
+//! than the child stream's.
+//!
 //! ## Digest is colour-blind
 //!
 //! `summary` is scanned out of the child's captured bytes, including runs
@@ -64,6 +76,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::cache_annotations::DeferredCacheDrain;
 use crate::build_log_meta::{sanitize_cwd_slug, utc_compact_timestamp};
 use crate::core::SoldrPaths;
 
@@ -144,6 +157,10 @@ pub(super) struct PorcelainSummary {
     /// soldr's own classification of the failure, when one of the
     /// existing `cargo_diagnostics` / strip classifiers matched.
     pub(super) diagnostic: Option<String>,
+    /// Number of soldr's own per-crate cache annotations this run moved out of
+    /// stderr and into `log_path`. Additive: an older reader ignores it, and
+    /// `0` is the honest answer for a run that deferred nothing.
+    pub(super) cache_lines: usize,
     /// Failing tests (first 10) with panic location and message lines
     /// (soldr#3961). Omitted when no test failed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -201,6 +218,8 @@ pub(super) struct RunReportInputs<'a> {
     pub(super) log_path: Option<PathBuf>,
     /// The child's full captured stdout+stderr, when capture ran.
     pub(super) output: Option<&'a str>,
+    /// Per-crate cache annotations appended to the log instead of stderr.
+    pub(super) cache_lines: usize,
 }
 
 /// The exit code this process will actually report.
@@ -232,6 +251,7 @@ pub(super) fn captured_run_report(
     status: &std::process::ExitStatus,
     effective_exit_code: i32,
     output: Option<&str>,
+    cache_lines: usize,
 ) -> Option<PorcelainReport> {
     let artifact = artifact?;
     Some(report_for_run(&RunReportInputs {
@@ -241,6 +261,7 @@ pub(super) fn captured_run_report(
         ended_at_ms: super::current_unix_ms(),
         log_path: Some(artifact.path.clone()),
         output,
+        cache_lines,
     }))
 }
 
@@ -248,7 +269,8 @@ pub(super) fn captured_run_report(
 /// compiler failure, or post-spawn abort).
 pub(super) fn report_for_run(inputs: &RunReportInputs<'_>) -> PorcelainReport {
     let output = inputs.output.unwrap_or_default();
-    let summary = summarize(inputs.command, inputs.exit_code, output);
+    let mut summary = summarize(inputs.command, inputs.exit_code, output);
+    summary.cache_lines = inputs.cache_lines;
     PorcelainReport {
         schema_version: SCHEMA_VERSION,
         command: inputs.command.to_string(),
@@ -290,6 +312,7 @@ pub(super) fn report_for_failure(
             Vec::new()
         },
         diagnostic: None,
+        cache_lines: 0,
         failed_tests: Vec::new(),
         failed_tests_more: 0,
         test_results: Vec::new(),
@@ -347,6 +370,7 @@ pub(super) fn summarize(command: &str, exit_code: i32, output: &str) -> Porcelai
         error_count,
         errors,
         diagnostic: classify_diagnostic(output),
+        cache_lines: 0,
     }
 }
 
@@ -389,7 +413,7 @@ fn extract_errors(output: &str) -> (usize, Vec<String>) {
 /// `status: "failed"` with `error_count: 0, errors: []` -- the empty digest this
 /// mode exists to prevent. Borrow when there is nothing to strip, which is the
 /// common (piped, uncoloured) case.
-fn without_ansi(line: &str) -> std::borrow::Cow<'_, str> {
+pub(super) fn without_ansi(line: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     if !line.contains('\u{1b}') {
         return Cow::Borrowed(line);
@@ -550,6 +574,68 @@ pub(super) fn write_run_log(
         path,
         started_at_ms,
     })
+}
+
+/// Section header for the annotations a porcelain run deferred from stderr.
+///
+/// Names the source explicitly: this text is soldr's own progress stream, whose
+/// order is the compile journal's, not the child's. Nothing here is a child
+/// diagnostic, and nothing in the child section above is reordered.
+pub(super) const DEFERRED_SECTION_HEADER: &str =
+    "# --- soldr auxiliary annotations (separate source; compile-journal order) ---\n";
+
+/// Append the annotations a porcelain run deferred from stderr to its durable
+/// log, under [`DEFERRED_SECTION_HEADER`].
+///
+/// Returns how many annotation lines were written -- `0` when the run had no
+/// log or nothing was deferred. A failed append is reported on stderr and
+/// never fails the build: the log is an aid, the exit code is the result.
+pub(super) fn append_deferred_annotations(
+    artifact: Option<&PorcelainLogArtifact>,
+    drained: Option<&DeferredCacheDrain>,
+) -> usize {
+    append_deferred_annotations_to(artifact.map(|artifact| artifact.path.as_path()), drained)
+}
+
+/// [`append_deferred_annotations`] for a log path that is not a capture
+/// artifact -- the abort path's best-effort failure log, so annotations the run
+/// deferred are never dropped just because the child never exited normally.
+pub(super) fn append_deferred_annotations_to(
+    log_path: Option<&Path>,
+    drained: Option<&DeferredCacheDrain>,
+) -> usize {
+    let (Some(path), Some(drained)) = (log_path, drained) else {
+        return 0;
+    };
+    if drained.lines.is_empty() && drained.omitted == 0 {
+        return 0;
+    }
+    let mut body = String::from(DEFERRED_SECTION_HEADER);
+    for line in &drained.lines {
+        body.push_str(line);
+        body.push('\n');
+    }
+    if drained.omitted > 0 {
+        body.push_str(&format!(
+            "# {} further annotation line(s) omitted; the zccache compile journal holds the complete record\n",
+            drained.omitted
+        ));
+    }
+    match append_to_log(path, &body) {
+        Ok(()) => drained.lines.len(),
+        Err(err) => {
+            eprintln!(
+                "soldr warning: failed to append deferred annotations to the porcelain log: {err}"
+            );
+            0
+        }
+    }
+}
+
+fn append_to_log(path: &Path, body: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+    file.write_all(body.as_bytes())
 }
 
 /// Best-effort durable log for a run that failed before capture. Returns

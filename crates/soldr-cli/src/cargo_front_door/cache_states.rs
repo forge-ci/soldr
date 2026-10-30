@@ -56,6 +56,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::CargoCachePlan;
+use soldr_platform::sync::Mutex;
+
+use super::cache_annotations::{emit, CacheLineSink, CacheStateTailStart};
 use crate::color_choice::{paint, DIM, GREEN, YELLOW};
 use crate::core::SoldrPaths;
 use crate::daemon::protocol::BuildCacheSummary;
@@ -167,12 +170,16 @@ fn json_u64(value: &serde_json::Value, key: &str) -> Option<u64> {
 /// Start the live per-unit tail for a cache-enabled build. Returns `None`
 /// (printing nothing) for a `--no-cache` run with no session or when the
 /// surface is disabled — so the front door integrates in one line.
+///
+/// `porcelain` selects the sink: a machine-readable run defers every
+/// annotation into the returned buffer instead of writing it to stderr.
 pub(crate) fn start_tail(
     cache_plan: &CargoCachePlan,
     paths: &SoldrPaths,
     journal_start_offset: u64,
     args: &[String],
-) -> Option<CacheStateTail> {
+    porcelain: bool,
+) -> Option<CacheStateTailStart> {
     cache_plan.zccache_session()?;
     // Stamp with the same elapsed-seconds prefix as the relayed cargo output
     // when that prefix is on, so the two read as one stream in a CI log.
@@ -183,12 +190,16 @@ pub(crate) fn start_tail(
         std::io::stderr().is_terminal(),
     )
     .then(Instant::now);
-    CacheStateTail::start(
+    let sink = CacheLineSink::for_capture(porcelain);
+    let deferred = sink.deferred();
+    let tail = CacheStateTail::start(
         super::embedded_compile_journal_path(paths),
         journal_start_offset,
         stamp_from,
         BuildScope::resolve(args),
-    )
+        sink,
+    );
+    Some(CacheStateTailStart { tail, deferred })
 }
 
 /// Stop and join a tail started by [`start_tail`], draining its final records.
@@ -452,12 +463,13 @@ impl ScopedLines {
     }
 }
 
-/// A live tail over the compile journal that prints per-unit HIT/MISS lines to
-/// stderr as records land, for the lifetime of one cargo run.
+/// A live tail over the compile journal that writes per-unit HIT/MISS lines as
+/// records land, for the lifetime of one cargo run.
 ///
-/// The thread writes whole lines via `eprintln!`; a rare interleave with the
-/// relayed cargo stream is cosmetic and does not warrant sharing a lock with
-/// the front door's output tee.
+/// The thread writes whole lines through its [`CacheLineSink`]; on the default
+/// stderr sink a rare interleave with the relayed cargo stream is cosmetic and
+/// does not warrant sharing a lock with the front door's output tee, and on the
+/// deferred sink nothing is interleaved at all.
 pub(crate) struct CacheStateTail {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
@@ -476,6 +488,7 @@ impl CacheStateTail {
         start_offset: u64,
         stamp_from: Option<Instant>,
         scope: BuildScope,
+        sink: CacheLineSink,
     ) -> Option<Self> {
         if !enabled() {
             return None;
@@ -493,6 +506,7 @@ impl CacheStateTail {
                     stamp_from,
                     &stop_thread,
                     ScopedLines::new(scope),
+                    sink,
                 )
             })
             .ok()?;
@@ -511,13 +525,6 @@ impl CacheStateTail {
     }
 }
 
-fn emit(line: &str, stamp_from: Option<Instant>) {
-    match stamp_from {
-        Some(t0) => eprintln!("{:>8.2} {line}", t0.elapsed().as_nanos() as f64 / 1e9),
-        None => eprintln!("{line}"),
-    }
-}
-
 fn tail_loop(
     journal_path: &Path,
     start_offset: u64,
@@ -525,6 +532,7 @@ fn tail_loop(
     stamp_from: Option<Instant>,
     stop: &AtomicBool,
     mut lines: ScopedLines,
+    sink: CacheLineSink,
 ) {
     let mut offset = start_offset;
     let mut pending: Vec<u8> = Vec::new();
@@ -537,6 +545,7 @@ fn tail_loop(
             use_color,
             stamp_from,
             &mut lines,
+            &sink,
         );
         if stopping {
             // Cargo has exited, but the daemon writes journal records
@@ -551,9 +560,10 @@ fn tail_loop(
                 use_color,
                 stamp_from,
                 &mut lines,
+                &sink,
             );
             for line in lines.finish() {
-                emit(&line, stamp_from);
+                emit(&line, stamp_from, &sink);
             }
             break;
         }
@@ -571,6 +581,7 @@ fn drain_new_records(
     use_color: bool,
     stamp_from: Option<Instant>,
     lines: &mut ScopedLines,
+    sink: &CacheLineSink,
 ) -> u64 {
     let Ok(mut file) = std::fs::File::open(journal_path) else {
         return offset;
@@ -598,7 +609,7 @@ fn drain_new_records(
         let complete: Vec<u8> = pending.drain(..=last_nl).collect();
         for unit in parse_journal_chunk(&String::from_utf8_lossy(&complete)) {
             if let Some(line) = lines.accept(&unit, use_color) {
-                emit(&line, stamp_from);
+                emit(&line, stamp_from, sink);
             }
         }
     }
@@ -608,6 +619,7 @@ fn drain_new_records(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cargo_front_door::cache_annotations::DeferredCacheDrain;
 
     fn summary(hits: u64, misses: u64) -> BuildCacheSummary {
         BuildCacheSummary {
@@ -862,7 +874,15 @@ mod tests {
 
         let mut pending: Vec<u8> = Vec::new();
         let mut lines = ScopedLines::new(BuildScope::default());
-        let offset = drain_new_records(&path, 0, &mut pending, false, None, &mut lines);
+        let offset = drain_new_records(
+            &path,
+            0,
+            &mut pending,
+            false,
+            None,
+            &mut lines,
+            &CacheLineSink::Stderr,
+        );
         // Only the complete first record is consumed for rendering; the
         // partial `beta` line stays pending, but the offset still advances past
         // all bytes read so the next poll does not re-read them.
