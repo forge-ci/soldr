@@ -245,7 +245,7 @@ RELEASE_INCLUDED_TRIPLES = [
 # Canonical Dylint CI policy shared by the nightly-agreement and process-
 # boundary guards. The full rustup toolchain key is also the target-directory
 # key, keeping nightly artifacts separate from the project's Rust 1.95 tree.
-DYLINT_NIGHTLY = "nightly-2026-05-28-x86_64-unknown-linux-gnu"
+DYLINT_NIGHTLY = "nightly-2026-08-15-x86_64-unknown-linux-gnu"
 DYLINT_BUILD_STEPS = (
     "Build daemon process-creation boundary lint",
     "Build fetch network boundary lint",

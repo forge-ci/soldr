@@ -39,7 +39,7 @@ fn missing_dylint_driver_fails_before_tool_launch() {
         "unexpected error: {message}"
     );
     assert!(
-        message.contains("dylint-driver 6.0.3-nightly-2026-05-28"),
+        message.contains("dylint-driver 6.2.0-nightly-2026-05-28"),
         "unexpected error: {message}"
     );
     assert!(

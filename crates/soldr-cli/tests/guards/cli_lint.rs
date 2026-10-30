@@ -267,9 +267,9 @@ fn lint_rust_uses_canonical_commands_without_a_redundant_check() {
         soldr_platform::host::facts::os(),
         soldr_platform::host::facts::HostOs::Windows
     ) {
-        "@echo off\necho dylint-driver 6.0.3\nexit /b 0\n"
+        "@echo off\necho dylint-driver 6.2.0\nexit /b 0\n"
     } else {
-        "#!/bin/sh\nprintf 'dylint-driver 6.0.3\\n'\n"
+        "#!/bin/sh\nprintf 'dylint-driver 6.2.0\\n'\n"
     };
     write_fake_script(&driver, driver_script);
     let rustc = install_versioned_fake_rustc(

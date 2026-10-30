@@ -175,8 +175,17 @@ impl DylintToolchainPlan {
         command.env(CACHE_IDENTITY_ENV_VAR, self.cache_identity());
         command.env(PREPARED_IDENTITY_ENV_VAR, self.cache_identity());
         crate::dylint_driver::apply_dylint_driver_path(command);
+        // Dylint 6.2.0's dylint-link skips the `lib<name>@<toolchain>` copy
+        // when cargo-dylint sets DYLINT_BUILDING_LIBRARIES, leaving it to
+        // cargo-dylint after the link. zccache models that copy as a link
+        // output and fails to materialize it when it is absent, so keep the
+        // linker producing it, as every release before 6.2.0 did.
+        command.env(DYLINT_LINK_COPY_LIBRARY_ENV_VAR, "1");
     }
 }
+
+/// Makes dylint-link write the toolchain-suffixed library copy itself.
+pub(crate) const DYLINT_LINK_COPY_LIBRARY_ENV_VAR: &str = "DYLINT_LINK_ENABLE_COPY_LIBRARY";
 
 pub(crate) fn write_success_marker(plan: &DylintToolchainPlan) -> Result<(), SoldrError> {
     let Some(path) = std::env::var_os(SUCCESS_MARKER_ENV_VAR)
