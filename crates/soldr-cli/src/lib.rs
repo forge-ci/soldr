@@ -311,6 +311,7 @@ pub(crate) mod dylint_driver;
 /// `dylint_cook`, and `ci_test::plan` all resolve the Dylint channel through
 /// it instead of each deriving or hard-coding its own answer.
 pub(crate) mod dylint_libraries;
+pub(crate) mod dylint_library_uplift;
 pub(crate) mod dylint_prepare;
 /// soldr#3567/#3605 — the single Rustup home Dylint provisions and runs in.
 pub(crate) mod dylint_rustup_home;
