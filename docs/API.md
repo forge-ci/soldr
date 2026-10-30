@@ -818,6 +818,36 @@ before it reaches fmt/Clippy/Dylint. An unknown or unsupported triple — declar
 or explicit — is a clear error raised before any compile starts, not a silent
 skip; the host's own triple is never run twice.
 
+**Declared steps and repo commands (soldr#3958).** A repo whose lint is more
+than Rust declares the whole step list next to `targets`, so one `soldr lint`
+call runs everything:
+
+```toml
+[workspace.metadata.soldr.lint]
+steps = ["fmt", "clippy", "dylint"]   # built-ins, run in this order
+extra = [["ruff", "check", "."], ["python", "ci/guard.py"]]  # repo commands
+```
+
+`steps` selects and orders the built-ins (`fmt`, `clippy`, `dylint`); omitting
+it runs all three, and omitting the whole table keeps today's behavior. `extra`
+entries are `[program, args...]`, run after the built-ins, in the directory of
+the manifest that declares them, with the caller's environment. The table is
+validated before any step starts: an unknown or repeated step name, an unknown
+key, or an `extra` tool that cannot be found (the error names it) is a hard
+error. Applies to the `rust` and `all` suites. The first failing step stops the run.
+
+**Porcelain (soldr#3958).** With `SOLDR_PORCELAIN=1` (or `soldr --porcelain
+lint`), `soldr lint rust` prints ONE JSON line on stdout and nothing else when
+every step passes. It is the same report `soldr cargo` emits under porcelain
+(`schema_version`, `command`, `exit_code`, `duration_ms`, `log_path`,
+`expires_at`, `summary` with `status` `ok`/`failed`), plus two additive fields:
+`steps` (`name`, `ok`, `exit_code`, `duration_ms` per step run) and, on failure,
+`failed_step`. Every step's stdout+stderr is appended to the single log at
+`log_path`. When a step fails, its complete output (the rustfmt diff, Clippy
+errors and warnings) is printed unfolded on stderr before the JSON line; only
+the output of steps that passed is folded into the log. The `deps`, `ci` and
+`all` suites are unchanged.
+
 ### `soldr ci-test`
 
 Run Soldr's prescribed validation DAG with maximum artifact sharing inside
