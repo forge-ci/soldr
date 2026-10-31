@@ -515,31 +515,25 @@ fn porcelain_lint_success_prints_exactly_one_summary_line() {
     assert_eq!(stdout.lines().count(), 1, "stdout:\n{stdout}");
     assert!(!stdout.contains(LINT_NOISE_MARKER) && !stderr.contains(LINT_NOISE_MARKER));
     let report: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON line");
-    assert_eq!(report["summary"]["status"], "ok");
+    assert_eq!(report["status"], "ok");
     assert_eq!(report["exit_code"], 0);
-    let names: Vec<_> = report["steps"]
-        .as_array()
-        .expect("steps")
-        .iter()
-        .map(|step| {
-            (
-                step["name"].as_str().unwrap_or_default().to_string(),
-                step["ok"].clone(),
-            )
-        })
-        .collect();
-    assert_eq!(
-        names,
-        vec![
-            ("fmt".to_string(), serde_json::json!(true)),
-            ("clippy".to_string(), serde_json::json!(true)),
-        ]
-    );
+    // soldr#4010: a passing line carries no steps; they live in the log.
+    assert!(report.get("steps").is_none(), "{report}");
     let log = fs::read_to_string(report["log_path"].as_str().expect("log_path")).expect("log");
     assert!(
         log.contains(LINT_NOISE_MARKER),
         "the folded output lives in the log:\n{log}"
     );
+    assert_eq!(step_names(&log), vec!["fmt", "clippy"]);
+}
+
+/// Step names in the order the lint log recorded them.
+fn step_names(log: &str) -> Vec<String> {
+    log.lines()
+        .filter_map(|line| line.strip_prefix("# --- step "))
+        .filter_map(|rest| rest.split(':').next())
+        .map(str::to_string)
+        .collect()
 }
 
 #[test]
@@ -558,6 +552,7 @@ fn porcelain_lint_failure_shows_the_fmt_diff_in_full() {
     );
     assert_eq!(stdout.lines().count(), 1, "stdout:\n{stdout}");
     let report: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON line");
+    assert_eq!(report["status"], "failed");
     assert_eq!(report["summary"]["status"], "failed");
     assert_eq!(report["failed_step"], "fmt");
     assert_eq!(report["exit_code"], 1);
@@ -576,11 +571,7 @@ fn porcelain_lint_formats_in_place_before_the_fmt_check() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "stdout:\n{stdout}");
     let report: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON line");
-    let names: Vec<_> = report["steps"]
-        .as_array()
-        .expect("steps")
-        .iter()
-        .map(|step| step["name"].as_str().unwrap_or_default().to_string())
-        .collect();
+    let log = fs::read_to_string(report["log_path"].as_str().expect("log_path")).expect("log");
+    let names = step_names(&log);
     assert_eq!(names, vec!["fmt-fix", "fmt", "clippy"]);
 }
