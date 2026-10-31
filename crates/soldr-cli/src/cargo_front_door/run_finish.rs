@@ -437,14 +437,31 @@ fn complete_cargo_run(
             return retried;
         }
     }
-    // Porcelain: exactly one JSON line on stdout, emitted last (after every
-    // early `?` and after the retry decision above) so the caller always
-    // sees it exactly once.
-    if let Some(report) = porcelain_report.as_ref() {
-        porcelain::emit(report);
-    }
+    emit_final_reports(&status, prepared, session.started_at_ms, porcelain_report.as_ref());
     drop(normalized);
     Ok(status.code().unwrap_or(1))
+}
+
+/// The run's last words: the `cargo install` notice (soldr#3960), then the
+/// single porcelain JSON line, emitted last (after every early `?` and after
+/// the retry decision) so the caller always sees it exactly once.
+fn emit_final_reports(
+    status: &std::process::ExitStatus,
+    prepared: &PreparedCargo,
+    started_at_ms: i64,
+    porcelain_report: Option<&porcelain::PorcelainReport>,
+) {
+    if status.success() {
+        install_notice::report(
+            &prepared.args,
+            &prepared.command,
+            started_at_ms,
+            prepared.porcelain,
+        );
+    }
+    if let Some(report) = porcelain_report {
+        porcelain::emit(report);
+    }
 }
 
 /// After a successful cargo run, embed packed DWARF and refresh the `cargo
