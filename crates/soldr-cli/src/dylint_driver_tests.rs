@@ -333,6 +333,23 @@ fn cargo_toml_pins_the_exact_cargo_dylint_version() {
     assert!(manifest.contains(DRIVER_BUILD_PACKAGE_NAME));
 }
 
+/// soldr#4002: an ambient stable `RUSTUP_TOOLCHAIN` must not reach the
+/// driver build, or rustup's `rustc` proxy compiles `#![feature]` crates on
+/// stable (E0554).
+#[test]
+fn driver_build_is_pinned_to_the_plan_nightly() {
+    let rustc = Path::new("/toolchains/nightly-2026-05-28/bin/rustc");
+    let mut command = std::process::Command::new("cargo");
+    command.env("RUSTUP_TOOLCHAIN", "1.95.0");
+    pin_driver_build_toolchain(&mut command, "nightly-2026-05-28", rustc);
+    let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
+    assert_eq!(
+        envs[std::ffi::OsStr::new("RUSTUP_TOOLCHAIN")],
+        Some(std::ffi::OsStr::new("nightly-2026-05-28"))
+    );
+    assert_eq!(envs[std::ffi::OsStr::new("RUSTC")], Some(rustc.as_os_str()));
+}
+
 #[test]
 fn main_rs_calls_the_upstream_driver_entry_point() {
     assert!(DRIVER_BUILD_MAIN_RS.contains("dylint_driver::dylint_driver(&args)"));
