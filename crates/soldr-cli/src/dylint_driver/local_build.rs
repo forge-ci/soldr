@@ -238,6 +238,8 @@ fn build_and_install_driver_from_source(
     command
         .env_remove("RUSTC_WRAPPER")
         .env_remove("RUSTC_WORKSPACE_WRAPPER");
+    let rustc = resolve_toolchain_binary_for_channel("rustc", Some(&plan.channel))?;
+    pin_driver_build_toolchain(&mut command, &plan.channel, &rustc);
     // Unix only: bake the *local* toolchain's lib directory into the
     // driver's rpath, mirroring upstream's own `-C link-args=-Wl,-rpath,...`
     // RUSTFLAGS. Unlike the catalogue-fetched driver — built on a CI machine
@@ -283,6 +285,20 @@ fn build_and_install_driver_from_source(
         )));
     }
     install_local_driver(&built, driver_dir, qualified_channel)
+}
+
+/// Pin the driver build to the plan's nightly (soldr#4002). The resolved
+/// `cargo` is the nightly's own binary, but it runs `rustc` through rustup's
+/// proxy, and an ambient `RUSTUP_TOOLCHAIN` (setup-soldr exports the project's
+/// stable pin) would hand `dylint_driver`'s `#![feature]` crates to stable and
+/// fail with E0554. Naming the nightly's `rustc` and toolchain explicitly
+/// means the build either uses the nightly or fails on it, never on stable.
+pub(super) fn pin_driver_build_toolchain(
+    command: &mut std::process::Command,
+    channel: &str,
+    rustc: &Path,
+) {
+    command.env("RUSTUP_TOOLCHAIN", channel).env("RUSTC", rustc);
 }
 
 /// Install a freshly built driver into `driver_dir`, using the exact same
