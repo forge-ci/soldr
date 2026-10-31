@@ -83,7 +83,7 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Setup soldr build cache
-        uses: zackees/setup-soldr@794fb3083729fd6be3396ab6cbd573c9f756d2f5
+        uses: zackees/setup-soldr@35b5765c99cf392c259e684daeda10a950f72fff
         with:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
           cook-delta: false

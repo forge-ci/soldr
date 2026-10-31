@@ -374,7 +374,7 @@ jobs:
 
 
       - name: Setup soldr build cache
-        uses: zackees/setup-soldr@794fb3083729fd6be3396ab6cbd573c9f756d2f5
+        uses: zackees/setup-soldr@35b5765c99cf392c259e684daeda10a950f72fff
         with:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
           cook-delta: false
@@ -552,7 +552,7 @@ jobs:
       # uses a published soldr solely to build the source driver (soldr#3934).
       - name: Set up soldr for bootstrap build
         if: steps.bootstrap_cache.outputs.cache-hit != 'true'
-        uses: zackees/setup-soldr@794fb3083729fd6be3396ab6cbd573c9f756d2f5
+        uses: zackees/setup-soldr@35b5765c99cf392c259e684daeda10a950f72fff
         with:
           toolchain: 1.98.1
           cook-delta: false
@@ -1100,7 +1100,7 @@ jobs:
         with:
           cache-suffix: ${{ env.PR_CACHE_TAG }}
       - name: Set up soldr for local driver build
-        uses: zackees/setup-soldr@794fb3083729fd6be3396ab6cbd573c9f756d2f5
+        uses: zackees/setup-soldr@35b5765c99cf392c259e684daeda10a950f72fff
         with:
           toolchain: 1.98.1
           cook-delta: false

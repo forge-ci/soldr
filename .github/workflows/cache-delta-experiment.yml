@@ -90,7 +90,7 @@ jobs:
         # before the release-auto workflow has built and published
         # the matching tarball; setup-soldr fetches by tag, so an
         # unpublished version 404s here.
-        uses: zackees/setup-soldr@794fb3083729fd6be3396ab6cbd573c9f756d2f5
+        uses: zackees/setup-soldr@35b5765c99cf392c259e684daeda10a950f72fff
         with:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
           cook-delta: false
@@ -192,7 +192,7 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: zackees/setup-soldr@794fb3083729fd6be3396ab6cbd573c9f756d2f5
+      - uses: zackees/setup-soldr@35b5765c99cf392c259e684daeda10a950f72fff
         with:
           cook-delta: false
           # 0.7.29 brings `soldr cook` — see delta job above for why.
