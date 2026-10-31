@@ -173,6 +173,11 @@ pub(crate) fn start_tail(
     journal_start_offset: u64,
     args: &[String],
 ) -> Option<CacheStateTail> {
+    // soldr#4018: a verb that compiles nothing (fmt, tree, metadata) would
+    // only relay other builds' records from the shared journal.
+    if !super::cargo_args_are_cacheable(args) {
+        return None;
+    }
     cache_plan.zccache_session()?;
     // Stamp with the same elapsed-seconds prefix as the relayed cargo output
     // when that prefix is on, so the two read as one stream in a CI log.
@@ -199,7 +204,11 @@ pub(crate) fn stop_tail(tail: Option<CacheStateTail>) {
 }
 
 /// Emit the automatic cache-stats summary for a finished build's session.
-pub(crate) fn emit_build_stats(cache_plan: &CargoCachePlan) {
+pub(crate) fn emit_build_stats(cache_plan: &CargoCachePlan, args: &[String]) {
+    // soldr#4018: no compile, so any summary on disk is another build's.
+    if !super::cargo_args_are_cacheable(args) {
+        return;
+    }
     let Some(session) = cache_plan.zccache_session() else {
         return;
     };
