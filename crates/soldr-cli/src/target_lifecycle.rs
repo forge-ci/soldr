@@ -480,7 +480,9 @@ pub(crate) fn cargo_feature_flags(args: &[String]) -> Vec<String> {
 fn cargo_operation_requires_prep(args: &[String]) -> bool {
     matches!(
         crate::cargo_front_door::first_cargo_subcommand(args),
-        Some("build" | "check" | "clippy" | "test" | "bench" | "run" | "doc" | "nextest")
+        Some(
+            "build" | "check" | "clippy" | "test" | "bench" | "run" | "doc" | "nextest" | "dylint"
+        )
     )
 }
 
