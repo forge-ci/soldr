@@ -474,10 +474,20 @@ fn unpublished_driver_pin_check(
     }
     let message = unpublished_driver_pin_message(plan, version, published);
     if crate::core::running_under_clud() {
-        return Err(SoldrError::Other(message));
+        // soldr#3991: this is fatal under clud; say so, or the exit 1 reads as
+        // a warning followed by a silent failure.
+        return Err(SoldrError::Other(unpublished_driver_pin_error(&message)));
     }
     eprintln!("soldr: WARNING: {message}");
     Ok(())
+}
+
+/// The clud-fatal form of [`unpublished_driver_pin_message`] (soldr#3991).
+pub(crate) fn unpublished_driver_pin_error(message: &str) -> String {
+    format!(
+        "ERROR: refusing to build the Dylint driver from source under clud, so this lint run \
+         fails (exit 1). {message}"
+    )
 }
 
 pub(crate) fn unpublished_driver_pin_message(
