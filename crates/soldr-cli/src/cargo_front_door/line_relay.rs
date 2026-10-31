@@ -15,8 +15,8 @@
 //! Only the terminal copy goes through here. The raw capture channel
 //! bytes are untouched.
 
+use soldr_platform::sync::Mutex;
 use std::io::{self, Write};
-use std::sync::Mutex;
 
 /// Serializes every whole-record terminal write across threads.
 static TERMINAL_LINES: Mutex<()> = Mutex::new(());
@@ -26,9 +26,7 @@ const MAX_PENDING: usize = 64 * 1024;
 
 /// Write `line` in one call under the terminal lock, then flush.
 pub(crate) fn emit_whole_line<W: Write>(w: &mut W, line: &[u8]) -> io::Result<()> {
-    let _guard = TERMINAL_LINES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = TERMINAL_LINES.lock();
     w.write_all(line)?;
     w.flush()
 }
@@ -123,7 +121,7 @@ mod tests {
             let Some(&b) = buf.first() else {
                 return Ok(0);
             };
-            self.0.lock().expect("sink").push(b);
+            self.0.lock().push(b);
             Ok(1)
         }
         fn flush(&mut self) -> io::Result<()> {
@@ -169,7 +167,7 @@ mod tests {
         });
         relay.join().expect("relay");
         cache.join().expect("cache");
-        let out = String::from_utf8(sink.0.lock().expect("sink").clone()).expect("utf8");
+        let out = String::from_utf8(sink.0.lock().clone()).expect("utf8");
         let mut ok_lines = 0;
         for line in out.lines() {
             let is_test = line.starts_with("test t") && line.ends_with(" ... ok");
