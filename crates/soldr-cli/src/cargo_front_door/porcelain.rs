@@ -103,6 +103,21 @@ const MAX_ERROR_IDENTITIES: usize = 20;
 /// set without limit.
 const MAX_DEDUPE_ENTRIES: usize = 4096;
 
+/// Upper bound on the failure excerpt's line count.
+const MAX_EXCERPT_LINES: usize = 8;
+
+/// Upper bound on one excerpt line's length, in chars.
+const MAX_EXCERPT_LINE_CHARS: usize = 200;
+
+/// Upper bound on the whole excerpt, in bytes.
+const MAX_EXCERPT_BYTES: usize = 1200;
+
+/// Context lines taken after an error header / panic line (source location,
+/// the assertion message, a `note:`).
+/// Three, not two: rustc's useful tail after `error[..]` is the `-->` location,
+/// the source line, and the caret line that carries the message itself.
+const EXCERPT_FOLLOW: usize = 3;
+
 /// Exit code the process uses when soldr itself fails before a child status
 /// exists (`soldr_main_helpers::report_and_exit`). The JSON reports this same
 /// value so `exit_code` always equals `$?`.
@@ -144,6 +159,21 @@ pub(super) struct PorcelainSummary {
     /// soldr's own classification of the failure, when one of the
     /// existing `cargo_diagnostics` / strip classifiers matched.
     pub(super) diagnostic: Option<String>,
+    /// Bounded, actionable evidence for the FIRST failure that the structured
+    /// fields cannot describe -- i.e. compiler/build errors: the error header,
+    /// its source location, the source line, and rustc's message. Empty on
+    /// success, and empty when `failed_tests` already names the failure.
+    ///
+    /// This is the difference between a digest a harness can act on and one
+    /// that only tells it *that* something failed: without it the caller has
+    /// to open `log_path` and re-read the bytes porcelain just suppressed,
+    /// which costs more context than the run itself. Bounds: at most
+    /// [`MAX_EXCERPT_LINES`] lines, [`MAX_EXCERPT_LINE_CHARS`] chars each,
+    /// [`MAX_EXCERPT_BYTES`] total.
+    pub(super) excerpt: Vec<String>,
+    /// `true` when evidence was dropped by those bounds, so a caller knows
+    /// the excerpt is incomplete and `log_path` holds the rest.
+    pub(super) excerpt_truncated: bool,
     /// Failing tests (first 10) with panic location and message lines
     /// (soldr#3961). Omitted when no test failed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -290,6 +320,12 @@ pub(super) fn report_for_failure(
             Vec::new()
         },
         diagnostic: None,
+        excerpt: if failed {
+            vec![first_line(detail)]
+        } else {
+            Vec::new()
+        },
+        excerpt_truncated: false,
         failed_tests: Vec::new(),
         failed_tests_more: 0,
         test_results: Vec::new(),
@@ -337,6 +373,17 @@ pub(super) fn summarize(command: &str, exit_code: i32, output: &str) -> Porcelai
             .collect();
         super::porcelain_failures::digest(&lines)
     };
+    // soldr#3961 landed a structured `failed_tests` digest (name, panic
+    // location, message) while this branch was open, so a named test failure
+    // is already described field-by-field. Repeating it in `excerpt` would
+    // double the digest without adding evidence, so the excerpt is reserved
+    // for failures that digest cannot describe -- compiler/build errors, and
+    // a failure whose test name could not be recovered.
+    let (excerpt, excerpt_truncated) = if exit_code == 0 || !failures.tests.is_empty() {
+        (Vec::new(), false)
+    } else {
+        failure_excerpt(output)
+    };
     PorcelainSummary {
         failed_tests: failures.tests,
         failed_tests_more: failures.more,
@@ -347,7 +394,197 @@ pub(super) fn summarize(command: &str, exit_code: i32, output: &str) -> Porcelai
         error_count,
         errors,
         diagnostic: classify_diagnostic(output),
+        excerpt,
+        excerpt_truncated,
     }
+}
+
+/// Collect the bounded, actionable evidence for the first failure(s).
+///
+/// A failing stream carries three different kinds of line, and the digest is
+/// useless without the first two: the *count* (`test result: FAILED. 0 passed;
+/// 1 failed`, nextest's `Summary [...]`), the *identity* (`FAIL ...`,
+/// `error[E0308]`), and the *explanation* (`panicked at src/lib.rs:6:9:` plus
+/// the assertion message, or the compiler's `--> src/main.rs:12:5` location and
+/// note). [`extract_errors`] already answers identity; this answers explanation.
+///
+/// Selection is first-seen order, evidence lines only, with a small follow
+/// window after each header so a location/message line that does not match a
+/// rule on its own is still carried. Bounded in lines, chars-per-line and
+/// total bytes; `true` second element means something was dropped.
+fn failure_excerpt(output: &str) -> (Vec<String>, bool) {
+    if let Some(rendered) = first_json_error_rendered(output) {
+        return excerpt_from_rendered(&rendered);
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut bytes = 0usize;
+    let mut follow = 0usize;
+    let mut truncated = false;
+    for raw in output.lines() {
+        if lines.len() >= MAX_EXCERPT_LINES || bytes >= MAX_EXCERPT_BYTES {
+            truncated = true;
+            break;
+        }
+        let line = without_ansi(raw);
+        let Some(body) = excerpt_line_body(line.trim()) else {
+            continue;
+        };
+        let is_header = is_error_line(body) || is_panic_line(body);
+        let is_evidence = is_header || is_excerpt_evidence(body);
+        if !is_evidence && follow == 0 {
+            continue;
+        }
+        if is_header {
+            follow = EXCERPT_FOLLOW;
+        } else {
+            follow = follow.saturating_sub(1);
+        }
+        let mut text = body.to_string();
+        if text.chars().count() > MAX_EXCERPT_LINE_CHARS {
+            text = text.chars().take(MAX_EXCERPT_LINE_CHARS).collect();
+            text.push_str("...");
+            truncated = true;
+        }
+        if lines.last() == Some(&text) {
+            continue;
+        }
+        let cost = text.len() + 1;
+        if bytes + cost > MAX_EXCERPT_BYTES {
+            truncated = true;
+            break;
+        }
+        bytes += cost;
+        lines.push(text);
+    }
+    (lines, truncated)
+}
+
+/// Is this line the start of a panic / assertion failure?
+fn is_panic_line(trimmed: &str) -> bool {
+    trimmed.starts_with("panicked at") || trimmed.starts_with("thread '")
+}
+
+/// The text of one line worth keeping, or `None` for a line that carries
+/// nothing: blank, pure rustc caret art (`|`, `   |`), or panic boilerplate.
+///
+/// The caret line is NOT noise in general -- rustc renders the message itself
+/// on it (`  |     ^^^ expected `u32`, found `&str``), so the art is stripped
+/// and the residual text kept. Same for a source gutter line `12 | let x = ...`.
+fn excerpt_line_body(trimmed: &str) -> Option<&str> {
+    if trimmed.is_empty() || is_panic_boilerplate(trimmed) {
+        return None;
+    }
+    let body = trim_rustc_art(strip_gutter(trimmed));
+    (!body.is_empty()).then_some(body)
+}
+
+/// Strip a rustc gutter: a leading `|` block, or `<digits> | `. Returns the
+/// text after the gutter, or the input when there is none.
+fn strip_gutter(trimmed: &str) -> &str {
+    if let Some(rest) = trimmed.strip_prefix('|') {
+        return rest;
+    }
+    if let Some(bar) = trimmed.find(" | ") {
+        let prefix = &trimmed[..bar];
+        if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
+            return &trimmed[bar + 3..];
+        }
+    }
+    trimmed
+}
+
+/// Panic boilerplate that names no failure and repeats in every panic. Skipped
+/// even when the follow-window would otherwise take it.
+fn is_panic_boilerplate(trimmed: &str) -> bool {
+    trimmed.starts_with("note: run with `RUST_BACKTRACE")
+}
+
+/// Drop rustc's caret/underline art from the front of a rendered line while
+/// keeping the `-->` location arrow (whose `-` are not art).
+fn trim_rustc_art(text: &str) -> &str {
+    let text = text.trim_start_matches([' ', '|']);
+    if text.starts_with("-->") {
+        return text.trim();
+    }
+    text.trim_start_matches(['^', '~', '-', '|', ' ']).trim()
+}
+
+/// Lines that explain a failure without being an error header themselves: the
+/// test whose output follows, and the run's own count summary.
+fn is_excerpt_evidence(trimmed: &str) -> bool {
+    trimmed.starts_with("---- ")
+        || trimmed.starts_with("Summary [")
+        || trimmed.starts_with("test result:")
+        // libtest's per-test line: `test m::t ... FAILED`. It is the only
+        // place the failing test's NAME appears in a libtest stream, and it
+        // does not match `is_error_line` (which keys on nextest's `FAIL `).
+        || trimmed.ends_with("... FAILED")
+}
+
+/// The rendered text of the FIRST compiler-message error in a
+/// `--message-format=json` stream, when this stream is one.
+fn first_json_error_rendered(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-message") {
+            continue;
+        }
+        if value
+            .pointer("/message/level")
+            .and_then(serde_json::Value::as_str)
+            != Some("error")
+        {
+            continue;
+        }
+        if let Some(rendered) = value
+            .pointer("/message/rendered")
+            .and_then(serde_json::Value::as_str)
+        {
+            return Some(rendered.to_string());
+        }
+    }
+    None
+}
+
+/// First lines of one rustc `rendered` message: the header, the `-->` location,
+/// the explanatory message, and one `note:`/`help:` if present.
+fn excerpt_from_rendered(rendered: &str) -> (Vec<String>, bool) {
+    let mut lines: Vec<String> = Vec::new();
+    let mut bytes = 0usize;
+    let mut dropped = false;
+    for raw in rendered.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('=') {
+            continue;
+        }
+        // Keep the gutter's *content* and drop the art: rustc renders the
+        // message itself on the caret line (`  |  ^^^ no `foo` in the crate
+        // root`), so discarding every `|` line loses the explanation.
+        let body = trim_rustc_art(strip_gutter(trimmed));
+        if body.is_empty() {
+            continue;
+        }
+        if lines.len() >= 4 {
+            dropped = true;
+            break;
+        }
+        let mut text = body.to_string();
+        if text.chars().count() > MAX_EXCERPT_LINE_CHARS {
+            text = text.chars().take(MAX_EXCERPT_LINE_CHARS).collect();
+            text.push_str("...");
+            dropped = true;
+        }
+        let cost = text.len() + 1;
+        if bytes + cost > MAX_EXCERPT_BYTES {
+            dropped = true;
+            break;
+        }
+        bytes += cost;
+        lines.push(text);
+    }
+    (lines, dropped)
 }
 
 /// Count and name the failures/errors in a child stream.
