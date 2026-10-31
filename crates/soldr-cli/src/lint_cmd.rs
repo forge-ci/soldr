@@ -40,6 +40,11 @@ struct LintPlan {
     host_only: bool,
     /// Opt in to one Dylint workspace analysis pass per selected cross target.
     cross_dylint: bool,
+    /// soldr#4006: reformat in place before the fmt check, so a fmt-only
+    /// problem never costs a second run. Off under `--check` or in CI.
+    fmt_fix: bool,
+    /// `--check`: verify formatting only, never rewrite.
+    check_only: bool,
 }
 
 impl LintPlan {
@@ -75,6 +80,8 @@ impl LintPlan {
         // scope reaches fmt/Clippy/Dylint verbatim.
         let cross_dylint = scope.iter().any(|arg| arg == "--cross-dylint");
         scope.retain(|arg| arg != "--cross-dylint");
+        let check_only = scope.iter().any(|arg| arg == "--check");
+        scope.retain(|arg| arg != "--check");
         let (explicit_targets, host_only) = extract_target_flags(&mut scope)?;
         if !matches!(mode, LintMode::Rust | LintMode::All)
             && (host_only || cross_dylint || !explicit_targets.is_empty())
@@ -96,6 +103,8 @@ impl LintPlan {
             explicit_targets,
             host_only,
             cross_dylint,
+            fmt_fix: false,
+            check_only,
         })
     }
 
@@ -132,6 +141,8 @@ impl LintPlan {
             explicit_targets: Vec::new(),
             host_only: false,
             cross_dylint: false,
+            fmt_fix: false,
+            check_only: false,
         })
     }
 
@@ -202,10 +213,17 @@ impl LintPlan {
         clippy.extend(compiler_scope.iter().cloned());
         clippy.extend(["--".into(), "-D".into(), "warnings".into()]);
 
-        let mut steps = vec![
+        let mut steps = Vec::new();
+        if self.fmt_fix {
+            let mut fix = vec!["fmt".into(), "--all".into()];
+            fix.extend(fmt_compatible_scope(&self.scope));
+            fix.extend(["--".into(), "-l".into()]);
+            steps.push((LintStep::Fmt, lint_steps::FMT_FIX_LABEL.to_string(), fix));
+        }
+        steps.extend([
             (LintStep::Fmt, "fmt".to_string(), fmt),
             (LintStep::Clippy, "clippy".to_string(), clippy),
-        ];
+        ]);
 
         // soldr#3378: one additional Clippy pass per declared/explicit cross
         // target, each landing under cargo's own `target/<triple>/`
@@ -471,7 +489,9 @@ pub(crate) async fn run_lint(
     cache_enabled: bool,
     trust_inherited_soldr_env: bool,
 ) -> Result<i32, SoldrError> {
-    let plan = LintPlan::parse(args)?;
+    let mut plan = LintPlan::parse(args)?;
+    // soldr#4006: CI verifies formatting; it never rewrites the checkout.
+    plan.fmt_fix = !plan.check_only && !crate::core::flag("CI");
     match plan.mode {
         LintMode::Rust => {
             // soldr#3378: resolved (and validated) before any compile starts.
@@ -645,6 +665,39 @@ mod tests {
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).into()).collect()
+    }
+
+    #[test]
+    fn fmt_fix_formats_in_place_before_the_fmt_check() {
+        let mut plan = LintPlan::parse(&[]).unwrap();
+        assert!(!plan.check_only);
+        plan.fmt_fix = true;
+        let steps = plan.rust_step_args(false, &[]).unwrap();
+        assert_eq!(
+            steps[0],
+            (
+                LintStep::Fmt,
+                "fmt-fix".to_string(),
+                strings(&["fmt", "--all", "--", "-l"])
+            )
+        );
+        assert_eq!(steps[1].2, strings(&["fmt", "--all", "--", "--check"]));
+    }
+
+    #[test]
+    fn check_flag_is_recorded_and_not_passed_to_cargo() {
+        let plan = LintPlan::parse(&strings(&["--check", "-p", "x"])).unwrap();
+        assert!(plan.check_only);
+        assert_eq!(plan.scope, strings(&["-p", "x"]));
+    }
+
+    #[test]
+    fn fixed_files_keeps_only_rust_paths() {
+        let output = "src/a.rs\n  soldr[cache] x [HIT!]\n\nsrc/b c.rs\nDiff in src/d.rs:3:\n";
+        assert_eq!(
+            lint_steps::fixed_files(output),
+            strings(&["src/a.rs", "src/b c.rs"])
+        );
     }
 
     #[test]

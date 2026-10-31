@@ -146,6 +146,7 @@ pub(crate) fn run_porcelain(
     let soldr = current_soldr_binary()?;
     let mut outcomes = Vec::with_capacity(steps.len());
     let mut failure_output = None;
+    let mut autofixed = Vec::new();
     for step in &steps {
         let mut command = match step {
             PlannedStep::Cargo { args, .. } => {
@@ -182,8 +183,11 @@ pub(crate) fn run_porcelain(
             failure_output = Some(log.step_output(mark));
             break;
         }
+        if step.label() == FMT_FIX_LABEL {
+            autofixed = fixed_files(&log.step_output(mark));
+        }
     }
-    Ok(log.finish(&outcomes, failure_output.as_deref()))
+    Ok(log.finish(&outcomes, failure_output.as_deref(), autofixed))
 }
 
 fn cargo_child(
@@ -296,6 +300,21 @@ fn target_arg_value(args: &[String]) -> Option<String> {
         index += 1;
     }
     None
+}
+
+/// Label of the in-place format pass `soldr lint` runs before the `fmt`
+/// check when it may fix (soldr#4006).
+pub(crate) const FMT_FIX_LABEL: &str = "fmt-fix";
+
+/// The files `cargo fmt -- -l` rewrote. The step log also holds the child's
+/// stderr, so only Rust source paths count.
+pub(crate) fn fixed_files(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.ends_with(".rs"))
+        .map(str::to_string)
+        .collect()
 }
 
 #[cfg(test)]

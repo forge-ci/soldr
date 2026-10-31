@@ -181,6 +181,10 @@ pub(super) struct PorcelainReport {
     /// Name of the step that failed, when a multi-step run stopped on one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) failed_step: Option<String>,
+    /// Files `soldr lint` reformatted in place before checking (soldr#4006).
+    /// Additive: omitted when nothing was rewritten.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) autofixed: Vec<String>,
 }
 
 /// One step of a multi-step porcelain run (`soldr lint`, soldr#3958).
@@ -265,6 +269,7 @@ pub(super) fn report_for_run(inputs: &RunReportInputs<'_>) -> PorcelainReport {
         summary,
         steps: Vec::new(),
         failed_step: None,
+        autofixed: Vec::new(),
     }
 }
 
@@ -307,6 +312,7 @@ pub(super) fn report_for_failure(
         summary,
         steps: Vec::new(),
         failed_step: None,
+        autofixed: Vec::new(),
     }
 }
 

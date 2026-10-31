@@ -774,7 +774,13 @@ soldr lint all
 soldr lint --target x86_64-pc-windows-msvc
 soldr lint --target win-x64 --target mac-arm64
 soldr lint --host-only
+soldr lint --check
 ```
+
+Outside CI, the `rust` and `all` suites reformat in place before the fmt check
+and list the rewritten files (`autofixed` in the porcelain JSON), so a
+formatting-only problem never costs a second run. `--check`, or `CI` set in the
+environment, verifies without rewriting (soldr#4006).
 
 `deps` runs `deny check`, `audit`, and `machete` concurrently as cache-disabled
 children because they do not compile Rust. `ci` runs the CI/build-surface policy
