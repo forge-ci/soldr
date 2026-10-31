@@ -330,6 +330,24 @@ fn enabled_follows_the_env_var_only_on_a_truthy_value() {
 }
 
 #[test]
+fn porcelain_silences_the_cache_state_lines() {
+    let _lock = TEST_PROCESS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _restore = EnvVarGuard::remove(PORCELAIN_ENV_VAR);
+    let _cache = EnvVarGuard::remove("SOLDR_NO_CACHE_STATES");
+    assert!(
+        crate::cargo_front_door::cache_states::enabled(),
+        "on outside porcelain"
+    );
+    std::env::set_var(PORCELAIN_ENV_VAR, "1");
+    assert!(
+        !crate::cargo_front_door::cache_states::enabled(),
+        "soldr#4005: porcelain keeps stderr free of HIT/MISS lines"
+    );
+}
+
+#[test]
 fn failure_report_is_a_well_formed_single_object() {
     let report = report_for_failure("cargo build", -1, None, Some("soldr: cargo timed out"));
     let value = serde_json::to_value(&report).expect("serialize");
