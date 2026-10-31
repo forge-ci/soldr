@@ -160,7 +160,15 @@ fn classify_argv0(argv0: &str) -> Option<ShimIdentity> {
 fn run_soldr_dylint(raw_args: &[String]) -> i32 {
     match crate::wrapper::run_rustc_wrapper(raw_args, crate::startup_profile::WrapperProfile::new())
     {
-        Ok(code) => normalize_exit_code(code),
+        Ok(code) => {
+            let code = normalize_exit_code(code);
+            if code == 0 {
+                // soldr#3989: cargo-dylint reads the suffixed copy from the
+                // profile dir, not the build-dir out-dir it lands in.
+                crate::dylint_library_uplift::uplift_suffixed_library(raw_args);
+            }
+            code
+        }
         Err(err) => {
             eprintln!("soldr-dylint: wrapper dispatch failed: {err}");
             // This line IS the explanation for the non-zero exit; without
