@@ -75,7 +75,7 @@ pub(crate) const PORCELAIN_ENV_VAR: &str = "SOLDR_PORCELAIN";
 
 /// Schema version of the emitted JSON object. Additive field changes do
 /// not bump it; a breaking shape change does.
-pub(super) const SCHEMA_VERSION: u32 = 1;
+pub(super) const SCHEMA_VERSION: u32 = 2;
 
 /// Subdirectory of `<soldr root>/logs/` that holds porcelain run logs.
 pub(super) const PORCELAIN_LOG_DIR: &str = "porcelain";
@@ -673,6 +673,12 @@ pub(super) fn serialize_report(
 ) -> serde_json::Result<String> {
     let mut value = serde_json::to_value(report)?;
     if let Some(object) = value.as_object_mut() {
+        // soldr#4010 (schema 2): `status` is top-level on every line.
+        if report.exit_code == 0 {
+            compact_success(object);
+        } else {
+            object.insert("status".to_string(), "failed".into());
+        }
         if let Some(skew) = skew {
             object.insert("broker_skew".to_string(), serde_json::to_value(skew)?);
         }
@@ -681,6 +687,18 @@ pub(super) fn serialize_report(
         }
     }
     serde_json::to_string(&value)
+}
+
+/// Fields a passing run's agent never acts on (soldr#4010): the command it
+/// just typed, the log's expiry, per-step timings and the empty error
+/// summary. They stay in the log; `status` takes the summary's place.
+const SUCCESS_DROPPED: &[&str] = &["command", "expires_at", "steps", "summary"];
+
+fn compact_success(object: &mut serde_json::Map<String, serde_json::Value>) {
+    for key in SUCCESS_DROPPED {
+        object.remove(*key);
+    }
+    object.insert("status".to_string(), "ok".into());
 }
 
 static EMITTED: AtomicBool = AtomicBool::new(false);

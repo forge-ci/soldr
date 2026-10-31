@@ -844,11 +844,13 @@ error. Applies to the `rust` and `all` suites. The first failing step stops the 
 
 **Porcelain (soldr#3958).** With `SOLDR_PORCELAIN=1` (or `soldr --porcelain
 lint`), `soldr lint rust` prints ONE JSON line on stdout and nothing else when
-every step passes. It is the same report `soldr cargo` emits under porcelain
-(`schema_version`, `command`, `exit_code`, `duration_ms`, `log_path`,
-`expires_at`, `summary` with `status` `ok`/`failed`), plus two additive fields:
-`steps` (`name`, `ok`, `exit_code`, `duration_ms` per step run) and, on failure,
-`failed_step`. Every step's stdout+stderr is appended to the single log at
+every step passes. It is the same report `soldr cargo` emits under porcelain.
+Schema 2 (soldr#4010): every line has `schema_version`, a top-level `status` (`ok`/`failed`),
+`exit_code`, `duration_ms` and `log_path`. A passing line stops there, plus
+`autofixed`, `installed` or `broker_skew` when they apply. A failing line adds
+`command`, `expires_at`, `summary` (errors, diagnostic,
+failed tests), `steps` (`name`, `ok`, `exit_code`, `duration_ms` per step run)
+and `failed_step`. Every step's stdout+stderr is appended to the single log at
 `log_path`. When a step fails, its complete output (the rustfmt diff, Clippy
 errors and warnings) is printed unfolded on stderr before the JSON line; only
 the output of steps that passed is folded into the log. The `deps`, `ci` and
