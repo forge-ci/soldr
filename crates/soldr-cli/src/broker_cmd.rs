@@ -200,6 +200,15 @@ fn broker_stop_deadline() -> std::time::Duration {
 /// this endpoint while reusing running-process's router, registry,
 /// single-flight coordinator, peer validation, and launcher contracts.
 fn run_broker_serve() -> Result<(), SoldrError> {
+    // Every daemon this broker launches inherits its mask (soldr#3995).
+    if let Some(reset) = crate::platform::process::affinity::widen_cpu_affinity() {
+        if reset.after != reset.before {
+            println!(
+                "soldr broker: widened inherited CPU affinity from {} to {} CPU(s) (soldr#3995)",
+                reset.before, reset.after
+            );
+        }
+    }
     let endpoint = crate::broker_identity::ResolvedBrokerEndpoint::resolve()
         .map_err(|error| SoldrError::Other(format!("soldr broker: {error}")))?;
     println!(
