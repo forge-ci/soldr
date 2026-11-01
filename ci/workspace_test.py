@@ -289,14 +289,17 @@ def host_layout(git_dir: Path, cache_home: Path) -> HostLayout:
     so the target dir and the private soldr cache stay warm. It lives under
     the user cache dir, never inside a checkout: fixtures create their
     "pin-free" cwd under TMPDIR, and a TMPDIR below the repository would put
-    its rust-toolchain.toml above every one of them. The runtime dir holds
-    the broker socket, so it is short and under /tmp (sun_path)."""
+    its rust-toolchain.toml above every one of them. TMPDIR is not under the
+    user's home either: fixtures walk up from their temp dirs looking for a
+    repo-local ``.cargo``/``.rustup``, and a TMPDIR below ``$HOME`` finds the
+    caller's real ones (as on a CI runner, TMPDIR is under /tmp). The runtime
+    dir holds the broker socket, so it is short and under /tmp (sun_path)."""
     tag = hashlib.sha256(str(git_dir.resolve()).encode()).hexdigest()[:10]
     root = cache_home / "soldr-local-gate" / tag
     return HostLayout(
         home=root / "home",
         target=root / "target",
-        tmp=root / "tmp",
+        tmp=Path(f"/tmp/soldr-gate-{os.getuid()}-{tag}-tmp"),
         runtime=Path(f"/tmp/soldr-gate-{os.getuid()}-{tag}"),
     )
 
@@ -337,6 +340,13 @@ def host_environment(
             or str(real_home / ".local" / "share" / "uv" / "python"),
         }
     )
+    # CI parity, not isolation (each test is isolated by the nextest
+    # wrapper): an agent session's variables change what the code under test
+    # does (IN_CLUD turns a Dylint warning into an error), and no CI runner
+    # has them.
+    for name in [k for k in env if k == "IN_CLUD" or k.startswith("CLUD_")]:
+        del env[name]
+    env.pop("BASH_ENV", None)
     gitconfig = real_home / ".gitconfig"
     if "GIT_CONFIG_GLOBAL" not in env and gitconfig.is_file():
         env["GIT_CONFIG_GLOBAL"] = str(gitconfig)
@@ -363,9 +373,9 @@ def prepare_host(repo: Path) -> tuple[Path, Path]:
     ).stdout.strip()
     cache_home = Path(caller.get("XDG_CACHE_HOME") or Path.home() / ".cache")
     layout = host_layout(Path(git_dir), cache_home)
-    pin = pinned_ancestor(layout.tmp.parent)
+    pin = pinned_ancestor(layout.tmp)
     if pin is not None:
-        raise IsolationError(f"private root {layout.tmp.parent} sits below {pin}")
+        raise IsolationError(f"private TMPDIR {layout.tmp} sits below {pin}")
     env = host_environment(layout, caller, Path.home())
     for path in (layout.home, layout.target, layout.tmp):
         path.mkdir(parents=True, exist_ok=True)

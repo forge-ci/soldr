@@ -111,11 +111,7 @@ fn the_test_cannot_see_the_callers_soldr_state() {
         );
     }
     assert_eq!(fields[5], "1");
-    assert_eq!(
-        Path::new(fields[6]),
-        caller_home.join(".cargo"),
-        "the toolchain home stays the caller's"
-    );
+    assert_eq!(fields[6], "", "CARGO_HOME is not exported");
     assert!(!caller_home.exists(), "the caller's home was never touched");
     assert!(!private.exists(), "the private root is removed afterwards");
 }

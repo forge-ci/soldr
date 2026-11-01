@@ -481,8 +481,16 @@ def test_host_run_moves_every_identity_root_off_the_callers_state(
     ws = _workspace_test()
     real_home = tmp_path / "real"
     layout = ws.host_layout(tmp_path / "gitdir", tmp_path / "cache")
-    caller = {"PATH": "/bin", "CI": "true", "SOLDR_TEST_ISOLATED": "0"}
+    caller = {
+        "PATH": "/bin",
+        "CI": "true",
+        "SOLDR_TEST_ISOLATED": "0",
+        "IN_CLUD": "1",
+        "CLUD_SESSION_ID": "x",
+        "BASH_ENV": "/x",
+    }
     env = ws.host_environment(layout, caller, real_home)
+    assert not {"IN_CLUD", "CLUD_SESSION_ID", "BASH_ENV"} & set(env)
     assert "SOLDR_TEST_ISOLATED" not in env
     assert "CI" not in env
     for name in ("HOME", "XDG_CONFIG_HOME", "TMPDIR", "SOLDR_CACHE_DIR"):
@@ -497,8 +505,11 @@ def test_host_root_is_never_inside_a_checkout(tmp_path: Path) -> None:
     ws = _workspace_test()
     layout = ws.host_layout(ROOT / ".git", tmp_path)
     assert not layout.tmp.is_relative_to(ROOT)
+    # Nor under the user's home, where a walk up finds the real ~/.cargo.
+    assert not layout.tmp.is_relative_to(Path.home())
     (tmp_path / "rust-toolchain.toml").write_text("", encoding="utf-8")
-    assert ws.pinned_ancestor(layout.tmp) == tmp_path / "rust-toolchain.toml"
+    (tmp_path / "sub").mkdir()
+    assert ws.pinned_ancestor(tmp_path / "sub") == tmp_path / "rust-toolchain.toml"
 
 
 def test_host_run_refuses_the_callers_home(tmp_path: Path) -> None:

@@ -27,25 +27,31 @@ fn every_soldr_state_input_points_inside_the_private_root() {
         assert!(value.starts_with(&root), "{name}={}", value.display());
         assert!(value.is_dir(), "{name} directory exists");
     }
-    assert_eq!(
-        env_of(&command, ISOLATED_ENV),
-        Some(PathBuf::from("1"))
-    );
+    assert_eq!(env_of(&command, ISOLATED_ENV), Some(PathBuf::from("1")));
 }
 
 #[test]
-fn toolchain_homes_keep_the_callers_resolved_value() {
+fn toolchain_homes_are_reached_through_the_private_home_not_exported() {
     let base = tempfile::tempdir().expect("tmp");
     let mut command = Command::new("true");
     apply(&mut command, base.path()).expect("apply");
-    assert_eq!(
-        env_of(&command, "CARGO_HOME"),
-        soldr_core::core::resolve_cargo_home()
-    );
-    assert_eq!(
-        env_of(&command, "RUSTUP_HOME"),
-        soldr_core::core::resolve_rustup_home()
-    );
+    assert_eq!(env_of(&command, "CARGO_HOME"), None);
+    assert_eq!(env_of(&command, "RUSTUP_HOME"), None);
+    let home = base.path().join("h");
+    for (leaf, resolved) in [
+        (".cargo", soldr_core::core::resolve_cargo_home()),
+        (".rustup", soldr_core::core::resolve_rustup_home()),
+    ] {
+        let explicit = std::env::var_os(if leaf == ".cargo" {
+            "CARGO_HOME"
+        } else {
+            "RUSTUP_HOME"
+        })
+        .is_some_and(|value| !value.is_empty());
+        if let Some(resolved) = resolved.filter(|path| path.is_dir() && !explicit) {
+            assert_eq!(std::fs::read_link(home.join(leaf)).ok(), Some(resolved));
+        }
+    }
 }
 
 #[test]

@@ -21,9 +21,10 @@
 //! every Unix test process passes through, so it overrides all of them,
 //! unconditionally, before the test starts: no test can reach the caller's
 //! soldr state unless it names that path explicitly. The caller's toolchain
-//! homes (`CARGO_HOME`, `RUSTUP_HOME`) are pinned to their resolved values
-//! first, because they default from `HOME` and are not soldr state.
+//! homes stay reachable through `~/.cargo` / `~/.rustup` symlinks in the
+//! private home, because they default from `HOME` and are not soldr state.
 
+use soldr_platform::process::test_child;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -51,17 +52,35 @@ fn identity(root: &Path) -> [(&'static str, PathBuf); 7] {
 /// caller has already created (mode 0700). Fails when the layout cannot be
 /// created: a test never runs against the caller's state instead.
 pub(crate) fn apply(command: &mut Command, root: &Path) -> std::io::Result<()> {
-    // Resolve the toolchain homes from the caller's HOME before moving it.
-    for (name, resolved) in [
-        ("CARGO_HOME", soldr_core::core::resolve_cargo_home()),
-        ("RUSTUP_HOME", soldr_core::core::resolve_rustup_home()),
+    let home = root.join("h");
+    std::fs::create_dir(&home)?;
+    // The toolchain homes default from HOME and are not soldr state. Resolve
+    // them from the caller's environment before moving HOME, and reach them
+    // through symlinks in the private home rather than by exporting
+    // CARGO_HOME / RUSTUP_HOME: an explicit variable is itself an input the
+    // code under test resolves differently from an unset one. A caller that
+    // set them explicitly keeps them, unchanged, by inheritance.
+    for (name, resolved, leaf) in [
+        (
+            "CARGO_HOME",
+            soldr_core::core::resolve_cargo_home(),
+            ".cargo",
+        ),
+        (
+            "RUSTUP_HOME",
+            soldr_core::core::resolve_rustup_home(),
+            ".rustup",
+        ),
     ] {
-        if let Some(path) = resolved {
-            command.env(name, path);
+        if std::env::var_os(name).is_some_and(|value| !value.is_empty()) {
+            continue;
+        }
+        if let Some(target) = resolved.filter(|path| path.is_dir()) {
+            test_child::link_dir(&target, &home.join(leaf))?;
         }
     }
     // The broker's runtime directory must be owner-only, like a real one.
-    soldr_platform::process::test_child::create_private_dir(&root.join("r"))?;
+    test_child::create_private_dir(&root.join("r"))?;
     for (name, path) in identity(root) {
         std::fs::create_dir_all(&path)?;
         command.env(name, path);

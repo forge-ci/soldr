@@ -179,10 +179,9 @@ fn run(argv: &[std::ffi::OsString]) -> i32 {
         child_command.env_remove(name);
     }
     // soldr#3516: the test never runs against the caller's soldr state.
-    let private = match private_dir().and_then(|private| {
-        isolate::apply(&mut child_command, &private.path)
-            .map(|()| private)
-    }) {
+    let private = match private_dir()
+        .and_then(|private| isolate::apply(&mut child_command, &private.path).map(|()| private))
+    {
         Ok(private) => private,
         Err(error) => {
             write_stderr(&format!(
