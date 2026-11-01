@@ -30,9 +30,11 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping, MutableMapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # pylint: disable-next=wrong-import-position
@@ -313,11 +315,21 @@ def pinned_ancestor(path: Path) -> Path | None:
     return None
 
 
+@dataclass(frozen=True)
+class HostRun:
+    target: Path
+    bootstrap: Path
+
+
 def host_environment(
-    layout: HostLayout, caller: dict[str, str], real_home: Path
-) -> dict[str, str]:
-    """The child environment: private identity roots, the caller's
-    toolchain and uv caches (read-mostly, outside soldr's state)."""
+    layout: HostLayout,
+    caller: Mapping[str, str],
+    real_home: Path,
+    out: MutableMapping[str, str],
+) -> None:
+    """Fill ``out`` with the child environment: private identity roots, the
+    caller's toolchain and uv caches (read-mostly, outside soldr's state).
+    ``out`` is untouched when the layout fails a check."""
     if layout.home.resolve() == real_home.resolve():
         raise IsolationError(f"private HOME {layout.home} is the caller's home")
     env = {
@@ -355,28 +367,33 @@ def host_environment(
         value = Path(env[name]).resolve()
         if value == real_home.resolve() or value.is_relative_to(soldr_root):
             raise IsolationError(f"{name}={value} reaches the caller's soldr state")
-    return env
+    out.clear()
+    out.update(env)
 
 
-def prepare_host(repo: Path) -> tuple[Path, Path]:
-    """Isolate this process's environment; return (target, bootstrap)."""
+def absolute_git_dir(repo: Path) -> Path:
+    """``git rev-parse --absolute-git-dir``, captured through a file."""
+    with tempfile.TemporaryFile(mode="w+") as out:
+        subprocess.run(
+            ["git", "rev-parse", "--absolute-git-dir"], cwd=repo, check=True, stdout=out
+        )
+        out.seek(0)
+        return Path(out.read().strip())
+
+
+def prepare_host(repo: Path) -> HostRun:
+    """Isolate this process's environment for the driver's own steps."""
     caller = dict(os.environ)
     bootstrap = shutil.which("soldr", path=caller.get("PATH"))
     if bootstrap is None:
         raise IsolationError("no `soldr` on PATH to bootstrap the checkout")
-    git_dir = subprocess.run(
-        ["git", "rev-parse", "--absolute-git-dir"],
-        cwd=repo,
-        check=True,
-        stdout=subprocess.PIPE,
-        text=True,
-    ).stdout.strip()
     cache_home = Path(caller.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-    layout = host_layout(Path(git_dir), cache_home)
+    layout = host_layout(absolute_git_dir(repo), cache_home)
     pin = pinned_ancestor(layout.tmp)
     if pin is not None:
         raise IsolationError(f"private TMPDIR {layout.tmp} sits below {pin}")
-    env = host_environment(layout, caller, Path.home())
+    env: dict[str, str] = {}
+    host_environment(layout, caller, Path.home(), env)
     for path in (layout.home, layout.target, layout.tmp):
         path.mkdir(parents=True, exist_ok=True)
     layout.runtime.mkdir(mode=0o700, exist_ok=True)
@@ -388,7 +405,7 @@ def prepare_host(repo: Path) -> tuple[Path, Path]:
         f"XDG_RUNTIME_DIR={layout.runtime}; each test gets its own root from the nextest wrapper",
         flush=True,
     )
-    return layout.target, Path(bootstrap).resolve()
+    return HostRun(layout.target, Path(bootstrap).resolve())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -407,7 +424,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.host:
         args.repo = Path.cwd()
         try:
-            args.target, args.bootstrap = prepare_host(args.repo)
+            run = prepare_host(args.repo)
+            args.target, args.bootstrap = run.target, run.bootstrap
         except IsolationError as error:
             print(f"tests lane: REFUSED -- {error}", file=sys.stderr, flush=True)
             return 2

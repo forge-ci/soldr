@@ -489,7 +489,8 @@ def test_host_run_moves_every_identity_root_off_the_callers_state(
         "CLUD_SESSION_ID": "x",
         "BASH_ENV": "/x",
     }
-    env = ws.host_environment(layout, caller, real_home)
+    env: dict[str, str] = {}
+    ws.host_environment(layout, caller, real_home, env)
     assert not {"IN_CLUD", "CLUD_SESSION_ID", "BASH_ENV"} & set(env)
     assert "SOLDR_TEST_ISOLATED" not in env
     assert "CI" not in env
@@ -516,7 +517,7 @@ def test_host_run_refuses_the_callers_home(tmp_path: Path) -> None:
     ws = _workspace_test()
     layout = ws.host_layout(tmp_path, tmp_path / "cache")
     with pytest.raises(ws.IsolationError):
-        ws.host_environment(layout, {}, layout.home)
+        ws.host_environment(layout, {}, layout.home, {})
 
 
 def test_main_publisher_promotes_merged_pr_evidence() -> None:
