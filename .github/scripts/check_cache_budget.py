@@ -624,8 +624,15 @@ PERF_TARGET_KEY = re.compile(
 )
 PERF_BINARY_KEY = re.compile(r"^soldr-bin-(?P<platform>[a-z0-9-]+)-[0-9a-f]{64}$")
 
+# The `-v<N>-` key-schema version is matched, not pinned: setup-soldr moved
+# cook keys from `-v2-` to `-v3-` (soldr#4025 registered the prefix), and a
+# `v2`-only pattern recognised no current-lock base, so the superseded v2
+# generation (five bases, 2.38 GiB) was never retired and the family sat at
+# 4.77 GiB of 2.42 GiB on push run 41338706392. The schema version is not
+# part of a shape: a base under a prior lock is superseded by a current-lock
+# base of the same shape whatever schema either was written with.
 COOK_KEY = re.compile(
-    r"^cook-(base|delta)-v2-(.+-f[0-9a-f]+)-l([0-9a-f]+)-soldr([0-9.]+)(?:-s[0-9a-f]+-g[0-9a-f]+)?$"
+    r"^cook-(base|delta)-v[0-9]+-(.+-f[0-9a-f]+)-l([0-9a-f]+)-soldr([0-9.]+)(?:-s[0-9a-f]+-g[0-9a-f]+)?$"
 )
 
 
