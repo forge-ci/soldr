@@ -31,6 +31,7 @@ pub(crate) mod disk;
 mod holding_process;
 mod purge;
 mod rustup_toolchain;
+mod stale_versions;
 pub(crate) mod target_walker;
 mod walks;
 
