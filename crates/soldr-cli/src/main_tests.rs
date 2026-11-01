@@ -955,3 +955,19 @@ fn the_daemon_start_route_budget_clears_the_slowest_measured_lane() {
         "an explicit `daemon start` still has to fail rather than hang: {budget}s"
     );
 }
+
+// soldr#4016: cargo-dylint does not take cargo `--config`; prep overrides
+// belong to the nested cargo invocation after `--`.
+#[test]
+fn insert_cargo_config_args_after_dylint_separator() {
+    let args: Vec<String> = ["dylint", "--all", "--", "--workspace", "--target", "x"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let config = vec!["--config".to_string(), "k=v".to_string()];
+    let out = insert_cargo_config_args(args, &config);
+    assert_eq!(
+        out,
+        ["dylint", "--all", "--", "--config", "k=v", "--workspace", "--target", "x"]
+    );
+}

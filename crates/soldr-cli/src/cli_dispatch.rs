@@ -89,7 +89,17 @@ pub(crate) fn insert_cargo_config_args(
         return args;
     }
 
-    let insert_at = if args.first().is_some_and(|arg| arg == "nextest") {
+    let insert_at = if args.first().is_some_and(|arg| arg == "dylint") {
+        // soldr#4016: cargo-dylint takes no `--config`; the nested cargo
+        // invocation after `--` does.
+        match args.iter().position(|arg| arg == "--") {
+            Some(index) => index + 1,
+            None => {
+                args.push("--".into());
+                args.len()
+            }
+        }
+    } else if args.first().is_some_and(|arg| arg == "nextest") {
         nextest_inner_command_index(&args)
             .map(|index| index + 1)
             .unwrap_or(1)
