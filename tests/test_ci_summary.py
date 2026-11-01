@@ -100,6 +100,50 @@ def test_trusted_minimal_does_not_require_skipped_full_jobs():
     )
 
 
+def test_trusted_without_skip_lint_requires_the_minimal_gate():
+    """A trusted head whose Lint job ran must not require the lint-docs stand-in.
+
+    ci-mode reports `trusted` for any attested in-policy head but only reports
+    `skip_lint` when the Lint gate carries a Ci-Attestation trailer. The
+    workflow runs `lint` and never starts `lint-docs` in the second case, so
+    requiring docs_jobs here made a green PR's summary permanently red.
+    """
+    needs = {
+        job: {"result": "success"}
+        for job in ["ci-mode", "path-selection", "lint", "host"]
+    }
+    assert (
+        check(
+            needs,
+            mode="minimal",
+            author_permission="admin",
+            trusted=True,
+            skip_lint=False,
+        )
+        == []
+    )
+    # With the stand-in required (skip_lint), the same green run is incomplete.
+    assert check(
+        needs, mode="minimal", author_permission="admin", trusted=True, skip_lint=True
+    ) == ["docs-lint: missing"]
+
+
+def test_skip_lint_requires_the_docs_stand_in():
+    needs = {
+        job: {"result": "success"} for job in ["ci-mode", "path-selection", "docs-lint"]
+    }
+    assert (
+        check(
+            needs,
+            mode="minimal",
+            author_permission="admin",
+            trusted=True,
+            skip_lint=True,
+        )
+        == []
+    )
+
+
 def test_docs_gate_requires_successful_path_selection_and_docs_lint():
     needs = {
         job: {"result": "success"} for job in ["ci-mode", "path-selection", "docs-lint"]

@@ -38,6 +38,7 @@ class Selection(TypedDict):
     expected_sha: str
     selected_sha: str
     trusted: bool
+    skip_lint: bool
 
 
 def required_jobs(
@@ -45,9 +46,17 @@ def required_jobs(
     full: JsonDocument,
     mode: str,
     docs_only: bool,
-    trusted: bool = False,
+    skip_lint: bool = False,
 ) -> set[str]:
-    """Adapters declare a meaningful minimal gate and nonempty test expansion."""
+    """Adapters declare a meaningful minimal gate and nonempty test expansion.
+
+    `skip_lint` is ci-mode's GATE-010 output: the head is trusted AND every gate
+    mapped to the Lint job carries a stamp-valid `Ci-Attestation:` trailer. Only
+    then does the workflow skip `lint` and run the `lint-docs` stand-in, so only
+    then may the summary require `docs_jobs` instead of `minimal_jobs`. Using
+    `trusted` here required `lint-docs` from PRs where Lint actually ran, which
+    the workflow never starts (red summary on a green PR).
+    """
     groups = {}
     for name in ("minimal_jobs", "docs_jobs", "test_jobs"):
         groups[name] = COVERAGE["required_jobs"](
@@ -66,7 +75,7 @@ def required_jobs(
         raise ValueError("test tier must add jobs beyond minimal")
     jobs = {"ci-mode", "path-selection"}
     if mode == "minimal":
-        return jobs | groups["docs_jobs" if docs_only or trusted else "minimal_jobs"]
+        return jobs | groups["docs_jobs" if docs_only or skip_lint else "minimal_jobs"]
     if mode == "test":
         return jobs | groups["minimal_jobs"] | groups["test_jobs"]
     if mode == "full":
@@ -92,6 +101,7 @@ def summary_failures(
     expected_sha: str,
     selected_sha: str,
     trusted: bool = False,
+    skip_lint: bool = False,
 ) -> list[str]:
     failures = []
     if event_name not in (
@@ -124,7 +134,7 @@ def summary_failures(
         failures.append("attested skip is limited to a writer's minimal PR")
     # This bit comes from reviewed ci-mode's attestation verifier. It is not
     # evidence furnished by a PR artifact, and never replaces test/full cells.
-    jobs = required_jobs(adapter, full, mode, docs_only, trusted)
+    jobs = required_jobs(adapter, full, mode, docs_only, skip_lint)
     failures += COVERAGE["coverage_failures"](
         COVERAGE["JsonDocument"](
             {"schema_version": 1, "required_jobs": sorted(jobs), "targets": []}
@@ -255,6 +265,7 @@ def main() -> int:
         "expected_sha": os.environ.get("EXPECTED_SHA", ""),
         "selected_sha": os.environ.get("SELECTED_SHA", ""),
         "trusted": os.environ.get("CI_TRUSTED", "") == "true",
+        "skip_lint": os.environ.get("CI_SKIP_LINT", "") == "true",
     }
     selector_permission = inputs["author_permission"]
     current_event = None
@@ -320,7 +331,11 @@ def main() -> int:
             failures.append(f"cannot list run attempt jobs: {error}")
         jobs = sorted(
             required_jobs(
-                adapter, full, inputs["mode"], inputs["docs_only"], inputs["trusted"]
+                adapter,
+                full,
+                inputs["mode"],
+                inputs["docs_only"],
+                inputs["skip_lint"],
             )
         )
     except (ValueError, TypeError, KeyError) as error:
