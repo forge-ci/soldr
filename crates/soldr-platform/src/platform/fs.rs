@@ -21,3 +21,9 @@ pub mod volume;
 pub mod writers {
     pub use kernal_api::platform::fs::{await_no_writers, WriterWait};
 }
+
+/// Copy-on-write clone of one file (soldr#4033): fails rather than copying
+/// when the filesystem pair cannot share extents.
+pub mod reflink {
+    pub use kernal_api::platform::fs::reflink_file;
+}

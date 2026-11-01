@@ -32,6 +32,8 @@ mod holding_process;
 mod purge;
 mod rustup_toolchain;
 mod stale_versions;
+pub(crate) mod target_dedupe;
+pub(crate) use target_dedupe::run_gc_dedupe_command;
 pub(crate) mod target_walker;
 mod walks;
 
