@@ -554,6 +554,29 @@ pub(crate) enum CacheSubcommand {
         #[arg(long)]
         json: bool,
     },
+    /// Show the embedded zccache store's on-disk size against its
+    /// configured size cap (soldr#4028).
+    ///
+    /// The cap comes from `ZCCACHE_CACHE_SIZE_BYTES` /
+    /// `ZCCACHE_CACHE_SIZE_PERCENT`, else `config.toml`
+    /// `[zccache].max_size_gb`, else the 25 GiB default.
+    Stats {
+        /// Emit the stable machine-facing JSON form for this command.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Enforce the embedded zccache size cap now, evicting least-recently
+    /// used artifacts (soldr#4028).
+    ///
+    /// Runs a full maintenance pass when no daemon owns the root. A live
+    /// daemon already enforces the cap every few minutes, so this reports
+    /// that instead of racing it; stop it with `soldr cache shutdown` first
+    /// to force an immediate pass.
+    Gc {
+        /// Emit the stable machine-facing JSON form for this command.
+        #[arg(long)]
+        json: bool,
+    },
     /// Synchronously checkpoint the embedded zccache state without
     /// stopping Soldr-daemon.
     ///
