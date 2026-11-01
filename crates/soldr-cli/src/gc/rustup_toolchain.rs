@@ -93,6 +93,15 @@ pub(super) fn homes_for_enumeration(paths: Option<&SoldrPaths>) -> Vec<Enumerate
     homes
 }
 
+/// The rustup homes the central toolchain store links (soldr#4027): the
+/// same caller + managed pair the purge enumerates.
+pub(crate) fn rustup_homes_for_store(paths: Option<&SoldrPaths>) -> Vec<PathBuf> {
+    homes_for_enumeration(paths)
+        .into_iter()
+        .map(|home| home.path)
+        .collect()
+}
+
 /// Path equality with a best-effort canonicalization so a symlinked
 /// `$HOME` cannot make one physical home show up twice.
 fn same_home(a: &Path, b: &Path) -> bool {
@@ -441,10 +450,11 @@ pub(crate) fn run_gc_purge_rustup_toolchain_command(
     purge_all: bool,
     json: bool,
     dry_run: bool,
+    unused_days: Option<u64>,
 ) -> Result<(), SoldrError> {
     let shared_protected = shared_protected_channels()?;
     let soldr_paths = SoldrPaths::new().ok();
-    let mut homes = plan_all_homes(soldr_paths.as_ref(), &shared_protected);
+    let mut homes = plan_all_homes(soldr_paths.as_ref(), &shared_protected, unused_days);
 
     if !json {
         if homes.is_empty() {
@@ -491,6 +501,14 @@ pub(crate) fn run_gc_purge_rustup_toolchain_command(
 
     let selected_count = select_candidates(&mut homes, purge_all);
     let (uninstalled_count, failed_count, reclaimed_bytes) = uninstall_selected(&mut homes, json);
+    if uninstalled_count > 0 {
+        // Store objects whose last toolchain link just went (soldr#4027).
+        if let Some(paths) = soldr_paths.as_ref() {
+            crate::toolchain_store::gc_unreferenced_objects(&crate::toolchain_store::store_root(
+                paths,
+            ));
+        }
+    }
     if !json {
         eprintln!(
             "soldr gc purge --kind rustup_toolchain: selected {selected_count}; uninstalled {uninstalled_count}; failed {failed_count}; reclaimed {}",
@@ -512,16 +530,31 @@ pub(crate) fn run_gc_purge_rustup_toolchain_command(
 fn plan_all_homes(
     soldr_paths: Option<&SoldrPaths>,
     shared_protected: &[String],
+    unused_days: Option<u64>,
 ) -> Vec<HomePlanReport> {
+    let store = soldr_paths.map(crate::toolchain_store::store_root);
+    let now = std::time::SystemTime::now();
     homes_for_enumeration(soldr_paths)
         .into_iter()
         .map(|home| {
             let settings = read_home_settings(&home.path.join("settings.toml"));
             let installed = installed_toolchain_names(&home.path.join("toolchains"));
             let plan = plan_home(&installed, &settings, shared_protected);
+            // `--unused-days N` (soldr#4027): only toolchains no pin has
+            // used within N days stay eligible.
             let candidates = plan
                 .candidates
                 .iter()
+                .filter(|name| {
+                    unused_days.is_none_or(|days| {
+                        let dir = home.path.join("toolchains").join(name);
+                        let last_used = store
+                            .as_deref()
+                            .and_then(|store| crate::toolchain_store::last_used(store, name, &dir))
+                            .or_else(|| std::fs::metadata(&dir).and_then(|m| m.modified()).ok());
+                        crate::toolchain_store::unused_for(last_used, days, now)
+                    })
+                })
                 .map(|name| {
                     let (size_bytes, _files) =
                         fast_directory_size_and_files(&home.path.join("toolchains").join(name));
