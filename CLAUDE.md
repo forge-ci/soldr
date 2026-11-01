@@ -393,8 +393,10 @@ HEAD's message with the trailer. Install the pre-push hook once per clone with
   fixture once claimed the real `~/.soldr` and wedged every soldr build on
   the machine. `soldr-nextest-wrapper` (`src/isolate.rs`) now points all of
   them into a per-test private directory before every test, keeps the
-  caller's `CARGO_HOME`/`RUSTUP_HOME`, exports `SOLDR_TEST_ISOLATED=1` to the
-  test, removes the directory afterwards (Linux also reaps leaked daemons by
+  caller's toolchain homes reachable through `~/.cargo`/`~/.rustup` symlinks,
+  drops the outer front door's route/session/wrapper variables
+  (`SOLDR_BROKER_SERVICE`, `SOLDR_BUILD_SESSION_ID`, `RUSTC_WRAPPER`, ...),
+  exports `SOLDR_TEST_ISOLATED=1` to the test, removes the directory afterwards (Linux also reaps leaked daemons by
   its `TMPDIR`), and refuses (exit 97) if it cannot. `nextest_wrapper.sh`
   refuses a `SOLDR_NEXTEST_NATIVE_WRAPPER` override outside `CI=true` or an
   isolated test, so nothing replaces it. Plain `soldr cargo test` bypasses

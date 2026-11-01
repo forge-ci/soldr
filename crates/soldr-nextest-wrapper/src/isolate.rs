@@ -33,6 +33,21 @@ use std::process::Command;
 /// under it (or `CI=true`), so a nested run cannot bypass the isolation.
 pub(crate) const ISOLATED_ENV: &str = "SOLDR_TEST_ISOLATED";
 
+/// What an outer `soldr cargo` front door exports to Cargo, which Nextest
+/// hands on to every test: the outer build's route, session and wrapper
+/// shim. Each names state in the *caller's* root (the shim lives under the
+/// caller's `~/.soldr`, the route belongs to the caller's broker), so a test
+/// inheriting them would dial the caller's daemon -- or, with its private
+/// root, a route that does not exist there ("could not connect to the soldr
+/// daemon (route ...)"). A test that wants a front door starts its own.
+const OUTER_SESSION_ENVS: [&str; 5] = [
+    "SOLDR_BROKER_SERVICE",
+    "SOLDR_BUILD_SESSION_ID",
+    "SOLDR_EFFECTIVE_RUSTC_WRAPPER",
+    "SOLDR_EFFECTIVE_RUSTC_WRAPPER_ORIGIN",
+    "RUSTC_WRAPPER",
+];
+
 /// The variables a test's soldr state is resolved from, and where each one
 /// points inside the private root.
 fn identity(root: &Path) -> [(&'static str, PathBuf); 7] {
@@ -78,6 +93,9 @@ pub(crate) fn apply(command: &mut Command, root: &Path) -> std::io::Result<()> {
         if let Some(target) = resolved.filter(|path| path.is_dir()) {
             test_child::link_dir(&target, &home.join(leaf))?;
         }
+    }
+    for name in OUTER_SESSION_ENVS {
+        command.env_remove(name);
     }
     // The broker's runtime directory must be owner-only, like a real one.
     test_child::create_private_dir(&root.join("r"))?;

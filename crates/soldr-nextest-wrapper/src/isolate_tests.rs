@@ -60,3 +60,20 @@ fn a_missing_root_fails_instead_of_running_unisolated() {
     let mut command = Command::new("true");
     assert!(apply(&mut command, &base.path().join("absent")).is_err());
 }
+
+#[test]
+fn the_outer_front_doors_route_and_shim_are_not_inherited() {
+    let base = tempfile::tempdir().expect("tmp");
+    let mut command = Command::new("true");
+    command.env("SOLDR_BROKER_SERVICE", "soldr-daemon-outer");
+    command.env("RUSTC_WRAPPER", "/caller/.soldr/shims/rustc");
+    apply(&mut command, base.path()).expect("apply");
+    for name in OUTER_SESSION_ENVS {
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == name && value.is_none()),
+            "{name} is removed"
+        );
+    }
+}
