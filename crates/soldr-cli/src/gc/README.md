@@ -8,7 +8,7 @@ automatic sweeper that runs alongside builds.
 | `mod.rs` | Module wiring and the `gc` command entry points |
 | `auto.rs` | The automatic sweeper — throttling, deferral while a build is active, the maintenance lease, and the tiered passes |
 | `purge.rs` | Explicit `soldr gc purge` (`--all`, `--older-than`, `--larger-than`) |
-| `rustup_toolchain.rs` | `gc purge --kind rustup_toolchain` (soldr#3507) — enumerates the caller + managed rustup homes, protects the active/default/pin toolchains, and delegates deletion to `rustup toolchain uninstall` |
+| `rustup_toolchain.rs` | `gc purge --kind rustup_toolchain` (soldr#3507) — enumerates the caller + managed rustup homes, protects the active/default/pin toolchains, and delegates deletion to `rustup toolchain uninstall` |. `--unused-days N` keeps toolchains used within N days (stamps from `toolchain_store.rs`, soldr#4027)
 | `disk.rs` | Free-space probing that decides which pressure tier applies |
 | `cargo_native.rs` | `cargo`-native GC (`registry/src`, git checkouts) and `gc sweep` |
 | `target_walker.rs`, `walks.rs` | Directory traversal used to size and prune `target/` trees |

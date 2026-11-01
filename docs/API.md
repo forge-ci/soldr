@@ -2166,6 +2166,8 @@ soldr gc purge --registry-src --all            # delete extracted registry sourc
 soldr gc purge --git-checkouts --all           # delete git checkout worktrees
 soldr gc purge --kind rustup_toolchain --dry-run --all  # list unprotected toolchains; deletes nothing
 soldr gc purge --kind rustup_toolchain --all   # uninstall them via `rustup toolchain uninstall`
+soldr gc purge --kind rustup_toolchain --unused-days 30 --all  # only toolchains no pin used in 30 days
+soldr toolchain dedupe [--json]  # hardlink duplicate toolchains across rustup homes into one store (soldr#4027)
 ```
 
 Defaults:

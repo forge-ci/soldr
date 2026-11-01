@@ -45,7 +45,7 @@ pub(crate) use purge::{
     run_gc_purge_git_checkouts_command, run_gc_purge_registry_src_command,
     run_gc_purge_target_subtree_command,
 };
-pub(crate) use rustup_toolchain::run_gc_purge_rustup_toolchain_command;
+pub(crate) use rustup_toolchain::{run_gc_purge_rustup_toolchain_command, rustup_homes_for_store};
 
 // Items the tests file reaches through `super::*`. Keeping these
 // `use`d inside `mod.rs` makes the visibility explicit and survives

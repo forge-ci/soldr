@@ -103,6 +103,14 @@ pub(crate) enum ToolchainSubcommand {
     /// (exit 0 with a note) when the manifest is missing or omits
     /// `channel`.
     Install,
+    /// Hardlink every file of the caller's and the managed rustup homes'
+    /// toolchains into one content-addressed store, so the same toolchain
+    /// stored twice takes the disk space of one (soldr#4027).
+    Dedupe {
+        /// Emit a JSON report.
+        #[arg(long)]
+        json: bool,
+    },
     /// Install the channel and every declared component / target from
     /// `rust-toolchain.toml`. Stops at the first nonzero rustup exit.
     Prepare {
@@ -198,6 +206,10 @@ pub(crate) enum GcSubcommand {
         /// silently ignoring it.
         #[arg(long)]
         dry_run: bool,
+        /// With `--kind rustup_toolchain`: only toolchains no pin has used
+        /// within this many days are eligible (soldr#4027).
+        #[arg(long, value_name = "DAYS")]
+        unused_days: Option<u64>,
         /// Minimum age before a `target/` is considered stale
         /// (e.g. `10d`, `4w`).
         #[arg(long, default_value = "10d", value_name = "DURATION")]
