@@ -151,6 +151,10 @@ _AUDIT_EXEMPT_PREFIXES = ("CI summary", "Cancel run (", "End-of-queue cache jani
 # still be running; once it has finished, its conclusion is audited like any.
 _AUDIT_UNORDERED_PREFIXES = ("CI Pre",)
 _AUDIT_OK = ("success", "skipped")
+# GitHub keeps one *pending* job per concurrency group: a newer run's
+# `cache-janitor` sweep replaces this one (cancel-in-progress: false only
+# protects a running sweep). It validates nothing, so supersession is allowed.
+_AUDIT_SUPERSEDABLE = {"CI Pre / Cache janitor": "cancelled"}
 
 
 def run_attempt_failures(jobs: list[dict]) -> list[str]:
@@ -171,7 +175,9 @@ def run_attempt_failures(jobs: list[dict]) -> list[str]:
             if name.startswith(_AUDIT_UNORDERED_PREFIXES):
                 continue
             failures.append(f"job {name!r} has not completed ({job.get('status')})")
-        elif job.get("conclusion") not in _AUDIT_OK:
+        elif job.get("conclusion") not in _AUDIT_OK and (
+            _AUDIT_SUPERSEDABLE.get(name) != job.get("conclusion")
+        ):
             failures.append(f"job {name!r} concluded {job.get('conclusion')}")
     return failures
 

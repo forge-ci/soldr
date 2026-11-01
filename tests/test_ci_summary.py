@@ -390,3 +390,14 @@ def test_merge_summary_runs_even_when_selector_or_required_cells_fail() -> None:
     assert summary["if"] == "${{ always() }}"
     assert set(jobs["full-coverage"]["needs"]) <= set(summary["needs"])
     assert {"lint-docs", "path-selection", "full-coverage"} <= set(summary["needs"])
+
+
+def test_run_attempt_audit_allows_only_a_superseded_cache_janitor():
+    assert (
+        SUMMARY.run_attempt_failures([_job("CI Pre / Cache janitor", "cancelled")])
+        == []
+    )
+    assert SUMMARY.run_attempt_failures([_job("CI Pre / Cache janitor", "failure")])
+    assert SUMMARY.run_attempt_failures(
+        [_job("CI Pre / Repository Actions cache budget", "cancelled")]
+    )
