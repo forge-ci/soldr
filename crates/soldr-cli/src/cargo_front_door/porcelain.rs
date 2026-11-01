@@ -1090,7 +1090,7 @@ pub(super) fn serialize_report(
     if let Some(object) = value.as_object_mut() {
         // soldr#4010 (schema 2): `status` is top-level on every line.
         if report.exit_code == 0 {
-            compact_success(object);
+            compact_success(object, &report.summary)?;
         } else {
             object.insert("status".to_string(), "failed".into());
         }
@@ -1105,15 +1105,35 @@ pub(super) fn serialize_report(
 }
 
 /// Fields a passing run's agent never acts on (soldr#4010): the command it
-/// just typed, the log's expiry, per-step timings and the empty error
-/// summary. They stay in the log; `status` takes the summary's place.
+/// just typed, the log's expiry, per-step timings and the error summary.
+/// They stay in the log; `status` takes the summary's place.
+///
+/// Warnings are the one part of a passing run's summary an agent DOES act on:
+/// `cargo build` exits zero while printing `unused variable` / `never used` /
+/// `deprecated` diagnostics, and #4010's compaction used to delete them with
+/// the rest of the summary. The caller could only learn that anything was
+/// there by reading `log_path` back, which is exactly the context cost
+/// porcelain exists to remove (#3924). So when a passing run warned, the two
+/// bounded warning fields are lifted to the top level next to `status`; a
+/// warning-free success keeps its present shape byte for byte.
 const SUCCESS_DROPPED: &[&str] = &["command", "expires_at", "steps", "summary"];
 
-fn compact_success(object: &mut serde_json::Map<String, serde_json::Value>) {
+fn compact_success(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    summary: &PorcelainSummary,
+) -> serde_json::Result<()> {
     for key in SUCCESS_DROPPED {
         object.remove(*key);
     }
     object.insert("status".to_string(), "ok".into());
+    if summary.warning_count > 0 {
+        object.insert("warning_count".to_string(), summary.warning_count.into());
+        object.insert(
+            "warnings".to_string(),
+            serde_json::to_value(&summary.warnings)?,
+        );
+    }
+    Ok(())
 }
 
 static EMITTED: AtomicBool = AtomicBool::new(false);

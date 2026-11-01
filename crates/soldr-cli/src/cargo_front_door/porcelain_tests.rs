@@ -782,6 +782,75 @@ fn serialize_report_adds_broker_skew_only_when_observed() {
     assert_eq!(line.lines().count(), 1);
 }
 
+/// soldr#4010 compaction deleted the whole summary on a passing run, which
+/// silently took the warnings with it: `cargo build` exits zero while printing
+/// `unused variable`, so the caller could only find out by reading `log_path`
+/// back. The bounded warning digest now survives compaction, next to `status`.
+#[test]
+fn a_passing_run_keeps_its_bounded_warnings() {
+    let warning_run = concat!(
+        "warning: unused variable: `spare`\n",
+        " --> src/lib.rs:2:9\n",
+        "warning: unused import: `std::fmt`\n",
+        " --> src/lib.rs:1:5\n",
+        "    Finished `dev` profile [unoptimized] target(s) in 0.15s\n",
+    );
+    let report = report_for_run(&RunReportInputs {
+        command: "cargo build",
+        exit_code: 0,
+        started_at_ms: 1_000,
+        ended_at_ms: 1_500,
+        log_path: None,
+        output: Some(warning_run),
+    });
+    let line = serialize_report(&report, None, &[]).expect("serialize");
+    let value: serde_json::Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["warning_count"], 2);
+    assert_eq!(
+        value["warnings"].as_array().expect("warnings array").len(),
+        2
+    );
+    assert_eq!(
+        value["warnings"][0],
+        "warning: unused variable: `spare` [src/lib.rs:2:9]"
+    );
+    // The rest of the summary stays compacted: this is still the short form.
+    assert!(value.get("summary").is_none(), "{line}");
+    assert!(value.get("command").is_none(), "{line}");
+    assert_eq!(line.lines().count(), 1);
+}
+
+/// Additive: a warning-free passing run keeps exactly its present shape, so
+/// nothing downstream sees a new key on the common path.
+#[test]
+fn a_warning_free_passing_run_keeps_the_compact_shape() {
+    let report = report_for_run(&RunReportInputs {
+        command: "cargo build",
+        exit_code: 0,
+        started_at_ms: 1_000,
+        ended_at_ms: 1_500,
+        log_path: None,
+        output: Some("    Finished `dev` profile [unoptimized] target(s) in 0.15s\n"),
+    });
+    let line = serialize_report(&report, None, &[]).expect("serialize");
+    let value: serde_json::Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(value["status"], "ok");
+    assert!(value.get("warning_count").is_none(), "{line}");
+    assert!(value.get("warnings").is_none(), "{line}");
+}
+
+/// A failing run already carries warnings inside `summary`; the top-level copy
+/// is success-only, so nothing is reported twice.
+#[test]
+fn a_failing_run_does_not_duplicate_warnings_at_the_top_level() {
+    let report = report_for_failure("cargo build", 101, None, None);
+    let line = serialize_report(&report, None, &[]).expect("serialize");
+    let value: serde_json::Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(value["status"], "failed");
+    assert!(value.get("warning_count").is_none(), "{line}");
+}
+
 /// soldr#3960: porcelain lists installed binaries as `installed`.
 #[test]
 fn serialize_report_adds_installed_paths() {
