@@ -10,6 +10,40 @@ use super::*;
 use crate::TEST_PROCESS_ENV_LOCK as ENV_LOCK;
 
 use clap::Parser;
+
+#[test]
+fn blaze_cli_args_preserve_forwarded_flags() {
+    for (input, expected_allow, expected_args) in [
+        (
+            vec!["soldr", "blaze", "build", "--release"],
+            false,
+            vec!["build", "--release"],
+        ),
+        (
+            vec!["soldr", "blaze", "--allow-ci", "status"],
+            true,
+            vec!["status"],
+        ),
+        (
+            vec!["soldr", "blaze", "test", "--", "--nocapture"],
+            false,
+            vec!["test", "--", "--nocapture"],
+        ),
+        (
+            vec!["soldr", "blaze", "build", "--allow-ci"],
+            false,
+            vec!["build", "--allow-ci"],
+        ),
+    ] {
+        let cli = Cli::try_parse_from(input).expect("blaze grammar");
+        let Commands::Blaze { allow_ci, args } = cli.command else {
+            panic!("blaze must be a built-in command");
+        };
+        assert_eq!(allow_ci, expected_allow);
+        assert_eq!(args, expected_args);
+    }
+}
+
 // The barrier every env mutator in this crate takes (soldr#1663). These
 // tests set process-global variables, so an unguarded run races any test
 // that reads them.
