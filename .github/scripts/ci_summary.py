@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import runpy
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
@@ -93,7 +94,13 @@ def summary_failures(
     trusted: bool = False,
 ) -> list[str]:
     failures = []
-    if event_name not in ("pull_request", "push", "workflow_dispatch", "merge_group"):
+    if event_name not in (
+        "pull_request",
+        "push",
+        "workflow_dispatch",
+        "merge_group",
+        "schedule",
+    ):
         failures.append("missing or unsupported event")
     if (
         event_name == "pull_request"
@@ -103,8 +110,12 @@ def summary_failures(
         failures.append("external or unresolved author requires full CI")
     if event_name == "workflow_dispatch" and mode != "full":
         failures.append("candidate dispatch requires full CI")
-    if event_name == "merge_group" and mode != "full":
-        failures.append("merge queue requires full CI")
+    if event_name == "schedule" and mode != "full":
+        failures.append("nightly schedule requires full CI")
+    if event_name == "push" and mode != "full":
+        failures.append("push to main requires full CI")
+    if event_name == "merge_group" and mode not in ("minimal", "full"):
+        failures.append("merge queue requires the linux host lane or full CI")
     if trusted and (
         event_name != "pull_request"
         or mode != "minimal"
@@ -131,6 +142,61 @@ def summary_failures(
             selected_sha=selected_sha,
         )
     return sorted(set(failures))
+
+
+# Jobs that legitimately run after (or alongside) the summary: the summary is
+# their prerequisite, or they exist only to cancel an already-failing run.
+_AUDIT_EXEMPT_PREFIXES = ("CI summary", "Cancel run (", "End-of-queue cache janitor")
+# CI Pre must never be waited on (tests/test_ci_pre_workflow.py), so it may
+# still be running; once it has finished, its conclusion is audited like any.
+_AUDIT_UNORDERED_PREFIXES = ("CI Pre",)
+_AUDIT_OK = ("success", "skipped")
+
+
+def run_attempt_failures(jobs: list[dict]) -> list[str]:
+    """Fail on any job of this run attempt that did not succeed (obs gate_jobs).
+
+    ``needs`` only reflects declared prerequisites; this audit lists every job
+    GitHub recorded for the attempt -- reusable-workflow children included --
+    so a failed or cancelled job cannot hide behind one aggregating context.
+    """
+    if not jobs:
+        return ["run attempt job list is empty"]
+    failures = []
+    for job in jobs:
+        name = str(job.get("name", ""))
+        if name.startswith(_AUDIT_EXEMPT_PREFIXES):
+            continue
+        if job.get("status") != "completed":
+            if name.startswith(_AUDIT_UNORDERED_PREFIXES):
+                continue
+            failures.append(f"job {name!r} has not completed ({job.get('status')})")
+        elif job.get("conclusion") not in _AUDIT_OK:
+            failures.append(f"job {name!r} concluded {job.get('conclusion')}")
+    return failures
+
+
+def list_run_attempt_jobs(repository: str, run_id: str, attempt: str, token: str):
+    """Every job of one run attempt, following pagination."""
+    jobs: list[dict] = []
+    page = 1
+    while True:
+        request = urllib.request.Request(
+            f"https://api.github.com/repos/{repository}/actions/runs/{run_id}"
+            f"/attempts/{attempt}/jobs?per_page=100&page={page}",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {token}",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        batch = body.get("jobs", [])
+        jobs += batch
+        if len(jobs) >= int(body.get("total_count", 0)) or not batch:
+            return jobs
+        page += 1
 
 
 def current_selection_failures(
@@ -234,6 +300,18 @@ def main() -> int:
             )
         failures = summary_failures(adapter, full, needs, **inputs)
         failures += current_failures
+        try:
+            failures += run_attempt_failures(
+                list_run_attempt_jobs(
+                    os.environ.get("GITHUB_REPOSITORY", ""),
+                    os.environ.get("GITHUB_RUN_ID", ""),
+                    os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+                    os.environ.get("GITHUB_TOKEN", ""),
+                )
+            )
+        except (OSError, ValueError) as error:
+            # Fail closed: an unauditable run is not a green run.
+            failures.append(f"cannot list run attempt jobs: {error}")
         jobs = sorted(
             required_jobs(
                 adapter, full, inputs["mode"], inputs["docs_only"], inputs["trusted"]

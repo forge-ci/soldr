@@ -115,11 +115,79 @@ def test_unknown_mode_fails_clearly():
         check(passing(), mode="")
 
 
-def test_merge_queue_requires_full_selected_coverage():
+def test_merge_queue_accepts_linux_lane_or_full():
     assert check(passing(), event_name="merge_group") == []
-    assert "merge queue requires full CI" in check(
-        passing(), event_name="merge_group", mode="minimal"
+    assert "merge queue requires the linux host lane or full CI" in check(
+        passing(), event_name="merge_group", mode="test"
     )
+
+
+@pytest.mark.parametrize("event", ["push", "schedule"])
+def test_post_merge_events_require_full(event):
+    assert check(passing(), event_name=event) == []
+    assert any(
+        "requires full CI" in failure
+        for failure in check(passing(), event_name=event, mode="minimal")
+    )
+
+
+def _job(name, conclusion="success", status="completed"):
+    return {"name": name, "status": status, "conclusion": conclusion}
+
+
+def test_run_attempt_audit_passes_success_and_skipped():
+    jobs = [
+        _job("Lint"),
+        _job("Cook size gate", "skipped"),
+        _job("CI summary", None, "in_progress"),
+    ]
+    assert SUMMARY.run_attempt_failures(jobs) == []
+
+
+@pytest.mark.parametrize(
+    "conclusion", ["failure", "cancelled", "timed_out", "action_required", "neutral"]
+)
+def test_run_attempt_audit_fails_any_unsuccessful_job(conclusion):
+    failures = SUMMARY.run_attempt_failures(
+        [_job("Lint"), _job("CI Pre / plan", conclusion)]
+    )
+    assert failures == [f"job 'CI Pre / plan' concluded {conclusion}"]
+
+
+def test_run_attempt_audit_fails_unfinished_and_empty():
+    assert SUMMARY.run_attempt_failures(
+        [_job("reld dogfood proof (linux x64)", None, "in_progress")]
+    )
+    assert SUMMARY.run_attempt_failures([]) == ["run attempt job list is empty"]
+
+
+def test_run_attempt_audit_exempts_only_post_summary_jobs():
+    jobs = [
+        _job("End-of-queue cache janitor", None, "queued"),
+        _job("Cancel run (bootstrap soldr failed)", "skipped"),
+        _job("CI Pre / janitor", None, "in_progress"),
+    ]
+    assert SUMMARY.run_attempt_failures(jobs) == []
+
+
+def test_run_attempt_audit_still_fails_a_finished_unordered_job():
+    assert SUMMARY.run_attempt_failures([_job("CI Pre / janitor", "failure")])
+
+
+def test_summary_needs_every_job_it_can_wait_for():
+    """The audit is only sound if every non-exempt job finishes first."""
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    jobs = workflow["jobs"]
+    needs = set(jobs["ci-summary"]["needs"])
+    for job_id, job in jobs.items():
+        name = str(job.get("name", job_id))
+        if (
+            job_id == "ci-summary"
+            or name.startswith(SUMMARY._AUDIT_EXEMPT_PREFIXES)
+            or name.startswith(SUMMARY._AUDIT_UNORDERED_PREFIXES)
+        ):
+            continue
+        assert job_id in needs, job_id
 
 
 def test_test_adapter_must_add_real_jobs_beyond_minimal():
@@ -154,6 +222,11 @@ def test_build_only_target_cannot_pass_summary():
 
 
 def cli_environment(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        SUMMARY,
+        "list_run_attempt_jobs",
+        lambda *_: [{"name": "Lint", "status": "completed", "conclusion": "success"}],
+    )
     adapter_path = tmp_path / "adapter.json"
     manifest_path = tmp_path / "full.json"
     report_path = tmp_path / "summary.json"
