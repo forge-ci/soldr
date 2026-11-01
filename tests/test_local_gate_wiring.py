@@ -463,12 +463,7 @@ def test_host_run_moves_every_identity_root_off_the_callers_state(
     ws = _workspace_test()
     real_home = tmp_path / "real"
     layout = ws.host_layout(tmp_path / "gitdir", tmp_path / "cache")
-    shims = real_home / ".soldr" / "v0.9.48" / "shims"
-    caller = {
-        "PATH": f"{shims}:{real_home / '.clud' / 'state' / 'shims'}:/bin",
-        "CI": "true",
-        "SOLDR_TEST_ISOLATED": "0",
-    }
+    caller = {"PATH": "/bin", "CI": "true", "SOLDR_TEST_ISOLATED": "0"}
     env = ws.host_environment(layout, caller, real_home)
     assert env["SOLDR_TEST_ISOLATED"] == "1"
     assert "CI" not in env
@@ -476,7 +471,6 @@ def test_host_run_moves_every_identity_root_off_the_callers_state(
         assert not Path(env[name]).is_relative_to(real_home), name
     assert env["XDG_RUNTIME_DIR"] == str(layout.runtime)
     assert env["CARGO_HOME"] == str(real_home / ".cargo")
-    assert env["PATH"] == "/bin"
 
 
 def test_host_root_is_never_inside_a_checkout(tmp_path: Path) -> None:

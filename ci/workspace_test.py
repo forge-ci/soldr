@@ -345,17 +345,6 @@ def host_environment(
             or str(real_home / ".local" / "share" / "uv" / "python"),
         }
     )
-    # The caller's soldr PATH shims (~/.soldr/<ver>/shims) re-enter the host
-    # soldr, and agent shims (~/.clud/state) rewrite commands; neither exists
-    # in CI, and fixtures resolving rustc/rustfmt through them diverge (109
-    # host-only failures on the first host run). The bootstrap is resolved
-    # before this, by absolute path.
-    leaky = (real_home / ".soldr", real_home / ".clud" / "state")
-    env["PATH"] = os.pathsep.join(
-        entry
-        for entry in caller.get("PATH", "").split(os.pathsep)
-        if entry and not any(Path(entry).is_relative_to(root) for root in leaky)
-    )
     gitconfig = real_home / ".gitconfig"
     if "GIT_CONFIG_GLOBAL" not in env and gitconfig.is_file():
         env["GIT_CONFIG_GLOBAL"] = str(gitconfig)
