@@ -40,12 +40,14 @@ pub(crate) fn worth_probing(unit: Option<UnitMemory>) -> bool {
     trusted(unit).is_some_and(|unit| unit.tree_peak_rss_bytes >= PROBE_THRESHOLD_BYTES)
 }
 
-/// Memory available to compilers right now: cgroup headroom when a limit is
-/// set, otherwise `MemAvailable`. `None` when neither can be read.
+/// Memory available to compilers right now: the smaller of cgroup headroom
+/// (reclaimable page cache excluded, soldr#4012) and `MemAvailable`, either
+/// alone when only one can be read. `None` when neither can be read.
 pub(crate) fn available_bytes(snapshot: &HostResourceSnapshot) -> Option<u64> {
-    snapshot
-        .cgroup_headroom()
-        .or(snapshot.system_available_bytes)
+    match (snapshot.cgroup_headroom(), snapshot.system_available_bytes) {
+        (Some(cgroup), Some(host)) => Some(cgroup.min(host)),
+        (cgroup, host) => cgroup.or(host),
+    }
 }
 
 /// Additive rule: exclusive when the trusted, headroomed remembered peak is

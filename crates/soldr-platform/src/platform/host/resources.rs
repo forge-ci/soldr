@@ -29,6 +29,10 @@ const PROC_MEMINFO: &str = "/proc/meminfo";
 pub struct HostResourceSnapshot {
     /// Bytes charged to the current cgroup (`memory.current`).
     pub cgroup_current_bytes: Option<u64>,
+    /// Reclaimable inactive page cache charged to the cgroup
+    /// (`inactive_file` in `memory.stat`). Counted in `memory.current`, but
+    /// the kernel drops it before reclaiming anon memory (soldr#4012).
+    pub cgroup_inactive_file_bytes: Option<u64>,
     /// Lifetime peak bytes charged to the current cgroup (`memory.peak`).
     pub cgroup_peak_bytes: Option<u64>,
     /// Finite cgroup memory limit in bytes (`memory.max`).
@@ -78,6 +82,9 @@ impl HostResourceSnapshot {
             read_limit(cgroup_dir.join("pids.max"));
         Self {
             cgroup_current_bytes: read_u64(cgroup_dir.join("memory.current")),
+            cgroup_inactive_file_bytes: read_text(cgroup_dir.join("memory.stat"))
+                .as_deref()
+                .and_then(inactive_file),
             cgroup_peak_bytes: read_u64(cgroup_dir.join("memory.peak")),
             cgroup_limit_bytes,
             cgroup_limit_unbounded,
@@ -93,11 +100,14 @@ impl HostResourceSnapshot {
     }
 
     /// Return finite cgroup memory headroom, saturating at zero.
+    ///
+    /// Reclaimable inactive page cache does not count as used: build I/O
+    /// grows `memory.current` with file cache the kernel drops on demand, and
+    /// counting it starved admission until the daemon restarted (soldr#4012).
     pub fn cgroup_headroom(&self) -> Option<u64> {
-        Some(
-            self.cgroup_limit_bytes?
-                .saturating_sub(self.cgroup_current_bytes?),
-        )
+        let current = self.cgroup_current_bytes?;
+        let used = current.saturating_sub(self.cgroup_inactive_file_bytes.unwrap_or(0));
+        Some(self.cgroup_limit_bytes?.saturating_sub(used))
     }
 }
 
@@ -128,6 +138,14 @@ fn mem_available(raw: &str) -> Option<u64> {
             .parse::<u64>()
             .ok()?
             .checked_mul(1024)
+    })
+}
+
+fn inactive_file(raw: &str) -> Option<u64> {
+    raw.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        (fields.next()? == "inactive_file").then_some(())?;
+        fields.next()?.parse().ok()
     })
 }
 
@@ -190,5 +208,24 @@ mod snapshot_tests {
         let snapshot = HostResourceSnapshot::read_at(dir.path(), &dir.path().join("missing"));
         assert!(snapshot.cgroup_limit_unbounded);
         assert_eq!(snapshot.cgroup_oom_kills, None);
+    }
+
+    #[test]
+    fn inactive_page_cache_is_headroom_not_usage() {
+        // soldr#4012 host: 16 GiB limit, 15.6 GB charged, 11.6 GB inactive file.
+        let dir = tempfile::tempdir().expect("cgroup fixture");
+        std::fs::write(dir.path().join("memory.max"), "17179869184\n").unwrap();
+        std::fs::write(dir.path().join("memory.current"), "15580610560\n").unwrap();
+        std::fs::write(
+            dir.path().join("memory.stat"),
+            "anon 2931073024\nfile 12390547456\nactive_file 801099776\ninactive_file 11589472256\n",
+        )
+        .unwrap();
+        let snapshot = HostResourceSnapshot::read_at(dir.path(), &dir.path().join("meminfo"));
+        assert_eq!(snapshot.cgroup_inactive_file_bytes, Some(11_589_472_256));
+        assert_eq!(
+            snapshot.cgroup_headroom(),
+            Some(17_179_869_184 - (15_580_610_560 - 11_589_472_256))
+        );
     }
 }
