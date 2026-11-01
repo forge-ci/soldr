@@ -8,12 +8,13 @@ automatic sweeper that runs alongside builds.
 | `mod.rs` | Module wiring and the `gc` command entry points |
 | `auto.rs` | The automatic sweeper — throttling, deferral while a build is active, the maintenance lease, and the tiered passes |
 | `purge.rs` | Explicit `soldr gc purge` (`--all`, `--older-than`, `--larger-than`) |
-| `rustup_toolchain.rs` | `gc purge --kind rustup_toolchain` (soldr#3507) — enumerates the caller + managed rustup homes, protects the active/default/pin toolchains, and delegates deletion to `rustup toolchain uninstall` |
+| `rustup_toolchain.rs` | `gc purge --kind rustup_toolchain` (soldr#3507) — enumerates the caller + managed rustup homes, protects the active/default/pin toolchains, and delegates deletion to `rustup toolchain uninstall` |. `--unused-days N` keeps toolchains used within N days (stamps from `toolchain_store.rs`, soldr#4027)
 | `disk.rs` | Free-space probing that decides which pressure tier applies |
 | `cargo_native.rs` | `cargo`-native GC (`registry/src`, git checkouts) and `gc sweep` |
 | `target_walker.rs`, `walks.rs` | Directory traversal used to size and prune `target/` trees |
 | `discovery.rs` | Bridges the `target_walker` into registry-shaped rows so auto-GC sees targets the registry never recorded |
-| `stale_targets.rs` | Opt-in `auto_gc.stale_target_days` pass: evicts idle `target/` dirs regardless of disk pressure, once a day (soldr#4031) |
+| `stale_targets.rs` | `auto_gc.stale_target_days` pass (default 14 days): evicts idle `target/` dirs regardless of disk pressure, once a day, then runs the dedupe pass (soldr#4031) |
+| `target_dedupe.rs` | Content-addressed dedupe of immutable `deps/` and build-script `out/` artifacts across worktrees, `soldr gc dedupe`, shared/unique byte accounting (soldr#4033) |
 | `tests.rs` | Shared unit tests for the module |
 
 ## Auto-GC ordering

@@ -40,6 +40,7 @@ mod cache_plan;
 pub(crate) mod cache_states; // soldr#2302 — HIT/MISS annotations + stats
 mod clang_cl_shim;
 mod cmake_need;
+mod codegen_units;
 mod component_install;
 mod config_args;
 pub(crate) mod cook_hydrate;
@@ -62,6 +63,8 @@ pub(crate) mod no_cache_detach;
 mod orphan_rmeta;
 /// `--porcelain` / `SOLDR_PORCELAIN` machine-readable front-door mode.
 pub(crate) mod porcelain;
+/// Failure/error identities and ANSI stripping for the porcelain digest.
+mod porcelain_errors;
 /// Failing-test digest for the porcelain summary (soldr#3961).
 mod porcelain_failures;
 /// `soldr lint` porcelain report and log (soldr#3958).

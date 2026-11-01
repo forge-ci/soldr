@@ -370,6 +370,11 @@ fn build_child_cargo_command(
         .build_like_cargo
         .then(|| job_budget::apply(args, &mut command));
 
+    // soldr#4014: codegen units are selected per build intent rather than
+    // pinned in the manifest. Shipping builds get one unit; everything else
+    // keeps Cargo's default unless `SOLDR_CODEGEN_UNITS` opts in.
+    let _ = codegen_units::apply(&mut command, args);
+
     apply_child_cargo_toolchain_env(&mut command, spec);
 
     // Apply subcommand-derived env overrides (e.g. CC_<triple>=clang-cl

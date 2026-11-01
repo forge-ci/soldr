@@ -100,6 +100,50 @@ def test_trusted_minimal_does_not_require_skipped_full_jobs():
     )
 
 
+def test_trusted_without_skip_lint_requires_the_minimal_gate():
+    """A trusted head whose Lint job ran must not require the lint-docs stand-in.
+
+    ci-mode reports `trusted` for any attested in-policy head but only reports
+    `skip_lint` when the Lint gate carries a Ci-Attestation trailer. The
+    workflow runs `lint` and never starts `lint-docs` in the second case, so
+    requiring docs_jobs here made a green PR's summary permanently red.
+    """
+    needs = {
+        job: {"result": "success"}
+        for job in ["ci-mode", "path-selection", "lint", "host"]
+    }
+    assert (
+        check(
+            needs,
+            mode="minimal",
+            author_permission="admin",
+            trusted=True,
+            skip_lint=False,
+        )
+        == []
+    )
+    # With the stand-in required (skip_lint), the same green run is incomplete.
+    assert check(
+        needs, mode="minimal", author_permission="admin", trusted=True, skip_lint=True
+    ) == ["docs-lint: missing"]
+
+
+def test_skip_lint_requires_the_docs_stand_in():
+    needs = {
+        job: {"result": "success"} for job in ["ci-mode", "path-selection", "docs-lint"]
+    }
+    assert (
+        check(
+            needs,
+            mode="minimal",
+            author_permission="admin",
+            trusted=True,
+            skip_lint=True,
+        )
+        == []
+    )
+
+
 def test_docs_gate_requires_successful_path_selection_and_docs_lint():
     needs = {
         job: {"result": "success"} for job in ["ci-mode", "path-selection", "docs-lint"]
@@ -115,11 +159,79 @@ def test_unknown_mode_fails_clearly():
         check(passing(), mode="")
 
 
-def test_merge_queue_requires_full_selected_coverage():
+def test_merge_queue_accepts_linux_lane_or_full():
     assert check(passing(), event_name="merge_group") == []
-    assert "merge queue requires full CI" in check(
-        passing(), event_name="merge_group", mode="minimal"
+    assert "merge queue requires the linux host lane or full CI" in check(
+        passing(), event_name="merge_group", mode="test"
     )
+
+
+@pytest.mark.parametrize("event", ["push", "schedule"])
+def test_post_merge_events_require_full(event):
+    assert check(passing(), event_name=event) == []
+    assert any(
+        "requires full CI" in failure
+        for failure in check(passing(), event_name=event, mode="minimal")
+    )
+
+
+def _job(name, conclusion="success", status="completed"):
+    return {"name": name, "status": status, "conclusion": conclusion}
+
+
+def test_run_attempt_audit_passes_success_and_skipped():
+    jobs = [
+        _job("Lint"),
+        _job("Cook size gate", "skipped"),
+        _job("CI summary", None, "in_progress"),
+    ]
+    assert SUMMARY.run_attempt_failures(jobs) == []
+
+
+@pytest.mark.parametrize(
+    "conclusion", ["failure", "cancelled", "timed_out", "action_required", "neutral"]
+)
+def test_run_attempt_audit_fails_any_unsuccessful_job(conclusion):
+    failures = SUMMARY.run_attempt_failures(
+        [_job("Lint"), _job("CI Pre / plan", conclusion)]
+    )
+    assert failures == [f"job 'CI Pre / plan' concluded {conclusion}"]
+
+
+def test_run_attempt_audit_fails_unfinished_and_empty():
+    assert SUMMARY.run_attempt_failures(
+        [_job("reld dogfood proof (linux x64)", None, "in_progress")]
+    )
+    assert SUMMARY.run_attempt_failures([]) == ["run attempt job list is empty"]
+
+
+def test_run_attempt_audit_exempts_only_post_summary_jobs():
+    jobs = [
+        _job("End-of-queue cache janitor", None, "queued"),
+        _job("Cancel run (bootstrap soldr failed)", "skipped"),
+        _job("CI Pre / janitor", None, "in_progress"),
+    ]
+    assert SUMMARY.run_attempt_failures(jobs) == []
+
+
+def test_run_attempt_audit_still_fails_a_finished_unordered_job():
+    assert SUMMARY.run_attempt_failures([_job("CI Pre / janitor", "failure")])
+
+
+def test_summary_needs_every_job_it_can_wait_for():
+    """The audit is only sound if every non-exempt job finishes first."""
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    jobs = workflow["jobs"]
+    needs = set(jobs["ci-summary"]["needs"])
+    for job_id, job in jobs.items():
+        name = str(job.get("name", job_id))
+        if (
+            job_id == "ci-summary"
+            or name.startswith(SUMMARY._AUDIT_EXEMPT_PREFIXES)
+            or name.startswith(SUMMARY._AUDIT_UNORDERED_PREFIXES)
+        ):
+            continue
+        assert job_id in needs, job_id
 
 
 def test_test_adapter_must_add_real_jobs_beyond_minimal():
@@ -154,6 +266,11 @@ def test_build_only_target_cannot_pass_summary():
 
 
 def cli_environment(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        SUMMARY,
+        "list_run_attempt_jobs",
+        lambda *_: [{"name": "Lint", "status": "completed", "conclusion": "success"}],
+    )
     adapter_path = tmp_path / "adapter.json"
     manifest_path = tmp_path / "full.json"
     report_path = tmp_path / "summary.json"
@@ -317,3 +434,14 @@ def test_merge_summary_runs_even_when_selector_or_required_cells_fail() -> None:
     assert summary["if"] == "${{ always() }}"
     assert set(jobs["full-coverage"]["needs"]) <= set(summary["needs"])
     assert {"lint-docs", "path-selection", "full-coverage"} <= set(summary["needs"])
+
+
+def test_run_attempt_audit_allows_only_a_superseded_cache_janitor():
+    assert (
+        SUMMARY.run_attempt_failures([_job("CI Pre / Cache janitor", "cancelled")])
+        == []
+    )
+    assert SUMMARY.run_attempt_failures([_job("CI Pre / Cache janitor", "failure")])
+    assert SUMMARY.run_attempt_failures(
+        [_job("CI Pre / Repository Actions cache budget", "cancelled")]
+    )

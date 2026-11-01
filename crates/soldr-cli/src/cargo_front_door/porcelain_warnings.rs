@@ -9,7 +9,8 @@
 //! production ceiling (#2493); the shape mirrors `porcelain_failures.rs`,
 //! which does the same job for named test failures.
 
-use super::porcelain::{first_line, without_ansi, MAX_DEDUPE_ENTRIES};
+use super::porcelain::first_line;
+use super::porcelain_errors::{without_ansi, MAX_DEDUPE_ENTRIES};
 
 /// Upper bound on the distinct warning identities carried in the digest.
 ///

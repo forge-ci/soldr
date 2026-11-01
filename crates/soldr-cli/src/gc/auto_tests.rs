@@ -152,11 +152,80 @@ fn sweeper_spawn_declares_the_soldr_identity_and_the_self_spawn_edge() {
 }
 
 #[test]
-fn stale_target_age_is_disabled_by_default() {
+fn stale_target_eviction_is_on_by_default_at_14_days() {
+    let config = crate::core::AutoGcConfig::default();
+    assert_eq!(config.stale_target_days, 14);
+    assert!(config.dedupe_targets);
+    assert_eq!(stale_target_age_secs(&config), Some(14 * 86_400));
+    let off = crate::core::AutoGcConfig {
+        stale_target_days: 0,
+        ..crate::core::AutoGcConfig::default()
+    };
+    assert_eq!(stale_target_age_secs(&off), None);
+}
+
+#[test]
+fn stale_target_defaults_survive_partial_config_toml() {
+    let config: crate::core::SoldrConfig =
+        toml::from_str("[auto_gc]\nmin_age_secs = 7200\n").unwrap();
+    assert_eq!(config.auto_gc.stale_target_days, 14);
+    assert!(config.auto_gc.dedupe_targets);
+}
+
+#[test]
+fn default_gc_roots_cover_dev_and_agent_worktrees() {
+    let home = std::path::Path::new("/home/u");
     assert_eq!(
-        stale_target_age_secs(&crate::core::AutoGcConfig::default()),
-        None
+        super::super::purge::default_gc_dev_roots(home),
+        vec![home.join("dev"), home.join(".clud").join("worktrees")]
     );
+}
+
+#[test]
+fn stale_target_pass_evicts_idle_target_under_default_clud_worktrees_root() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let workspace = home.path().join(".clud").join("worktrees").join("agent-wt");
+    let target = workspace.join("target");
+    std::fs::create_dir_all(target.join("debug")).unwrap();
+    std::fs::write(workspace.join("Cargo.toml"), b"[package]\nname = \"x\"\n").unwrap();
+    let blob = std::fs::File::create(target.join("debug").join("dep.rlib")).unwrap();
+    blob.set_len(300 * 1024 * 1024).unwrap();
+    let old = SystemTime::now() - Duration::from_secs(30 * 86_400);
+    for p in [
+        target.join("debug").join("dep.rlib"),
+        target.join("debug"),
+        target.clone(),
+    ] {
+        filetime::set_file_mtime(&p, filetime::FileTime::from_system_time(old)).unwrap();
+    }
+    let root = home.path().join(".soldr");
+    std::fs::create_dir_all(&root).unwrap();
+    let roots = super::super::purge::default_gc_dev_roots(home.path());
+    std::fs::write(
+        root.join("config.toml"),
+        format!(
+            "[gc]\nallowlist_roots = [{}]\n",
+            roots
+                .iter()
+                .map(|r| format!("{:?}", r.to_string_lossy().replace('\\', "/")))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    )
+    .unwrap();
+    let paths = SoldrPaths::with_root(root.clone());
+    let log = root.join("auto_gc.log");
+
+    run_stale_target_pass(&paths, &crate::core::AutoGcConfig::default(), &log);
+
+    assert!(
+        !target.exists(),
+        "idle agent-worktree target should be evicted"
+    );
+    assert!(workspace.join("Cargo.toml").exists(), "workspace untouched");
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.contains("stale-targets days=14"), "{text}");
+    assert!(text.contains("dedupe-targets"), "{text}");
 }
 
 #[test]
@@ -209,7 +278,7 @@ fn stale_target_pass_evicts_idle_discovered_target_once_per_day() {
         ..crate::core::AutoGcConfig::default()
     };
 
-    run_stale_target_eviction(&paths, &config, &log);
+    run_stale_target_pass(&paths, &config, &log);
 
     assert!(!target.exists(), "idle target should be evicted");
     assert!(workspace.join("Cargo.toml").exists(), "workspace untouched");

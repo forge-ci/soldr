@@ -408,9 +408,16 @@ pub struct AutoGcConfig {
     /// (soldr#4031). When non-zero, the background sweeper deletes every
     /// registered or discovered `target/` (under the GC allowlist roots)
     /// that has not been used for this many days, regardless of free
-    /// space. `0` (the default) disables the pass.
-    #[serde(default)]
+    /// space. Defaults to 14; `0` disables the pass.
+    #[serde(default = "AutoGcConfig::default_stale_target_days")]
     pub stale_target_days: u64,
+    /// Content-addressed dedupe of immutable `target/` artifacts across
+    /// worktrees (soldr#4033): byte-identical `deps/*.rlib|rmeta` and
+    /// build-script `out/` files are collapsed into one stored copy
+    /// (reflink, or read-only hardlink for `deps/`). Runs in the same
+    /// daily background pass as stale-target eviction. Defaults to `true`.
+    #[serde(default = "AutoGcConfig::default_dedupe_targets")]
+    pub dedupe_targets: bool,
 }
 
 impl AutoGcConfig {
@@ -426,6 +433,12 @@ impl AutoGcConfig {
     pub const fn default_min_age_secs() -> u64 {
         3600
     }
+    pub const fn default_stale_target_days() -> u64 {
+        14
+    }
+    pub const fn default_dedupe_targets() -> bool {
+        true
+    }
 }
 
 impl Default for AutoGcConfig {
@@ -435,7 +448,8 @@ impl Default for AutoGcConfig {
             trigger_free_gb: Self::default_trigger_free_gb(),
             target_free_gb: Self::default_target_free_gb(),
             min_age_secs: Self::default_min_age_secs(),
-            stale_target_days: 0,
+            stale_target_days: Self::default_stale_target_days(),
+            dedupe_targets: Self::default_dedupe_targets(),
         }
     }
 }

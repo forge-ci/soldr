@@ -87,6 +87,10 @@ fn dylint_child_runs_under_the_home_its_targets_are_provisioned_in() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let fixture = fixture();
+    // Home resolution walks up from the cwd for a repo-local `.rustup`; from
+    // a checkout under `$HOME` that walk reaches the caller's real
+    // `~/.rustup`. Run from the fixture root, which has no such ancestor.
+    let _cwd = crate::CwdGuard::enter(fixture._root.path());
     let _root = EnvVarGuard::set(
         crate::core::SOLDR_CACHE_DIR_ENV_VAR,
         fixture.managed_rustup.parent().expect("soldr root"),

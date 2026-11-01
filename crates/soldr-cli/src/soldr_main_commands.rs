@@ -41,6 +41,9 @@ fn run_shims_command(json: bool) -> Result<(), SoldrError> {
 async fn run_toolchain_subcommand(subcommand: ToolchainSubcommand) -> Result<(), SoldrError> {
     match subcommand {
         ToolchainSubcommand::Install => exit_with(toolchain::run_toolchain_install()),
+        ToolchainSubcommand::Dedupe { json } => {
+            exit_with(crate::toolchain_store::run_toolchain_dedupe(json))
+        }
         ToolchainSubcommand::Prepare { target } => exit_with(
             crate::toolchain_prepare::run_toolchain_prepare_for_target(target.as_deref()),
         ),
@@ -335,6 +338,7 @@ async fn run_gc_cli(
             doc,
             subcommand_caches,
             dry_run,
+            unused_days,
         }) => {
             let effective_kind = gc_purge_kind(
                 kind,
@@ -345,8 +349,15 @@ async fn run_gc_cli(
                 doc,
                 subcommand_caches,
             );
-            match gc_purge_invocation(effective_kind, all, older_than, larger_than, json, dry_run)?
-            {
+            match gc_purge_invocation(
+                effective_kind,
+                all,
+                older_than,
+                larger_than,
+                json,
+                dry_run,
+                unused_days,
+            )? {
                 Some(invocation) => invocation,
                 None => return Ok(()),
             }
@@ -406,7 +417,13 @@ fn gc_purge_invocation(
     larger_than: String,
     json: bool,
     dry_run: bool,
+    unused_days: Option<u64>,
 ) -> Result<Option<gc::GcInvocation>, SoldrError> {
+    if unused_days.is_some() && !matches!(effective_kind, Some(GcListKind::RustupToolchain)) {
+        return Err(SoldrError::Other(
+            "gc purge --unused-days is only supported with `--kind rustup_toolchain`".to_string(),
+        ));
+    }
     // `--dry-run` exists for the rustup toolchain purge (soldr#3507).
     // Every other kind rejects it loudly instead of pretending to honor
     // it; the three cargo-owned report-only kinds below keep their
@@ -433,7 +450,7 @@ fn gc_purge_invocation(
     match effective_kind {
         Some(GcListKind::RustupToolchain) => {
             // Real deletion, delegated: rustup owns the bytes (soldr#3507).
-            gc::run_gc_purge_rustup_toolchain_command(all, json, dry_run)?;
+            gc::run_gc_purge_rustup_toolchain_command(all, json, dry_run, unused_days)?;
             Ok(None)
         }
         Some(GcListKind::CargoRegistrySrc) => {
@@ -502,6 +519,11 @@ async fn run_gc_subcommand(subcommand: GcSubcommand) -> Result<(), SoldrError> {
         GcSubcommand::Locations { json } => gc::run_gc_locations_command(json),
         GcSubcommand::Sweep(args) => gc::run_gc_sweep_command(*args),
         GcSubcommand::Target(args) => gc::run_gc_target_command(*args),
+        GcSubcommand::Dedupe {
+            paths,
+            dry_run,
+            json,
+        } => gc::run_gc_dedupe_command(paths, dry_run, json),
         GcSubcommand::Maintain { root, json } => {
             let status = crate::daemon::maintenance::run_manual_root(root)
                 .await

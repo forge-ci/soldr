@@ -442,7 +442,16 @@ pub(crate) async fn prepare_cargo_invocation(
     let paths = SoldrPaths::new()?;
     let feature_args = cargo_feature_flags(&args);
     let prep = prepare_target(&paths, &target, &feature_args).await?;
-    apply_to_process(&prep);
+    if crate::cargo_front_door::first_cargo_subcommand(&args) == Some("dylint") {
+        // soldr#4056: cargo-dylint first builds the lint library for the
+        // host with no `--target`, where a process-global
+        // `CARGO_ENCODED_RUSTFLAGS` reaches host build scripts. Keep the
+        // target's rustflags target-scoped; only the nested `--target`
+        // check reads them.
+        apply_to_process_target_scoped(&prep);
+    } else {
+        apply_to_process(&prep);
+    }
     Ok(crate::cli_dispatch::insert_cargo_config_args(
         args,
         &prep.cargo_args,
@@ -542,6 +551,17 @@ pub(crate) fn apply_to_process(prep: &BlessedPrep) {
     if let Some(encoded) = encoded_rustflags {
         std::env::set_var("CARGO_ENCODED_RUSTFLAGS", encoded);
         std::env::remove_var("RUSTFLAGS");
+    }
+    crate::prepend_path_dirs_to_env(&prep.path_prefix());
+}
+
+/// Like [`apply_to_process`], but leaves `CARGO_ENCODED_RUSTFLAGS` /
+/// `RUSTFLAGS` untouched so target rustflags stay in
+/// `CARGO_TARGET_<triple>_RUSTFLAGS` and never reach a host-only cargo build
+/// (soldr#4056).
+pub(crate) fn apply_to_process_target_scoped(prep: &BlessedPrep) {
+    for (key, value) in resolved_env(prep) {
+        std::env::set_var(key, value);
     }
     crate::prepend_path_dirs_to_env(&prep.path_prefix());
 }

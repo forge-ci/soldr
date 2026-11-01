@@ -2166,6 +2166,8 @@ soldr gc purge --registry-src --all            # delete extracted registry sourc
 soldr gc purge --git-checkouts --all           # delete git checkout worktrees
 soldr gc purge --kind rustup_toolchain --dry-run --all  # list unprotected toolchains; deletes nothing
 soldr gc purge --kind rustup_toolchain --all   # uninstall them via `rustup toolchain uninstall`
+soldr gc purge --kind rustup_toolchain --unused-days 30 --all  # only toolchains no pin used in 30 days
+soldr toolchain dedupe [--json]  # hardlink duplicate toolchains across rustup homes into one store (soldr#4027)
 ```
 
 Defaults:
@@ -2183,11 +2185,14 @@ Safety guards (from `docs/TARGET_GC_PROPOSAL.md`):
 - skip a candidate whose workspace `Cargo.lock` was modified within
   the staleness window
 - skip a candidate whose `target/.cargo-lock` exists (active build)
-- only consider paths under `gc.allowlist_roots` (default: `~/dev`)
+- only consider paths under `gc.allowlist_roots` (default: `~/dev` and
+  `~/.clud/worktrees`)
 
 The summary includes the registry path, eligible candidate count, total
-reclaimable size, skipped/dropped counts, and the largest eligible
-target directories with size and last-used age.
+reclaimable size, skipped/dropped counts, and the next target directories
+to be reclaimed with size, last-used age, and the split of their bytes into
+`shared=` (hardlinked elsewhere, not freed until the last link goes) and
+`unique=` (freed by deleting that target) (soldr#4033).
 
 `gc list --json` uses the issue #323 taxonomy. Derived kinds can be
 purged through explicit opt-in flags or `--kind`; the cargo-owned primary
@@ -2604,24 +2609,60 @@ enabled = true          # opt-out; on by default
 trigger_free_gb = 20    # start GC when free space < this
 target_free_gb = 30     # stop GC when free space >= this
 min_age_secs = 3600     # never touch anything modified within this window
-stale_target_days = 0   # >0: evict target/ dirs idle this many days (soldr#4031)
+stale_target_days = 14  # evict target/ dirs idle this many days; 0 = off (soldr#4031)
+dedupe_targets = true   # share identical target/ artifacts across worktrees (soldr#4033)
 ```
 
-`stale_target_days` (soldr#4031, opt-in, default `0` = off) adds an
-age-based pass that runs regardless of free space, at most once a day: every
-registered `target/` plus every `target/` discovered under
-`[gc] allowlist_roots` (default `~/dev`) that has not been used for that many
-days is deleted through the same guarded purge path as tier 2 (allowlist,
-active-build guards, 256M floor, `min_age_secs` floor). Idle agent worktrees
-stop holding their full `target/` forever; add your worktree root (for example
-`~/.clud/worktrees`) to `allowlist_roots` if it lives outside `~/dev`. Enable
-with `soldr config set auto_gc.stale_target_days 14`.
+`stale_target_days` (soldr#4031, default `14`, `0` = off) is an age-based
+pass that runs regardless of free space, at most once a day: every registered
+`target/` plus every `target/` discovered under `[gc] allowlist_roots`
+(default `~/dev` and the agent worktree root `~/.clud/worktrees`) that has not
+been used for that many days is deleted through the same guarded purge path as
+tier 2 (allowlist, active-build guards, 256M floor, `min_age_secs` floor,
+bounded budget). Idle agent worktrees stop holding their full `target/`
+forever. Setting `allowlist_roots` explicitly replaces both defaults. Disable
+with `soldr config set auto_gc.stale_target_days 0`.
 
 Dependency artifacts are already shared across worktrees through the zccache
 content-addressed store: on a cache hit the output is delivered into each
 worktree's `target/` as a reflink or hardlink when the probed volume pair
 supports it (`--zccache-mode`, see the materialization mode docs), so the
 per-worktree cost on a CoW filesystem is mostly metadata.
+
+`dedupe_targets` (soldr#4033, default `true`) covers what zccache cannot:
+build-script outputs (`target/<profile>/build/<pkg>/out/**`, which never pass
+through the rustc wrapper) and dependency artifacts zccache delivered as plain
+copies. After the stale-target pass, the same daily run hashes (blake3) the
+immutable artifacts of every surviving target and stores each distinct file
+once under `~/.soldr/target-store/`:
+
+- `deps/*.rlib` / `deps/*.rmeta` are reflinked to the stored copy, or, when
+  the volume has no reflink, hardlinked to it after the shared inode is made
+  read-only (rustc replaces these by rename, so an in-place writer fails
+  instead of corrupting other worktrees).
+- build-script `out/` files are only ever reflinked (copy-on-write), never
+  hardlinked, because build scripts often rewrite `OUT_DIR` files in place.
+- targets with a live cargo build are skipped, every `.cargo-lock` is held
+  for the duration, and files younger than `min_age_secs`, under 4 KiB, or
+  changed while hashing are left alone. Hardlinks never cross volumes.
+- store blobs no target links any more are pruned; reflinked blobs are
+  pruned after 30 days unused.
+
+Build scripts are deliberately not *cached* (replayed without running):
+their inputs are arbitrary and `rerun-if-*` is advisory, so a replay could be
+stale. Dedupe only collapses bytes cargo already produced. Run it on demand,
+or preview it, with `soldr gc dedupe`:
+
+```bash
+soldr gc dedupe                       # all known targets under the allowlist roots
+soldr gc dedupe --dry-run             # report what would be shared
+soldr gc dedupe ~/dev/a/target ~/dev/b/target --json
+```
+
+The report lists, per target, `total` / `shared` / `unique` bytes. JSON
+output is `{"schema_version": 1, "report": {...}, "targets": [{"path",
+"total_bytes", "shared_bytes", "unique_bytes"}]}`. On non-Unix hosts the pass
+reports `"supported": false` and changes nothing.
 
 Fallback behavior:
 

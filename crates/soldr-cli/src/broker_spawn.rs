@@ -191,6 +191,12 @@ pub(crate) fn front_door_command_shape(raw_args: &[String]) -> bool {
 /// …) had the same effect. Only KNOWN global flags are skipped: an
 /// unrecognized flag (`--version`, `-V`, `--help`) keeps the deliberate
 /// no-spawn behavior the flag-shaped rule exists for.
+///
+/// `--zccache-mode <MODE>` and `--porcelain` were missing here (they are in
+/// `replay_nextest::is_invocation`'s copy of this list), so
+/// `soldr --zccache-mode copy cargo build` against a cold root read
+/// `--zccache-mode` as the command, started no broker, and every compile
+/// failed with "could not connect to the soldr daemon".
 fn first_command_positional(raw_args: &[String]) -> Option<&String> {
     let mut iter = raw_args.iter().skip(1);
     while let Some(arg) = iter.next() {
@@ -201,12 +207,19 @@ fn first_command_positional(raw_args: &[String]) -> Option<&String> {
             | "--timestamp-lines"
             | "--no-timestamp-lines"
             | "--no-cache-states"
+            | "--porcelain"
             | "--debug" => continue,
-            "--zccache" | "--jobs" => {
+            "--zccache" | "--jobs" | "--zccache-mode" => {
                 let _ = iter.next();
                 continue;
             }
-            value if value.starts_with("--zccache=") || value.starts_with("--jobs=") => continue,
+            value
+                if value.starts_with("--zccache=")
+                    || value.starts_with("--jobs=")
+                    || value.starts_with("--zccache-mode=") =>
+            {
+                continue
+            }
             _ => return Some(arg),
         }
     }

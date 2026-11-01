@@ -89,18 +89,21 @@ def select_mode(
     label_aliases: LabelAliases | None = None,
 ) -> ModeSelection:
     aliases = label_aliases or LabelAliases()
-    if event_name == "workflow_dispatch":
+    if event_name in ("workflow_dispatch", "schedule"):
+        # Nightly (schedule) is the deferred full matrix; the workflow passes
+        # github.sha as its candidate so both events bind one exact commit.
         if not re.fullmatch(r"[0-9a-fA-F]{40}", candidate_sha):
-            raise ValueError(
-                "workflow_dispatch requires a full 40-character candidate SHA"
-            )
+            raise ValueError(f"{event_name} requires a full 40-character candidate SHA")
         return ModeSelection("full", candidate_sha.lower())
     if event_name == "merge_group":
         group = event.get("merge_group")
         sha = group.get("head_sha") if isinstance(group, dict) else None
         if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
             raise ValueError("merge_group head SHA is missing or invalid")
-        return ModeSelection("full", sha.lower())
+        # Fast queue: the merge group validates the linux x64 host lane only
+        # (lint + build-linux-x64). The full matrix is deferred to the push to
+        # main, the nightly schedule and candidate dispatch, never deleted.
+        return ModeSelection("minimal", sha.lower())
     if event_name == "pull_request":
         pr = event.get("pull_request")
         if not isinstance(pr, dict):
@@ -132,7 +135,8 @@ def select_mode(
         sha = event.get("after")
         if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
             raise ValueError("push commit SHA is missing or invalid")
-        return ModeSelection("minimal", sha.lower())
+        # Post-merge full matrix: every commit landing on main runs it.
+        return ModeSelection("full", sha.lower())
     raise ValueError(f"unsupported CI event: {event_name}")
 
 
@@ -311,8 +315,7 @@ def main() -> int:
         output.write(f"selector_schema={SELECTOR_SCHEMA}\n")
         output.write(f"author_permission={permission or 'unknown'}\n")
     print(
-        f"CI mode: {mode}; checked out SHA: {sha}; "
-        f"author permission: {permission or 'unknown'}"
+        f"CI mode: {mode}; checked out SHA: {sha}; author permission: {permission or 'unknown'}"
     )
     return 0
 

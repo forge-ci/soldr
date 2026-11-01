@@ -67,3 +67,13 @@ def test_the_cap_detector_sees_both_spellings() -> None:
     assert _sets_cap({"run": 'echo "SOLDR_JOBS=1" >> "$GITHUB_ENV"'})
     assert not _sets_cap({"run": "echo SOLDR_JOBS is documented here"})
     assert not _sets_cap({"env": {"RUSTFLAGS": "-C debuginfo=0"}})
+
+
+def test_swapfile_is_sized_to_free_disk_before_allocation() -> None:
+    # A fixed-size swapfile on a runner whose /mnt shares a small OS disk
+    # fills the disk and fails the job before any build ("No space left on
+    # device"). The script must measure /mnt and cap the size first.
+    script = (REPO_ROOT / ".github/scripts/setup_ci_swap.sh").read_text()
+    measure = script.index("df -BG --output=avail /mnt")
+    assert measure < script.index('fallocate -l "${SIZE_GB}G"')
+    assert "CI_SWAP_RESERVE_GB" in script

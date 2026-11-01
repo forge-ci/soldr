@@ -672,3 +672,44 @@ fn cross_dylint_requires_the_same_target_prep_as_clippy() {
         "clippy --workspace --target x86_64-pc-windows-msvc"
     )));
 }
+
+// soldr#4056: cargo-dylint builds its lint library for the host with no
+// `--target`; a Darwin prep promoted into `CARGO_ENCODED_RUSTFLAGS` handed
+// `-C link-arg=--target=arm64-apple-darwin` to host build-script links. The
+// dylint path keeps target rustflags in the target-scoped key only.
+#[test]
+fn target_scoped_apply_keeps_target_rustflags_out_of_host_builds() {
+    let _lock = crate::TEST_PROCESS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let target_key = "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS";
+    let names = [target_key, "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"];
+    let previous = names.map(std::env::var_os);
+    for name in names {
+        std::env::remove_var(name);
+    }
+    let mut prep = BlessedPrep::default();
+    prep.env.push((
+        target_key.to_string(),
+        "-C link-arg=--target=arm64-apple-darwin".to_string(),
+    ));
+
+    apply_to_process_target_scoped(&prep);
+    let target = std::env::var(target_key).ok();
+    let encoded = std::env::var_os("CARGO_ENCODED_RUSTFLAGS");
+    let rustflags = std::env::var_os("RUSTFLAGS");
+    for (name, value) in names.into_iter().zip(previous) {
+        if let Some(value) = value {
+            std::env::set_var(name, value);
+        } else {
+            std::env::remove_var(name);
+        }
+    }
+
+    assert_eq!(
+        target.as_deref(),
+        Some("-C link-arg=--target=arm64-apple-darwin")
+    );
+    assert!(encoded.is_none(), "{encoded:?}");
+    assert!(rustflags.is_none(), "{rustflags:?}");
+}

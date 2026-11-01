@@ -2,5 +2,5 @@
 //! versus spawn-and-wait.
 
 pub use crate::platform_imp::process::spawn::{
-    daemon_stdio, exec_or_status, spawn_detached, spawn_holding_fork_window,
+    daemon_command, daemon_stdio, exec_or_status, spawn_detached, spawn_holding_fork_window,
 };

@@ -216,6 +216,9 @@ fn global_flags_before_the_verb_stay_eligible() {
         &["soldr", "--zccache", "managed", "cargo", "build"],
         &["soldr", "--zccache=managed", "cargo", "build"],
         &["soldr", "--jobs", "4", "cargo", "build"],
+        &["soldr", "--zccache-mode", "copy", "cargo", "build"],
+        &["soldr", "--zccache-mode=link", "cargo", "build"],
+        &["soldr", "--porcelain", "cargo", "build"],
     ];
     for case in cases {
         let raw_args: Vec<String> = case.iter().map(|arg| arg.to_string()).collect();

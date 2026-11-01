@@ -539,7 +539,6 @@ fn failure_excerpt_carries_the_compiler_location_for_a_build_error() {
     );
 }
 
-#[test]
 fn summarize_counts_a_repeated_warning_once() {
     let output = concat!(
         "warning: unused variable: `spare`\n",
@@ -593,6 +592,42 @@ fn summarize_does_not_count_a_warning_tally_with_a_fix_suggestion() {
     assert!(summary.warnings.is_empty());
 }
 
+fn failure_excerpt_carries_a_build_scripts_c_compiler_error() {
+    // cc-rs relays the C compiler's diagnostics as `cargo:warning=` lines in
+    // the build script's stdout; its own `error occurred in cc-rs` line is a
+    // multi-KB argv that names no source location.
+    let output = concat!(
+        "error: failed to run custom build command for `oracle v0.1.0`\n",
+        "\n",
+        "Caused by:\n",
+        "  process didn't exit successfully: `build-script-build` (exit status: 1)\n",
+        "  --- stdout\n",
+        "  cargo:rerun-if-changed=oracle/windows_keys.c\n",
+        "  OUT_DIR = Some(/tmp/out)\n",
+        "  cargo:warning=oracle/windows_keys.c:42:9: error: unused variable 'k' [-Werror=unused-variable]\n",
+        "  cargo:warning=   42 |     int k;\n",
+        "  cargo:warning=      |         ^\n",
+        "  exit status: 1\n",
+        "  --- stderr\n",
+        "  error occurred in cc-rs: command did not execute successfully: \"cc\" \"-O0\"\n",
+    );
+    let summary = summarize("cargo check", 101, output);
+    assert!(
+        summary
+            .excerpt
+            .iter()
+            .any(|l| l.starts_with("oracle/windows_keys.c:42:9: error: unused variable")),
+        "the C compiler's located error is the actionable line: {:?}",
+        summary.excerpt
+    );
+    assert!(
+        !summary.excerpt.iter().any(|l| l.contains("cargo:warning=")),
+        "the cc-rs relay prefix is noise: {:?}",
+        summary.excerpt
+    );
+}
+
+#[test]
 fn failure_excerpt_is_bounded_on_a_pathological_stream() {
     let mut output = String::new();
     for i in 0..5_000 {
@@ -777,8 +812,11 @@ fn serialize_report_adds_broker_skew_only_when_observed() {
     };
     let line = serialize_report(&report, Some(&skew), &[]).expect("serialize");
     let value: serde_json::Value = serde_json::from_str(&line).expect("json");
-    assert_eq!(value["broker_skew"]["running_broker"], "soldr-0.9.44-aaaa");
-    assert_eq!(value["broker_skew"]["remedy"], "soldr broker remove");
+    // soldr#4040: one short string, not an object of full identities.
+    assert_eq!(
+        value["broker_skew"],
+        "broker 0.9.44-aaaa is running, this is 0.9.46-bbbb; run: soldr broker remove"
+    );
     assert_eq!(line.lines().count(), 1);
 }
 

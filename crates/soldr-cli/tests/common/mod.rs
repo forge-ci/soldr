@@ -451,6 +451,9 @@ pub(crate) fn scrub_outer_soldr_env(command: &mut Command) -> &mut Command {
         // CI flips SOLDR_REENTRANCY_GUARD=strict (soldr#2566). Scrub both.
         .env_remove(soldr_cli::reentrancy_guard::IN_SOLDR_PID_ENV)
         .env_remove(soldr_cli::reentrancy_guard::GUARD_MODE_ENV)
+        // An agent's own `SOLDR_PORCELAIN=1` must not turn a fixture's stderr
+        // assertions into JSON-only runs; a porcelain test sets it explicitly.
+        .env_remove("SOLDR_PORCELAIN")
         // soldr#2785: never let a fixture delegate to a globally-installed
         // soldr. `global_upgrade::maybe_delegate` walks ancestors for
         // `[workspace.metadata.soldr] prefer_newer_global`, which THIS
@@ -1970,9 +1973,56 @@ pub(crate) fn isolated_test_path() -> std::ffi::OsString {
         let dirs = [fake_llvm, system_root.join("System32"), system_root];
         std::env::join_paths(dirs).expect("failed to join isolated PATH")
     } else {
-        std::env::join_paths([fake_llvm, PathBuf::from("/usr/bin"), PathBuf::from("/bin")])
-            .expect("failed to join isolated PATH")
+        std::env::join_paths([
+            fake_llvm,
+            isolated_posix_utils_dir(),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+        ])
+        .expect("failed to join isolated PATH")
     }
+}
+
+/// The POSIX utilities fixture scripts call by name (`exec sleep`, `dirname`,
+/// `mkdir -p`, ...).
+const FIXTURE_POSIX_UTILS: &[&str] = &[
+    "basename", "cat", "chmod", "cp", "cut", "date", "dirname", "env", "false", "grep", "head",
+    "kill", "ln", "ls", "mkdir", "mktemp", "mv", "printf", "readlink", "realpath", "rm", "sed",
+    "sleep", "sort", "tail", "tee", "touch", "tr", "true", "uname", "wc",
+];
+
+/// One process-wide directory of forwarders for [`FIXTURE_POSIX_UTILS`], each
+/// re-executing the utility the caller's `PATH` resolves.
+///
+/// `isolated_test_path` pins PATH to the system directories so no ambient
+/// tool can satisfy a lookup, which assumed the utilities live in `/usr/bin`
+/// or `/bin`. They do not everywhere: on NixOS both are envfs mounts that
+/// resolve a name through the *calling process's* PATH, so under the pinned
+/// PATH a fixture found no `sleep`, `dirname` or `mkdir` at all. Forwarding
+/// only these names keeps the pin's intent -- no ambient compiler, Cargo or
+/// soldr becomes reachable -- while the fixtures get their shell utilities.
+/// The forwarder execs the PATH entry, not its canonical target, so a
+/// multicall binary (coreutils, busybox) still sees the utility's name.
+fn isolated_posix_utils_dir() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = unique_temp_dir("isolated-posix-utils");
+        let ambient = std::env::var_os("PATH").unwrap_or_default();
+        for name in FIXTURE_POSIX_UTILS {
+            let Some(found) = std::env::split_paths(&ambient)
+                .map(|entry| entry.join(name))
+                .find(|candidate| candidate.is_file())
+            else {
+                continue;
+            };
+            write_fake_script(
+                &fake_script_path(&dir, name),
+                &format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", found.display()),
+            );
+        }
+        dir
+    })
+    .clone()
 }
 
 /// One process-wide fake LLVM bin directory holding just a `clang` stub.
