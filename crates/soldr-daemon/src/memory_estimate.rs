@@ -24,7 +24,17 @@
 //!
 //! The coefficients are **uncalibrated placeholders**. They are deliberately
 //! monotone in every feature: fitting may change their magnitude, but more
-//! link input, fat LTO, or a single codegen unit must never predict *less*.
+//! link input, fat LTO, or more concurrent codegen threads must never predict
+//! *less*.
+//!
+//! soldr#4014: codegen units are priced as LLVM fan-out. A daemon-spawned
+//! rustc does not share Cargo's jobserver -- the daemon receives the client's
+//! `CARGO_MAKEFLAGS` as text over IPC, not the fds it names, and zccache
+//! deliberately drops it (`client_env_var_is_safe_to_replay`) -- so rustc runs
+//! up to `min(codegen units, cores)` LLVM workers on its own. Each concurrent
+//! worker holds its own module, so the estimate adds a per-thread working set
+//! instead of the manifest pinning large units to one thread. (Schema 3 priced
+//! a single unit *above* the default, which inverted the fan-out cost.)
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -38,7 +48,7 @@ use crate::core::SoldrPaths;
 
 /// Bumped on any field removal or meaning change so offline readers can refuse
 /// rows they cannot parse.
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 const MIB: u64 = 1024 * 1024;
 
@@ -52,6 +62,15 @@ const EXTERN_SUM_WEIGHT: u64 = 2;
 /// Extra weight on the largest single rlib, which bounds LLVM's working set
 /// more tightly than the total. Placeholder.
 const EXTERN_MAX_WEIGHT: u64 = 4;
+
+/// Working set each additional concurrent LLVM codegen thread holds
+/// (soldr#4014). Placeholder until fitted.
+const CODEGEN_THREAD_BYTES: u64 = 64 * MIB;
+
+/// rustc's codegen-unit count when `-C codegen-units` is absent (the
+/// non-incremental default; incremental builds use more units, but threads
+/// are capped by cores either way).
+const DEFAULT_CODEGEN_UNITS: u32 = 16;
 
 /// The unit's whole-program optimisation mode, read from `-C lto`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -184,6 +203,30 @@ fn emits_metadata_only(kinds: &str) -> bool {
 /// Predicted peak resident bytes for one compiler child. Placeholder model,
 /// monotone in every feature (see the module docs).
 pub(crate) fn estimate_peak_bytes(features: &UnitFeatures) -> u64 {
+    estimate_peak_bytes_with(features, host_parallelism())
+}
+
+fn host_parallelism() -> u32 {
+    std::thread::available_parallelism()
+        .map(|cores| u32::try_from(cores.get()).unwrap_or(u32::MAX))
+        .unwrap_or(1)
+}
+
+/// LLVM codegen threads this unit can run at once on `parallelism` cores.
+/// Metadata-only units do no codegen at all.
+pub(crate) fn codegen_threads(features: &UnitFeatures, parallelism: u32) -> u32 {
+    if features.emit_metadata_only {
+        return 0;
+    }
+    features
+        .codegen_units
+        .unwrap_or(DEFAULT_CODEGEN_UNITS)
+        .max(1)
+        .min(parallelism.max(1))
+}
+
+/// [`estimate_peak_bytes`] with the core count injected for tests.
+pub(crate) fn estimate_peak_bytes_with(features: &UnitFeatures, parallelism: u32) -> u64 {
     let linear = BASE_BYTES
         .saturating_add(features.extern_bytes.saturating_mul(EXTERN_SUM_WEIGHT))
         .saturating_add(features.max_extern_bytes.saturating_mul(EXTERN_MAX_WEIGHT));
@@ -192,12 +235,9 @@ pub(crate) fn estimate_peak_bytes(features: &UnitFeatures) -> u64 {
         LtoMode::Thin => 150,
         LtoMode::Fat => 300,
     };
-    let cgu_percent = if features.codegen_units == Some(1) {
-        125
-    } else {
-        100
-    };
-    let estimate = percent_of(percent_of(linear, lto_percent), cgu_percent);
+    let fanout = u64::from(codegen_threads(features, parallelism).saturating_sub(1))
+        .saturating_mul(CODEGEN_THREAD_BYTES);
+    let estimate = percent_of(linear, lto_percent).saturating_add(fanout);
     if features.emit_metadata_only {
         // No codegen and no link: the dominant term collapses toward the floor.
         BASE_BYTES.max(estimate / 4)
@@ -268,6 +308,8 @@ struct Row<'a> {
     max_extern_bytes: u64,
     lto: LtoMode,
     codegen_units: Option<u32>,
+    /// Concurrent LLVM threads the estimate priced (schema 4, soldr#4014).
+    codegen_threads: u32,
     estimate_bytes: u64,
     /// What admission actually decided, so a row shows where the estimate
     /// and today's name-list classifier disagree.
@@ -318,6 +360,7 @@ pub(crate) fn record_with_history(
         max_extern_bytes: features.max_extern_bytes,
         lto: features.lto,
         codegen_units: features.codegen_units,
+        codegen_threads: codegen_threads(features, host_parallelism()),
         estimate_bytes,
         exclusive,
         history_tree_peak_bytes: history.map(|unit| unit.tree_peak_rss_bytes),

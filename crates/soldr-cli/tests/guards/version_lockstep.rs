@@ -436,25 +436,32 @@ fn externalized_dependencies_are_exact_and_consistent() {
     }
 }
 
+/// soldr#4014: codegen units are selected per build intent (the cargo front
+/// door injects one unit for shipping builds, `SOLDR_CODEGEN_UNITS` opts in
+/// explicitly), never pinned in the manifest. A pin hides the amalgamated
+/// zccache unit's LLVM fan-out instead of letting admission price it.
 #[test]
-fn external_zccache_profiles_bound_internal_codegen_parallelism() {
+fn no_profile_pins_a_single_codegen_unit() {
     let root = repo_root();
     let manifest = fs::read_to_string(root.join("Cargo.toml")).expect("read workspace manifest");
-
-    for profile in [
-        "dev",
-        "test",
-        "release",
-        "ci-bootstrap",
-        "ci-release",
-        "ci-nextest",
-    ] {
-        let section = format!("profile.{profile}.package.zccache");
-        let lines = read_section_lines(&root.join("Cargo.toml"), &section);
-        assert!(
-            lines.iter().any(|line| line == "codegen-units = 1"),
-            "[{section}] must keep the amalgamated zccache unit single-codegen"
-        );
+    let mut section = String::new();
+    let mut pinned = Vec::new();
+    for raw in manifest.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') {
+            section = line.trim_matches(|c| c == '[' || c == ']').to_string();
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if section.starts_with("profile.") && key.trim() == "codegen-units" && value.trim() == "1" {
+            pinned.push(section.clone());
+        }
     }
-    assert!(manifest.contains("[profile.dev.package.zccache]"));
+    assert!(
+        pinned.is_empty(),
+        "these Cargo.toml profiles pin `codegen-units = 1`; select it per build \
+         intent instead (SOLDR_RELEASE_CI / SOLDR_CODEGEN_UNITS, soldr#4014): {pinned:?}"
+    );
 }

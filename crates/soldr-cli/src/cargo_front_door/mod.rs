@@ -40,6 +40,7 @@ mod cache_plan;
 pub(crate) mod cache_states; // soldr#2302 — HIT/MISS annotations + stats
 mod clang_cl_shim;
 mod cmake_need;
+mod codegen_units;
 mod component_install;
 mod config_args;
 pub(crate) mod cook_hydrate;

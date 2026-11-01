@@ -214,12 +214,12 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
-# The crates.io zccache package folds its upstream workspace into one large
-# rustc unit. Keep its internal LLVM fan-out to one without slowing ordinary
-# dependencies, which retain the wildcard profile above.
-[profile.dev.package.zccache]
-debug = false
-codegen-units = 1
+# soldr#4014: no profile pins `codegen-units`. The amalgamated zccache unit's
+# LLVM fan-out is bounded by compiler admission (zccache's exclusive classifier
+# for its own crate, plus the codegen-thread term in soldr-daemon's
+# memory_estimate.rs), and soldr selects one unit automatically only for
+# shipping builds. See docs/BUILD_PROFILE_LEVERS.md ("codegen units").
+# `version_lockstep.rs` guards that no profile reintroduces the pin.
 
 # soldr#3138: blake3 must be optimized even in the dev/test profiles.
 #
@@ -235,7 +235,7 @@ codegen-units = 1
 # The hash is 98% of a cold broker bringup and dwarfs the image copy beside
 # it. Optimized, blake3 runs at GB/s and the same hash is a rounding error.
 #
-# `codegen-units = 1` above does NOT imply optimization -- `opt-level` is
+# A single codegen unit does NOT imply optimization -- `opt-level` is
 # still 0 for dev -- which is why this needs saying separately. Scoped to the
 # one crate that does the work, so the rest of the workspace keeps its fast
 # unoptimized builds and its debuggability. `constant_time_eq` and `arrayvec`
@@ -289,10 +289,6 @@ debug = "line-tables-only"
 
 [profile.test.package."*"]
 debug = false
-
-[profile.test.package.zccache]
-debug = false
-codegen-units = 1
 
 # Same reason as `[profile.dev.package.blake3]` above. The gate's test binaries
 # build under this profile, and roughly 40 integration tests each cold-start
@@ -360,20 +356,12 @@ strip = "none"
 # Thin LTO is the practical release-quality compromise: it preserves most of
 # the optimization and size benefit while keeping CI compilation feasible.
 lto = "thin"
-# Single codegen unit unlocks the last bit of optimization. Slows
-# clean builds further; release-only, so acceptable. Deliberate, not a copy of
-# the zccache override below (soldr#3055): it predates that override (#929,
-# citing #920's size work), and the owner's standing direction is that shipped
-# release builds stay at maximum optimization with LTO.
-codegen-units = 1
-
-# soldr#3055: bound the amalgamated zccache unit here too, rather than leaning
-# on the workspace-wide `codegen-units = 1` above. Every other profile carries
-# this override; without it, loosening the release-wide setting would silently
-# unbound the one crate that genuinely needs a single codegen unit.
-# `version_lockstep.rs` guards it alongside the others.
-[profile.release.package.zccache]
-codegen-units = 1
+# soldr#4014: `codegen-units` is not pinned here. Shipped release builds stay
+# at maximum optimization (#920/#929/#3055): the publishing lane runs with
+# `SOLDR_RELEASE_CI=1`, and soldr's cargo front door then injects
+# `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1` (auto-release.yml and
+# native_release_build.py also set it explicitly). Local `--release` builds
+# get Cargo's default and compile in parallel.
 
 # soldr#1282 — fast-compile profile for the CI bootstrap step.
 # `Bootstrap soldr for SDK / blessed-build prep` builds a throwaway
@@ -399,11 +387,9 @@ strip = "none"
 # way.
 debug = false
 
-# The bootstrap deliberately bypasses the compiler cache, so zccache cannot
-# use its runtime admission gate while its own amalgamated crate is compiling.
-[profile.ci-bootstrap.package.zccache]
-debug = false
-codegen-units = 1
+# The bootstrap bypasses the compiler cache, so rustc runs directly under
+# Cargo's jobserver and its LLVM codegen threads take Cargo's tokens
+# (soldr#4014) -- no per-crate pin is needed.
 
 # soldr#1357 — fast-compile profile for CI cross-build lanes. Same
 # rationale as ci-bootstrap but applied to Stage B of
@@ -431,10 +417,6 @@ lto = false
 codegen-units = 16
 strip = "symbols"
 debug = false
-
-[profile.ci-release.package.zccache]
-debug = false
-codegen-units = 1
 
 # soldr#1248 — fast-compile profile for CI cross-build lanes that also
 # produce nextest archives. It matches ci-release's compile-time wins so
@@ -469,10 +451,6 @@ split-debuginfo = "off"
 # without losing the soldr#1168 line-table backtrace target.
 [profile.ci-nextest.package."*"]
 debug = false
-
-[profile.ci-nextest.package.zccache]
-debug = false
-codegen-units = 1
 
 [workspace.lints.rust]
 unused_mut = "deny"
