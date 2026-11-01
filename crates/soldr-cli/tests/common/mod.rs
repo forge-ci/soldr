@@ -451,6 +451,9 @@ pub(crate) fn scrub_outer_soldr_env(command: &mut Command) -> &mut Command {
         // CI flips SOLDR_REENTRANCY_GUARD=strict (soldr#2566). Scrub both.
         .env_remove(soldr_cli::reentrancy_guard::IN_SOLDR_PID_ENV)
         .env_remove(soldr_cli::reentrancy_guard::GUARD_MODE_ENV)
+        // An agent's own `SOLDR_PORCELAIN=1` must not turn a fixture's stderr
+        // assertions into JSON-only runs; a porcelain test sets it explicitly.
+        .env_remove("SOLDR_PORCELAIN")
         // soldr#2785: never let a fixture delegate to a globally-installed
         // soldr. `global_upgrade::maybe_delegate` walks ancestors for
         // `[workspace.metadata.soldr] prefer_newer_global`, which THIS
