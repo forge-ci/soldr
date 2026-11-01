@@ -1,0 +1,86 @@
+{
+ "captured": "live cook-base listing of forge-ci/soldr after push run 41338706392 (2026-11-01; main lock 545c1ee3e34a8565, v3 current; v2 lba58121b6bc8138b superseded)",
+ "usage_bytes": null,
+ "entries": [
+  {
+   "createdAt": "2026-10-30T11:01:36.353571Z",
+   "id": 9751967299,
+   "key": "cook-base-v2-linux-x64-glibc-rustc1.98.1-f8a8107f7-lba58121b6bc8138b-soldr0.9.46",
+   "lastAccessedAt": "2026-10-30T11:01:36.353571Z",
+   "ref": "refs/heads/main",
+   "sizeInBytes": 541141541
+  },
+  {
+   "createdAt": "2026-10-30T11:00:04.404807Z",
+   "id": 9751877468,
+   "key": "cook-base-v2-linux-x64-glibc-rustc1.98.1-faaa264c8-lba58121b6bc8138b-soldr0.9.46",
+   "lastAccessedAt": "2026-10-30T11:00:04.404807Z",
+   "ref": "refs/heads/main",
+   "sizeInBytes": 453446613
+  },
+  {
+   "createdAt": "2026-10-30T11:01:45.827427Z",
+   "id": 9751953262,
+   "key": "cook-base-v2-linux-x64-glibc-rustc1.98.1-fbaf623ad-lba58121b6bc8138b-soldr0.9.46",
+   "lastAccessedAt": "2026-10-30T11:01:45.827427Z",
+   "ref": "refs/heads/main",
+   "sizeInBytes": 576596340
+  },
+  {
+   "createdAt": "2026-10-30T11:01:11.536802Z",
+   "id": 9751930074,
+   "key": "cook-base-v2-linux-x64-glibc-rustc1.98.1-fbf1bfb42-lba58121b6bc8138b-soldr0.9.46",
+   "lastAccessedAt": "2026-10-30T11:01:11.536802Z",
+   "ref": "refs/heads/main",
+   "sizeInBytes": 449549056
+  },
+  {
+   "createdAt": "2026-10-30T10:56:55.962155Z",
+   "id": 9751743035,
+   "key": "cook-base-v2-linux-x64-glibc-rustc1.98.1-fc0f411d4-lba58121b6bc8138b-soldr0.9.46",
+   "lastAccessedAt": "2026-10-30T10:56:55.962155Z",
+   "ref": "refs/heads/main",
+   "sizeInBytes": 539704017
+  },
+  {
+   "createdAt": "2026-11-01T19:20:00.829248Z",
+   "id": 9841496334,
+   "key": "cook-base-v3-linux-x64-glibc-rustc1.98.1-f8a8107f7-l545c1ee3e34a8565-soldr0.9.50",
+   "lastAccessedAt": "2026-11-01T19:21:20.625989Z",
+   "ref": "refs/heads/main",
+   "sizeInBytes": 543065913
+  },
+  {
+   "createdAt": "2026-11-01T19:07:32.411562Z",
+   "id": 9841185127,
+   "key": "cook-base-v3-linux-x64-glibc-rustc1.98.1-faaa264c8-l545c1ee3e34a8565-soldr0.9.50",
+   "lastAccessedAt": "2026-11-01T19:14:09.254587Z",
+   "ref": "refs/heads/main",
+   "sizeInBytes": 455081907
+  },
+  {
+   "createdAt": "2026-11-01T19:07:01.000365Z",
+   "id": 9841166394,
+   "key": "cook-base-v3-linux-x64-glibc-rustc1.98.1-fbaf623ad-l545c1ee3e34a8565-soldr0.9.50",
+   "lastAccessedAt": "2026-11-01T19:24:47.132935Z",
+   "ref": "refs/heads/main",
+   "sizeInBytes": 579727451
+  },
+  {
+   "createdAt": "2026-11-01T19:10:11.775764Z",
+   "id": 9841234713,
+   "key": "cook-base-v3-linux-x64-glibc-rustc1.98.1-fbf1bfb42-l545c1ee3e34a8565-soldr0.9.50",
+   "lastAccessedAt": "2026-11-01T19:14:33.576773Z",
+   "ref": "refs/heads/main",
+   "sizeInBytes": 450340013
+  },
+  {
+   "createdAt": "2026-11-01T19:13:58.966487Z",
+   "id": 9841349515,
+   "key": "cook-base-v3-linux-x64-glibc-rustc1.98.1-fc0f411d4-l545c1ee3e34a8565-soldr0.9.50",
+   "lastAccessedAt": "2026-11-01T19:17:51.212680Z",
+   "ref": "refs/heads/main",
+   "sizeInBytes": 542448033
+  }
+ ]
+}
