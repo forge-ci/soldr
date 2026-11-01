@@ -734,14 +734,14 @@ def checks() -> list[Check]:
         )
     ]
     # zackees/ci.yml#168 (GATE-005), soldr#3516: soldr's test suite starts
-    # soldr daemons and touches soldr state roots, so it never runs against
-    # the caller's soldr state -- the nextest run-wrapper refuses unless
-    # CI=true or SOLDR_TEST_ISOLATED=1. No bosn (owner directive 2026-10-16):
-    # ci/workspace_test.py --host moves HOME, XDG_CONFIG_HOME,
-    # XDG_RUNTIME_DIR, TMPDIR and SOLDR_CACHE_DIR into a private root under
-    # ~/.cache/soldr-local-gate/<worktree hash> (outside any checkout), proves the guard still refuses an unmarked
-    # run, and only then sets the marker for its own children. It refuses
-    # (exit 2) rather than falling back to an unisolated host run.
+    # soldr brokers and daemons. The nextest run-wrapper gives every test a
+    # private HOME / SOLDR_CACHE_DIR / XDG root, so no test can reach the
+    # caller's ~/.soldr (crates/soldr-nextest-wrapper/src/isolate.rs). No bosn
+    # (owner directive 2026-10-16): ci/workspace_test.py --host runs the suite
+    # on this host, with its own daemon handoff (cache shutdown, broker
+    # remove, source daemon start) in a private root under
+    # ~/.cache/soldr-local-gate/<worktree hash>, and refuses (exit 2) when
+    # that root would be the caller's home.
     tests = [
         Check(
             "soldr tests (isolated, host private root)",

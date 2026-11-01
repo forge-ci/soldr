@@ -5,8 +5,9 @@
 # (crates/soldr-nextest-wrapper), the one implementation of the wrapper
 # contract. This shim only finds it, by one rule:
 #
-#   1. $SOLDR_NEXTEST_NATIVE_WRAPPER, when set (an explicit override; the
-#      black-box suites use their own SOLDR_NEXTEST_WRAPPER_UNDER_TEST);
+#   1. $SOLDR_NEXTEST_NATIVE_WRAPPER, when set and trusted (an explicit
+#      override, see the isolation note below; the black-box suites use their
+#      own SOLDR_NEXTEST_WRAPPER_UNDER_TEST);
 #   2. otherwise beside the test binary's Cargo profile directory:
 #      `<target>/[<triple>/]<profile>/deps/<test>` ->
 #      `<target>/[<triple>/]<profile>/soldr-nextest-wrapper`. The first
@@ -32,19 +33,27 @@
 # macOS Recovery guest has none of them guaranteed.
 #
 # zackees/ci.yml#168 (GATE-005), soldr#3516: soldr's tests start soldr
-# daemons and touch soldr state roots, so they never run on a developer host
-# -- a leaked fixture daemon once claimed the real ~/.soldr root and wedged
-# every soldr build on the machine. Every Unix test process passes through
-# here, so this is where the suite refuses. CI=true covers GitHub runners and
-# act; SOLDR_TEST_ISOLATED=1 is set only by isolated environments (the local
-# gate's private-root host driver ci/workspace_test.py --host, the cook image,
-# the macOS Recovery guest).
-if [ "${CI:-}" != "true" ] && [ "${SOLDR_TEST_ISOLATED:-}" != "1" ]; then
-    echo "soldr tests refuse to run on a developer host (zackees/ci.yml#168, soldr#3516)." >&2
-    echo "Run them isolated: ci/workspace_test.py --host (the local gate tests lane)" >&2
-    exit 97
-fi
+# brokers and daemons, and a leaked fixture daemon once claimed the real
+# ~/.soldr root and wedged every soldr build on the machine. The native
+# wrapper this shim execs is what makes that impossible: it points HOME,
+# SOLDR_CACHE_DIR, the XDG directories and XDG_RUNTIME_DIR of every test into
+# a private per-test root, refuses (exit 97) when it cannot, and exports
+# SOLDR_TEST_ISOLATED=1 to the test (crates/soldr-nextest-wrapper/src/
+# isolate.rs). So the suite is safe to run on a developer host, and the local
+# gate's tests lane runs it there (ci/workspace_test.py --host).
+#
+# The one way around that is to replace the native wrapper. An explicit
+# SOLDR_NEXTEST_NATIVE_WRAPPER is therefore honoured only where a replacement
+# cannot reach a developer's state: under CI=true (a disposable runner or act
+# job), or with SOLDR_TEST_ISOLATED=1 (inside a test the native wrapper has
+# already isolated, or a disposable guest that sets it: the macOS Recovery
+# VM). Anywhere else it is refused rather than allowed to run tests unwrapped.
 if [ -n "${SOLDR_NEXTEST_NATIVE_WRAPPER:-}" ]; then
+    if [ "${CI:-}" != "true" ] && [ "${SOLDR_TEST_ISOLATED:-}" != "1" ]; then
+        echo "nextest_wrapper.sh: refusing SOLDR_NEXTEST_NATIVE_WRAPPER=$SOLDR_NEXTEST_NATIVE_WRAPPER on a developer host (zackees/ci.yml#168, soldr#3516):" >&2
+        echo "  only soldr-nextest-wrapper isolates a test's soldr state; unset it, or run the suite through ci/workspace_test.py --host" >&2
+        exit 97
+    fi
     exec "$SOLDR_NEXTEST_NATIVE_WRAPPER" "$@"
 fi
 NAME=soldr-nextest-wrapper

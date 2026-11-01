@@ -224,20 +224,38 @@ def _echo_script(path: Path, label: str) -> Path:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the nextest run-wrapper is Unix-only")
-def test_isolation_guard_refuses_a_developer_host() -> None:
+def test_a_native_wrapper_override_is_refused_on_a_developer_host() -> None:
+    """soldr#3516: only soldr-nextest-wrapper isolates a test's soldr state,
+    so replacing it is honoured only under CI=true or inside an isolated test
+    (SOLDR_TEST_ISOLATED=1, which that wrapper exports)."""
     refused = _wrapper()
-    assert refused.returncode != 0
+    assert refused.returncode == 97
+    assert "refusing SOLDR_NEXTEST_NATIVE_WRAPPER" in refused.stderr
     assert "ci/workspace_test.py --host" in refused.stderr
     assert _wrapper(CI="true").returncode == 0
     assert _wrapper(SOLDR_TEST_ISOLATED="1").returncode == 0
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the nextest run-wrapper is Unix-only")
-def test_isolation_guard_runs_before_any_wrapper_resolution(tmp_path: Path) -> None:
+def test_the_override_guard_runs_before_the_override_is_execed(tmp_path: Path) -> None:
     native = _echo_script(tmp_path / "native", "native")
     refused = _shim(["true"], str(native))
     assert refused.returncode == 97
     assert "native" not in refused.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the nextest run-wrapper is Unix-only")
+def test_the_isolating_wrapper_needs_no_marker_on_a_developer_host(
+    tmp_path: Path,
+) -> None:
+    """The derived soldr-nextest-wrapper isolates every test itself, so a
+    host run neither needs nor reads the marker."""
+    profile = tmp_path / "target" / "debug"
+    _echo_script(profile / "soldr-nextest-wrapper", "derived")
+    test_binary = _echo_script(profile / "deps" / "suite-0123", "test")
+    run = _shim([str(test_binary)], None)
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == f"derived {test_binary}"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the nextest run-wrapper is Unix-only")
@@ -458,14 +476,14 @@ def _workspace_test():  # type: ignore[no-untyped-def]
 def test_host_run_moves_every_identity_root_off_the_callers_state(
     tmp_path: Path,
 ) -> None:
-    """soldr#3516: the host run's daemons resolve a private root, and the
-    marker is set only together with that root."""
+    """soldr#3516: the driver's own daemon lifecycle steps resolve a private
+    root, and it never claims or forwards the test-isolation marker."""
     ws = _workspace_test()
     real_home = tmp_path / "real"
     layout = ws.host_layout(tmp_path / "gitdir", tmp_path / "cache")
     caller = {"PATH": "/bin", "CI": "true", "SOLDR_TEST_ISOLATED": "0"}
     env = ws.host_environment(layout, caller, real_home)
-    assert env["SOLDR_TEST_ISOLATED"] == "1"
+    assert "SOLDR_TEST_ISOLATED" not in env
     assert "CI" not in env
     for name in ("HOME", "XDG_CONFIG_HOME", "TMPDIR", "SOLDR_CACHE_DIR"):
         assert not Path(env[name]).is_relative_to(real_home), name
@@ -488,18 +506,6 @@ def test_host_run_refuses_the_callers_home(tmp_path: Path) -> None:
     layout = ws.host_layout(tmp_path, tmp_path / "cache")
     with pytest.raises(ws.IsolationError):
         ws.host_environment(layout, {}, layout.home)
-
-
-@pytest.mark.skipif(os.name == "nt", reason="the nextest run-wrapper is Unix-only")
-def test_host_run_fails_closed_without_the_guard(tmp_path: Path) -> None:
-    ws = _workspace_test()
-    ws.assert_guard_refuses(ROOT, dict(os.environ))
-    (tmp_path / ".github" / "scripts").mkdir(parents=True)
-    (tmp_path / ".github" / "scripts" / "nextest_wrapper.sh").write_text(
-        "exit 0\n", encoding="utf-8"
-    )
-    with pytest.raises(ws.IsolationError):
-        ws.assert_guard_refuses(tmp_path, dict(os.environ))
 
 
 def test_main_publisher_promotes_merged_pr_evidence() -> None:

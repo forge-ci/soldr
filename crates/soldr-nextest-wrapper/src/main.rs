@@ -6,8 +6,11 @@
 //! Python one (whose interpreter start cost ~48 ms before each of ~3,500
 //! tests). For each test:
 //!
-//! * the test gets a private `TMPDIR`, removed afterwards (soldr#3079;
-//!   Linux only), and any process still carrying it -- a daemon the test
+//! * the test gets a private soldr state root -- `HOME`, `SOLDR_CACHE_DIR`,
+//!   the XDG directories and the broker's `XDG_RUNTIME_DIR` -- or does not
+//!   run (soldr#3516, `isolate`);
+//! * on Linux that directory is also its `TMPDIR`; it is removed afterwards
+//!   (soldr#3079), and any process still carrying it -- a daemon the test
 //!   auto-started -- is terminated first (soldr#3739);
 //! * it refuses toolchain downloads and names its own binary for the
 //!   target-dir tripwire (soldr#3195, soldr#3203);
@@ -18,6 +21,7 @@
 
 mod dump;
 mod guard;
+mod isolate;
 mod memory;
 mod reap;
 mod tail;
@@ -39,6 +43,8 @@ const FORBID_TARGET_CONTAINING_ENV: &str = "SOLDR_TEST_FORBID_TARGET_CONTAINING"
 /// An explicit path to this binary for `nextest_wrapper.sh`; never inherited
 /// by the test, so a nested Nextest inside a test resolves its own wrapper.
 const NATIVE_WRAPPER_ENV: &str = "SOLDR_NEXTEST_NATIVE_WRAPPER";
+/// Exit status when the test cannot be isolated (as `nextest_wrapper.sh`).
+const ISOLATION_REFUSED: i32 = 97;
 const POLL: Duration = Duration::from_millis(20);
 const DRAIN_SLICE: Duration = Duration::from_millis(100);
 
@@ -59,22 +65,28 @@ fn child_exit_grace() -> Duration {
         )
 }
 
-/// This test's private TMPDIR, or `None` to leave TMPDIR alone.
+/// This test's private directory: its soldr state root everywhere, and its
+/// `TMPDIR` too on Linux.
 ///
 /// soldr#3079: about 420 integration-test call sites create a uniquely named
 /// directory under TMPDIR and never remove it; a private TMPDIR removed after
-/// the test reclaims all of them at the source. Linux only: macOS's TMPDIR is
-/// already long and its `sun_path` limit is 104 bytes, so extra depth risks
-/// the Unix-socket endpoints tests bind under TMPDIR. The name is kept short
-/// (`snt<pid hex>`) for the same reason.
-fn private_tmpdir() -> Option<PathBuf> {
-    if !memory::is_linux() {
-        return None;
-    }
+/// the test reclaims all of them at the source. TMPDIR moves on Linux only:
+/// macOS's TMPDIR is already long and its `sun_path` limit is 104 bytes, so
+/// extra depth risks the Unix-socket endpoints tests bind under TMPDIR. For
+/// the same reason the directory sits directly under `/tmp` off Linux and
+/// the name is kept short (`snt<pid hex>`).
+struct PrivateDir {
+    path: PathBuf,
+    is_tmpdir: bool,
+}
+
+fn private_dir() -> std::io::Result<PrivateDir> {
+    let is_tmpdir = memory::is_linux();
     let base = std::env::var_os("TMPDIR")
-        .filter(|value| !value.is_empty())
+        .filter(|value| is_tmpdir && !value.is_empty())
         .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
     let stem = format!("snt{:x}", std::process::id());
+    let mut last = None;
     for attempt in 0..16 {
         let path = base.join(if attempt == 0 {
             stem.clone()
@@ -82,22 +94,22 @@ fn private_tmpdir() -> Option<PathBuf> {
             format!("{stem}-{attempt}")
         });
         match test_child::create_private_dir(&path) {
-            Ok(()) => return Some(path),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(_) => return None,
+            Ok(()) => return Ok(PrivateDir { path, is_tmpdir }),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => last = Some(error),
+            Err(error) => return Err(error),
         }
     }
-    None
+    Err(last.unwrap_or_else(|| std::io::Error::other("no free private directory name")))
 }
 
-fn remove_private_tmpdir(path: Option<&PathBuf>) {
-    if let Some(path) = path {
-        // soldr#3739: stop daemons the test auto-started before deleting the
-        // directory their state lives in.
-        reap::reap_tmpdir_holders(path.as_os_str());
-        if !soldr_core::core::flag(KEEP_TMPDIR_ENV) {
-            let _ = std::fs::remove_dir_all(path);
-        }
+fn remove_private_dir(private: &PrivateDir) {
+    // soldr#3739: stop daemons the test auto-started before deleting the
+    // directory their state lives in. Only a private TMPDIR identifies them.
+    if private.is_tmpdir {
+        reap::reap_tmpdir_holders(private.path.as_os_str());
+    }
+    if !soldr_core::core::flag(KEEP_TMPDIR_ENV) {
+        let _ = std::fs::remove_dir_all(&private.path);
     }
 }
 
@@ -161,15 +173,27 @@ fn run(argv: &[std::ffi::OsString]) -> i32 {
     let grace = child_exit_grace();
     test_child::install_termination_flag();
     let mut guard = ProcessGuard::new(&command);
-    let private = private_tmpdir();
-
     let mut child_command = Command::new(program);
     child_command.args(args);
     for name in CONTROL_ENVS.iter().chain([&NATIVE_WRAPPER_ENV]) {
         child_command.env_remove(name);
     }
-    if let Some(path) = &private {
-        child_command.env("TMPDIR", path);
+    // soldr#3516: the test never runs against the caller's soldr state.
+    let private = match private_dir().and_then(|private| {
+        isolate::apply(&mut child_command, &private.path)
+            .map(|()| private)
+    }) {
+        Ok(private) => private,
+        Err(error) => {
+            write_stderr(&format!(
+                "nextest wrapper: cannot give this test a private soldr state root ({error}); \
+                 refusing to run it against the caller's ~/.soldr (soldr#3516)\n"
+            ));
+            return ISOLATION_REFUSED;
+        }
+    };
+    if private.is_tmpdir {
+        child_command.env("TMPDIR", &private.path);
     }
     set_default(
         &mut child_command,
@@ -192,7 +216,7 @@ fn run(argv: &[std::ffi::OsString]) -> i32 {
     let mut child = match child_command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            remove_private_tmpdir(private.as_ref());
+            remove_private_dir(&private);
             return guard.spawn_failed(&error);
         }
     };
@@ -282,7 +306,7 @@ fn run(argv: &[std::ffi::OsString]) -> i32 {
             "=== nextest timeout: stdout/stderr drained ===\n"
         });
     }
-    remove_private_tmpdir(private.as_ref());
+    remove_private_dir(&private);
     guard.finish(returncode, termination.started.is_some())
 }
 

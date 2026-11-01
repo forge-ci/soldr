@@ -27,12 +27,13 @@ verify-exempt = ["ci-pre", "path-selection", "cancel-superseded"]
 mode = "enforce"
 
 # zackees/ci.yml#168 (GATE-005), soldr#3516: soldr's tests start soldr
-# daemons and touch soldr state roots, so they never run against the caller's
-# soldr state. The nextest run-wrapper refuses unless CI=true or the marker is
-# set. No bosn (owner directive 2026-10-16): the runner below moves HOME,
-# XDG_CONFIG_HOME, XDG_RUNTIME_DIR, TMPDIR and SOLDR_CACHE_DIR into a private
-# root under ~/.cache/soldr-local-gate/<worktree hash>, checks the guard still refuses an
-# unmarked run, and sets the marker for its own children only.
+# brokers and daemons. The nextest run-wrapper (the guard) execs
+# soldr-nextest-wrapper, which gives every test a private HOME /
+# SOLDR_CACHE_DIR / XDG / XDG_RUNTIME_DIR root and exports the marker to it;
+# the guard refuses to let anything replace that wrapper outside CI=true or an
+# already-isolated test. No bosn (owner directive 2026-10-16): the runner runs
+# the suite on this host; it puts its own daemon handoff in a private root
+# under ~/.cache/soldr-local-gate/<worktree hash>.
 [gate.isolation]
 marker = "SOLDR_TEST_ISOLATED"
 runner = ["uv", "run", "--no-project", "--python", "3.13", "python", "ci/workspace_test.py", "--host"]

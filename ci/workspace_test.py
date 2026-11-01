@@ -8,19 +8,18 @@ bootstrap daemon route: their wire protocol may legitimately differ.
 Two environments run this plan:
 
 * ``--host`` -- the local gate's ``tests`` lane (owner directive 2026-10-16:
-  no bosn). The suite starts soldr daemons and brokers and touches soldr
-  state roots (soldr#3516), so the host run first moves every per-user
-  identity variable the broker and daemon resolve a root from -- ``HOME``,
-  ``XDG_CONFIG_HOME``, ``XDG_RUNTIME_DIR``, ``TMPDIR`` and ``SOLDR_CACHE_DIR``
-  (``broker_spawn.rs`` ``HOME_IDENTITY_ENV_VARS``) -- into a private root
-  under ``~/.cache/soldr-local-gate/<worktree hash>``. Only then does it set ``SOLDR_TEST_ISOLATED``,
-  and only for its own children. The bootstrap's ``cache shutdown`` and
-  ``broker remove`` therefore reach the private broker, never the caller's
-  live one. It fails closed: it refuses to start when the private root would
-  be the caller's real home, or when the nextest guard no longer refuses an
-  unmarked run.
+  no bosn). Each test is isolated by the nextest run-wrapper, which gives it
+  a private ``HOME`` / ``SOLDR_CACHE_DIR`` / XDG root (soldr#3516,
+  ``crates/soldr-nextest-wrapper/src/isolate.rs``). This driver isolates
+  *itself* for a different reason: its plan runs ``cache shutdown``,
+  ``broker remove`` and a source-built ``daemon start``, which on the
+  caller's own root would stop their live broker and hand their ``~/.soldr``
+  to a source daemon. So it moves ``HOME``, ``XDG_CONFIG_HOME``,
+  ``XDG_RUNTIME_DIR``, ``TMPDIR`` and ``SOLDR_CACHE_DIR`` into a private root
+  under ``~/.cache/soldr-local-gate/<worktree hash>`` first, and refuses to
+  start when that root would be the caller's real home.
 * default -- the legacy container layout (``/repo``, ``/target``,
-  ``/opt/soldr-bootstrap``), whose image already isolates and sets the marker.
+  ``/opt/soldr-bootstrap``), whose image already isolates the driver.
 """
 
 from __future__ import annotations
@@ -273,12 +272,6 @@ def cleanup(steps: list[Step], *, repo: Path, preserve_primary: bool) -> None:
         raise failures[0]
 
 
-ISOLATION_MARKER = "SOLDR_TEST_ISOLATED"
-GUARD = Path(".github/scripts/nextest_wrapper.sh")
-# nextest_wrapper.sh's exit code for an unmarked, non-CI run.
-GUARD_REFUSAL = 97
-
-
 class IsolationError(RuntimeError):
     """The host run cannot prove it is isolated, so it does not start."""
 
@@ -321,14 +314,13 @@ def host_environment(
     layout: HostLayout, caller: dict[str, str], real_home: Path
 ) -> dict[str, str]:
     """The child environment: private identity roots, the caller's
-    toolchain and uv caches (read-mostly, outside soldr's state), and the
-    isolation marker last."""
+    toolchain and uv caches (read-mostly, outside soldr's state)."""
     if layout.home.resolve() == real_home.resolve():
         raise IsolationError(f"private HOME {layout.home} is the caller's home")
     env = {
         k: v
         for k, v in caller.items()
-        if k not in ("CI", ISOLATION_MARKER, "SOLDR_RUSTC_WRAPPER")
+        if k not in ("CI", "SOLDR_TEST_ISOLATED", "SOLDR_RUSTC_WRAPPER")
     }
     env.update(
         {
@@ -353,23 +345,7 @@ def host_environment(
         value = Path(env[name]).resolve()
         if value == real_home.resolve() or value.is_relative_to(soldr_root):
             raise IsolationError(f"{name}={value} reaches the caller's soldr state")
-    env[ISOLATION_MARKER] = "1"
     return env
-
-
-def assert_guard_refuses(repo: Path, caller: dict[str, str]) -> None:
-    """Fail closed unless the nextest guard still refuses an unmarked run:
-    the marker is only meaningful while the guard checks it."""
-    env = {k: v for k, v in caller.items() if k not in ("CI", ISOLATION_MARKER)}
-    env["SOLDR_NEXTEST_NATIVE_WRAPPER"] = "/bin/true"
-    code = subprocess.run(
-        ["sh", str(repo / GUARD), "true"], env=env, check=False
-    ).returncode
-    if code != GUARD_REFUSAL:
-        raise IsolationError(
-            f"{GUARD} exited {code} without {ISOLATION_MARKER}, expected "
-            f"{GUARD_REFUSAL}: the isolation guard is not in force"
-        )
 
 
 def prepare_host(repo: Path) -> tuple[Path, Path]:
@@ -390,7 +366,6 @@ def prepare_host(repo: Path) -> tuple[Path, Path]:
     pin = pinned_ancestor(layout.tmp.parent)
     if pin is not None:
         raise IsolationError(f"private root {layout.tmp.parent} sits below {pin}")
-    assert_guard_refuses(repo, caller)
     env = host_environment(layout, caller, Path.home())
     for path in (layout.home, layout.target, layout.tmp):
         path.mkdir(parents=True, exist_ok=True)
@@ -400,7 +375,7 @@ def prepare_host(repo: Path) -> tuple[Path, Path]:
     os.environ.update(env)
     print(
         f"tests lane: host run, private HOME={layout.home}, "
-        f"XDG_RUNTIME_DIR={layout.runtime}, {ISOLATION_MARKER}=1 for children only",
+        f"XDG_RUNTIME_DIR={layout.runtime}; each test gets its own root from the nextest wrapper",
         flush=True,
     )
     return layout.target, Path(bootstrap).resolve()
