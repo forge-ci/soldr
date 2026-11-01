@@ -69,6 +69,27 @@ if ! swap_probe_ok; then
 fi
 sudo rm -f "$PROBEFILE" || true
 
+# Size the swapfile to what /mnt can actually spare. Recent runner images no
+# longer guarantee the ~70 GB ephemeral /mnt (it can share the OS disk), and a
+# fixed 14 GB dd then fills the disk and kills the job before any build starts
+# ("No space left on device"). Keep a reserve for the build itself and skip
+# enlargement entirely when what's left is too small to matter.
+RESERVE_GB="${CI_SWAP_RESERVE_GB:-24}"
+free_gb=$(df -BG --output=avail /mnt | tail -1 | tr -dc '0-9') || true
+free_gb=${free_gb:-0}
+spare_gb=$((free_gb - RESERVE_GB))
+if [ "$spare_gb" -lt "$SIZE_GB" ]; then
+  SIZE_GB=$spare_gb
+fi
+if [ "$SIZE_GB" -lt 2 ]; then
+  echo "::warning::CI swap enlargement skipped: /mnt has ${free_gb} GB free, reserving ${RESERVE_GB} GB for the build"
+  echo "== swap after (unchanged) =="
+  free -h || true
+  swapon --show || true
+  exit 0
+fi
+echo "swapfile size: ${SIZE_GB} GB (/mnt free ${free_gb} GB, reserve ${RESERVE_GB} GB)"
+
 # Replace any existing swap with a single large file so total swap is
 # deterministic rather than "default 4 GB plus ours". Past this point the
 # probe has proven swap is manageable here, so a failure is genuinely
