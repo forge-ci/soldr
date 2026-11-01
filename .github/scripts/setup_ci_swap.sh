@@ -75,7 +75,7 @@ sudo rm -f "$PROBEFILE" || true
 # ("No space left on device"). Keep a reserve for the build itself and skip
 # enlargement entirely when what's left is too small to matter.
 RESERVE_GB="${CI_SWAP_RESERVE_GB:-24}"
-free_gb=$(df -BG --output=avail /mnt 2>/dev/null | tail -1 | tr -dc '0-9')
+free_gb=$(df -BG --output=avail /mnt | tail -1 | tr -dc '0-9') || true
 free_gb=${free_gb:-0}
 spare_gb=$((free_gb - RESERVE_GB))
 if [ "$spare_gb" -lt "$SIZE_GB" ]; then
