@@ -2604,7 +2604,24 @@ enabled = true          # opt-out; on by default
 trigger_free_gb = 20    # start GC when free space < this
 target_free_gb = 30     # stop GC when free space >= this
 min_age_secs = 3600     # never touch anything modified within this window
+stale_target_days = 0   # >0: evict target/ dirs idle this many days (soldr#4031)
 ```
+
+`stale_target_days` (soldr#4031, opt-in, default `0` = off) adds an
+age-based pass that runs regardless of free space, at most once a day: every
+registered `target/` plus every `target/` discovered under
+`[gc] allowlist_roots` (default `~/dev`) that has not been used for that many
+days is deleted through the same guarded purge path as tier 2 (allowlist,
+active-build guards, 256M floor, `min_age_secs` floor). Idle agent worktrees
+stop holding their full `target/` forever; add your worktree root (for example
+`~/.clud/worktrees`) to `allowlist_roots` if it lives outside `~/dev`. Enable
+with `soldr config set auto_gc.stale_target_days 14`.
+
+Dependency artifacts are already shared across worktrees through the zccache
+content-addressed store: on a cache hit the output is delivered into each
+worktree's `target/` as a reflink or hardlink when the probed volume pair
+supports it (`--zccache-mode`, see the materialization mode docs), so the
+per-worktree cost on a CoW filesystem is mostly metadata.
 
 Fallback behavior:
 
