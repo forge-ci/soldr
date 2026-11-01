@@ -74,7 +74,8 @@ pub(crate) fn maybe_spawn_auto_gc_sweeper(paths: &SoldrPaths) {
     };
     let disk_pressure_enabled = cfg.auto_gc.enabled;
     let cook_enabled = cfg.cook.max_total_gb > 0 || cfg.cook.max_age_days > 0;
-    if !disk_pressure_enabled && !cook_enabled {
+    let stale_targets_enabled = cfg.auto_gc.stale_target_days > 0;
+    if !disk_pressure_enabled && !cook_enabled && !stale_targets_enabled {
         return;
     }
     let marker = crate::cache_lib::auto_gc_throttle_marker_path(paths);
@@ -326,6 +327,7 @@ fn run_auto_gc_background(paths_root: std::path::PathBuf, log_path: std::path::P
             &format!("auto-gc tier=0 scratch_entries_reclaimed={scratch_removed}"),
         );
     }
+    super::stale_versions::run_and_log(&paths, &log_path);
 
     // The daemon performs the same event-retention pass in its maintenance
     // loop. When it is stopped, run the pass only under the same root lock
@@ -463,6 +465,8 @@ fn run_auto_gc_background(paths_root: std::path::PathBuf, log_path: std::path::P
             }
         }
     }
+
+    run_stale_target_eviction(&paths, &validated, &log_path);
 
     if !validated.enabled {
         // Disk-pressure tiers off, but cook-gc above may still have
@@ -959,6 +963,7 @@ fn run_soldr_target_purge_background(
 // rustc — see the auto-GC `tier=3 skipped=true reason=…` branch
 // below for how the outcome is reported.
 include!("auto_reclaim.rs");
+include!("stale_targets.rs");
 #[cfg(test)]
 #[path = "auto_tests.rs"]
 mod tests;

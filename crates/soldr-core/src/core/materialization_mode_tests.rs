@@ -285,3 +285,17 @@ fn config_toml_zccache_mode_parses() {
     let empty: crate::core::SoldrConfig = toml::from_str("").unwrap();
     assert_eq!(empty.zccache, ZccacheModeConfig::default());
 }
+
+#[test]
+fn zccache_max_size_defaults_to_bounded_cap_and_zero_defers_upstream() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let default: ZccacheModeConfig = toml::from_str("").unwrap();
+    assert_eq!(
+        default.max_size_bytes(),
+        Some(DEFAULT_ZCCACHE_MAX_SIZE_GB * GIB)
+    );
+    let set: ZccacheModeConfig = toml::from_str("max_size_gb = 10").unwrap();
+    assert_eq!(set.max_size_bytes(), Some(10 * GIB));
+    let dynamic: ZccacheModeConfig = toml::from_str("max_size_gb = 0").unwrap();
+    assert_eq!(dynamic.max_size_bytes(), None);
+}

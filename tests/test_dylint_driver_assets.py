@@ -369,7 +369,7 @@ def test_library_nightly_rejects_a_manifest_with_no_channel():
 
 
 def test_canonical_channel_drops_only_a_nightly_host_suffix():
-    assert GUARD.canonical_channel(DYLINT_NIGHTLY) == "nightly-2026-05-28"
+    assert GUARD.canonical_channel(DYLINT_NIGHTLY) == "nightly-2026-08-15"
     assert GUARD.canonical_channel("nightly-2026-05-28") == "nightly-2026-05-28"
     assert GUARD.canonical_channel("1.95.0") == "1.95.0"
 

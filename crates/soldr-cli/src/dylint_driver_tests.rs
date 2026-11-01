@@ -333,6 +333,23 @@ fn cargo_toml_pins_the_exact_cargo_dylint_version() {
     assert!(manifest.contains(DRIVER_BUILD_PACKAGE_NAME));
 }
 
+/// soldr#4002: an ambient stable `RUSTUP_TOOLCHAIN` must not reach the
+/// driver build, or rustup's `rustc` proxy compiles `#![feature]` crates on
+/// stable (E0554).
+#[test]
+fn driver_build_is_pinned_to_the_plan_nightly() {
+    let rustc = Path::new("/toolchains/nightly-2026-05-28/bin/rustc");
+    let mut command = std::process::Command::new("cargo");
+    command.env("RUSTUP_TOOLCHAIN", "1.95.0");
+    pin_driver_build_toolchain(&mut command, "nightly-2026-05-28", rustc);
+    let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
+    assert_eq!(
+        envs[std::ffi::OsStr::new("RUSTUP_TOOLCHAIN")],
+        Some(std::ffi::OsStr::new("nightly-2026-05-28"))
+    );
+    assert_eq!(envs[std::ffi::OsStr::new("RUSTC")], Some(rustc.as_os_str()));
+}
+
 #[test]
 fn main_rs_calls_the_upstream_driver_entry_point() {
     assert!(DRIVER_BUILD_MAIN_RS.contains("dylint_driver::dylint_driver(&args)"));
@@ -620,4 +637,52 @@ fn replace_installed_file_falls_back_to_remove_then_rename_when_rename_refuses()
     assert_eq!(attempts, 2);
     assert_eq!(std::fs::read(&destination).unwrap(), b"new-driver");
     assert!(!temporary.exists());
+}
+
+// ---------------------------------------------------------------------
+// Unpublished driver pin: error under clud, warning elsewhere.
+// ---------------------------------------------------------------------
+
+#[test]
+fn published_driver_nightly_passes_the_pin_check_everywhere() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _clud = crate::EnvVarGuard::set(crate::core::CLUD_SESSION_ENV_VAR, "test-session");
+    let plan = DylintToolchainPlan::identity(
+        format!(
+            "{}-x86_64-unknown-linux-gnu",
+            crate::fetch::known_tools::DYLINT_DRIVER_NIGHTLY
+        ),
+        "1.99.0-nightly".to_string(),
+        "0123456789abcdef".to_string(),
+    );
+    unpublished_driver_pin_check(&plan, "6.2.0").expect("published nightly passes");
+}
+
+#[test]
+fn unpublished_driver_pin_is_an_error_under_clud() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _clud = crate::EnvVarGuard::set(crate::core::CLUD_SESSION_ENV_VAR, "test-session");
+    let error = unpublished_driver_pin_check(&sample_plan(), "6.2.0")
+        .expect_err("an unpublished pin must fail under clud")
+        .to_string();
+    assert!(
+        error.starts_with("ERROR: refusing to build the Dylint driver from source under clud")
+            && error.contains("no pre-deployed driver for nightly-2026-05-28"),
+        "{error}"
+    );
+    assert!(
+        error.contains(&format!(
+            "channel = \"{}\"",
+            crate::fetch::known_tools::DYLINT_DRIVER_NIGHTLY
+        )),
+        "{error}"
+    );
+    assert!(error.contains("`=6.2.0`"), "{error}");
+}
+
+#[test]
+fn unpublished_driver_pin_only_warns_outside_clud() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _clud = crate::EnvVarGuard::remove(crate::core::CLUD_SESSION_ENV_VAR);
+    unpublished_driver_pin_check(&sample_plan(), "6.2.0").expect("warning, not error");
 }

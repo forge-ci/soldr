@@ -6,7 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
-SETUP_SOLDR_MANAGED_SHA = "2f4be9f8f5806fbe0e8e16cc3534489d147da094"
+SETUP_SOLDR_MANAGED_SHA = "35b5765c99cf392c259e684daeda10a950f72fff"
 DIRECT_USE = re.compile(r"uses:\s*zackees/setup-soldr@([0-9a-f]{40})")
 
 

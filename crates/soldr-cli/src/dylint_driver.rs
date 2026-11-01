@@ -369,6 +369,8 @@ pub(crate) async fn ensure_prebuilt_driver(
         return Err(catalogue_error);
     }
 
+    unpublished_driver_pin_check(plan, version)?;
+
     // Tier 2 (soldr#2349): the catalogue has no asset for this nightly +
     // host — routine on macOS/Windows, where the catalogue does not
     // backfill every dated nightly for every triple. Build the driver once,
@@ -455,6 +457,53 @@ pub(crate) fn unavailable_driver_error(
         directory = driver_dir.display(),
         opt_in = crate::wrapper::ALLOW_DYLINT_DRIVER_BUILD_ENV_VAR,
     ))
+}
+
+/// A channel other than [`crate::fetch::known_tools::DYLINT_DRIVER_NIGHTLY`]
+/// has no pre-deployed driver, so the fallback tiers below would build one
+/// from source. Under clud that is an error the agent fixes by re-pinning;
+/// everywhere else it is a warning and the fallback proceeds.
+fn unpublished_driver_pin_check(
+    plan: &DylintToolchainPlan,
+    version: &str,
+) -> Result<(), SoldrError> {
+    let published = crate::fetch::known_tools::DYLINT_DRIVER_NIGHTLY;
+    let channel = crate::dylint_libraries::canonical_channel(&plan.channel);
+    if channel == published {
+        return Ok(());
+    }
+    let message = unpublished_driver_pin_message(plan, version, published);
+    if crate::core::running_under_clud() {
+        // soldr#3991: this is fatal under clud; say so, or the exit 1 reads as
+        // a warning followed by a silent failure.
+        return Err(SoldrError::Other(unpublished_driver_pin_error(&message)));
+    }
+    eprintln!("soldr: WARNING: {message}");
+    Ok(())
+}
+
+/// The clud-fatal form of [`unpublished_driver_pin_message`] (soldr#3991).
+pub(crate) fn unpublished_driver_pin_error(message: &str) -> String {
+    format!(
+        "ERROR: refusing to build the Dylint driver from source under clud, so this lint run \
+         fails (exit 1). {message}"
+    )
+}
+
+pub(crate) fn unpublished_driver_pin_message(
+    plan: &DylintToolchainPlan,
+    version: &str,
+    published: &str,
+) -> String {
+    format!(
+        "Dylint v{version} has no pre-deployed driver for {channel} (channel selected from \
+         {provenance}); pre-deployed drivers exist only for {published}. Re-pin every lint \
+         library's `rust-toolchain.toml` to `channel = \"{published}\"` and its \
+         `dylint_linting` / `dylint_testing` dependencies to `={version}`. Without that, \
+         Soldr builds the driver from source, which takes minutes.",
+        channel = plan.channel,
+        provenance = plan.provenance.describe(),
+    )
 }
 
 /// The loud counterpart to [`unavailable_driver_error`] for the opt-in path.

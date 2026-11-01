@@ -407,11 +407,21 @@ pub(crate) enum Commands {
     /// targets entirely. `--cross-dylint` opts in to a custom-lint pass for
     /// each selected cross target using the lint libraries' exact nightly.
     /// These flags are valid only for `rust`/`all`.
+    ///
+    /// soldr#3958: `[workspace.metadata.soldr.lint]` declares the step list
+    /// (`steps = ["fmt", "clippy", "dylint"]`, built-ins in order) and repo
+    /// commands (`extra = [["ruff", "check", "."]]`) for the `rust`/`all`
+    /// suites. With `SOLDR_PORCELAIN=1`, `lint rust` prints one JSON summary
+    /// line on success; a failing step's output is printed in full.
+    ///
+    /// soldr#4006: `rust`/`all` first reformat in place (`cargo fmt -- -l`) and
+    /// report the rewritten files (`autofixed` in porcelain), so formatting
+    /// alone never fails a lint. `--check`, or `CI` set, only verifies.
     Lint {
         /// Suite selector (`rust`, `deps`, `ci`, or `all`). Rust/deps/all
         /// accept cargo scope flags; `ci` accepts only `--format json|human`.
         /// `rust`/`all` additionally accept `--target <triple>` (repeatable)
-        /// `--host-only`, and `--cross-dylint`.
+        /// `--host-only`, `--cross-dylint`, and `--check`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },

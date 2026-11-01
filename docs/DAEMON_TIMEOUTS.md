@@ -77,14 +77,15 @@ readiness.
 
 ### Broker image or version mismatch (soldr#2549)
 
-Signal: an ordinary invocation prints
+Signal: an ordinary invocation prints, once per broker generation
+(soldr#3985; recorded in `<broker dir>/broker-skew-warned`)
 
 ```
-soldr: warning: the running broker was started from a different Soldr image
-soldr:   running broker: soldr-<version>-<digest>
-soldr:   this soldr:     soldr-<version>-<digest>
-soldr: ... to retire it deliberately, run: soldr broker remove
+soldr: broker is <version>-<digest8> (this is <version>-<digest8>); work continues; retire with `soldr broker remove`
 ```
+
+Under `SOLDR_PORCELAIN=1` nothing is printed; the JSON line carries a
+`broker_skew` object (`running_broker`, `this_soldr`, `remedy`) instead.
 
 This is a diagnostic, not a failure. The broker is a stable, long-lived
 singleton for its user-home endpoint: Soldr never stops, kills, replaces, or

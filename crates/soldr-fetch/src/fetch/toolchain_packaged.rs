@@ -142,8 +142,22 @@ pub async fn ensure_dylint_driver(
     };
 
     let qualified_channel = format!("{dated_channel}-{}", target.triple());
-    let destination =
-        install_extensionless_driver(&result.binary_path, driver_root, &qualified_channel)?;
+    let destination = install_extensionless_driver(
+        &result.binary_path,
+        driver_root,
+        &qualified_channel,
+        &qualified_channel,
+    )?;
+    // `dylint_testing` resolves the driver by the lint library's channel as
+    // spelled in its rust-toolchain file, which is the bare dated nightly,
+    // not cargo-dylint's host-qualified directory. Stage the same driver
+    // there too so UI tests never fall back to a source build of the driver.
+    install_extensionless_driver(
+        &result.binary_path,
+        driver_root,
+        dated_channel,
+        &qualified_channel,
+    )?;
     eprintln!(
         "soldr: installed catalogued Dylint driver {} at {}",
         asset_version,
@@ -152,12 +166,16 @@ pub async fn ensure_dylint_driver(
     Ok(Some(destination))
 }
 
+/// `directory` is the `$DYLINT_DRIVER_PATH` entry to stage into;
+/// `qualified_channel` names the rustup toolchain whose libraries the
+/// loader wrapper exposes.
 fn install_extensionless_driver(
     source: &Path,
     driver_root: &Path,
+    directory: &str,
     qualified_channel: &str,
 ) -> Result<PathBuf, SoldrError> {
-    let driver_dir = driver_root.join(qualified_channel);
+    let driver_dir = driver_root.join(directory);
     std::fs::create_dir_all(&driver_dir)?;
     let destination = driver_dir.join("dylint-driver");
     // Unix hosts get a loader-env wrapper in the `dylint-driver` slot and
@@ -347,7 +365,7 @@ mod tests {
         let channel = "nightly-2026-05-28-x86_64-unknown-linux-gnu";
 
         let destination =
-            install_extensionless_driver(&source, &root, channel).expect("stage driver");
+            install_extensionless_driver(&source, &root, channel, channel).expect("stage driver");
         assert_eq!(destination, root.join(channel).join("dylint-driver"));
         let staged = std::fs::read(&destination).expect("read staged slot");
 
@@ -387,8 +405,8 @@ mod tests {
         let root = temp.path().join("drivers");
         let channel = "nightly-2026-05-28-x86_64-unknown-linux-gnu";
 
-        install_extensionless_driver(&source_one, &root, channel).expect("first stage");
-        install_extensionless_driver(&source_two, &root, channel).expect("second stage");
+        install_extensionless_driver(&source_one, &root, channel, channel).expect("first stage");
+        install_extensionless_driver(&source_two, &root, channel, channel).expect("second stage");
 
         let payload_path = if crate::platform::host::facts::os()
             == crate::platform::host::facts::HostOs::Windows
@@ -517,7 +535,7 @@ mod tests {
         std::fs::write(&source_two, b"two").expect("source two");
         let root = temp.path().join("drivers");
         let channel = "nightly-2026-05-28-x86_64-unknown-linux-gnu";
-        install_extensionless_driver(&source_one, &root, channel).expect("first stage");
+        install_extensionless_driver(&source_one, &root, channel, channel).expect("first stage");
         let wrapper = root.join(channel).join("dylint-driver");
 
         let done = std::sync::Arc::new(AtomicBool::new(false));
@@ -540,7 +558,7 @@ mod tests {
             } else {
                 &source_one
             };
-            install_extensionless_driver(source, &root, channel)
+            install_extensionless_driver(source, &root, channel, channel)
                 .expect("restage while the reader is running");
         }
         done.store(true, Ordering::Relaxed);
@@ -567,17 +585,17 @@ mod tests {
         for triple in targets {
             let target = TargetTriple::from_triple(triple).unwrap();
             assert_eq!(
-                asset_name("cargo-dylint", "v6.0.3", &target),
-                Some(format!("cargo-dylint-6.0.3-{triple}.tar.gz"))
+                asset_name("cargo-dylint", "v6.2.0", &target),
+                Some(format!("cargo-dylint-6.2.0-{triple}.tar.gz"))
             );
             assert_eq!(
-                asset_name("dylint-link", "6.0.3", &target),
-                Some(format!("dylint-link-6.0.3-{triple}.tar.gz"))
+                asset_name("dylint-link", "6.2.0", &target),
+                Some(format!("dylint-link-6.2.0-{triple}.tar.gz"))
             );
             assert_eq!(
-                asset_name("dylint-driver", "6.0.3-nightly-2026-05-28", &target),
+                asset_name("dylint-driver", "6.2.0-nightly-2026-08-15", &target),
                 Some(format!(
-                    "dylint-driver-6.0.3-nightly-2026-05-28-{triple}.tar.gz"
+                    "dylint-driver-6.2.0-nightly-2026-08-15-{triple}.tar.gz"
                 ))
             );
         }
@@ -623,6 +641,34 @@ mod tests {
         assert_eq!(dated_nightly_prefix("1.94.1"), None);
     }
 
+    /// The bare-channel copy `dylint_testing` resolves still loads the
+    /// host-qualified toolchain's libraries, since rustup only installs that.
+    #[test]
+    fn bare_channel_driver_loads_the_qualified_toolchain() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("dylint-driver");
+        std::fs::write(&source, b"driver").unwrap();
+        let root = dir.path().join("drivers");
+        let destination = install_extensionless_driver(
+            &source,
+            &root,
+            "nightly-2026-08-15",
+            "nightly-2026-08-15-x86_64-unknown-linux-gnu",
+        )
+        .unwrap();
+        assert_eq!(
+            destination,
+            root.join("nightly-2026-08-15").join("dylint-driver")
+        );
+        if crate::platform::host::facts::os() != crate::platform::host::facts::HostOs::Windows {
+            let script = std::fs::read_to_string(&destination).unwrap();
+            assert!(
+                script.contains("toolchains/nightly-2026-08-15-x86_64-unknown-linux-gnu/lib"),
+                "{script}"
+            );
+        }
+    }
+
     #[test]
     fn driver_installation_is_extensionless_on_every_host() {
         let dir = tempfile::tempdir().unwrap();
@@ -631,6 +677,7 @@ mod tests {
         let destination = install_extensionless_driver(
             &source,
             &dir.path().join("drivers"),
+            "nightly-2026-05-28-x86_64-pc-windows-msvc",
             "nightly-2026-05-28-x86_64-pc-windows-msvc",
         )
         .unwrap();

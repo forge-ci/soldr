@@ -276,6 +276,20 @@ async fn prepare_dylint_scope(
         let plan =
             crate::dylint_toolchain::resolve_plan(explicit_toolchain, &workspace_root).await?;
         crate::dylint_driver::ensure_prebuilt_driver(&plan, paths).await?;
+        // soldr#4030: one library build tree per toolchain + lint deps,
+        // shared by every worktree, instead of ~350 MB per worktree.
+        let target_dir = crate::core::cargo_target_dir::resolve_cargo_target_dir(
+            &crate::core::cargo_target_dir::CargoTargetDirInputs::from_process(
+                &workspace_root,
+                args,
+            ),
+        );
+        crate::dylint_library_store::share_library_build(
+            paths,
+            &workspace_root,
+            target_dir.as_deref(),
+            &plan.channel,
+        );
         Some((bootstrap, plan))
     } else {
         None

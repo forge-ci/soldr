@@ -7,7 +7,10 @@ use super::{DiskCacheLimits, EmbeddedDiskPolicy, EmbeddedServiceError};
 pub(crate) const CACHE_SIZE_BYTES_ENV: &str = "ZCCACHE_CACHE_SIZE_BYTES";
 pub(crate) const CACHE_SIZE_PERCENT_ENV: &str = "ZCCACHE_CACHE_SIZE_PERCENT";
 
+/// Resolve the artifact budget: env override, then `config.toml`
+/// `[zccache].max_size_gb`, then soldr's fixed default (soldr#4028).
 pub(super) fn disk_cache_limits_from_env(
+    config_max_bytes: Option<u64>,
 ) -> Result<(DiskCacheLimits, EmbeddedDiskPolicy), EmbeddedServiceError> {
     let bytes_raw = std::env::var(CACHE_SIZE_BYTES_ENV)
         .ok()
@@ -15,7 +18,32 @@ pub(super) fn disk_cache_limits_from_env(
     let percent_raw = std::env::var(CACHE_SIZE_PERCENT_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty());
+    if bytes_raw.is_none() && percent_raw.is_none() {
+        return Ok(disk_cache_limits_from_config(config_max_bytes));
+    }
     disk_cache_limits_from_values(bytes_raw.as_deref(), percent_raw.as_deref())
+}
+
+/// Budget from `[zccache].max_size_gb` (already defaulted by the config
+/// layer). `None` defers to zccache's dynamic disk-relative default.
+pub(super) fn disk_cache_limits_from_config(
+    config_max_bytes: Option<u64>,
+) -> (DiskCacheLimits, EmbeddedDiskPolicy) {
+    let source = match config_max_bytes {
+        Some(_) => "config_max_size_gb",
+        None => "dynamic_5_percent_clamped_40_200_gib",
+    };
+    (
+        DiskCacheLimits {
+            max_cache_bytes: config_max_bytes,
+            max_cache_percent: None,
+        },
+        EmbeddedDiskPolicy {
+            source: source.to_string(),
+            max_cache_bytes: config_max_bytes,
+            max_cache_percent: None,
+        },
+    )
 }
 
 pub(super) fn disk_cache_limits_from_values(
@@ -90,5 +118,15 @@ mod disk_limit_tests {
         assert!(disk_cache_limits_from_values(Some("1"), Some("5")).is_err());
         assert!(disk_cache_limits_from_values(Some("0"), None).is_err());
         assert!(disk_cache_limits_from_values(None, Some("101")).is_err());
+    }
+
+    #[test]
+    fn config_cap_applies_when_env_is_unset() {
+        let (limits, policy) = disk_cache_limits_from_config(Some(25 << 30));
+        assert_eq!(limits.max_cache_bytes, Some(25 << 30));
+        assert_eq!(policy.source, "config_max_size_gb");
+        let (limits, policy) = disk_cache_limits_from_config(None);
+        assert_eq!(limits.max_cache_bytes, None);
+        assert_eq!(policy.source, "dynamic_5_percent_clamped_40_200_gib");
     }
 }

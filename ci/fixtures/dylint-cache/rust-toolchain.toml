@@ -12,6 +12,6 @@
 #   component: dylint-driver for nightly-2026-04-16
 #
 # `tests/test_dylint_nightly_agreement.py` now fails if they diverge again.
-channel = "nightly-2026-05-28"
+channel = "nightly-2026-08-15"
 components = ["rustc-dev", "rust-src", "llvm-tools-preview"]
 profile = "minimal"

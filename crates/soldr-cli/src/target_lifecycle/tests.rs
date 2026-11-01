@@ -658,3 +658,17 @@ fn resolve_prepare_targets_all_error_does_not_name_build() {
     let error = resolve_prepare_targets("linux-x64,all", false).unwrap_err();
     assert!(!error.to_string().contains("soldr build"), "{error}");
 }
+
+// soldr#4016: `soldr lint --cross-dylint` runs `cargo dylint ... -- --target
+// <triple>`; that step needs the same per-target C/asm prep as cross Clippy,
+// or cc-rs build scripts fall back to the host `cc`.
+#[test]
+fn cross_dylint_requires_the_same_target_prep_as_clippy() {
+    let args = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+    assert!(cargo_operation_requires_prep(&args(
+        "dylint --all -- --workspace --target x86_64-pc-windows-msvc"
+    )));
+    assert!(cargo_operation_requires_prep(&args(
+        "clippy --workspace --target x86_64-pc-windows-msvc"
+    )));
+}

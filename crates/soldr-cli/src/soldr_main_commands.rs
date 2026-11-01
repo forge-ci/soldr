@@ -232,6 +232,12 @@ async fn run_cache_command(json: bool, command: Option<CacheSubcommand>) -> Resu
             )
             .await?;
         }
+        Some(CacheSubcommand::Stats { json: stats_json }) => {
+            cache::run_cache_stats_command(stats_json || json)?;
+        }
+        Some(CacheSubcommand::Gc { json: gc_json }) => {
+            cache::run_cache_gc_command(gc_json || json).await?;
+        }
         Some(CacheSubcommand::Flush { json: flush_json }) => {
             cache::run_cache_flush_command(flush_json || json).await?;
         }

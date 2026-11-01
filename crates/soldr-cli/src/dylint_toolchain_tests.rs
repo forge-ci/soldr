@@ -543,7 +543,8 @@ fn apply_to_command_never_touches_build_profile_or_injects_args() {
         assert!(
             expected_keys.contains(&key_str.as_ref())
                 || key_str == "DYLINT_DRIVER_PATH"
-                || key_str == "RUSTUP_HOME",
+                || key_str == "RUSTUP_HOME"
+                || key_str == DYLINT_LINK_COPY_LIBRARY_ENV_VAR,
             "unexpected env var set by DylintToolchainPlan::apply_to_command: {key_str}"
         );
     }
@@ -765,7 +766,7 @@ fn driver_diagnostic_names_the_provenance_and_the_missing_asset() {
         "the diagnostic must name the tier that chose the channel: {message}"
     );
     assert!(
-        message.contains("dylint-driver 6.0.3-nightly-2026-01-18"),
+        message.contains("dylint-driver 6.2.0-nightly-2026-01-18"),
         "{message}"
     );
     assert!(message.contains("/soldr/dylint/drivers/"), "{message}");
@@ -799,13 +800,13 @@ fn the_driver_build_opt_in_is_off_by_default_and_warns_when_set() {
     let plan = sample_plan().with_provenance(ChannelProvenance::LintLibraries);
     let warning = driver_source_build_warning(
         &plan,
-        "6.0.3",
+        "6.2.0",
         &SoldrError::Other("catalogue has no asset row".into()),
     );
     assert!(warning.contains("WARNING"), "{warning}");
     assert!(warning.contains("nightly-2026-01-18"), "{warning}");
     assert!(
-        warning.contains("dylint-driver 6.0.3-nightly-2026-01-18"),
+        warning.contains("dylint-driver 6.2.0-nightly-2026-01-18"),
         "{warning}"
     );
     assert!(
@@ -843,5 +844,28 @@ fn dylint_readiness_reads_the_home_the_install_writes_to() {
     assert_eq!(
         crate::dylint_rustup_home::dylint_rustup_home().expect("Dylint home"),
         managed
+    );
+}
+
+/// soldr#3991: an inherited DYLINT_LINK_ENABLE_COPY_LIBRARY makes
+/// cargo-dylint skip its post-build `lib<name>@<toolchain>` copy, so a fresh
+/// or cache-replayed lint cdylib (dylint-link never runs) fails with
+/// "Could not find ... despite successful build". The plan must remove it.
+#[test]
+fn apply_to_command_strips_dylint_link_copy_library_env() {
+    let plan = sample_plan();
+    let mut command = std::process::Command::new("does-not-matter");
+    command.env(DYLINT_LINK_COPY_LIBRARY_ENV_VAR, "1");
+    plan.apply_to_command(&mut command);
+
+    let value = command
+        .get_envs()
+        .find(|(key, _)| *key == OsStr::new(DYLINT_LINK_COPY_LIBRARY_ENV_VAR))
+        .map(|(_, value)| value);
+    assert_eq!(
+        value,
+        Some(None),
+        "apply_to_command must remove {DYLINT_LINK_COPY_LIBRARY_ENV_VAR} so cargo-dylint \
+         always writes the toolchain-stamped library copy itself"
     );
 }

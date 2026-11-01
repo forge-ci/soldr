@@ -774,7 +774,13 @@ soldr lint all
 soldr lint --target x86_64-pc-windows-msvc
 soldr lint --target win-x64 --target mac-arm64
 soldr lint --host-only
+soldr lint --check
 ```
+
+Outside CI, the `rust` and `all` suites reformat in place before the fmt check
+and list the rewritten files (`autofixed` in the porcelain JSON), so a
+formatting-only problem never costs a second run. `--check`, or `CI` set in the
+environment, verifies without rewriting (soldr#4006).
 
 `deps` runs `deny check`, `audit`, and `machete` concurrently as cache-disabled
 children because they do not compile Rust. `ci` runs the CI/build-surface policy
@@ -817,6 +823,38 @@ are valid only for the `rust`/`all` suites and are stripped from the cargo scope
 before it reaches fmt/Clippy/Dylint. An unknown or unsupported triple — declared
 or explicit — is a clear error raised before any compile starts, not a silent
 skip; the host's own triple is never run twice.
+
+**Declared steps and repo commands (soldr#3958).** A repo whose lint is more
+than Rust declares the whole step list next to `targets`, so one `soldr lint`
+call runs everything:
+
+```toml
+[workspace.metadata.soldr.lint]
+steps = ["fmt", "clippy", "dylint"]   # built-ins, run in this order
+extra = [["ruff", "check", "."], ["python", "ci/guard.py"]]  # repo commands
+```
+
+`steps` selects and orders the built-ins (`fmt`, `clippy`, `dylint`); omitting
+it runs all three, and omitting the whole table keeps today's behavior. `extra`
+entries are `[program, args...]`, run after the built-ins, in the directory of
+the manifest that declares them, with the caller's environment. The table is
+validated before any step starts: an unknown or repeated step name, an unknown
+key, or an `extra` tool that cannot be found (the error names it) is a hard
+error. Applies to the `rust` and `all` suites. The first failing step stops the run.
+
+**Porcelain (soldr#3958).** With `SOLDR_PORCELAIN=1` (or `soldr --porcelain
+lint`), `soldr lint rust` prints ONE JSON line on stdout and nothing else when
+every step passes. It is the same report `soldr cargo` emits under porcelain.
+Schema 2 (soldr#4010): every line has `schema_version`, a top-level `status` (`ok`/`failed`),
+`exit_code`, `duration_ms` and `log_path`. A passing line stops there, plus
+`autofixed`, `installed` or `broker_skew` when they apply. A failing line adds
+`command`, `expires_at`, `summary` (errors, diagnostic,
+failed tests), `steps` (`name`, `ok`, `exit_code`, `duration_ms` per step run)
+and `failed_step`. Every step's stdout+stderr is appended to the single log at
+`log_path`. When a step fails, its complete output (the rustfmt diff, Clippy
+errors and warnings) is printed unfolded on stderr before the JSON line; only
+the output of steps that passed is folded into the log. The `deps`, `ci` and
+`all` suites are unchanged.
 
 ### `soldr ci-test`
 
@@ -2495,14 +2533,19 @@ Liveness is polled at the idle interval, so a PID reused within one interval
 can be mistaken for the original owner. Soldr does not install Task Scheduler jobs, systemd timers,
 launchd agents, or any other OS scheduler.
 
-The embedded artifact budget defaults to 5% of filesystem capacity, clamped to
-40–200 GiB and reduced when needed to preserve recovery space. At 85% fill it
+The embedded artifact budget defaults to 25 GiB (soldr#4028), set with
+`soldr config set zccache.max_size_gb <N>`; `max_size_gb = 0` restores
+zccache's dynamic default (5% of filesystem capacity, clamped to 40–200 GiB and
+reduced when needed to preserve recovery space). The budget is read when the
+daemon starts. `soldr cache stats` shows the store's on-disk size against the
+cap; `soldr cache gc` runs the eviction pass now when no daemon owns the root
+(a live daemon runs it every 5 minutes). At 85% fill it
 evicts LRU artifacts older than four days toward 70%; at 100% fill or critically
 low free space it evicts regardless of age toward 80% plus recovery headroom.
 A daily pass expires artifacts older than 30 days even below budget. Physical,
 hardlink-deduplicated allocated bytes are used. Set exactly one of
 `ZCCACHE_CACHE_SIZE_BYTES` or `ZCCACHE_CACHE_SIZE_PERCENT` to override the
-dynamic budget.
+configured budget.
 
 The same coordinated pass bounds cook artifacts, trash buckets, registered
 workspace targets, PEP517 targets and wheels, daemon events, stale embedded generations,
@@ -2561,7 +2604,24 @@ enabled = true          # opt-out; on by default
 trigger_free_gb = 20    # start GC when free space < this
 target_free_gb = 30     # stop GC when free space >= this
 min_age_secs = 3600     # never touch anything modified within this window
+stale_target_days = 0   # >0: evict target/ dirs idle this many days (soldr#4031)
 ```
+
+`stale_target_days` (soldr#4031, opt-in, default `0` = off) adds an
+age-based pass that runs regardless of free space, at most once a day: every
+registered `target/` plus every `target/` discovered under
+`[gc] allowlist_roots` (default `~/dev`) that has not been used for that many
+days is deleted through the same guarded purge path as tier 2 (allowlist,
+active-build guards, 256M floor, `min_age_secs` floor). Idle agent worktrees
+stop holding their full `target/` forever; add your worktree root (for example
+`~/.clud/worktrees`) to `allowlist_roots` if it lives outside `~/dev`. Enable
+with `soldr config set auto_gc.stale_target_days 14`.
+
+Dependency artifacts are already shared across worktrees through the zccache
+content-addressed store: on a cache hit the output is delivered into each
+worktree's `target/` as a reflink or hardlink when the probed volume pair
+supports it (`--zccache-mode`, see the materialization mode docs), so the
+per-worktree cost on a CoW filesystem is mostly metadata.
 
 Fallback behavior:
 
@@ -2755,8 +2815,8 @@ Commands:
 | `SOLDR_ZCCACHE_BIN` | Legacy compatibility variable; it does not replace the embedded service on the normal `soldr cargo ...` path. Use `SOLDR_RUSTC_WRAPPER=/path/to/zccache` for an intentional external-wrapper experiment. | unset |
 | `SOLDR_ZCCACHE_LOCAL_DIR` | Legacy compatibility variable from the removed downloaded-zccache flow; ignored by the normal embedded path. | unset |
 | `SOLDR_CACHE_DIR` | Override the exact product root owned by this soldr daemon. **On Windows, keep this path short** — see the note below. | official builds: `~/.soldr`; development builds: `~/.soldr-dev` |
-| `ZCCACHE_CACHE_SIZE_BYTES` | Exact embedded artifact budget in bytes. Mutually exclusive with `ZCCACHE_CACHE_SIZE_PERCENT`. | dynamic 5%, clamped 40–200 GiB |
-| `ZCCACHE_CACHE_SIZE_PERCENT` | Embedded artifact budget as an integer percentage from 1 through 100. Mutually exclusive with `ZCCACHE_CACHE_SIZE_BYTES`. | dynamic 5%, clamped 40–200 GiB |
+| `ZCCACHE_CACHE_SIZE_BYTES` | Exact embedded artifact budget in bytes. Mutually exclusive with `ZCCACHE_CACHE_SIZE_PERCENT`. Outranks `[zccache].max_size_gb`. | `[zccache].max_size_gb` (25 GiB) |
+| `ZCCACHE_CACHE_SIZE_PERCENT` | Embedded artifact budget as an integer percentage from 1 through 100. Mutually exclusive with `ZCCACHE_CACHE_SIZE_BYTES`. Outranks `[zccache].max_size_gb`. | `[zccache].max_size_gb` (25 GiB) |
 | `SOLDR_CACHE_LIFECYCLE` | Embedded-cache durability policy for `soldr cargo ...`. `job` leaves normal background persistence to the long-lived Soldr daemon. `command` requests an embedded cache flush before the command exits; it does not stop the root-owning daemon. | `job` |
 | `SOLDR_CACHE_SHUTDOWN_TIMEOUT_SECS` | Positive compatibility timeout accepted with command-lifetime mode; empty, zero, or malformed values fall back to the default (malformed/zero warn on stderr). Embedded mode uses it to select the flush-on-command path; there is no separate zccache daemon to stop. | `300` |
 | `SOLDR_TRUST_INHERITED_ENV` | Advanced escape hatch for CI/action workflows that intentionally inject soldr/zccache workspace-pinned env into `soldr cargo ...`. Truthy values are equivalent to `--trust-inherited-soldr-env`; unset/default means `soldr cargo ...` derives a fresh soldr workspace context from the current cwd/manifest while preserving normal OS, Cargo, Rust, proxy, cert, and CI env. | unset |

@@ -150,3 +150,70 @@ fn sweeper_spawn_declares_the_soldr_identity_and_the_self_spawn_edge() {
         Some("1")
     );
 }
+
+#[test]
+fn stale_target_age_is_disabled_by_default() {
+    assert_eq!(
+        stale_target_age_secs(&crate::core::AutoGcConfig::default()),
+        None
+    );
+}
+
+#[test]
+fn stale_target_age_converts_days_and_honors_floor() {
+    let config = crate::core::AutoGcConfig {
+        stale_target_days: 7,
+        ..crate::core::AutoGcConfig::default()
+    };
+    assert_eq!(stale_target_age_secs(&config), Some(7 * 86_400));
+    let floored = crate::core::AutoGcConfig {
+        stale_target_days: 1,
+        min_age_secs: 3 * 86_400,
+        ..crate::core::AutoGcConfig::default()
+    };
+    assert_eq!(stale_target_age_secs(&floored), Some(3 * 86_400));
+}
+
+#[test]
+fn stale_target_pass_evicts_idle_discovered_target_once_per_day() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let dev = home.path().join("dev");
+    let workspace = dev.join("idle-worktree");
+    let target = workspace.join("target");
+    std::fs::create_dir_all(target.join("debug")).unwrap();
+    std::fs::write(workspace.join("Cargo.toml"), b"[package]\nname = \"x\"\n").unwrap();
+    let blob = std::fs::File::create(target.join("debug").join("dep.rlib")).unwrap();
+    blob.set_len(300 * 1024 * 1024).unwrap();
+    let old = SystemTime::now() - Duration::from_secs(30 * 86_400);
+    for p in [
+        target.join("debug").join("dep.rlib"),
+        target.join("debug"),
+        target.clone(),
+    ] {
+        filetime::set_file_mtime(&p, filetime::FileTime::from_system_time(old)).unwrap();
+    }
+    let root = home.path().join(".soldr");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("config.toml"),
+        format!(
+            "[gc]\nallowlist_roots = [{:?}]\n",
+            dev.to_string_lossy().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+    let paths = SoldrPaths::with_root(root.clone());
+    let log = root.join("auto_gc.log");
+    let config = crate::core::AutoGcConfig {
+        stale_target_days: 14,
+        ..crate::core::AutoGcConfig::default()
+    };
+
+    run_stale_target_eviction(&paths, &config, &log);
+
+    assert!(!target.exists(), "idle target should be evicted");
+    assert!(workspace.join("Cargo.toml").exists(), "workspace untouched");
+    assert!(stale_target_marker_path(&paths).exists());
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.contains("stale-targets days=14"), "{text}");
+}

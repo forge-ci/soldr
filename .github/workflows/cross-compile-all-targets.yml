@@ -91,7 +91,7 @@ jobs:
           submodules: recursive
 
       - name: Set up Soldr for source bootstrap
-        uses: zackees/setup-soldr@2f4be9f8f5806fbe0e8e16cc3534489d147da094
+        uses: zackees/setup-soldr@35b5765c99cf392c259e684daeda10a950f72fff
         with:
           toolchain: 1.98.1
           cook-delta: false

@@ -236,6 +236,7 @@ pub(crate) mod broker_purge;
 pub(crate) mod broker_reaper;
 pub(crate) mod broker_retry;
 pub(crate) mod broker_server;
+pub mod broker_skew;
 pub mod broker_spawn;
 /// soldr#2900 — Soldr-owned per-build cache bookkeeping. Replaces the
 /// retired private-zccache lifecycle module, which still carried subprocess
@@ -311,6 +312,8 @@ pub(crate) mod dylint_driver;
 /// `dylint_cook`, and `ci_test::plan` all resolve the Dylint channel through
 /// it instead of each deriving or hard-coding its own answer.
 pub(crate) mod dylint_libraries;
+pub(crate) mod dylint_library_store;
+pub(crate) mod dylint_library_uplift;
 pub(crate) mod dylint_prepare;
 /// soldr#3567/#3605 — the single Rustup home Dylint provisions and runs in.
 pub(crate) mod dylint_rustup_home;
@@ -348,6 +351,8 @@ pub mod lint_ci;
 /// soldr#820 — `soldr logs` discoverable runtime-log surface.
 /// soldr#1721 - cache-aware unified validation command.
 pub mod lint_cmd;
+/// soldr#3958 - declared `soldr lint` extras and the porcelain runner.
+pub(crate) mod lint_steps;
 pub(crate) mod llvm_fetch_wait;
 pub mod logs_cmd;
 /// soldr#3698 — `soldr logs view` / `soldr logs prune`.

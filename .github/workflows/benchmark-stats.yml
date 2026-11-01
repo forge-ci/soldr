@@ -129,9 +129,12 @@ jobs:
         run: rustup toolchain install 1.98.1 --profile minimal --no-self-update  # ci-lint: allow RUST-001 bootstrap: pre-seeds ~/.rustup before setup-soldr puts soldr on PATH (soldr#1340)
 
       - name: Setup soldr build cache
-        uses: zackees/setup-soldr@2f4be9f8f5806fbe0e8e16cc3534489d147da094
+        uses: zackees/setup-soldr@35b5765c99cf392c259e684daeda10a950f72fff
         env:
           ACTION_WORKSPACE: ${{ github.workspace }}/soldr
+          # setup-soldr#629: optional S3 remote build cache (DO Spaces).
+          SOLDR_S3_CACHE_ACCESS_KEY: ${{ secrets.SOLDR_S3_CACHE_ACCESS_KEY }}
+          SOLDR_S3_CACHE_SECRET_KEY: ${{ secrets.SOLDR_S3_CACHE_SECRET_KEY }}
         with:
           # Save caches fully under act (local bosn runs are pull_request events); setup-soldr#537 makes this the default. Remove then.
           cook-delta: false
@@ -142,6 +145,8 @@ jobs:
           toolchain: 1.98.1
           cache: true
           zccache-seed-strict: true
+          s3-bucket: forge-ci-cache
+          s3-endpoint: sfo3.digitaloceanspaces.com
 
       # Benchmark Stats is a per-commit trend: measure the commit under
       # test, not setup-soldr's released default. Build from this job's

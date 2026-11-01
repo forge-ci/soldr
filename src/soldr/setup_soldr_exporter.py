@@ -12,6 +12,8 @@ HELPER_SCRIPT_PATHS = (
     Path(".github/actions/setup-soldr/install_tool_shims.py"),
     Path(".github/actions/setup-soldr/verify_soldr.py"),
     Path(".github/actions/setup-soldr/zccache_contract.py"),
+    Path(".github/actions/setup-soldr/s3_cache.py"),
+    Path(".github/actions/setup-soldr/s3-save/action.yml"),
     Path("contracts/zccache-runtime.v1.json"),
 )
 
