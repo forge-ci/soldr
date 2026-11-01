@@ -85,7 +85,8 @@ soldr: broker is <version>-<digest8> (this is <version>-<digest8>); work continu
 ```
 
 Under `SOLDR_PORCELAIN=1` nothing is printed; the JSON line carries a
-`broker_skew` object (`running_broker`, `this_soldr`, `remedy`) instead.
+one-line `broker_skew` string instead, e.g. `broker 0.9.48-9ce3acee is running,
+this is 0.9.49-413f0ec1; run: soldr broker remove` (soldr#4040).
 
 This is a diagnostic, not a failure. The broker is a stable, long-lived
 singleton for its user-home endpoint: Soldr never stops, kills, replaces, or

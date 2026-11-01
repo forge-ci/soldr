@@ -650,8 +650,11 @@ fn serialize_report_adds_broker_skew_only_when_observed() {
     };
     let line = serialize_report(&report, Some(&skew), &[]).expect("serialize");
     let value: serde_json::Value = serde_json::from_str(&line).expect("json");
-    assert_eq!(value["broker_skew"]["running_broker"], "soldr-0.9.44-aaaa");
-    assert_eq!(value["broker_skew"]["remedy"], "soldr broker remove");
+    // soldr#4040: one short string, not an object of full identities.
+    assert_eq!(
+        value["broker_skew"],
+        "broker 0.9.44-aaaa is running, this is 0.9.46-bbbb; run: soldr broker remove"
+    );
     assert_eq!(line.lines().count(), 1);
 }
 

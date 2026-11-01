@@ -917,7 +917,7 @@ pub(super) fn serialize_report(
             object.insert("status".to_string(), "failed".into());
         }
         if let Some(skew) = skew {
-            object.insert("broker_skew".to_string(), serde_json::to_value(skew)?);
+            object.insert("broker_skew".to_string(), broker_skew_line(skew).into());
         }
         if !installed.is_empty() {
             object.insert("installed".to_string(), serde_json::to_value(installed)?);
@@ -936,6 +936,19 @@ fn compact_success(object: &mut serde_json::Map<String, serde_json::Value>) {
         object.remove(*key);
     }
     object.insert("status".to_string(), "ok".into());
+}
+
+/// One line for the porcelain JSON (soldr#4040). The full identities carry
+/// 64-hex digests and outweighed a compact success line; the short forms
+/// keep version plus 8 hex, enough to tell the two builds apart.
+fn broker_skew_line(skew: &crate::broker_spawn::BrokerSkew) -> String {
+    use crate::broker_spawn::short_broker_identity as short;
+    format!(
+        "broker {} is running, this is {}; run: {}",
+        short(&skew.running_broker),
+        short(&skew.this_soldr),
+        skew.remedy
+    )
 }
 
 static EMITTED: AtomicBool = AtomicBool::new(false);
