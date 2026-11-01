@@ -1,15 +1,34 @@
 #!/usr/bin/env python3
-"""Run Bosn's workspace tests after handing the cache route to source Soldr.
+"""Run soldr's workspace tests after handing the cache route to source Soldr.
 
 The published Soldr bootstrap exists only to compile the checkout.  Source
 integration tests execute ``target/debug/soldr`` and must not inherit the
 bootstrap daemon route: their wire protocol may legitimately differ.
+
+Two environments run this plan:
+
+* ``--host`` -- the local gate's ``tests`` lane (owner directive 2026-10-16:
+  no bosn). The suite starts soldr daemons and brokers and touches soldr
+  state roots (soldr#3516), so the host run first moves every per-user
+  identity variable the broker and daemon resolve a root from -- ``HOME``,
+  ``XDG_CONFIG_HOME``, ``XDG_RUNTIME_DIR``, ``TMPDIR`` and ``SOLDR_CACHE_DIR``
+  (``broker_spawn.rs`` ``HOME_IDENTITY_ENV_VARS``) -- into a private root
+  under this worktree's git dir. Only then does it set ``SOLDR_TEST_ISOLATED``,
+  and only for its own children. The bootstrap's ``cache shutdown`` and
+  ``broker remove`` therefore reach the private broker, never the caller's
+  live one. It fails closed: it refuses to start when the private root would
+  be the caller's real home, or when the nextest guard no longer refuses an
+  unmarked run.
+* default -- the legacy container layout (``/repo``, ``/target``,
+  ``/opt/soldr-bootstrap``), whose image already isolates and sets the marker.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -254,6 +273,123 @@ def cleanup(steps: list[Step], *, repo: Path, preserve_primary: bool) -> None:
         raise failures[0]
 
 
+ISOLATION_MARKER = "SOLDR_TEST_ISOLATED"
+GUARD = Path(".github/scripts/nextest_wrapper.sh")
+# nextest_wrapper.sh's exit code for an unmarked, non-CI run.
+GUARD_REFUSAL = 97
+
+
+class IsolationError(RuntimeError):
+    """The host run cannot prove it is isolated, so it does not start."""
+
+
+@dataclass(frozen=True)
+class HostLayout:
+    home: Path
+    target: Path
+    tmp: Path
+    runtime: Path
+
+
+def host_layout(git_dir: Path) -> HostLayout:
+    """A private root per worktree (its own git dir), kept between runs so
+    the target dir and the private soldr cache stay warm. The runtime dir
+    holds the broker socket, so it is short and under /tmp (sun_path)."""
+    root = git_dir.resolve() / "local-gate" / "tests-host"
+    tag = hashlib.sha256(str(root).encode()).hexdigest()[:10]
+    return HostLayout(
+        home=root / "home",
+        target=root / "target",
+        tmp=root / "tmp",
+        runtime=Path(f"/tmp/soldr-gate-{os.getuid()}-{tag}"),
+    )
+
+
+def host_environment(
+    layout: HostLayout, caller: dict[str, str], real_home: Path
+) -> dict[str, str]:
+    """The child environment: private identity roots, the caller's
+    toolchain and uv caches (read-mostly, outside soldr's state), and the
+    isolation marker last."""
+    if layout.home.resolve() == real_home.resolve():
+        raise IsolationError(f"private HOME {layout.home} is the caller's home")
+    env = {
+        k: v
+        for k, v in caller.items()
+        if k not in ("CI", ISOLATION_MARKER, "SOLDR_RUSTC_WRAPPER")
+    }
+    env.update(
+        {
+            "HOME": str(layout.home),
+            "XDG_CONFIG_HOME": str(layout.home / ".config"),
+            "XDG_RUNTIME_DIR": str(layout.runtime),
+            "TMPDIR": str(layout.tmp),
+            "SOLDR_CACHE_DIR": str(layout.home / ".soldr" / "bootstrap"),
+            "CARGO_HOME": caller.get("CARGO_HOME") or str(real_home / ".cargo"),
+            "RUSTUP_HOME": caller.get("RUSTUP_HOME") or str(real_home / ".rustup"),
+            "UV_CACHE_DIR": caller.get("UV_CACHE_DIR")
+            or str(real_home / ".cache" / "uv"),
+            "UV_PYTHON_INSTALL_DIR": caller.get("UV_PYTHON_INSTALL_DIR")
+            or str(real_home / ".local" / "share" / "uv" / "python"),
+        }
+    )
+    gitconfig = real_home / ".gitconfig"
+    if "GIT_CONFIG_GLOBAL" not in env and gitconfig.is_file():
+        env["GIT_CONFIG_GLOBAL"] = str(gitconfig)
+    soldr_root = real_home / ".soldr"
+    for name in ("HOME", "SOLDR_CACHE_DIR", "XDG_CONFIG_HOME", "TMPDIR"):
+        value = Path(env[name]).resolve()
+        if value == real_home.resolve() or value.is_relative_to(soldr_root):
+            raise IsolationError(f"{name}={value} reaches the caller's soldr state")
+    env[ISOLATION_MARKER] = "1"
+    return env
+
+
+def assert_guard_refuses(repo: Path, caller: dict[str, str]) -> None:
+    """Fail closed unless the nextest guard still refuses an unmarked run:
+    the marker is only meaningful while the guard checks it."""
+    env = {k: v for k, v in caller.items() if k not in ("CI", ISOLATION_MARKER)}
+    env["SOLDR_NEXTEST_NATIVE_WRAPPER"] = "/bin/true"
+    code = subprocess.run(
+        ["sh", str(repo / GUARD), "true"], env=env, check=False
+    ).returncode
+    if code != GUARD_REFUSAL:
+        raise IsolationError(
+            f"{GUARD} exited {code} without {ISOLATION_MARKER}, expected "
+            f"{GUARD_REFUSAL}: the isolation guard is not in force"
+        )
+
+
+def prepare_host(repo: Path) -> tuple[Path, Path]:
+    """Isolate this process's environment; return (target, bootstrap)."""
+    caller = dict(os.environ)
+    bootstrap = shutil.which("soldr", path=caller.get("PATH"))
+    if bootstrap is None:
+        raise IsolationError("no `soldr` on PATH to bootstrap the checkout")
+    git_dir = subprocess.run(
+        ["git", "rev-parse", "--absolute-git-dir"],
+        cwd=repo,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    layout = host_layout(Path(git_dir))
+    assert_guard_refuses(repo, caller)
+    env = host_environment(layout, caller, Path.home())
+    for path in (layout.home, layout.target, layout.tmp):
+        path.mkdir(parents=True, exist_ok=True)
+    layout.runtime.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(layout.runtime, 0o700)
+    os.environ.clear()
+    os.environ.update(env)
+    print(
+        f"tests lane: host run, private HOME={layout.home}, "
+        f"XDG_RUNTIME_DIR={layout.runtime}, {ISOLATION_MARKER}=1 for children only",
+        flush=True,
+    )
+    return layout.target, Path(bootstrap).resolve()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path("/repo"))
@@ -261,9 +397,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--bootstrap", type=Path, default=Path("/opt/soldr-bootstrap/bin/soldr")
     )
+    parser.add_argument(
+        "--host",
+        action="store_true",
+        help="run on this host from the current checkout, in a private soldr root",
+    )
     args = parser.parse_args(argv)
-    # zackees/ci.yml#196: echo the gate's nonce so the host can prove this
-    # container is bound to the worktree that invoked it (zackees/bosn#314).
+    if args.host:
+        args.repo = Path.cwd()
+        try:
+            args.target, args.bootstrap = prepare_host(args.repo)
+        except IsolationError as error:
+            print(f"tests lane: REFUSED -- {error}", file=sys.stderr, flush=True)
+            return 2
+    # zackees/ci.yml#196: echo the gate's nonce from the tree this run tests,
+    # so the gate can prove it tested the worktree that invoked it.
     nonce = args.repo / ".gate-nonce"
     seen = nonce.read_text(encoding="utf-8").strip() if nonce.is_file() else "(none)"
     print(f"gate-nonce: {seen}", flush=True)

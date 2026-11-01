@@ -43,8 +43,9 @@ Lanes:
   dockur/windows VM (`ci/winvm_lane.py`). Host-optional: with no VM it exits
   75 and local-gate records `winvm:n/a` -- not cached, not attested, and the
   gate passes (zackees/ci.yml#202, ci_lint 9687a0b).
-- `tests`: soldr's own test suite, in bosn's isolated container
-  (`bosn run --task test`), never on the host (GATE-005, soldr#3516).
+- `tests`: soldr's own test suite, on this host inside a private soldr root
+  (`ci/workspace_test.py --host`): private HOME/XDG/TMPDIR/SOLDR_CACHE_DIR,
+  so its daemons never touch the caller's state (GATE-005, soldr#3516).
 
 Native *execution* (macOS, Windows, linux-arm64 target-runs) cannot run here
 and stays remote; it is the residual first-push risk. Their *lints* run here
@@ -95,7 +96,7 @@ CI_LINT_REF = ci_lint_ref()
 # GATE-007 lanes (zackees/ci.yml#177), split along input boundaries so each
 # can be cached on its own: Python linters read only Python; guards scan the
 # whole repository; ci-lint is CI-surface and dependency policy (cheap);
-# rust compiles the workspace; tests runs the suite in bosn.
+# rust compiles the workspace; tests runs the suite in a private soldr root.
 LANES = ("py-static", "guards", "ci-lint", "rust", "cross", "wine", "winvm", "tests")
 # zackees/ci.yml#198 phase 2: Clippy and Dylint for the non-Linux targets, run
 # from this Linux host. No ordinary PR job lints these targets, so the
@@ -146,10 +147,10 @@ class Check:
     # `<tool> --version`; an older tool fails fast with an upgrade hint.
     min_version: tuple[int, ...] | None = None
     # zackees/ci.yml#196 (candidate GATE-009): prove the isolated runner saw
-    # THIS worktree. bosn can reuse a warm container still bound to another
-    # checkout (zackees/bosn#314) -- once it ran a sibling session's tree and
-    # this gate would have attested it. A fresh nonce is written to
-    # NONCE_FILE; the runner must echo it back from its /repo.
+    # THIS worktree. A runner bound to another checkout (once, a reused bosn
+    # container, zackees/bosn#314) would let the gate attest a tree it never
+    # tested. A fresh nonce is written to NONCE_FILE; the runner must echo it
+    # back from the tree it tests.
     tree_nonce: bool = False
     # Host-optional (local-gate.toml `optional = true`): exit
     # NOT_APPLICABLE means "cannot run on this host" -- reported, not failed,
@@ -733,24 +734,29 @@ def checks() -> list[Check]:
         )
     ]
     # zackees/ci.yml#168 (GATE-005), soldr#3516: soldr's test suite starts
-    # soldr daemons and touches soldr state roots, so it never runs on the
-    # developer host -- the nextest run-wrapper refuses unless CI=true or
-    # SOLDR_TEST_ISOLATED=1. Locally it runs in bosn's isolated container,
-    # whose image sets the marker.
+    # soldr daemons and touches soldr state roots, so it never runs against
+    # the caller's soldr state -- the nextest run-wrapper refuses unless
+    # CI=true or SOLDR_TEST_ISOLATED=1. No bosn (owner directive 2026-10-16):
+    # ci/workspace_test.py --host moves HOME, XDG_CONFIG_HOME,
+    # XDG_RUNTIME_DIR, TMPDIR and SOLDR_CACHE_DIR into a private root under
+    # this worktree's git dir, proves the guard still refuses an unmarked
+    # run, and only then sets the marker for its own children. It refuses
+    # (exit 2) rather than falling back to an unisolated host run.
     tests = [
         Check(
-            "soldr tests (isolated, bosn)",
-            # A locally built Bosn can be selected without replacing a shared
-            # installation. Its normal version and isolation checks still run.
-            (os.environ.get("SOLDR_LOCAL_GATE_BOSN", "bosn"), "run", "--task", "test"),
+            "soldr tests (isolated, host private root)",
+            (
+                "uv",
+                "run",
+                "--no-project",
+                "--python",
+                "3.13",
+                "python",
+                "ci/workspace_test.py",
+                "--host",
+            ),
             "tests",
             exclusive=True,
-            # zackees/bosn#317 (0.1.5): older bosn reaps a task whose output
-            # outruns its event queue -- `ci-test`'s warning burst died at
-            # 390 s. 0.1.6 (zackees/bosn#322): a stale socket in the default
-            # state dir is reclaimed instead of failing autostart, and a
-            # client/daemon version mismatch is reported instead of a reset.
-            min_version=(0, 1, 6),
             tree_nonce=True,
         )
     ]

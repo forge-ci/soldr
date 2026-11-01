@@ -36,11 +36,12 @@
 # -- a leaked fixture daemon once claimed the real ~/.soldr root and wedged
 # every soldr build on the machine. Every Unix test process passes through
 # here, so this is where the suite refuses. CI=true covers GitHub runners and
-# act; SOLDR_TEST_ISOLATED=1 is set only by isolated environments (the bosn
-# image, the macOS Recovery guest).
+# act; SOLDR_TEST_ISOLATED=1 is set only by isolated environments (the local
+# gate's private-root host driver ci/workspace_test.py --host, the cook image,
+# the macOS Recovery guest).
 if [ "${CI:-}" != "true" ] && [ "${SOLDR_TEST_ISOLATED:-}" != "1" ]; then
     echo "soldr tests refuse to run on a developer host (zackees/ci.yml#168, soldr#3516)." >&2
-    echo "Run them isolated: bosn run --task test" >&2
+    echo "Run them isolated: uv run --no-project --python 3.13 python ci/workspace_test.py --host" >&2
     exit 97
 fi
 if [ -n "${SOLDR_NEXTEST_NATIVE_WRAPPER:-}" ]; then

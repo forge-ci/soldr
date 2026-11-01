@@ -46,7 +46,7 @@ cmd = "cd /repo && CARGO_TARGET_DIR=/target soldr cargo test -p soldr-cache cook
 
 [task.test]
 stack = "cook"
-cmd = "python3 /repo/ci/bosn_workspace_test.py"
+cmd = "python3 /repo/ci/workspace_test.py"
 
 [task.lint]
 stack = "cook"

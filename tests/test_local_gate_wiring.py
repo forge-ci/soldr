@@ -133,7 +133,7 @@ def test_only_the_non_compiling_lanes_are_light() -> None:
         assert lane.get("weight", "heavy") in {"light", "heavy"}, name
 
 
-# zackees/ci.yml#399: the bosn `tests` lane builds in its container's own
+# zackees/ci.yml#399: the `tests` lane builds in its private root's own
 # target dir, so it is its own heavy group and runs beside the host chain.
 # Every host-compiling heavy lane shares target/ and must stay in one group.
 def test_only_the_isolated_tests_lane_has_its_own_heavy_group() -> None:
@@ -145,20 +145,32 @@ def test_only_the_isolated_tests_lane_has_its_own_heavy_group() -> None:
 
 
 def test_the_isolated_test_run_proves_its_tree() -> None:
-    """zackees/ci.yml#196: the bosn test check carries a nonce the container
-    must echo from its /repo, so a container bound to another worktree
-    (zackees/bosn#314) fails the gate instead of attesting the wrong tree."""
+    """zackees/ci.yml#196: the test check carries a nonce the driver must echo
+    from the tree it tests, so a run against another worktree fails the gate
+    instead of attesting the wrong tree."""
     tests = next(c for c in GATE.checks() if c.lane == "tests")
     assert tests.tree_nonce
-    task = (ROOT / "ci" / "bosn_workspace_test.py").read_text(encoding="utf-8")
+    task = (ROOT / "ci" / "workspace_test.py").read_text(encoding="utf-8")
     assert '".gate-nonce"' in task and "gate-nonce: " in task
     assert GATE.NONCE_FILE in (ROOT / ".gitignore").read_text(encoding="utf-8")
 
 
 def test_the_test_suite_only_runs_isolated_locally() -> None:
     lanes = {check.name: check for check in GATE.checks()}
-    tests = lanes["soldr tests (isolated, bosn)"]
-    assert tests.argv == ("bosn", "run", "--task", "test")
+    tests = lanes["soldr tests (isolated, host private root)"]
+    assert tests.argv == (
+        "uv",
+        "run",
+        "--no-project",
+        "--python",
+        "3.13",
+        "python",
+        "ci/workspace_test.py",
+        "--host",
+    )
+    gate = tomllib.loads((ROOT / "local-gate.toml").read_text(encoding="utf-8"))
+    assert tuple(gate["gate"]["isolation"]["runner"]) == tests.argv
+    assert all("bosn" not in check.argv[0] for check in GATE.checks())
     for check in GATE.checks():
         if check.lane != "tests":
             assert "nextest" not in check.argv and "ci-test" not in check.argv, check
@@ -215,7 +227,7 @@ def _echo_script(path: Path, label: str) -> Path:
 def test_isolation_guard_refuses_a_developer_host() -> None:
     refused = _wrapper()
     assert refused.returncode != 0
-    assert "bosn run --task test" in refused.stderr
+    assert "ci/workspace_test.py --host" in refused.stderr
     assert _wrapper(CI="true").returncode == 0
     assert _wrapper(SOLDR_TEST_ISOLATED="1").returncode == 0
 
@@ -437,12 +449,47 @@ def test_a_dead_builders_lock_is_taken_over(tmp_path: Path) -> None:
     assert len(log.read_text(encoding="utf-8").splitlines()) == 1
 
 
-def test_isolated_suite_requires_a_bosn_that_does_not_reap_bursts() -> None:
-    # zackees/bosn#317: bosn < 0.1.5 reaped `ci-test` on an output burst.
-    tests = {check.name: check for check in GATE.checks()}[
-        "soldr tests (isolated, bosn)"
-    ]
-    assert tests.min_version is not None and tests.min_version >= (0, 1, 6)
+def _workspace_test():  # type: ignore[no-untyped-def]
+    return load_script_module(
+        ROOT / "ci" / "workspace_test.py", "soldr_workspace_test_host"
+    )
+
+
+def test_host_run_moves_every_identity_root_off_the_callers_state(
+    tmp_path: Path,
+) -> None:
+    """soldr#3516: the host run's daemons resolve a private root, and the
+    marker is set only together with that root."""
+    ws = _workspace_test()
+    real_home = tmp_path / "real"
+    layout = ws.host_layout(tmp_path / "gitdir")
+    caller = {"PATH": "/bin", "CI": "true", "SOLDR_TEST_ISOLATED": "0"}
+    env = ws.host_environment(layout, caller, real_home)
+    assert env["SOLDR_TEST_ISOLATED"] == "1"
+    assert "CI" not in env
+    for name in ("HOME", "XDG_CONFIG_HOME", "TMPDIR", "SOLDR_CACHE_DIR"):
+        assert not Path(env[name]).is_relative_to(real_home), name
+    assert env["XDG_RUNTIME_DIR"] == str(layout.runtime)
+    assert env["CARGO_HOME"] == str(real_home / ".cargo")
+
+
+def test_host_run_refuses_the_callers_home(tmp_path: Path) -> None:
+    ws = _workspace_test()
+    layout = ws.host_layout(tmp_path)
+    with pytest.raises(ws.IsolationError):
+        ws.host_environment(layout, {}, layout.home)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the nextest run-wrapper is Unix-only")
+def test_host_run_fails_closed_without_the_guard(tmp_path: Path) -> None:
+    ws = _workspace_test()
+    ws.assert_guard_refuses(ROOT, dict(os.environ))
+    (tmp_path / ".github" / "scripts").mkdir(parents=True)
+    (tmp_path / ".github" / "scripts" / "nextest_wrapper.sh").write_text(
+        "exit 0\n", encoding="utf-8"
+    )
+    with pytest.raises(ws.IsolationError):
+        ws.assert_guard_refuses(tmp_path, dict(os.environ))
 
 
 def test_main_publisher_promotes_merged_pr_evidence() -> None:

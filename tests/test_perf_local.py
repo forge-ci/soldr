@@ -49,7 +49,7 @@ def test_docker_image_bootstraps_with_the_latest_published_soldr() -> None:
 
 def test_bosn_workspace_test_hands_off_from_bootstrap_to_source() -> None:
     handoff = load_script_module(
-        Path(__file__).parents[1] / "ci" / "bosn_workspace_test.py",
+        Path(__file__).parents[1] / "ci" / "workspace_test.py",
         "bosn_workspace_test",
     )
 
@@ -135,7 +135,7 @@ def test_bosn_workspace_test_cleans_up_source_route_after_validation_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     handoff = load_script_module(
-        Path(__file__).parents[1] / "ci" / "bosn_workspace_test.py",
+        Path(__file__).parents[1] / "ci" / "workspace_test.py",
         "bosn_workspace_test_failure",
     )
     plan = handoff.workspace_test_plan(
@@ -164,7 +164,7 @@ def test_bosn_workspace_test_cleans_up_source_route_after_start_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     handoff = load_script_module(
-        Path(__file__).parents[1] / "ci" / "bosn_workspace_test.py",
+        Path(__file__).parents[1] / "ci" / "workspace_test.py",
         "bosn_workspace_test_start_failure",
     )
     plan = handoff.workspace_test_plan(
@@ -195,7 +195,7 @@ def test_bosn_workspace_test_preserves_validation_error_when_cleanup_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     handoff = load_script_module(
-        Path(__file__).parents[1] / "ci" / "bosn_workspace_test.py",
+        Path(__file__).parents[1] / "ci" / "workspace_test.py",
         "bosn_workspace_test_cleanup_failure",
     )
     plan = handoff.workspace_test_plan(
@@ -225,7 +225,7 @@ def test_bosn_workspace_test_preserves_validation_error_when_cleanup_launch_fail
 ) -> None:
     """A teardown launch error must not hide validation's primary failure."""
     handoff = load_script_module(
-        Path(__file__).parents[1] / "ci" / "bosn_workspace_test.py",
+        Path(__file__).parents[1] / "ci" / "workspace_test.py",
         "bosn_workspace_test_cleanup_oserror",
     )
     plan = handoff.workspace_test_plan(
@@ -569,7 +569,7 @@ def test_source_handoff_removes_image_caps_before_daemon_and_cargo(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, phase: str
 ) -> None:
     handoff = load_script_module(
-        Path(__file__).parents[1] / "ci" / "bosn_workspace_test.py",
+        Path(__file__).parents[1] / "ci" / "workspace_test.py",
         "bosn_source_handoff_environment",
     )
     plan = handoff.workspace_test_plan(

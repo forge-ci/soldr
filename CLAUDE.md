@@ -372,7 +372,7 @@ git push                             # (--force-with-lease if the branch was alr
 
 `<CI_LINT_REF>` is the SHA in `ci.toml`'s `linter` -- the one canonical pin (soldr#3616); `ci/local_gate.py` derives `CI_LINT_REF` from it and workflow `ref:` lines are guarded equal. `local-gate run` runs
 `ci/local_gate.py` (lanes `lint` = the remote Lint job exactly, `rust` =
-`soldr lint rust`, `tests` = the test suite in bosn), and on success amends
+`soldr lint rust`, `tests` = the test suite in a private host root), and on success amends
 HEAD's message with the trailer. Install the pre-push hook once per clone with
 `... ci-lint local-gate install-hook`.
 
@@ -386,13 +386,16 @@ HEAD's message with the trailer. Install the pre-push hook once per clone with
 - **Add Lint checks to `ci/local_gate.py`, never as a step in ci.yml's Lint
   job.** The Lint job runs `ci/local_gate.py --lane lint` and nothing else;
   `ci-lint local-gate lint` (a check in that lane) fails anything else.
-- **Never run soldr's test suite on the host.** It starts soldr daemons and
-  touches soldr state roots. A leaked fixture once claimed the real
-  `~/.soldr` root and wedged every soldr build on the machine (soldr#3516).
-  The nextest run-wrapper refuses unless `CI=true` or `SOLDR_TEST_ISOLATED=1`,
-  which only the bosn image sets. Run the suite with
-  `bosn run --task test` (the gate's `tests` lane). Do not set the marker on
-  a host to get around the refusal.
+- **Never run soldr's test suite against your real soldr state.** It starts
+  soldr daemons and touches soldr state roots. A leaked fixture once claimed
+  the real `~/.soldr` root and wedged every soldr build on the machine
+  (soldr#3516). The nextest run-wrapper refuses unless `CI=true` or
+  `SOLDR_TEST_ISOLATED=1`. Run the suite with
+  `uv run --no-project --python 3.13 python ci/workspace_test.py --host` (the
+  gate's `tests` lane; no bosn, owner directive 2026-10-16): it moves `HOME`,
+  `XDG_CONFIG_HOME`, `XDG_RUNTIME_DIR`, `TMPDIR` and `SOLDR_CACHE_DIR` into
+  `<git-dir>/local-gate/tests-host/`, checks the guard still refuses, and sets
+  the marker for its own children only. Never export the marker by hand.
 
 ## Agent Code-Smell Reporting Rule (issue #2741)
 
