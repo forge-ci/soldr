@@ -462,7 +462,7 @@ def test_host_run_moves_every_identity_root_off_the_callers_state(
     marker is set only together with that root."""
     ws = _workspace_test()
     real_home = tmp_path / "real"
-    layout = ws.host_layout(tmp_path / "gitdir")
+    layout = ws.host_layout(tmp_path / "gitdir", tmp_path / "cache")
     shims = real_home / ".soldr" / "v0.9.48" / "shims"
     caller = {
         "PATH": f"{shims}:{real_home / '.clud' / 'state' / 'shims'}:/bin",
@@ -479,9 +479,19 @@ def test_host_run_moves_every_identity_root_off_the_callers_state(
     assert env["PATH"] == "/bin"
 
 
+def test_host_root_is_never_inside_a_checkout(tmp_path: Path) -> None:
+    """Fixtures make their pin-free cwd under TMPDIR; a private root below a
+    rust-toolchain.toml would hand every one of them the repository's pin."""
+    ws = _workspace_test()
+    layout = ws.host_layout(ROOT / ".git", tmp_path)
+    assert not layout.tmp.is_relative_to(ROOT)
+    (tmp_path / "rust-toolchain.toml").write_text("", encoding="utf-8")
+    assert ws.pinned_ancestor(layout.tmp) == tmp_path / "rust-toolchain.toml"
+
+
 def test_host_run_refuses_the_callers_home(tmp_path: Path) -> None:
     ws = _workspace_test()
-    layout = ws.host_layout(tmp_path)
+    layout = ws.host_layout(tmp_path, tmp_path / "cache")
     with pytest.raises(ws.IsolationError):
         ws.host_environment(layout, {}, layout.home)
 

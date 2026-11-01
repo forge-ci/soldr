@@ -13,7 +13,7 @@ Two environments run this plan:
   identity variable the broker and daemon resolve a root from -- ``HOME``,
   ``XDG_CONFIG_HOME``, ``XDG_RUNTIME_DIR``, ``TMPDIR`` and ``SOLDR_CACHE_DIR``
   (``broker_spawn.rs`` ``HOME_IDENTITY_ENV_VARS``) -- into a private root
-  under this worktree's git dir. Only then does it set ``SOLDR_TEST_ISOLATED``,
+  under ``~/.cache/soldr-local-gate/<worktree hash>``. Only then does it set ``SOLDR_TEST_ISOLATED``,
   and only for its own children. The bootstrap's ``cache shutdown`` and
   ``broker remove`` therefore reach the private broker, never the caller's
   live one. It fails closed: it refuses to start when the private root would
@@ -291,18 +291,30 @@ class HostLayout:
     runtime: Path
 
 
-def host_layout(git_dir: Path) -> HostLayout:
-    """A private root per worktree (its own git dir), kept between runs so
-    the target dir and the private soldr cache stay warm. The runtime dir
-    holds the broker socket, so it is short and under /tmp (sun_path)."""
-    root = git_dir.resolve() / "local-gate" / "tests-host"
-    tag = hashlib.sha256(str(root).encode()).hexdigest()[:10]
+def host_layout(git_dir: Path, cache_home: Path) -> HostLayout:
+    """A private root per worktree (keyed by its git dir), kept between runs
+    so the target dir and the private soldr cache stay warm. It lives under
+    the user cache dir, never inside a checkout: fixtures create their
+    "pin-free" cwd under TMPDIR, and a TMPDIR below the repository would put
+    its rust-toolchain.toml above every one of them. The runtime dir holds
+    the broker socket, so it is short and under /tmp (sun_path)."""
+    tag = hashlib.sha256(str(git_dir.resolve()).encode()).hexdigest()[:10]
+    root = cache_home / "soldr-local-gate" / tag
     return HostLayout(
         home=root / "home",
         target=root / "target",
         tmp=root / "tmp",
         runtime=Path(f"/tmp/soldr-gate-{os.getuid()}-{tag}"),
     )
+
+
+def pinned_ancestor(path: Path) -> Path | None:
+    """The first rust-toolchain(.toml) at or above ``path``, if any."""
+    for parent in (path, *path.parents):
+        for name in ("rust-toolchain.toml", "rust-toolchain"):
+            if (parent / name).is_file():
+                return parent / name
+    return None
 
 
 def host_environment(
@@ -384,7 +396,11 @@ def prepare_host(repo: Path) -> tuple[Path, Path]:
         stdout=subprocess.PIPE,
         text=True,
     ).stdout.strip()
-    layout = host_layout(Path(git_dir))
+    cache_home = Path(caller.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    layout = host_layout(Path(git_dir), cache_home)
+    pin = pinned_ancestor(layout.tmp.parent)
+    if pin is not None:
+        raise IsolationError(f"private root {layout.tmp.parent} sits below {pin}")
     assert_guard_refuses(repo, caller)
     env = host_environment(layout, caller, Path.home())
     for path in (layout.home, layout.target, layout.tmp):

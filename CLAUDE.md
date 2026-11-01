@@ -394,7 +394,7 @@ HEAD's message with the trailer. Install the pre-push hook once per clone with
   `uv run --no-project --python 3.13 python ci/workspace_test.py --host` (the
   gate's `tests` lane; no bosn, owner directive 2026-10-16): it moves `HOME`,
   `XDG_CONFIG_HOME`, `XDG_RUNTIME_DIR`, `TMPDIR` and `SOLDR_CACHE_DIR` into
-  `<git-dir>/local-gate/tests-host/`, checks the guard still refuses, and sets
+  `~/.cache/soldr-local-gate/<worktree hash>/`, checks the guard still refuses, and sets
   the marker for its own children only. Never export the marker by hand.
 
 ## Agent Code-Smell Reporting Rule (issue #2741)

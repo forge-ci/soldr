@@ -31,7 +31,7 @@ mode = "enforce"
 # soldr state. The nextest run-wrapper refuses unless CI=true or the marker is
 # set. No bosn (owner directive 2026-10-16): the runner below moves HOME,
 # XDG_CONFIG_HOME, XDG_RUNTIME_DIR, TMPDIR and SOLDR_CACHE_DIR into a private
-# root under this worktree's git dir, checks the guard still refuses an
+# root under ~/.cache/soldr-local-gate/<worktree hash>, checks the guard still refuses an
 # unmarked run, and sets the marker for its own children only.
 [gate.isolation]
 marker = "SOLDR_TEST_ISOLATED"
@@ -149,7 +149,7 @@ keep = [
 
 # The test suite, in a private host root: the Rust world plus the harness it
 # runs under. zackees/ci.yml#399: it builds in its private root's own target
-# dir (<git-dir>/local-gate/tests-host/target), never the host target/, so it
+# dir (~/.cache/soldr-local-gate/<hash>/target), never the host target/, so it
 # is its own heavy group and runs beside the host chain (rust, cross, wine,
 # winvm) instead of after it. soldr#3731: the lane narrows itself to the
 # changed crates' reverse-dependency closure plus soldr-cli when the diff is

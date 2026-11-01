@@ -739,7 +739,7 @@ def checks() -> list[Check]:
     # CI=true or SOLDR_TEST_ISOLATED=1. No bosn (owner directive 2026-10-16):
     # ci/workspace_test.py --host moves HOME, XDG_CONFIG_HOME,
     # XDG_RUNTIME_DIR, TMPDIR and SOLDR_CACHE_DIR into a private root under
-    # this worktree's git dir, proves the guard still refuses an unmarked
+    # ~/.cache/soldr-local-gate/<worktree hash> (outside any checkout), proves the guard still refuses an unmarked
     # run, and only then sets the marker for its own children. It refuses
     # (exit 2) rather than falling back to an unisolated host run.
     tests = [
