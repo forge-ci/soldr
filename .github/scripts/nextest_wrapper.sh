@@ -41,7 +41,7 @@
 # the macOS Recovery guest).
 if [ "${CI:-}" != "true" ] && [ "${SOLDR_TEST_ISOLATED:-}" != "1" ]; then
     echo "soldr tests refuse to run on a developer host (zackees/ci.yml#168, soldr#3516)." >&2
-    echo "Run them isolated: uv run --no-project --python 3.13 python ci/workspace_test.py --host" >&2
+    echo "Run them isolated: ci/workspace_test.py --host (the local gate tests lane)" >&2
     exit 97
 fi
 if [ -n "${SOLDR_NEXTEST_NATIVE_WRAPPER:-}" ]; then
