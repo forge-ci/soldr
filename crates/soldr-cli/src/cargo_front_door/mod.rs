@@ -66,6 +66,7 @@ pub(crate) mod porcelain;
 mod porcelain_failures;
 /// `soldr lint` porcelain report and log (soldr#3958).
 pub(crate) mod porcelain_lint;
+mod porcelain_warnings;
 mod profile_debug;
 pub(crate) mod provision;
 mod strip_diagnostics;
