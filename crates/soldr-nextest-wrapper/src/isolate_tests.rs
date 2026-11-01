@@ -95,8 +95,15 @@ fn path_entries_inside_the_callers_soldr_root_are_dropped() {
     );
 }
 
+/// Unix only: `.config/nextest.toml` runs only Unix tests through this
+/// wrapper, and a Windows directory link is not followed by `canonicalize`
+/// under every runtime (Wine leaves it unresolved), so the property under
+/// test -- a symlinked PATH entry judged by its target -- is a Unix one.
 #[test]
 fn a_symlinked_path_entry_is_judged_by_its_target() {
+    if soldr_platform::host::facts::os() == soldr_platform::host::facts::HostOs::Windows {
+        return;
+    }
     let base = tempfile::tempdir().expect("tmp");
     let root = base.path().join(".soldr");
     let shims = root.join("shims");
