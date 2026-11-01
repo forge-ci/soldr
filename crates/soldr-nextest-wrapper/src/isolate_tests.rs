@@ -106,3 +106,32 @@ fn a_symlinked_path_entry_is_judged_by_its_target() {
     let stripped = strip_entries_under(alias.as_os_str(), &[root]).expect("strip");
     assert!(stripped.is_empty(), "{stripped:?}");
 }
+
+#[test]
+fn variables_naming_a_program_in_the_callers_root_are_recognized() {
+    let base = tempfile::tempdir().expect("tmp");
+    let root = base.path().join(".soldr");
+    let shims = root.join("bin").join("linker-shims").join("v1");
+    std::fs::create_dir_all(&shims).expect("shims");
+    let linker = shims.join("clang-afe5f3c59276da8fcce9");
+    std::fs::write(&linker, b"").expect("linker shim");
+    let elsewhere = base.path().join("usr-bin");
+    std::fs::create_dir_all(&elsewhere).expect("bin");
+    std::fs::write(elsewhere.join("clang"), b"").expect("clang");
+    let path = std::env::join_paths([shims.as_path(), elsewhere.as_path()]).expect("join");
+    let roots = [root.clone()];
+    let names = |value: &str| names_program_under(OsStr::new(value), &path, &roots);
+    // A bare linker-shim name found through PATH, and an absolute shim path
+    // followed by its real compiler (the `CC` shape).
+    assert!(names("clang-afe5f3c59276da8fcce9"));
+    let cc = format!(
+        "{} /usr/bin/cc",
+        root.join("v0.9.49/shims/zccache-soldr").display()
+    );
+    assert!(names(&cc));
+    // A user's own settings and plain values are not touched.
+    assert!(!names("clang"));
+    assert!(!names("/usr/bin/cc"));
+    assert!(!names("1"));
+    assert!(!names("soldr-managed"));
+}

@@ -396,7 +396,8 @@ HEAD's message with the trailer. Install the pre-push hook once per clone with
   caller's toolchain homes reachable through `~/.cargo`/`~/.rustup` symlinks,
   drops the outer front door's route/session/wrapper variables
   (`SOLDR_BROKER_SERVICE`, `SOLDR_BUILD_SESSION_ID`, `RUSTC_WRAPPER`, ...),
-  strips `PATH` entries inside the caller's soldr root (its `~/.soldr/<ver>/shims`),
+  strips `PATH` entries and variables (`CC`, `CARGO_TARGET_<triple>_LINKER`, ...) that name a
+  program inside the caller's soldr root,
   exports `SOLDR_TEST_ISOLATED=1` to the test, removes the directory afterwards (Linux also reaps leaked daemons by
   its `TMPDIR`), and refuses (exit 97) if it cannot. `nextest_wrapper.sh`
   refuses a `SOLDR_NEXTEST_NATIVE_WRAPPER` override outside `CI=true` or an

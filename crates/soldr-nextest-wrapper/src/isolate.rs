@@ -24,9 +24,10 @@
 //! homes stay reachable through `~/.cargo` / `~/.rustup` symlinks in the
 //! private home, because they default from `HOME` and are not soldr state.
 //! `PATH` entries inside the caller's soldr root (the front door's
-//! `~/.soldr/<version>/shims`, the pinned `~/.soldr/bin`) are dropped: a test
-//! resolving `rustc` or `cargo` through them would re-enter the caller's
-//! soldr and dial the caller's broker.
+//! `~/.soldr/<version>/shims`, its linker shims, the pinned `~/.soldr/bin`)
+//! are dropped, and so is every variable naming a program there (`CC`,
+//! `CARGO_TARGET_<triple>_LINKER`, ...): a test running one would re-enter
+//! the caller's soldr and dial the caller's broker.
 
 use soldr_platform::process::test_child;
 use std::ffi::{OsStr, OsString};
@@ -66,28 +67,60 @@ fn caller_soldr_roots() -> Vec<PathBuf> {
     if let Some(home) = non_empty("HOME") {
         roots.push(PathBuf::from(home).join(".soldr"));
     }
-    let canonical: Vec<PathBuf> = roots
-        .iter()
-        .filter_map(|root| std::fs::canonicalize(root).ok())
-        .collect();
-    roots.extend(canonical);
     roots
 }
 
-/// `path` without the entries that lie inside any of `roots`, compared both
-/// as written and canonicalized (a symlinked entry is judged by its target).
+/// Is `path` inside one of `roots`? Judged both as written and canonicalized
+/// on each side, so a symlinked (or, on Windows, `\\?\`-prefixed) spelling
+/// of either is judged by what it resolves to.
+fn inside_any(path: &Path, roots: &[PathBuf]) -> bool {
+    let canonical_roots: Vec<PathBuf> = roots
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .collect();
+    let under = |candidate: &Path| {
+        roots
+            .iter()
+            .chain(&canonical_roots)
+            .any(|root| candidate.starts_with(root))
+    };
+    under(path) || std::fs::canonicalize(path).is_ok_and(|resolved| under(&resolved))
+}
+
+/// `path` without the entries that lie inside any of `roots`.
 fn strip_entries_under(
     path: &OsStr,
     roots: &[PathBuf],
 ) -> Result<OsString, std::env::JoinPathsError> {
-    let inside = |entry: &Path| {
-        roots.iter().any(|root| entry.starts_with(root))
-            || std::fs::canonicalize(entry)
-                .is_ok_and(|resolved| roots.iter().any(|root| resolved.starts_with(root)))
-    };
     std::env::join_paths(
-        std::env::split_paths(path).filter(|entry| entry.as_os_str().is_empty() || !inside(entry)),
+        std::env::split_paths(path)
+            .filter(|entry| entry.as_os_str().is_empty() || !inside_any(entry, roots)),
     )
+}
+
+/// Does the variable value `value` name a program inside `roots`? Its first
+/// whitespace-separated word is the program (`CC` may read
+/// `<shim> <real compiler>`): an absolute path is judged directly, a bare
+/// name by where `path` resolves it -- `clang-<digest>` is a linker shim the
+/// outer front door put on PATH.
+fn names_program_under(value: &OsStr, path: &OsStr, roots: &[PathBuf]) -> bool {
+    let Some(program) = value
+        .to_str()
+        .and_then(|text| text.split_whitespace().next())
+    else {
+        return false;
+    };
+    let program = Path::new(program);
+    if program.is_absolute() {
+        return inside_any(program, roots);
+    }
+    if program.components().count() != 1 {
+        return false;
+    }
+    std::env::split_paths(path)
+        .map(|dir| dir.join(program))
+        .find(|candidate| candidate.is_file())
+        .is_some_and(|found| inside_any(&found, roots))
 }
 
 /// The variables a test's soldr state is resolved from, and where each one
@@ -139,11 +172,21 @@ pub(crate) fn apply(command: &mut Command, root: &Path) -> std::io::Result<()> {
     for name in OUTER_SESSION_ENVS {
         command.env_remove(name);
     }
-    if let Some(path) = std::env::var_os("PATH") {
-        let stripped = strip_entries_under(&path, &caller_soldr_roots())
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-        command.env("PATH", stripped);
+    // Anything else the outer front door exported that names a program in
+    // the caller's root -- `CC`/`CXX` (its native-compiler shim),
+    // `CARGO_TARGET_<triple>_LINKER` (a `clang-<digest>` linker shim found
+    // through PATH) -- would run the caller's soldr. Drop the variable; a
+    // user's own setting, which names nothing in a soldr root, is kept.
+    let roots = caller_soldr_roots();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for (name, value) in std::env::vars_os() {
+        if name != "PATH" && names_program_under(&value, &path, &roots) {
+            command.env_remove(name);
+        }
     }
+    let stripped = strip_entries_under(&path, &roots)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    command.env("PATH", stripped);
     // The broker's runtime directory must be owner-only, like a real one.
     test_child::create_private_dir(&root.join("r"))?;
     for (name, path) in identity(root) {
