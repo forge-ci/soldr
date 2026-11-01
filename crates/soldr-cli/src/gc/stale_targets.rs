@@ -3,11 +3,14 @@
 // Disk-pressure tier 2 only reclaims targets once a volume is already short
 // on space, so a box with plenty of headroom kept every idle agent
 // worktree's `target/` forever (one was 86G). `auto_gc.stale_target_days`
-// opts into an unconditional pass: any registered or discovered target
-// unused for that many days is deleted through the same guarded purge
-// path tier 2 uses (allowlist roots, active-build guards, 256M floor,
-// bounded budget). The filesystem discovery walk is costly, so the pass
-// runs at most once per `STALE_TARGET_THROTTLE_SECONDS`.
+// (default 14, `0` = off) runs an unconditional pass: any registered or
+// discovered target unused for that many days is deleted through the same
+// guarded purge path tier 2 uses (allowlist roots — `~/dev` and
+// `~/.clud/worktrees` by default — active-build guards, min age, 256M
+// floor, bounded budget). The surviving targets then get the soldr#4033
+// content-addressed dedupe pass (`auto_gc.dedupe_targets`, default on).
+// The filesystem discovery walk is costly, so the pass runs at most once
+// per `STALE_TARGET_THROTTLE_SECONDS`.
 
 /// How often the stale-target pass may run (once a day).
 const STALE_TARGET_THROTTLE_SECONDS: u64 = 24 * 60 * 60;
@@ -30,20 +33,71 @@ fn stale_target_age_secs(config: &crate::core::AutoGcConfig) -> Option<u64> {
     )
 }
 
-fn run_stale_target_eviction(
+/// Daily pass: stale-target eviction, then cross-worktree dedupe of the
+/// targets that survive it.
+fn run_stale_target_pass(
     paths: &SoldrPaths,
     config: &crate::core::AutoGcConfig,
     log_path: &std::path::Path,
 ) {
-    let Some(age_secs) = stale_target_age_secs(config) else {
+    let age_secs = stale_target_age_secs(config);
+    if age_secs.is_none() && !config.dedupe_targets {
         return;
-    };
+    }
     let marker = stale_target_marker_path(paths);
     if !auto_gc_throttle_expired(&marker, STALE_TARGET_THROTTLE_SECONDS) {
         return;
     }
     let _ = touch_auto_gc_marker(&marker);
 
+    let (targets, discovered) = collect_workspace_targets(paths);
+    if targets.is_empty() {
+        let _ = append_auto_gc_log_line(
+            log_path,
+            "auto-gc stale-targets skipped=true reason=no_workspace_targets",
+        );
+        return;
+    }
+    if let Some(age_secs) = age_secs {
+        let outcome = run_soldr_target_purge_background(paths, &targets, discovered, age_secs);
+        let _ = append_auto_gc_log_line(
+            log_path,
+            &format!(
+                "auto-gc stale-targets days={} reclaimed_bytes={} candidates={} skipped={}",
+                config.stale_target_days, outcome.reclaimed, outcome.candidates, outcome.skipped,
+            ),
+        );
+    }
+    if config.dedupe_targets {
+        let survivors: Vec<_> = targets.into_iter().filter(|t| t.is_dir()).collect();
+        let opts = super::target_dedupe::DedupeOptions::for_paths(paths, config.min_age_secs);
+        let report = super::target_dedupe::dedupe_targets(&survivors, &opts);
+        let _ = append_auto_gc_log_line(
+            log_path,
+            &format!(
+                "auto-gc dedupe-targets targets={} active_skipped={} saved_bytes={} hardlinked={} reflinked={} stored={} pruned={} errors={}",
+                report.targets_scanned,
+                report.targets_skipped_active,
+                report.bytes_saved,
+                report.files_hardlinked,
+                report.files_reflinked,
+                report.files_added_to_store,
+                report.blobs_pruned,
+                report.errors,
+            ),
+        );
+    }
+}
+
+/// Registered workspace targets plus targets discovered under the GC
+/// allowlist roots. Returns all paths and the discovered rows separately
+/// (the purge path needs the latter to trust unregistered dirs).
+pub(super) fn collect_workspace_targets(
+    paths: &SoldrPaths,
+) -> (
+    Vec<std::path::PathBuf>,
+    Vec<crate::cache_lib::target_registry::TargetRow>,
+) {
     let registered: Vec<std::path::PathBuf> = enumerate_auto_gc_paths(paths)
         .into_iter()
         .filter(|entry| {
@@ -69,19 +123,5 @@ fn run_stale_target_eviction(
     );
     let mut targets = registered;
     targets.extend(discovered.iter().map(|row| row.path.clone()));
-    if targets.is_empty() {
-        let _ = append_auto_gc_log_line(
-            log_path,
-            "auto-gc stale-targets skipped=true reason=no_workspace_targets",
-        );
-        return;
-    }
-    let outcome = run_soldr_target_purge_background(paths, &targets, discovered, age_secs);
-    let _ = append_auto_gc_log_line(
-        log_path,
-        &format!(
-            "auto-gc stale-targets days={} reclaimed_bytes={} candidates={} skipped={}",
-            config.stale_target_days, outcome.reclaimed, outcome.candidates, outcome.skipped,
-        ),
-    );
+    (targets, discovered)
 }

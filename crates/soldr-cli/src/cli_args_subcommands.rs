@@ -343,6 +343,21 @@ pub(crate) enum GcSubcommand {
     /// (issue #574). Designed for cross-repo `target/` reclamation —
     /// independent of the per-repo `target/` taxonomy walks above.
     Target(Box<GcTargetArgs>),
+    /// Collapse byte-identical immutable artifacts (`deps/*.rlib|rmeta`,
+    /// build-script `out/` files) across worktree `target/` dirs into one
+    /// content-addressed store under `~/.soldr/target-store`, then report
+    /// per-target shared vs. unique bytes (soldr#4033). With no paths, uses
+    /// every registered or discovered target under the GC allowlist roots.
+    Dedupe {
+        /// `target/` directories to dedupe (default: all known targets).
+        paths: Vec<std::path::PathBuf>,
+        /// Report what would be shared without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit the stable machine-facing JSON form for this command.
+        #[arg(long)]
+        json: bool,
+    },
     /// Run one full maintenance pass against an explicitly supplied orphaned
     /// soldr root. Refuses live daemons, relative paths, and directory links;
     /// never discovers sibling product roots.

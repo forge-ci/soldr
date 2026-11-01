@@ -13,7 +13,8 @@ automatic sweeper that runs alongside builds.
 | `cargo_native.rs` | `cargo`-native GC (`registry/src`, git checkouts) and `gc sweep` |
 | `target_walker.rs`, `walks.rs` | Directory traversal used to size and prune `target/` trees |
 | `discovery.rs` | Bridges the `target_walker` into registry-shaped rows so auto-GC sees targets the registry never recorded |
-| `stale_targets.rs` | Opt-in `auto_gc.stale_target_days` pass: evicts idle `target/` dirs regardless of disk pressure, once a day (soldr#4031) |
+| `stale_targets.rs` | `auto_gc.stale_target_days` pass (default 14 days): evicts idle `target/` dirs regardless of disk pressure, once a day, then runs the dedupe pass (soldr#4031) |
+| `target_dedupe.rs` | Content-addressed dedupe of immutable `deps/` and build-script `out/` artifacts across worktrees, `soldr gc dedupe`, shared/unique byte accounting (soldr#4033) |
 | `tests.rs` | Shared unit tests for the module |
 
 ## Auto-GC ordering

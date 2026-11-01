@@ -502,6 +502,11 @@ async fn run_gc_subcommand(subcommand: GcSubcommand) -> Result<(), SoldrError> {
         GcSubcommand::Locations { json } => gc::run_gc_locations_command(json),
         GcSubcommand::Sweep(args) => gc::run_gc_sweep_command(*args),
         GcSubcommand::Target(args) => gc::run_gc_target_command(*args),
+        GcSubcommand::Dedupe {
+            paths,
+            dry_run,
+            json,
+        } => gc::run_gc_dedupe_command(paths, dry_run, json),
         GcSubcommand::Maintain { root, json } => {
             let status = crate::daemon::maintenance::run_manual_root(root)
                 .await
