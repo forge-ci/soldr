@@ -477,10 +477,12 @@ fn is_panic_line(trimmed: &str) -> bool {
 /// on it (`  |     ^^^ expected `u32`, found `&str``), so the art is stripped
 /// and the residual text kept. Same for a source gutter line `12 | let x = ...`.
 fn excerpt_line_body(trimmed: &str) -> Option<&str> {
+    // cc-rs relays a build script's C compiler diagnostics behind this prefix.
+    let trimmed = trimmed.strip_prefix("cargo:warning=").unwrap_or(trimmed);
     if trimmed.is_empty() || is_panic_boilerplate(trimmed) {
         return None;
     }
-    let body = trim_rustc_art(strip_gutter(trimmed));
+    let body = trim_rustc_art(strip_gutter(trimmed.trim_start()));
     (!body.is_empty()).then_some(body)
 }
 
@@ -678,6 +680,23 @@ fn is_error_line(trimmed: &str) -> bool {
         // cargo-nextest's per-test failure line, e.g. `FAIL [ 0.1s] pkg::t`.
         || trimmed.starts_with("FAIL ")
         || trimmed.starts_with("FAILED ")
+        || is_c_compiler_error(trimmed)
+}
+
+/// A GCC/Clang diagnostic: `path:line:col: error: ...` (or `fatal error:`).
+fn is_c_compiler_error(trimmed: &str) -> bool {
+    let Some(at) = trimmed
+        .find(": error: ")
+        .or_else(|| trimmed.find(": fatal error: "))
+    else {
+        return false;
+    };
+    let mut parts = trimmed[..at].rsplitn(3, ':');
+    let col = parts.next().unwrap_or_default();
+    let line = parts.next().unwrap_or_default();
+    [line, col]
+        .iter()
+        .all(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Errors from cargo's `--message-format=json` stream, when this stream is

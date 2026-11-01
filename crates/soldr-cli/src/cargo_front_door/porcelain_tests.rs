@@ -466,6 +466,42 @@ fn failure_excerpt_carries_the_compiler_location_for_a_build_error() {
 }
 
 #[test]
+fn failure_excerpt_carries_a_build_scripts_c_compiler_error() {
+    // cc-rs relays the C compiler's diagnostics as `cargo:warning=` lines in
+    // the build script's stdout; its own `error occurred in cc-rs` line is a
+    // multi-KB argv that names no source location.
+    let output = concat!(
+        "error: failed to run custom build command for `oracle v0.1.0`\n",
+        "\n",
+        "Caused by:\n",
+        "  process didn't exit successfully: `build-script-build` (exit status: 1)\n",
+        "  --- stdout\n",
+        "  cargo:rerun-if-changed=oracle/windows_keys.c\n",
+        "  OUT_DIR = Some(/tmp/out)\n",
+        "  cargo:warning=oracle/windows_keys.c:42:9: error: unused variable 'k' [-Werror=unused-variable]\n",
+        "  cargo:warning=   42 |     int k;\n",
+        "  cargo:warning=      |         ^\n",
+        "  exit status: 1\n",
+        "  --- stderr\n",
+        "  error occurred in cc-rs: command did not execute successfully: \"cc\" \"-O0\"\n",
+    );
+    let summary = summarize("cargo check", 101, output);
+    assert!(
+        summary
+            .excerpt
+            .iter()
+            .any(|l| l.starts_with("oracle/windows_keys.c:42:9: error: unused variable")),
+        "the C compiler's located error is the actionable line: {:?}",
+        summary.excerpt
+    );
+    assert!(
+        !summary.excerpt.iter().any(|l| l.contains("cargo:warning=")),
+        "the cc-rs relay prefix is noise: {:?}",
+        summary.excerpt
+    );
+}
+
+#[test]
 fn failure_excerpt_is_bounded_on_a_pathological_stream() {
     let mut output = String::new();
     for i in 0..5_000 {
