@@ -946,8 +946,8 @@ def _nonce_verdict(expected: str, seen: list[str], exit_code: int) -> str:
         return (
             "the isolated runner proved a DIFFERENT worktree "
             f"(expected {NONCE_MARKER}{expected}, saw {seen[-1]}) -- it ran another checkout's tree, "
-            "zackees/bosn#314, zackees/ci.yml#196. Stop or remove the bosn setup container bound "
-            "to the other worktree, or wait for it, then rerun."
+            "zackees/ci.yml#196. The tests lane runs ci/workspace_test.py --host from the gate's own "
+            "cwd: check that the lane's runner was not redirected to another checkout, then rerun."
         )
     if exit_code:
         return (
