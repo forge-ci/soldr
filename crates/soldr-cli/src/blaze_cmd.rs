@@ -76,12 +76,13 @@ pub fn run(args: &[String], allow_ci: bool) -> Result<i32, SoldrError> {
             command.env_remove(name);
         }
     }
-    let status = command.status().map_err(|error| {
-        SoldrError::Other(format!(
-            "failed to execute blaze: {error}. {}",
-            install_message()
-        ))
-    })?;
+    let status = crate::platform::wait::status_for(&mut command, crate::platform::wait::LONG_CHILD)
+        .map_err(|error| {
+            SoldrError::Other(format!(
+                "failed to execute blaze: {error}. {}",
+                install_message()
+            ))
+        })?;
     Ok(status.code().unwrap_or(1))
 }
 
