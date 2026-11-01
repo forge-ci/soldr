@@ -27,16 +27,20 @@ verify-exempt = ["ci-pre", "path-selection", "cancel-superseded"]
 mode = "enforce"
 
 # zackees/ci.yml#168 (GATE-005), soldr#3516: soldr's tests start soldr
-# daemons and touch soldr state roots, so they never run on a developer host.
-# The nextest run-wrapper refuses unless CI=true or the marker is set; the
-# bosn image sets the marker; the gate's `tests` lane runs the suite there.
+# brokers and daemons. The nextest run-wrapper (the guard) execs
+# soldr-nextest-wrapper, which gives every test a private HOME /
+# SOLDR_CACHE_DIR / XDG / XDG_RUNTIME_DIR root and exports the marker to it;
+# the guard refuses to let anything replace that wrapper outside CI=true or an
+# already-isolated test. No bosn (owner directive 2026-10-16): the runner runs
+# the suite on this host; it puts its own daemon handoff in a private root
+# under ~/.cache/soldr-local-gate/<worktree hash>.
 [gate.isolation]
 marker = "SOLDR_TEST_ISOLATED"
-runner = ["bosn", "run", "--task", "test"]
+runner = ["uv", "run", "--no-project", "--python", "3.13", "python", "ci/workspace_test.py", "--host"]
 guard = ".github/scripts/nextest_wrapper.sh"
-# zackees/ci.yml#196 (GATE-009): the gate writes .gate-nonce and the bosn
-# task echoes it from /repo, so a container bound to another worktree
-# (zackees/bosn#314) fails instead of attesting someone else's tree.
+# zackees/ci.yml#196 (GATE-009): the gate writes .gate-nonce and
+# ci/workspace_test.py echoes it from the tree it tests, so a run against
+# another worktree fails instead of attesting someone else's tree.
 proves-tree = true
 
 # zackees/ci.yml#177 (GATE-007): the gate as cacheable lanes, split along
@@ -144,17 +148,17 @@ keep = [
   ".github/scripts/toolchain_asset_query.py",
 ]
 
-# The test suite, in bosn: the Rust world plus the harness it runs under.
-# zackees/ci.yml#399: it builds in the bosn container's own target dir, never
-# the host target/, so it is its own heavy group and runs beside the host
-# chain (rust, cross, wine, winvm) instead of after it. soldr#3731: the lane
-# narrows itself to the changed crates' reverse-dependency closure plus
-# soldr-cli when the diff is crate source only (ci/bosn_workspace_test.py
-# select_packages), and logs the selection.
+# The test suite, in a private host root: the Rust world plus the harness it
+# runs under. zackees/ci.yml#399: it builds in its private root's own target
+# dir (~/.cache/soldr-local-gate/<hash>/target), never the host target/, so it
+# is its own heavy group and runs beside the host chain (rust, cross, wine,
+# winvm) instead of after it. soldr#3731: the lane narrows itself to the
+# changed crates' reverse-dependency closure plus soldr-cli when the diff is
+# crate source only (ci/workspace_test.py select_packages), and logs it.
 [gate.lanes.tests]
 run = ["uv", "run", "--no-project", "--python", "3.13", "python", "ci/local_gate.py", "--lane", "tests"]
 group = "isolated"
-tools = ["bosn"]
+tools = ["uv", "soldr"]
 exclude = [
   "docs/**", "*.md", "*.png", "contracts/**", "bench/**", "perf/**", "examples/**",
   "tests/**", ".github/**", "ci/**", "tools/**", "scripts/**", ".claude/**",
@@ -162,7 +166,7 @@ exclude = [
 ]
 keep = [
   "tests/fixtures/**", "src/soldr/_bundle_bins.py", ".github/scripts/nextest*",
-  "ci/bosn_workspace_test.py", "ci/crate_graph.py",
+  "ci/workspace_test.py", "ci/crate_graph.py",
 ]
 
 # zackees/ci.yml#190 (GATE-008, pilot #189): an attested PR head skips the
@@ -180,7 +184,7 @@ mode = "enforce"
 skip = ["ci.yml:lint", "ci.yml:build-linux-x64"]
 # Linux x64 is not a pure mirror: its `soldr ci-test` DAG is the rust
 # (fmt/Clippy/Dylint), ci-lint (dependency policy) and tests (nextest +
-# doctests, bosn) lanes; the CI-only probes below run on every main push.
+# doctests, private host root) lanes; the CI-only probes below run on every main push.
 covered-by = { "ci.yml:build-linux-x64" = ["rust", "ci-lint", "tests"] }
 # Scripts only the skipped jobs run: a change to one can only be validated
 # remotely.

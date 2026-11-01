@@ -176,7 +176,7 @@ fails closed when the job list cannot be read.
 
 **The `tests` lane may narrow by proof (soldr#3731).** When every changed path is
   crate source -- under `crates/<known crate>/`, but not that crate's `Cargo.toml` or
-  `tests/` -- `ci/bosn_workspace_test.py` runs doctests and nextest with `-p` for the
+  `tests/` -- `ci/workspace_test.py` runs doctests and nextest with `-p` for the
   reverse-dependency closure of the changed crates plus `soldr-cli` (whose guards read
   the whole tree), and prints `tests lane: SELECTED [...] (soldr#3731)` with the skipped
   crates. A skipped crate's test binaries are built only from crates outside the change,

@@ -232,7 +232,7 @@ def test_a_different_nonce_keeps_the_other_worktree_blame(
         encoding="utf-8"
     )
     assert "proved a DIFFERENT worktree" in body
-    assert "Stop or remove" in body  # the advice is correct for THIS case
+    assert "not redirected to another checkout" in body  # host-run advice
 
 
 def test_a_failed_runner_reports_its_exit_code_and_suggests_a_rerun(

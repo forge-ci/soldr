@@ -826,7 +826,15 @@ fn the_driver_build_opt_in_is_off_by_default_and_warns_when_set() {
 #[test]
 fn dylint_readiness_reads_the_home_the_install_writes_to() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _cwd_lock = crate::TEST_PROCESS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().expect("temp soldr root");
+    // Home resolution walks up from the cwd for a repo-local `.rustup`. The
+    // test's own cwd is the checkout, and a checkout under `$HOME` finds the
+    // caller's real `~/.rustup` there -- the very home this test proves the
+    // probe does *not* read. Run from a directory with no such ancestor.
+    let _cwd = crate::CwdGuard::enter(root.path());
     let managed = root.path().join("rustup");
     std::fs::create_dir_all(&managed).expect("managed rustup home");
     let _root = EnvVarGuard::set(crate::core::SOLDR_CACHE_DIR_ENV_VAR, root.path());

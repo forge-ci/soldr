@@ -372,7 +372,7 @@ git push                             # (--force-with-lease if the branch was alr
 
 `<CI_LINT_REF>` is the SHA in `ci.toml`'s `linter` -- the one canonical pin (soldr#3616); `ci/local_gate.py` derives `CI_LINT_REF` from it and workflow `ref:` lines are guarded equal. `local-gate run` runs
 `ci/local_gate.py` (lanes `lint` = the remote Lint job exactly, `rust` =
-`soldr lint rust`, `tests` = the test suite in bosn), and on success amends
+`soldr lint rust`, `tests` = the test suite on the host, each test in a wrapper-private soldr root), and on success amends
 HEAD's message with the trailer. Install the pre-push hook once per clone with
 `... ci-lint local-gate install-hook`.
 
@@ -386,13 +386,26 @@ HEAD's message with the trailer. Install the pre-push hook once per clone with
 - **Add Lint checks to `ci/local_gate.py`, never as a step in ci.yml's Lint
   job.** The Lint job runs `ci/local_gate.py --lane lint` and nothing else;
   `ci-lint local-gate lint` (a check in that lane) fails anything else.
-- **Never run soldr's test suite on the host.** It starts soldr daemons and
-  touches soldr state roots. A leaked fixture once claimed the real
-  `~/.soldr` root and wedged every soldr build on the machine (soldr#3516).
-  The nextest run-wrapper refuses unless `CI=true` or `SOLDR_TEST_ISOLATED=1`,
-  which only the bosn image sets. Run the suite with
-  `bosn run --task test` (the gate's `tests` lane). Do not set the marker on
-  a host to get around the refusal.
+- **Every test runs in a private soldr root, enforced by the nextest
+  wrapper (soldr#3516).** Tests start soldr brokers and daemons, which
+  resolve state from `HOME` (broker, pinned bin), `SOLDR_CACHE_DIR` (state
+  root) and `XDG_RUNTIME_DIR` (broker socket fallback, lease DB). A leaked
+  fixture once claimed the real `~/.soldr` and wedged every soldr build on
+  the machine. `soldr-nextest-wrapper` (`src/isolate.rs`) now points all of
+  them into a per-test private directory before every test, keeps the
+  caller's toolchain homes reachable through `~/.cargo`/`~/.rustup` symlinks,
+  drops the outer front door's route/session/wrapper variables
+  (`SOLDR_BROKER_SERVICE`, `SOLDR_BUILD_SESSION_ID`, `RUSTC_WRAPPER`, ...),
+  strips `PATH` entries and variables (`CC`, `CARGO_TARGET_<triple>_LINKER`, ...) that name a
+  program inside the caller's soldr root,
+  exports `SOLDR_TEST_ISOLATED=1` to the test, removes the directory afterwards (Linux also reaps leaked daemons by
+  its `TMPDIR`), and refuses (exit 97) if it cannot. `nextest_wrapper.sh`
+  refuses a `SOLDR_NEXTEST_NATIVE_WRAPPER` override outside `CI=true` or an
+  isolated test, so nothing replaces it. Plain `soldr cargo test` bypasses
+  the wrapper: use nextest. The gate's `tests` lane is
+  `uv run --no-project --python 3.13 python ci/workspace_test.py --host` (no
+  bosn, owner directive 2026-10-16); it keeps its own daemon handoff in
+  `~/.cache/soldr-local-gate/<worktree hash>/`. Never export the marker by hand.
 
 ## Agent Code-Smell Reporting Rule (issue #2741)
 
