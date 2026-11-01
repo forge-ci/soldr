@@ -481,8 +481,9 @@ def test_host_run_moves_every_identity_root_off_the_callers_state(
     ws = _workspace_test()
     real_home = tmp_path / "real"
     layout = ws.host_layout(tmp_path / "gitdir", tmp_path / "cache")
+    shims = real_home / ".soldr" / "v0.9.49" / "shims"
     caller = {
-        "PATH": "/bin",
+        "PATH": f"{shims}:/bin:{real_home / '.soldr' / 'bin'}",
         "CI": "true",
         "SOLDR_TEST_ISOLATED": "0",
         "IN_CLUD": "1",
@@ -494,6 +495,7 @@ def test_host_run_moves_every_identity_root_off_the_callers_state(
     assert not {"IN_CLUD", "CLUD_SESSION_ID", "BASH_ENV"} & set(env)
     assert "SOLDR_TEST_ISOLATED" not in env
     assert "CI" not in env
+    assert env["PATH"] == "/bin"
     for name in ("HOME", "XDG_CONFIG_HOME", "TMPDIR", "SOLDR_CACHE_DIR"):
         assert not Path(env[name]).is_relative_to(real_home), name
     assert env["XDG_RUNTIME_DIR"] == str(layout.runtime)

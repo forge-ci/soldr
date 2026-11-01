@@ -23,8 +23,13 @@
 //! soldr state unless it names that path explicitly. The caller's toolchain
 //! homes stay reachable through `~/.cargo` / `~/.rustup` symlinks in the
 //! private home, because they default from `HOME` and are not soldr state.
+//! `PATH` entries inside the caller's soldr root (the front door's
+//! `~/.soldr/<version>/shims`, the pinned `~/.soldr/bin`) are dropped: a test
+//! resolving `rustc` or `cargo` through them would re-enter the caller's
+//! soldr and dial the caller's broker.
 
 use soldr_platform::process::test_child;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -47,6 +52,43 @@ const OUTER_SESSION_ENVS: [&str; 5] = [
     "SOLDR_EFFECTIVE_RUSTC_WRAPPER_ORIGIN",
     "RUSTC_WRAPPER",
 ];
+
+/// The caller's soldr state roots, as the code under test would resolve them
+/// from the wrapper's own environment: `$SOLDR_CACHE_DIR` and `$HOME/.soldr`
+/// (the pinned-tool and shim directories stay under `$HOME/.soldr` even when
+/// `SOLDR_CACHE_DIR` moves the root).
+fn caller_soldr_roots() -> Vec<PathBuf> {
+    let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    let mut roots: Vec<PathBuf> = non_empty("SOLDR_CACHE_DIR")
+        .map(PathBuf::from)
+        .into_iter()
+        .collect();
+    if let Some(home) = non_empty("HOME") {
+        roots.push(PathBuf::from(home).join(".soldr"));
+    }
+    let canonical: Vec<PathBuf> = roots
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .collect();
+    roots.extend(canonical);
+    roots
+}
+
+/// `path` without the entries that lie inside any of `roots`, compared both
+/// as written and canonicalized (a symlinked entry is judged by its target).
+fn strip_entries_under(
+    path: &OsStr,
+    roots: &[PathBuf],
+) -> Result<OsString, std::env::JoinPathsError> {
+    let inside = |entry: &Path| {
+        roots.iter().any(|root| entry.starts_with(root))
+            || std::fs::canonicalize(entry)
+                .is_ok_and(|resolved| roots.iter().any(|root| resolved.starts_with(root)))
+    };
+    std::env::join_paths(
+        std::env::split_paths(path).filter(|entry| entry.as_os_str().is_empty() || !inside(entry)),
+    )
+}
 
 /// The variables a test's soldr state is resolved from, and where each one
 /// points inside the private root.
@@ -96,6 +138,11 @@ pub(crate) fn apply(command: &mut Command, root: &Path) -> std::io::Result<()> {
     }
     for name in OUTER_SESSION_ENVS {
         command.env_remove(name);
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        let stripped = strip_entries_under(&path, &caller_soldr_roots())
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        command.env("PATH", stripped);
     }
     // The broker's runtime directory must be owner-only, like a real one.
     test_child::create_private_dir(&root.join("r"))?;

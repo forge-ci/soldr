@@ -359,6 +359,18 @@ def host_environment(
     for name in [k for k in env if k == "IN_CLUD" or k.startswith("CLUD_")]:
         del env[name]
     env.pop("BASH_ENV", None)
+    # The caller's soldr shim and pinned-bin dirs (~/.soldr/<ver>/shims,
+    # ~/.soldr/bin) re-enter the caller's soldr, which dials the caller's
+    # broker: a fixture resolving `rustc` there reaches the caller's state.
+    # The nextest wrapper strips its own caller's root the same way, but by
+    # then HOME is already the private one, so the real root goes here. The
+    # bootstrap was resolved before this, by absolute path.
+    caller_root = real_home / ".soldr"
+    env["PATH"] = os.pathsep.join(
+        entry
+        for entry in caller.get("PATH", "").split(os.pathsep)
+        if entry and not Path(entry).is_relative_to(caller_root)
+    )
     gitconfig = real_home / ".gitconfig"
     if "GIT_CONFIG_GLOBAL" not in env and gitconfig.is_file():
         env["GIT_CONFIG_GLOBAL"] = str(gitconfig)

@@ -77,3 +77,32 @@ fn the_outer_front_doors_route_and_shim_are_not_inherited() {
         );
     }
 }
+
+#[test]
+fn path_entries_inside_the_callers_soldr_root_are_dropped() {
+    let base = tempfile::tempdir().expect("tmp");
+    let root = base.path().join(".soldr");
+    let shims = root.join("v0.9.49").join("shims");
+    std::fs::create_dir_all(&shims).expect("shims");
+    let keep = base.path().join("bin");
+    std::fs::create_dir_all(&keep).expect("bin");
+    let path = std::env::join_paths([shims.as_path(), keep.as_path(), root.join("bin").as_path()])
+        .expect("join");
+    let stripped = strip_entries_under(&path, &[root]).expect("strip");
+    assert_eq!(
+        std::env::split_paths(&stripped).collect::<Vec<_>>(),
+        vec![keep]
+    );
+}
+
+#[test]
+fn a_symlinked_path_entry_is_judged_by_its_target() {
+    let base = tempfile::tempdir().expect("tmp");
+    let root = base.path().join(".soldr");
+    let shims = root.join("shims");
+    std::fs::create_dir_all(&shims).expect("shims");
+    let alias = base.path().join("alias");
+    test_child::link_dir(&shims, &alias).expect("link");
+    let stripped = strip_entries_under(alias.as_os_str(), &[root]).expect("strip");
+    assert!(stripped.is_empty(), "{stripped:?}");
+}
