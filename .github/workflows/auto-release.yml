@@ -594,6 +594,9 @@ jobs:
         env:
           EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
           SOLDR_RELEASE_CI: "1"
+          # soldr#4014: the manifest no longer pins codegen-units; the
+          # published wheel keeps one unit through this publishing-lane env.
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
           # Release/LTO wheel builds were signal-terminated under concurrent
           # resource pressure when Cargo and Soldr admitted multiple compiler
           # processes (run 32823371747).
