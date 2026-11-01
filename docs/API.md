@@ -2533,14 +2533,19 @@ Liveness is polled at the idle interval, so a PID reused within one interval
 can be mistaken for the original owner. Soldr does not install Task Scheduler jobs, systemd timers,
 launchd agents, or any other OS scheduler.
 
-The embedded artifact budget defaults to 5% of filesystem capacity, clamped to
-40–200 GiB and reduced when needed to preserve recovery space. At 85% fill it
+The embedded artifact budget defaults to 25 GiB (soldr#4028), set with
+`soldr config set zccache.max_size_gb <N>`; `max_size_gb = 0` restores
+zccache's dynamic default (5% of filesystem capacity, clamped to 40–200 GiB and
+reduced when needed to preserve recovery space). The budget is read when the
+daemon starts. `soldr cache stats` shows the store's on-disk size against the
+cap; `soldr cache gc` runs the eviction pass now when no daemon owns the root
+(a live daemon runs it every 5 minutes). At 85% fill it
 evicts LRU artifacts older than four days toward 70%; at 100% fill or critically
 low free space it evicts regardless of age toward 80% plus recovery headroom.
 A daily pass expires artifacts older than 30 days even below budget. Physical,
 hardlink-deduplicated allocated bytes are used. Set exactly one of
 `ZCCACHE_CACHE_SIZE_BYTES` or `ZCCACHE_CACHE_SIZE_PERCENT` to override the
-dynamic budget.
+configured budget.
 
 The same coordinated pass bounds cook artifacts, trash buckets, registered
 workspace targets, PEP517 targets and wheels, daemon events, stale embedded generations,
@@ -2793,8 +2798,8 @@ Commands:
 | `SOLDR_ZCCACHE_BIN` | Legacy compatibility variable; it does not replace the embedded service on the normal `soldr cargo ...` path. Use `SOLDR_RUSTC_WRAPPER=/path/to/zccache` for an intentional external-wrapper experiment. | unset |
 | `SOLDR_ZCCACHE_LOCAL_DIR` | Legacy compatibility variable from the removed downloaded-zccache flow; ignored by the normal embedded path. | unset |
 | `SOLDR_CACHE_DIR` | Override the exact product root owned by this soldr daemon. **On Windows, keep this path short** — see the note below. | official builds: `~/.soldr`; development builds: `~/.soldr-dev` |
-| `ZCCACHE_CACHE_SIZE_BYTES` | Exact embedded artifact budget in bytes. Mutually exclusive with `ZCCACHE_CACHE_SIZE_PERCENT`. | dynamic 5%, clamped 40–200 GiB |
-| `ZCCACHE_CACHE_SIZE_PERCENT` | Embedded artifact budget as an integer percentage from 1 through 100. Mutually exclusive with `ZCCACHE_CACHE_SIZE_BYTES`. | dynamic 5%, clamped 40–200 GiB |
+| `ZCCACHE_CACHE_SIZE_BYTES` | Exact embedded artifact budget in bytes. Mutually exclusive with `ZCCACHE_CACHE_SIZE_PERCENT`. Outranks `[zccache].max_size_gb`. | `[zccache].max_size_gb` (25 GiB) |
+| `ZCCACHE_CACHE_SIZE_PERCENT` | Embedded artifact budget as an integer percentage from 1 through 100. Mutually exclusive with `ZCCACHE_CACHE_SIZE_BYTES`. Outranks `[zccache].max_size_gb`. | `[zccache].max_size_gb` (25 GiB) |
 | `SOLDR_CACHE_LIFECYCLE` | Embedded-cache durability policy for `soldr cargo ...`. `job` leaves normal background persistence to the long-lived Soldr daemon. `command` requests an embedded cache flush before the command exits; it does not stop the root-owning daemon. | `job` |
 | `SOLDR_CACHE_SHUTDOWN_TIMEOUT_SECS` | Positive compatibility timeout accepted with command-lifetime mode; empty, zero, or malformed values fall back to the default (malformed/zero warn on stderr). Embedded mode uses it to select the flush-on-command path; there is no separate zccache daemon to stop. | `300` |
 | `SOLDR_TRUST_INHERITED_ENV` | Advanced escape hatch for CI/action workflows that intentionally inject soldr/zccache workspace-pinned env into `soldr cargo ...`. Truthy values are equivalent to `--trust-inherited-soldr-env`; unset/default means `soldr cargo ...` derives a fresh soldr workspace context from the current cwd/manifest while preserving normal OS, Cargo, Rust, proxy, cert, and CI env. | unset |

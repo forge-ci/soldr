@@ -18,6 +18,7 @@ pub(crate) const EMBEDDED_ZCCACHE_VERSION: &str = zccache::core::VERSION;
 mod release_worktree;
 mod report;
 mod session;
+mod store_budget;
 mod trim;
 
 pub(super) use crate::build_cache_session::{output_snippet, ANALYZE_NOTE_LIMIT};
@@ -30,6 +31,7 @@ pub(crate) use session::{
     run_cache_flush_command, run_cache_shutdown_command, run_session_end_command,
     run_session_start_command,
 };
+pub(crate) use store_budget::{run_cache_gc_command, run_cache_stats_command};
 pub(crate) use trim::{run_cache_prune_target_command, run_cache_trim_target_command, TrimProfile};
 
 pub(crate) fn clear_zccache_cache() -> Result<(), SoldrError> {
