@@ -404,6 +404,13 @@ pub struct AutoGcConfig {
     /// of "now" are never touched.
     #[serde(default = "AutoGcConfig::default_min_age_secs")]
     pub min_age_secs: u64,
+    /// Age-based eviction of idle workspace `target/` directories
+    /// (soldr#4031). When non-zero, the background sweeper deletes every
+    /// registered or discovered `target/` (under the GC allowlist roots)
+    /// that has not been used for this many days, regardless of free
+    /// space. `0` (the default) disables the pass.
+    #[serde(default)]
+    pub stale_target_days: u64,
 }
 
 impl AutoGcConfig {
@@ -428,6 +435,7 @@ impl Default for AutoGcConfig {
             trigger_free_gb: Self::default_trigger_free_gb(),
             target_free_gb: Self::default_target_free_gb(),
             min_age_secs: Self::default_min_age_secs(),
+            stale_target_days: 0,
         }
     }
 }
