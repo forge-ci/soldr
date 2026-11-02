@@ -103,6 +103,14 @@ pub(crate) enum ToolchainSubcommand {
     /// (exit 0 with a note) when the manifest is missing or omits
     /// `channel`.
     Install,
+    /// Hardlink every file of the caller's and the managed rustup homes'
+    /// toolchains into one content-addressed store, so the same toolchain
+    /// stored twice takes the disk space of one (soldr#4027).
+    Dedupe {
+        /// Emit a JSON report.
+        #[arg(long)]
+        json: bool,
+    },
     /// Install the channel and every declared component / target from
     /// `rust-toolchain.toml`. Stops at the first nonzero rustup exit.
     Prepare {
@@ -198,6 +206,10 @@ pub(crate) enum GcSubcommand {
         /// silently ignoring it.
         #[arg(long)]
         dry_run: bool,
+        /// With `--kind rustup_toolchain`: only toolchains no pin has used
+        /// within this many days are eligible (soldr#4027).
+        #[arg(long, value_name = "DAYS")]
+        unused_days: Option<u64>,
         /// Minimum age before a `target/` is considered stale
         /// (e.g. `10d`, `4w`).
         #[arg(long, default_value = "10d", value_name = "DURATION")]
@@ -343,6 +355,21 @@ pub(crate) enum GcSubcommand {
     /// (issue #574). Designed for cross-repo `target/` reclamation —
     /// independent of the per-repo `target/` taxonomy walks above.
     Target(Box<GcTargetArgs>),
+    /// Collapse byte-identical immutable artifacts (`deps/*.rlib|rmeta`,
+    /// build-script `out/` files) across worktree `target/` dirs into one
+    /// content-addressed store under `~/.soldr/target-store`, then report
+    /// per-target shared vs. unique bytes (soldr#4033). With no paths, uses
+    /// every registered or discovered target under the GC allowlist roots.
+    Dedupe {
+        /// `target/` directories to dedupe (default: all known targets).
+        paths: Vec<std::path::PathBuf>,
+        /// Report what would be shared without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit the stable machine-facing JSON form for this command.
+        #[arg(long)]
+        json: bool,
+    },
     /// Run one full maintenance pass against an explicitly supplied orphaned
     /// soldr root. Refuses live daemons, relative paths, and directory links;
     /// never discovers sibling product roots.
@@ -550,6 +577,29 @@ pub(crate) enum CacheSubcommand {
         /// (interactive shells). See soldr#383.
         #[arg(long)]
         no_wait: bool,
+        /// Emit the stable machine-facing JSON form for this command.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the embedded zccache store's on-disk size against its
+    /// configured size cap (soldr#4028).
+    ///
+    /// The cap comes from `ZCCACHE_CACHE_SIZE_BYTES` /
+    /// `ZCCACHE_CACHE_SIZE_PERCENT`, else `config.toml`
+    /// `[zccache].max_size_gb`, else the 25 GiB default.
+    Stats {
+        /// Emit the stable machine-facing JSON form for this command.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Enforce the embedded zccache size cap now, evicting least-recently
+    /// used artifacts (soldr#4028).
+    ///
+    /// Runs a full maintenance pass when no daemon owns the root. A live
+    /// daemon already enforces the cap every few minutes, so this reports
+    /// that instead of racing it; stop it with `soldr cache shutdown` first
+    /// to force an immediate pass.
+    Gc {
         /// Emit the stable machine-facing JSON form for this command.
         #[arg(long)]
         json: bool,

@@ -140,6 +140,30 @@ pub struct ZccacheModeConfig {
     /// Cache-hit delivery mode. `None` falls through to the next tier.
     #[serde(default)]
     pub mode: Option<String>,
+    /// Size cap for the embedded zccache artifact store, in gibibytes
+    /// (soldr#4028). `None` uses [`DEFAULT_ZCCACHE_MAX_SIZE_GB`]; `0`
+    /// restores zccache's dynamic disk-relative default. The
+    /// `ZCCACHE_CACHE_SIZE_BYTES` / `ZCCACHE_CACHE_SIZE_PERCENT` env vars
+    /// outrank this key.
+    #[serde(default)]
+    pub max_size_gb: Option<u64>,
+}
+
+/// Default embedded zccache artifact-store cap in GiB (soldr#4028). zccache's
+/// own default (5% of the volume, clamped to 40-200 GiB) let a single store
+/// reach 99 GiB on a large disk; a fixed cap keeps it bounded regardless of
+/// volume size while still holding several toolchains' worth of artifacts.
+pub const DEFAULT_ZCCACHE_MAX_SIZE_GB: u64 = 25;
+
+impl ZccacheModeConfig {
+    /// Configured artifact-store cap in bytes. `None` means "defer to
+    /// zccache's dynamic default" (the user set `max_size_gb = 0`).
+    pub fn max_size_bytes(&self) -> Option<u64> {
+        match self.max_size_gb.unwrap_or(DEFAULT_ZCCACHE_MAX_SIZE_GB) {
+            0 => None,
+            gb => Some(gb.saturating_mul(1024 * 1024 * 1024)),
+        }
+    }
 }
 
 /// Where a resolved mode came from.

@@ -571,8 +571,11 @@ pub(super) fn print_gc_summary(
         // is which directory is next, not which is biggest.
         println!("soldr gc: next to be reclaimed (eviction order):");
         for cand in report.candidates.iter().take(5) {
+            // soldr#4033: hardlinked bytes are only freed when the last
+            // link goes, so show what deleting this target really frees.
+            let sharing = super::target_dedupe::measure_target_sharing(&cand.path);
             println!(
-                "  {}{}  size={}  last_used={}",
+                "  {}{}  size={}  shared={}  unique={}  last_used={}",
                 cand.path.display(),
                 if cand.in_worktree {
                     "  [linked worktree]"
@@ -580,6 +583,8 @@ pub(super) fn print_gc_summary(
                     ""
                 },
                 crate::cache_lib::target_registry::human_size(cand.size_bytes),
+                crate::cache_lib::target_registry::human_size(sharing.shared_bytes),
+                crate::cache_lib::target_registry::human_size(sharing.unique_bytes),
                 crate::cache_lib::target_registry::human_age(cand.age_seconds),
             );
         }
@@ -747,7 +752,14 @@ pub(super) fn resolve_gc_dev_roots(
         return Ok(configured);
     }
     if let Ok(home) = crate::core::user_home_dir() {
-        return Ok(vec![home.join("dev")]);
+        return Ok(default_gc_dev_roots(&home));
     }
     Ok(Vec::new())
+}
+
+/// Default GC allowlist when `[gc] allowlist_roots` is unset: `~/dev` plus
+/// the agent worktree root `~/.clud/worktrees` (soldr#4031), where idle
+/// parallel-agent worktrees accumulate full `target/` dirs.
+pub(super) fn default_gc_dev_roots(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    vec![home.join("dev"), home.join(".clud").join("worktrees")]
 }

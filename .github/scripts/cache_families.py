@@ -57,7 +57,7 @@ SIZE_UNITS = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3}
 VIA_PREFIXES: dict[str, tuple[str, ...]] = {
     "setup-soldr:build-cache": ("setup-soldr-buildcache-v2-",),
     "setup-soldr:cargo-registry": ("setup-soldr-cargoregistry-v1-",),
-    "setup-soldr:cook": ("cook-base-v2-",),
+    "setup-soldr:cook": ("cook-base-v3-", "cook-base-v2-"),
     "setup-soldr:soldr-mini": ("soldr-mini-v2-",),
     "setup-soldr:solo-toolchain": ("solo-toolchain-v3-",),
     "setup-uv": ("setup-uv-2-", "setup-uv-1-"),

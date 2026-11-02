@@ -810,10 +810,14 @@ fn wait_for_cargo_child_guarded(
                     }
                 }
                 if start.elapsed() >= next_heartbeat {
-                    eprintln!(
-                        "{}",
-                        cargo_wait_heartbeat_message(context, start.elapsed(), timeout)
-                    );
+                    // soldr#4005: a porcelain caller reads one JSON line;
+                    // a heartbeat in its stderr is pure context cost.
+                    if !crate::cargo_front_door::porcelain::enabled() {
+                        eprintln!(
+                            "{}",
+                            cargo_wait_heartbeat_message(context, start.elapsed(), timeout)
+                        );
+                    }
                     next_heartbeat += heartbeat;
                 }
             }

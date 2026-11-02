@@ -1,4 +1,5 @@
 //! Windows process implementation index.
+pub mod affinity;
 pub mod command;
 pub mod cpu_ticks;
 pub mod exit;

@@ -180,17 +180,16 @@ fn porcelain_flag_emits_one_json_line_and_suppresses_the_relay() {
     );
 
     let (value, _stdout) = sole_json_line(&output);
-    assert_eq!(value["schema_version"], 1);
-    assert_eq!(value["command"], "cargo build");
+    assert_eq!(value["schema_version"], 2);
+    // soldr#4010: a passing line drops what the agent never acts on.
+    assert!(value.get("command").is_none(), "{value}");
     assert_eq!(value["exit_code"], 0);
     assert!(
         value["duration_ms"].is_u64(),
         "duration_ms must be a number"
     );
-    assert!(value["expires_at"].is_i64(), "expires_at must be a number");
-    assert_eq!(value["summary"]["status"], "ok");
-    assert_eq!(value["summary"]["exit_code"], 0);
-    assert_eq!(value["summary"]["error_count"], 0);
+    assert_eq!(value["status"], "ok");
+    assert!(value.get("summary").is_none(), "{value}");
 
     // Point 2 of the contract: the child's bytes are NOT relayed.
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -389,12 +388,11 @@ fn porcelain_takes_precedence_and_composes_with_cargo_json_capture() {
 
     // One line, and it is the porcelain object -- not cargo's JSON stream.
     let (value, stdout) = sole_json_line(&output);
-    assert_eq!(value["schema_version"], 1);
-    assert!(
-        value.get("summary").is_some(),
+    assert_eq!(value["schema_version"], 2);
+    assert_eq!(
+        value["status"], "ok",
         "the porcelain envelope must win: {stdout}"
     );
-    assert_eq!(value["command"], "cargo build --message-format=json");
 }
 
 /// The "exactly one line" invariant also holds when the front door fails

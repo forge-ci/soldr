@@ -77,6 +77,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::cache_annotations::DeferredCacheDrain;
+use super::porcelain_errors::{extract_errors, is_error_line, without_ansi};
 use crate::build_log_meta::{sanitize_cwd_slug, utc_compact_timestamp};
 use crate::core::SoldrPaths;
 
@@ -88,7 +89,7 @@ pub(crate) const PORCELAIN_ENV_VAR: &str = "SOLDR_PORCELAIN";
 
 /// Schema version of the emitted JSON object. Additive field changes do
 /// not bump it; a breaking shape change does.
-pub(super) const SCHEMA_VERSION: u32 = 1;
+pub(super) const SCHEMA_VERSION: u32 = 2;
 
 /// Subdirectory of `<soldr root>/logs/` that holds porcelain run logs.
 pub(super) const PORCELAIN_LOG_DIR: &str = "porcelain";
@@ -107,14 +108,20 @@ pub(super) const PORCELAIN_LOG_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// first (age or count) wins.
 pub(super) const PORCELAIN_LOG_KEEP: usize = 200;
 
-/// Upper bound on the number of error identities carried in `summary`.
-/// `summary.error_count` always reports the true count.
-const MAX_ERROR_IDENTITIES: usize = 20;
+/// Upper bound on the failure excerpt's line count.
+const MAX_EXCERPT_LINES: usize = 8;
 
-/// Upper bound on the distinct error lines remembered for de-duplication.
-/// Past it, repeated occurrences count as they arrive rather than growing the
-/// set without limit.
-const MAX_DEDUPE_ENTRIES: usize = 4096;
+/// Upper bound on one excerpt line's length, in chars.
+const MAX_EXCERPT_LINE_CHARS: usize = 200;
+
+/// Upper bound on the whole excerpt, in bytes.
+const MAX_EXCERPT_BYTES: usize = 1200;
+
+/// Context lines taken after an error header / panic line (source location,
+/// the assertion message, a `note:`).
+/// Three, not two: rustc's useful tail after `error[..]` is the `-->` location,
+/// the source line, and the caret line that carries the message itself.
+const EXCERPT_FOLLOW: usize = 3;
 
 /// Exit code the process uses when soldr itself fails before a child status
 /// exists (`soldr_main_helpers::report_and_exit`). The JSON reports this same
@@ -161,6 +168,31 @@ pub(super) struct PorcelainSummary {
     /// stderr and into `log_path`. Additive: an older reader ignores it, and
     /// `0` is the honest answer for a run that deferred nothing.
     pub(super) cache_lines: usize,
+    /// Number of DISTINCT warnings recognized in the child stream. Present on
+    /// a successful run too: a build that exits zero can still emit warnings,
+    /// and a caller that cannot see them has to read the whole log to learn
+    /// whether there is anything to fix.
+    pub(super) warning_count: usize,
+    /// Identities of the first
+    /// [`porcelain_warnings::MAX_WARNING_IDENTITIES`] warnings, each
+    /// `warning: <message> [<file>:<line>:<col>]` where rustc printed a
+    /// location. Empty when the run emitted none.
+    pub(super) warnings: Vec<String>,
+    /// Bounded, actionable evidence for the FIRST failure that the structured
+    /// fields cannot describe -- i.e. compiler/build errors: the error header,
+    /// its source location, the source line, and rustc's message. Empty on
+    /// success, and empty when `failed_tests` already names the failure.
+    ///
+    /// This is the difference between a digest a harness can act on and one
+    /// that only tells it *that* something failed: without it the caller has
+    /// to open `log_path` and re-read the bytes porcelain just suppressed,
+    /// which costs more context than the run itself. Bounds: at most
+    /// [`MAX_EXCERPT_LINES`] lines, [`MAX_EXCERPT_LINE_CHARS`] chars each,
+    /// [`MAX_EXCERPT_BYTES`] total.
+    pub(super) excerpt: Vec<String>,
+    /// `true` when evidence was dropped by those bounds, so a caller knows
+    /// the excerpt is incomplete and `log_path` holds the rest.
+    pub(super) excerpt_truncated: bool,
     /// Failing tests (first 10) with panic location and message lines
     /// (soldr#3961). Omitted when no test failed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -198,6 +230,10 @@ pub(super) struct PorcelainReport {
     /// Name of the step that failed, when a multi-step run stopped on one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) failed_step: Option<String>,
+    /// Files `soldr lint` reformatted in place before checking (soldr#4006).
+    /// Additive: omitted when nothing was rewritten.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) autofixed: Vec<String>,
 }
 
 /// One step of a multi-step porcelain run (`soldr lint`, soldr#3958).
@@ -287,6 +323,7 @@ pub(super) fn report_for_run(inputs: &RunReportInputs<'_>) -> PorcelainReport {
         summary,
         steps: Vec::new(),
         failed_step: None,
+        autofixed: Vec::new(),
     }
 }
 
@@ -313,6 +350,14 @@ pub(super) fn report_for_failure(
         },
         diagnostic: None,
         cache_lines: 0,
+        warning_count: 0,
+        warnings: Vec::new(),
+        excerpt: if failed {
+            vec![first_line(detail)]
+        } else {
+            Vec::new()
+        },
+        excerpt_truncated: false,
         failed_tests: Vec::new(),
         failed_tests_more: 0,
         test_results: Vec::new(),
@@ -330,6 +375,7 @@ pub(super) fn report_for_failure(
         summary,
         steps: Vec::new(),
         failed_step: None,
+        autofixed: Vec::new(),
     }
 }
 
@@ -351,6 +397,7 @@ pub(super) fn command_string(args: &[String]) -> String {
 /// when one matches.
 pub(super) fn summarize(command: &str, exit_code: i32, output: &str) -> PorcelainSummary {
     let (error_count, errors) = extract_errors(output);
+    let (warning_count, warnings) = super::porcelain_warnings::extract(output);
     let failures = if exit_code == 0 {
         super::porcelain_failures::FailureDigest::default()
     } else {
@@ -359,6 +406,17 @@ pub(super) fn summarize(command: &str, exit_code: i32, output: &str) -> Porcelai
             .map(|l| without_ansi(l).into_owned())
             .collect();
         super::porcelain_failures::digest(&lines)
+    };
+    // soldr#3961 landed a structured `failed_tests` digest (name, panic
+    // location, message) while this branch was open, so a named test failure
+    // is already described field-by-field. Repeating it in `excerpt` would
+    // double the digest without adding evidence, so the excerpt is reserved
+    // for failures that digest cannot describe -- compiler/build errors, and
+    // a failure whose test name could not be recovered.
+    let (excerpt, excerpt_truncated) = if exit_code == 0 || !failures.tests.is_empty() {
+        (Vec::new(), false)
+    } else {
+        failure_excerpt(output)
     };
     PorcelainSummary {
         failed_tests: failures.tests,
@@ -371,116 +429,145 @@ pub(super) fn summarize(command: &str, exit_code: i32, output: &str) -> Porcelai
         errors,
         diagnostic: classify_diagnostic(output),
         cache_lines: 0,
+        warning_count,
+        warnings,
+        excerpt,
+        excerpt_truncated,
     }
 }
 
-/// Count and name the failures/errors in a child stream.
-fn extract_errors(output: &str) -> (usize, Vec<String>) {
-    if let Some(result) = extract_cargo_json_errors(output) {
-        return result;
-    }
-    let mut errors: Vec<String> = Vec::new();
-    // A single failure is often reported more than once: cargo-nextest prints
-    // the `FAIL ...` line in the progress stream AND again in its summary, so a
-    // raw occurrence count told a caller "3 errors" for ONE failing test. Count
-    // and list each distinct line once, in first-seen order.
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut count = 0usize;
-    for line in output.lines() {
-        let line = without_ansi(line);
-        let trimmed = line.trim();
-        if !is_error_line(trimmed) {
-            continue;
-        }
-        // Bound the dedupe set so a pathological stream cannot grow it without
-        // limit; past the cap, occurrences are counted as they arrive.
-        if seen.len() < MAX_DEDUPE_ENTRIES && !seen.insert(trimmed.to_string()) {
-            continue;
-        }
-        count += 1;
-        if errors.len() < MAX_ERROR_IDENTITIES {
-            errors.push(trimmed.to_string());
-        }
-    }
-    (count, errors)
-}
-
-/// Strip ANSI escapes from one captured line.
+/// Collect the bounded, actionable evidence for the first failure(s).
 ///
-/// Cargo colours `error[E0308]: ...` whenever the caller forces colour
-/// (`CARGO_TERM_COLOR=always`, `--color always`, `CLICOLOR_FORCE`). The escape
-/// bytes then sit in front of `error[`, so a plain `starts_with` scan reports
-/// `status: "failed"` with `error_count: 0, errors: []` -- the empty digest this
-/// mode exists to prevent. Borrow when there is nothing to strip, which is the
-/// common (piped, uncoloured) case.
-pub(super) fn without_ansi(line: &str) -> std::borrow::Cow<'_, str> {
-    use std::borrow::Cow;
-    if !line.contains('\u{1b}') {
-        return Cow::Borrowed(line);
+/// A failing stream carries three different kinds of line, and the digest is
+/// useless without the first two: the *count* (`test result: FAILED. 0 passed;
+/// 1 failed`, nextest's `Summary [...]`), the *identity* (`FAIL ...`,
+/// `error[E0308]`), and the *explanation* (`panicked at src/lib.rs:6:9:` plus
+/// the assertion message, or the compiler's `--> src/main.rs:12:5` location and
+/// note). [`extract_errors`] already answers identity; this answers explanation.
+///
+/// Selection is first-seen order, evidence lines only, with a small follow
+/// window after each header so a location/message line that does not match a
+/// rule on its own is still carried. Bounded in lines, chars-per-line and
+/// total bytes; `true` second element means something was dropped.
+fn failure_excerpt(output: &str) -> (Vec<String>, bool) {
+    if let Some(rendered) = first_json_error_rendered(output) {
+        return excerpt_from_rendered(&rendered);
     }
-    let mut out = String::with_capacity(line.len());
-    let mut chars = line.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\u{1b}' {
-            out.push(ch);
+    let mut lines: Vec<String> = Vec::new();
+    let mut bytes = 0usize;
+    let mut follow = 0usize;
+    let mut truncated = false;
+    for raw in output.lines() {
+        if lines.len() >= MAX_EXCERPT_LINES || bytes >= MAX_EXCERPT_BYTES {
+            truncated = true;
+            break;
+        }
+        let line = without_ansi(raw);
+        let Some(body) = excerpt_line_body(line.trim()) else {
+            continue;
+        };
+        let is_header = is_error_line(body) || is_panic_line(body);
+        let is_evidence = is_header || is_excerpt_evidence(body);
+        if !is_evidence && follow == 0 {
             continue;
         }
-        match chars.next() {
-            // CSI: parameters/intermediates, then one final byte in `@..=~`.
-            Some('[') => {
-                for next in chars.by_ref() {
-                    if ('@'..='~').contains(&next) {
-                        break;
-                    }
-                }
-            }
-            // OSC: consume until BEL or ST (`ESC \`).
-            Some(']') => {
-                for next in chars.by_ref() {
-                    if next == '\u{7}' {
-                        break;
-                    }
-                    if next == '\u{1b}' {
-                        let _ = chars.next();
-                        break;
-                    }
-                }
-            }
-            // Two-byte escape, or a truncated sequence at end of line.
-            Some(_) | None => {}
+        if is_header {
+            follow = EXCERPT_FOLLOW;
+        } else {
+            follow = follow.saturating_sub(1);
+        }
+        let mut text = body.to_string();
+        if text.chars().count() > MAX_EXCERPT_LINE_CHARS {
+            text = text.chars().take(MAX_EXCERPT_LINE_CHARS).collect();
+            text.push_str("...");
+            truncated = true;
+        }
+        if lines.last() == Some(&text) {
+            continue;
+        }
+        let cost = text.len() + 1;
+        if bytes + cost > MAX_EXCERPT_BYTES {
+            truncated = true;
+            break;
+        }
+        bytes += cost;
+        lines.push(text);
+    }
+    (lines, truncated)
+}
+
+/// Is this line the start of a panic / assertion failure?
+fn is_panic_line(trimmed: &str) -> bool {
+    trimmed.starts_with("panicked at") || trimmed.starts_with("thread '")
+}
+
+/// The text of one line worth keeping, or `None` for a line that carries
+/// nothing: blank, pure rustc caret art (`|`, `   |`), or panic boilerplate.
+///
+/// The caret line is NOT noise in general -- rustc renders the message itself
+/// on it (`  |     ^^^ expected `u32`, found `&str``), so the art is stripped
+/// and the residual text kept. Same for a source gutter line `12 | let x = ...`.
+fn excerpt_line_body(trimmed: &str) -> Option<&str> {
+    // cc-rs relays a build script's C compiler diagnostics behind this prefix.
+    let trimmed = trimmed.strip_prefix("cargo:warning=").unwrap_or(trimmed);
+    if trimmed.is_empty() || is_panic_boilerplate(trimmed) {
+        return None;
+    }
+    let body = trim_rustc_art(strip_gutter(trimmed.trim_start()));
+    (!body.is_empty()).then_some(body)
+}
+
+/// Strip a rustc gutter: a leading `|` block, or `<digits> | `. Returns the
+/// text after the gutter, or the input when there is none.
+fn strip_gutter(trimmed: &str) -> &str {
+    if let Some(rest) = trimmed.strip_prefix('|') {
+        return rest;
+    }
+    if let Some(bar) = trimmed.find(" | ") {
+        let prefix = &trimmed[..bar];
+        if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
+            return &trimmed[bar + 3..];
         }
     }
-    Cow::Owned(out)
+    trimmed
 }
 
-fn is_error_line(trimmed: &str) -> bool {
-    trimmed.starts_with("error[")
-        || trimmed.starts_with("error:")
-        // cargo-nextest's per-test failure line, e.g. `FAIL [ 0.1s] pkg::t`.
-        || trimmed.starts_with("FAIL ")
-        || trimmed.starts_with("FAILED ")
+/// Panic boilerplate that names no failure and repeats in every panic. Skipped
+/// even when the follow-window would otherwise take it.
+fn is_panic_boilerplate(trimmed: &str) -> bool {
+    trimmed.starts_with("note: run with `RUST_BACKTRACE")
 }
 
-/// Errors from cargo's `--message-format=json` stream, when this stream is
-/// one. `None` means "not a JSON stream" so the plain scan takes over.
-///
-/// The shape mirrors `strip_diagnostics::merge_cargo_json_diagnostics`
-/// (`reason == "compiler-message"`, `/message/rendered`), extended to the
-/// error level so a failure has an identity rather than just a count.
-/// Returns `(true_count, capped_identities)`.
-fn extract_cargo_json_errors(output: &str) -> Option<(usize, Vec<String>)> {
-    let mut saw_message = false;
-    let mut errors: Vec<String> = Vec::new();
-    let mut total = 0usize;
+/// Drop rustc's caret/underline art from the front of a rendered line while
+/// keeping the `-->` location arrow (whose `-` are not art).
+fn trim_rustc_art(text: &str) -> &str {
+    let text = text.trim_start_matches([' ', '|']);
+    if text.starts_with("-->") {
+        return text.trim();
+    }
+    text.trim_start_matches(['^', '~', '-', '|', ' ']).trim()
+}
+
+/// Lines that explain a failure without being an error header themselves: the
+/// test whose output follows, and the run's own count summary.
+fn is_excerpt_evidence(trimmed: &str) -> bool {
+    trimmed.starts_with("---- ")
+        || trimmed.starts_with("Summary [")
+        || trimmed.starts_with("test result:")
+        // libtest's per-test line: `test m::t ... FAILED`. It is the only
+        // place the failing test's NAME appears in a libtest stream, and it
+        // does not match `is_error_line` (which keys on nextest's `FAIL `).
+        || trimmed.ends_with("... FAILED")
+}
+
+/// The rendered text of the FIRST compiler-message error in a
+/// `--message-format=json` stream, when this stream is one.
+fn first_json_error_rendered(output: &str) -> Option<String> {
     for line in output.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        let Some(reason) = value.get("reason").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        saw_message = true;
-        if reason != "compiler-message" {
+        if value.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-message") {
             continue;
         }
         if value
@@ -490,29 +577,53 @@ fn extract_cargo_json_errors(output: &str) -> Option<(usize, Vec<String>)> {
         {
             continue;
         }
-        total += 1;
-        if errors.len() < MAX_ERROR_IDENTITIES {
-            errors.push(json_error_identity(&value));
+        if let Some(rendered) = value
+            .pointer("/message/rendered")
+            .and_then(serde_json::Value::as_str)
+        {
+            return Some(rendered.to_string());
         }
     }
-    saw_message.then_some((total, errors))
+    None
 }
 
-/// Short identity for one cargo JSON `compiler-message` error: its rustc
-/// error code when present (`E0308`), else the first line of the message.
-fn json_error_identity(value: &serde_json::Value) -> String {
-    let code = value
-        .pointer("/message/code/code")
-        .and_then(serde_json::Value::as_str);
-    let message = value
-        .pointer("/message/message")
-        .and_then(serde_json::Value::as_str)
-        .map(first_line)
-        .unwrap_or_else(|| "error".to_string());
-    match code {
-        Some(code) => format!("{code}: {message}"),
-        None => message,
+/// First lines of one rustc `rendered` message: the header, the `-->` location,
+/// the explanatory message, and one `note:`/`help:` if present.
+fn excerpt_from_rendered(rendered: &str) -> (Vec<String>, bool) {
+    let mut lines: Vec<String> = Vec::new();
+    let mut bytes = 0usize;
+    let mut dropped = false;
+    for raw in rendered.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('=') {
+            continue;
+        }
+        // Keep the gutter's *content* and drop the art: rustc renders the
+        // message itself on the caret line (`  |  ^^^ no `foo` in the crate
+        // root`), so discarding every `|` line loses the explanation.
+        let body = trim_rustc_art(strip_gutter(trimmed));
+        if body.is_empty() {
+            continue;
+        }
+        if lines.len() >= 4 {
+            dropped = true;
+            break;
+        }
+        let mut text = body.to_string();
+        if text.chars().count() > MAX_EXCERPT_LINE_CHARS {
+            text = text.chars().take(MAX_EXCERPT_LINE_CHARS).collect();
+            text.push_str("...");
+            dropped = true;
+        }
+        let cost = text.len() + 1;
+        if bytes + cost > MAX_EXCERPT_BYTES {
+            dropped = true;
+            break;
+        }
+        bytes += cost;
+        lines.push(text);
     }
+    (lines, dropped)
 }
 
 /// soldr's own classification of a failure, when an existing classifier
@@ -531,7 +642,7 @@ fn classify_diagnostic(output: &str) -> Option<String> {
     Some(format!("build-script-{category}: {}", diagnosis.crate_name))
 }
 
-fn first_line(text: &str) -> String {
+pub(super) fn first_line(text: &str) -> String {
     text.lines().next().unwrap_or_default().trim().to_string()
 }
 
@@ -727,7 +838,9 @@ pub(super) fn prune_porcelain_logs(dir: &Path, keep: usize, ttl_ms: i64) -> usiz
 /// failure (impossible for this fixed shape) degrades to a minimal
 /// object rather than printing a second line or panicking.
 pub(super) fn emit(report: &PorcelainReport) {
-    let line = serde_json::to_string(report).unwrap_or_else(|_| {
+    let skew = crate::broker_spawn::observed_broker_skew();
+    let installed = super::install_notice::installed_paths();
+    let line = serialize_report(report, skew.as_ref(), &installed).unwrap_or_else(|_| {
         format!(
             "{{\"schema_version\":{SCHEMA_VERSION},\"command\":{:?},\"exit_code\":{}}}",
             report.command, report.exit_code
@@ -739,6 +852,77 @@ pub(super) fn emit(report: &PorcelainReport) {
     let _ = writeln!(lock, "{line}");
     let _ = lock.flush();
     mark_emitted();
+}
+
+/// Serialize `report`, adding `broker_skew` when this process saw a
+/// broker/front-door identity skew (soldr#3985), and `installed` when a
+/// `cargo install` wrote binaries (soldr#3960). Additive fields: no schema bump.
+pub(super) fn serialize_report(
+    report: &PorcelainReport,
+    skew: Option<&crate::broker_spawn::BrokerSkew>,
+    installed: &[String],
+) -> serde_json::Result<String> {
+    let mut value = serde_json::to_value(report)?;
+    if let Some(object) = value.as_object_mut() {
+        // soldr#4010 (schema 2): `status` is top-level on every line.
+        if report.exit_code == 0 {
+            compact_success(object, &report.summary)?;
+        } else {
+            object.insert("status".to_string(), "failed".into());
+        }
+        if let Some(skew) = skew {
+            object.insert("broker_skew".to_string(), broker_skew_line(skew).into());
+        }
+        if !installed.is_empty() {
+            object.insert("installed".to_string(), serde_json::to_value(installed)?);
+        }
+    }
+    serde_json::to_string(&value)
+}
+
+/// Fields a passing run's agent never acts on (soldr#4010): the command it
+/// just typed, the log's expiry, per-step timings and the error summary.
+/// They stay in the log; `status` takes the summary's place.
+///
+/// Warnings are the one part of a passing run's summary an agent DOES act on:
+/// `cargo build` exits zero while printing `unused variable` / `never used` /
+/// `deprecated` diagnostics, and #4010's compaction used to delete them with
+/// the rest of the summary. The caller could only learn that anything was
+/// there by reading `log_path` back, which is exactly the context cost
+/// porcelain exists to remove (#3924). So when a passing run warned, the two
+/// bounded warning fields are lifted to the top level next to `status`; a
+/// warning-free success keeps its present shape byte for byte.
+const SUCCESS_DROPPED: &[&str] = &["command", "expires_at", "steps", "summary"];
+
+fn compact_success(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    summary: &PorcelainSummary,
+) -> serde_json::Result<()> {
+    for key in SUCCESS_DROPPED {
+        object.remove(*key);
+    }
+    object.insert("status".to_string(), "ok".into());
+    if summary.warning_count > 0 {
+        object.insert("warning_count".to_string(), summary.warning_count.into());
+        object.insert(
+            "warnings".to_string(),
+            serde_json::to_value(&summary.warnings)?,
+        );
+    }
+    Ok(())
+}
+
+/// One line for the porcelain JSON (soldr#4040). The full identities carry
+/// 64-hex digests and outweighed a compact success line; the short forms
+/// keep version plus 8 hex, enough to tell the two builds apart.
+fn broker_skew_line(skew: &crate::broker_spawn::BrokerSkew) -> String {
+    use crate::broker_spawn::short_broker_identity as short;
+    format!(
+        "broker {} is running, this is {}; run: {}",
+        short(&skew.running_broker),
+        short(&skew.this_soldr),
+        skew.remedy
+    )
 }
 
 static EMITTED: AtomicBool = AtomicBool::new(false);

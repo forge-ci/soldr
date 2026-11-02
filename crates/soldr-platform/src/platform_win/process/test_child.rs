@@ -59,3 +59,9 @@ pub fn returncode(status: &std::process::ExitStatus) -> i32 {
 pub fn pids_with_env(_name: &str, _value: &std::ffi::OsStr) -> Vec<u32> {
     Vec::new()
 }
+
+/// Make `link` a symlink to the directory `target` (a test's private HOME
+/// reaching the caller's toolchain homes, soldr#3516).
+pub fn link_dir(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}

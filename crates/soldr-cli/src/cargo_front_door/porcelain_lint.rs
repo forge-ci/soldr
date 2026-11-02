@@ -124,7 +124,12 @@ impl LintLog {
     /// Print the failing step's diagnostics (stderr) and the one JSON line
     /// (stdout). Returns the process exit code, which equals the report's
     /// `exit_code`.
-    pub(crate) fn finish(self, outcomes: &[StepOutcome], failure_output: Option<&str>) -> i32 {
+    pub(crate) fn finish(
+        self,
+        outcomes: &[StepOutcome],
+        failure_output: Option<&str>,
+        autofixed: Vec<String>,
+    ) -> i32 {
         let failed = outcomes.iter().find(|outcome| outcome.exit_code != 0);
         let exit_code = failed.map_or(0, |outcome| outcome.exit_code);
         if let Some(output) = failure_output {
@@ -135,7 +140,8 @@ impl LintLog {
             }
             let _ = stderr.flush();
         }
-        let report = self.report(outcomes, failed, exit_code, failure_output.unwrap_or(""));
+        let mut report = self.report(outcomes, failed, exit_code, failure_output.unwrap_or(""));
+        report.autofixed = autofixed;
         porcelain::emit(&report);
         exit_code
     }
@@ -174,6 +180,7 @@ impl LintLog {
                 })
                 .collect(),
             failed_step: failed.map(|outcome| outcome.name.clone()),
+            autofixed: Vec::new(),
         }
     }
 }

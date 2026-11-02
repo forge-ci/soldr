@@ -106,9 +106,15 @@ fn the_estimate_is_monotone_in_every_feature() {
     assert!(estimate_peak_bytes(&thin) >= estimate_peak_bytes(&heavier));
     assert!(estimate_peak_bytes(&fat) >= estimate_peak_bytes(&thin));
 
-    let mut one_cgu = heavier.clone();
-    one_cgu.codegen_units = Some(1);
-    assert!(estimate_peak_bytes(&one_cgu) >= estimate_peak_bytes(&heavier));
+    // soldr#4014: more concurrent codegen threads never predict less.
+    let mut previous = 0;
+    for units in [1, 2, 4, 8, 16] {
+        let mut unit = heavier.clone();
+        unit.codegen_units = Some(units);
+        let estimate = estimate_peak_bytes_with(&unit, 16);
+        assert!(estimate >= previous, "{units} codegen units predicted less");
+        previous = estimate;
+    }
 
     let mut metadata = heavier.clone();
     metadata.emit_metadata_only = true;
@@ -151,7 +157,7 @@ fn record_appends_one_parseable_row_per_admission_decision() {
         .collect();
     assert_eq!(rows.len(), 2);
     let row = &rows[0];
-    assert_eq!(row["schema_version"], 3);
+    assert_eq!(row["schema_version"], 4);
     assert_eq!(row["crate_name"], "broker");
     assert_eq!(row["args_digest"], args_digest(&command));
     assert_eq!(row["is_test"], true);
@@ -246,7 +252,7 @@ fn schema_two_rows_carry_the_unit_key() {
     );
     let row: serde_json::Value =
         serde_json::from_str(std::fs::read_to_string(&log).expect("row").trim()).expect("json");
-    assert_eq!(row["schema_version"], 3);
+    assert_eq!(row["schema_version"], 4);
     assert_eq!(row["unit_key"], "anyhow/0123456789abcdef");
 }
 
@@ -288,7 +294,7 @@ fn schema_three_rows_carry_the_units_remembered_peak() {
         .lines()
         .map(|line| serde_json::from_str(line).expect("json"))
         .collect();
-    assert_eq!(rows[0]["schema_version"], 3);
+    assert_eq!(rows[0]["schema_version"], 4);
     assert_eq!(rows[0]["history_tree_peak_bytes"], 1_356);
     assert_eq!(rows[0]["history_samples"], 3);
     assert!(
@@ -319,4 +325,29 @@ async fn shadow_looks_up_the_units_history_by_unit_key() {
         serde_json::from_str(std::fs::read_to_string(&log).expect("row").trim()).expect("json");
     assert_eq!(row["unit_key"], "anyhow/0123456789abcdef");
     assert_eq!(row["history_tree_peak_bytes"], 42 * 1024 * 1024);
+}
+
+#[test]
+fn codegen_units_are_priced_as_llvm_fanout_capped_by_cores() {
+    // soldr#4014: the amalgamated zccache unit at Cargo's default fans out
+    // into one LLVM thread per core; admission must see that, not one compile.
+    let base = features_with(&args(&["--crate-name", "zccache"]), no_sizes);
+    assert_eq!(codegen_threads(&base, 32), 16, "default is 16 units");
+    assert_eq!(codegen_threads(&base, 4), 4, "threads are capped by cores");
+
+    let mut one = base.clone();
+    one.codegen_units = Some(1);
+    assert_eq!(codegen_threads(&one, 32), 1);
+
+    let mut metadata = base.clone();
+    metadata.emit_metadata_only = true;
+    assert_eq!(codegen_threads(&metadata, 32), 0);
+
+    let single = estimate_peak_bytes_with(&one, 16);
+    let fanned = estimate_peak_bytes_with(&base, 16);
+    assert!(
+        fanned > single,
+        "16 concurrent LLVM threads must cost more than one: {fanned} vs {single}"
+    );
+    assert!(estimate_peak_bytes_with(&base, 1) < fanned);
 }

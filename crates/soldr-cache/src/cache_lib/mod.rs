@@ -17,7 +17,7 @@ pub mod cargo_lock;
 pub mod cook_archive;
 pub mod cook_gc;
 pub mod cook_index;
-pub(crate) mod dir_footprint;
+pub mod dir_footprint;
 pub mod gc;
 pub mod gc_policy;
 pub mod path_safety;

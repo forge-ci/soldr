@@ -167,7 +167,7 @@ mod tests {
         let plain: Vec<String> = drained
             .lines
             .iter()
-            .map(|line| super::super::porcelain::without_ansi(line).into_owned())
+            .map(|line| super::super::porcelain_errors::without_ansi(line).into_owned())
             .collect();
         assert_eq!(
             plain,

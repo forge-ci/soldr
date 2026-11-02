@@ -137,7 +137,7 @@ fn volume_key_for_path(path: &std::path::Path) -> Option<String> {
     crate::platform::fs::volume::identity(path)
 }
 
-fn append_auto_gc_log_line(log_path: &std::path::Path, line: &str) -> std::io::Result<()> {
+pub(super) fn append_auto_gc_log_line(log_path: &std::path::Path, line: &str) -> std::io::Result<()> {
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
     }

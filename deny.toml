@@ -38,6 +38,11 @@ skip = [
     # to the newer side so another version remains a ratchet failure.
     { name = "block-buffer", version = "=0.12.1" },
     { name = "crypto-common", version = "=0.2.2" },
+    # The published zccache 1.15.12 crate depends on sysinfo 0.39, while soldr's
+    # own crates still use sysinfo 0.30 (the vendored zccache amalgamation was
+    # built against 0.30). Pin the exception to the newer side so a third
+    # version still fails the ratchet.
+    { name = "sysinfo", version = "=0.39.6" },
     { name = "digest", version = "=0.11.3" },
     { name = "sha2", version = "=0.11.0" },
     # errno/rustix/tempfile still cap at 0.52, reached only through

@@ -146,11 +146,12 @@ pub(crate) fn run_porcelain(
     let soldr = current_soldr_binary()?;
     let mut outcomes = Vec::with_capacity(steps.len());
     let mut failure_output = None;
+    let mut autofixed = Vec::new();
     for step in &steps {
         let mut command = match step {
             PlannedStep::Cargo { args, .. } => {
                 prepare_cargo_step(args)?;
-                cargo_child(&soldr, args, cache_enabled, trust_inherited_soldr_env)
+                cargo_step_command(&soldr, args, cache_enabled, trust_inherited_soldr_env)
             }
             PlannedStep::Extra(extra) => extra_command(extra),
         };
@@ -182,11 +183,19 @@ pub(crate) fn run_porcelain(
             failure_output = Some(log.step_output(mark));
             break;
         }
+        if step.label() == FMT_FIX_LABEL {
+            autofixed = fixed_files(&log.step_output(mark));
+        }
     }
-    Ok(log.finish(&outcomes, failure_output.as_deref()))
+    Ok(log.finish(&outcomes, failure_output.as_deref(), autofixed))
 }
 
-fn cargo_child(
+/// A lint cargo step as a `soldr cargo <args>` child (soldr#4016). Going
+/// through the `soldr cargo` dispatch is what applies
+/// `target_lifecycle::prepare_cargo_invocation` — the same per-target C/asm
+/// toolchain env `soldr prepare --target` exports — and keeps that env scoped
+/// to this step instead of leaking into the next target's step.
+fn cargo_step_command(
     soldr: &Path,
     args: &[String],
     cache_enabled: bool,
@@ -269,9 +278,20 @@ async fn run_cargo_step(
     trust_inherited_soldr_env: bool,
 ) -> Result<i32, SoldrError> {
     prepare_cargo_step(args)?;
-    let code =
-        cargo_front_door::run_cargo_front_door(args, cache_enabled, trust_inherited_soldr_env)
-            .await?;
+    let mut command = cargo_step_command(
+        &current_soldr_binary()?,
+        args,
+        cache_enabled,
+        trust_inherited_soldr_env,
+    );
+    crate::exit_guard::mark_spoke();
+    let code = spawn_guarded(&mut command)
+        .and_then(|mut child| {
+            crate::platform::wait::wait_for(&mut child, crate::platform::wait::WHOLE_COMMAND)
+        })
+        .map_err(|error| SoldrError::Other(format!("lint: failed to run cargo step: {error}")))?
+        .code()
+        .unwrap_or(1);
     if code != 0 {
         if let Some(target) = target_arg_value(args) {
             let dylint = cargo_front_door::first_cargo_subcommand(args) == Some("dylint");
@@ -296,6 +316,21 @@ fn target_arg_value(args: &[String]) -> Option<String> {
         index += 1;
     }
     None
+}
+
+/// Label of the in-place format pass `soldr lint` runs before the `fmt`
+/// check when it may fix (soldr#4006).
+pub(crate) const FMT_FIX_LABEL: &str = "fmt-fix";
+
+/// The files `cargo fmt -- -l` rewrote. The step log also holds the child's
+/// stderr, so only Rust source paths count.
+pub(crate) fn fixed_files(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.ends_with(".rs"))
+        .map(str::to_string)
+        .collect()
 }
 
 #[cfg(test)]
@@ -335,5 +370,27 @@ mod tests {
         assert_eq!(extra.args, vec!["--strict".to_string()]);
         assert_eq!(extra.cwd, tmp.path());
         assert_eq!(planned[0].label(), "ci/guard.sh --strict");
+    }
+
+    // soldr#4016: every runner executes a cargo step as a `soldr cargo`
+    // child, so cross Clippy and cross Dylint get the same per-target C
+    // toolchain prep the `soldr cargo` dispatch applies, scoped to that child.
+    #[test]
+    fn cargo_steps_run_through_the_soldr_cargo_dispatch() {
+        let args = vec![
+            "clippy".to_string(),
+            "--target".into(),
+            "x86_64-pc-windows-msvc".into(),
+        ];
+        let command = cargo_step_command(Path::new("/bin/soldr"), &args, true, false);
+        let argv: Vec<String> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(command.get_program(), "/bin/soldr");
+        assert_eq!(
+            argv,
+            ["cargo", "clippy", "--target", "x86_64-pc-windows-msvc"]
+        );
     }
 }

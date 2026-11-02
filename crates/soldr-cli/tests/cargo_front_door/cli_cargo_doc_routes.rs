@@ -31,7 +31,7 @@ fn fake_cargo_doc_hold_script(log_path: &Path) -> String {
         format!(
             "#!/bin/sh\n\
              echo \"cargo-doc phase=$1 hold-descendant=ready\" >> \"{}\"\n\
-             exec /bin/sleep 120\n",
+             exec sleep 120\n",
             log_path.display()
         )
     }

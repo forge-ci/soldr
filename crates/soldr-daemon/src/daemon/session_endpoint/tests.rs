@@ -401,38 +401,49 @@ fn broker_handoff_ack_latency(
     }
 }
 
+/// Holds the compile runtime's workers parked until dropped.
+struct ParkedWorkers {
+    release: Arc<std::sync::Barrier>,
+}
+
+impl Drop for ParkedWorkers {
+    fn drop(&mut self) {
+        self.release.wait();
+    }
+}
+
 /// Park every worker of `runtime` in a synchronous wait -- the shape of the
 /// embedded cache's store-lock and materialization stalls -- and prove it
-/// took: a fresh task must fail to run within 500 ms.
-fn saturate_runtime_workers(
-    runtime: &tokio::runtime::Runtime,
-    workers: usize,
-    stall: std::time::Duration,
-) {
-    let parked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+/// took: a fresh task must fail to run within 500 ms. The workers stay parked
+/// until the returned guard is dropped.
+///
+/// soldr#3965: deterministic. Each stall task is spawned only after the
+/// previous one reported that it holds a worker, so the next one can only run
+/// on a free worker (spawn order is not scheduling order, and a batch of
+/// spawns can queue behind a worker that is about to block). Readiness is a
+/// signal, not a polling deadline, and the release is the guard, not a sleep
+/// that could expire before the test finishes on a loaded runner.
+fn saturate_runtime_workers(runtime: &tokio::runtime::Runtime, workers: usize) -> ParkedWorkers {
+    let release = Arc::new(std::sync::Barrier::new(workers + 1));
     for _ in 0..workers {
-        let parked = Arc::clone(&parked);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let release = Arc::clone(&release);
         runtime.spawn(async move {
-            parked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            std::thread::sleep(stall);
+            let _ = started_tx.send(());
+            release.wait();
         });
+        started_rx
+            .recv()
+            .expect("stall task dropped its readiness signal without starting");
     }
-    // Spawn order is not scheduling order: wait until every stall task has
-    // actually taken a worker before probing.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while parked.load(std::sync::atomic::Ordering::SeqCst) < workers {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "stall tasks never started"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    let parked = ParkedWorkers { release };
     let probe = runtime.spawn(async {});
     std::thread::sleep(std::time::Duration::from_millis(500));
     assert!(
         !probe.is_finished(),
         "premise: the compile runtime's workers must all be parked for this test to mean anything"
     );
+    parked
 }
 
 /// soldr#3102: the broker gives the daemon `DEFAULT_HANDOFF_ACK_DEADLINE`
@@ -452,7 +463,6 @@ fn handoff_ack_does_not_wait_for_a_saturated_compile_runtime() {
     use running_process::broker::server::DEFAULT_HANDOFF_ACK_DEADLINE;
 
     const WORKERS: usize = 2;
-    let stall = DEFAULT_HANDOFF_ACK_DEADLINE + std::time::Duration::from_secs(3);
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = SoldrPaths::with_root(temp.path().join("root"));
     let (readiness, _publisher) = CompileServiceReadiness::pending_without_events();
@@ -495,7 +505,7 @@ fn handoff_ack_does_not_wait_for_a_saturated_compile_runtime() {
         Arc::clone(&mux),
         compile_runtime.handle().clone(),
     ));
-    saturate_runtime_workers(&compile_runtime, WORKERS, stall);
+    let parked = saturate_runtime_workers(&compile_runtime, WORKERS);
     let shared_latency =
         broker_handoff_ack_latency(&shared_endpoint).expect("drive shared handoff");
     assert!(
@@ -528,5 +538,6 @@ fn handoff_ack_does_not_wait_for_a_saturated_compile_runtime() {
     );
 
     control_plane.abort();
+    drop(parked);
     compile_runtime.shutdown_background();
 }

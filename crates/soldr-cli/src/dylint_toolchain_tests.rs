@@ -543,7 +543,8 @@ fn apply_to_command_never_touches_build_profile_or_injects_args() {
         assert!(
             expected_keys.contains(&key_str.as_ref())
                 || key_str == "DYLINT_DRIVER_PATH"
-                || key_str == "RUSTUP_HOME",
+                || key_str == "RUSTUP_HOME"
+                || key_str == DYLINT_LINK_COPY_LIBRARY_ENV_VAR,
             "unexpected env var set by DylintToolchainPlan::apply_to_command: {key_str}"
         );
     }
@@ -825,7 +826,15 @@ fn the_driver_build_opt_in_is_off_by_default_and_warns_when_set() {
 #[test]
 fn dylint_readiness_reads_the_home_the_install_writes_to() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _cwd_lock = crate::TEST_PROCESS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = tempfile::tempdir().expect("temp soldr root");
+    // Home resolution walks up from the cwd for a repo-local `.rustup`. The
+    // test's own cwd is the checkout, and a checkout under `$HOME` finds the
+    // caller's real `~/.rustup` there -- the very home this test proves the
+    // probe does *not* read. Run from a directory with no such ancestor.
+    let _cwd = crate::CwdGuard::enter(root.path());
     let managed = root.path().join("rustup");
     std::fs::create_dir_all(&managed).expect("managed rustup home");
     let _root = EnvVarGuard::set(crate::core::SOLDR_CACHE_DIR_ENV_VAR, root.path());
@@ -843,5 +852,28 @@ fn dylint_readiness_reads_the_home_the_install_writes_to() {
     assert_eq!(
         crate::dylint_rustup_home::dylint_rustup_home().expect("Dylint home"),
         managed
+    );
+}
+
+/// soldr#3991: an inherited DYLINT_LINK_ENABLE_COPY_LIBRARY makes
+/// cargo-dylint skip its post-build `lib<name>@<toolchain>` copy, so a fresh
+/// or cache-replayed lint cdylib (dylint-link never runs) fails with
+/// "Could not find ... despite successful build". The plan must remove it.
+#[test]
+fn apply_to_command_strips_dylint_link_copy_library_env() {
+    let plan = sample_plan();
+    let mut command = std::process::Command::new("does-not-matter");
+    command.env(DYLINT_LINK_COPY_LIBRARY_ENV_VAR, "1");
+    plan.apply_to_command(&mut command);
+
+    let value = command
+        .get_envs()
+        .find(|(key, _)| *key == OsStr::new(DYLINT_LINK_COPY_LIBRARY_ENV_VAR))
+        .map(|(_, value)| value);
+    assert_eq!(
+        value,
+        Some(None),
+        "apply_to_command must remove {DYLINT_LINK_COPY_LIBRARY_ENV_VAR} so cargo-dylint \
+         always writes the toolchain-stamped library copy itself"
     );
 }

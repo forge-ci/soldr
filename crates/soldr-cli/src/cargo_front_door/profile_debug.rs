@@ -68,7 +68,7 @@ pub(super) fn maybe_apply_cargo_profile_debug_default(
     command.env(default.env_var, default.value);
     let repo_path = cargo_invocation_repo_path(args);
     let decision = cargo_debug_default_warning_decision(paths, &repo_path);
-    if decision != WarningDecision::Suppress {
+    if prints_debug_default_warning(decision, super::porcelain::enabled()) {
         eprintln!(
             "soldr: warning: Cargo profile.{}.debug is unspecified for {}; setting {}={} for this invocation. Set `debug` explicitly under `[profile.{}]` in Cargo.toml or .cargo/config.toml to override this default.",
             default.profile,
@@ -102,6 +102,13 @@ impl UnrecordedDebugWarning {
         let sock = crate::daemon::client::default_sock_path(paths);
         let _ = crate::daemon::client::should_warn_cargo_debug_default(&sock, &self.repo_path);
     }
+}
+
+/// The advisory is about build speed, not the agent's task: under porcelain
+/// it would be the only non-JSON text on a passing run, so it stays silent.
+/// It is still recorded, so leaving porcelain later does not resurface it.
+fn prints_debug_default_warning(decision: WarningDecision, porcelain: bool) -> bool {
+    decision != WarningDecision::Suppress && !porcelain
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -653,6 +660,25 @@ mod tests {
         cargo_profile_lookup_start_dir_from, configured_targets_msvc,
         toml_text_specifies_profile_debug, ConfiguredTargets,
     };
+    use super::{prints_debug_default_warning, WarningDecision};
+
+    #[test]
+    fn porcelain_silences_the_debug_default_advisory() {
+        assert!(prints_debug_default_warning(WarningDecision::Emit, false));
+        assert!(prints_debug_default_warning(
+            WarningDecision::EmitUnrecorded,
+            false
+        ));
+        assert!(!prints_debug_default_warning(WarningDecision::Emit, true));
+        assert!(!prints_debug_default_warning(
+            WarningDecision::EmitUnrecorded,
+            true
+        ));
+        assert!(!prints_debug_default_warning(
+            WarningDecision::Suppress,
+            false
+        ));
+    }
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()

@@ -34,7 +34,14 @@ jobs:
     name: Cache janitor
     # Deleting needs a writable token. A fork PR's token is read-only, so the
     # sweep runs on pushes, schedule, dispatch and same-repository PRs only.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    # The merge queue sweeps at the end of ci.yml instead (queue-cache-janitor):
+    # batched queue runs arrive together, and GitHub cancels a *pending* job
+    # when a newer request for the shared `cache-janitor` group waits, so a
+    # second sweeper here concluded every queue run `cancelled` (run
+    # 41335680472: "Canceling since a higher priority waiting request for
+    # cache-janitor exists"). The push to main that follows each merge still
+    # runs this sweep plus the end-of-queue one, so nothing goes unswept.
+    if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     # One sweep at a time, repository-wide, and never cancelled mid-delete.

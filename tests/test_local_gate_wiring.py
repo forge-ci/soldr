@@ -133,7 +133,7 @@ def test_only_the_non_compiling_lanes_are_light() -> None:
         assert lane.get("weight", "heavy") in {"light", "heavy"}, name
 
 
-# zackees/ci.yml#399: the bosn `tests` lane builds in its container's own
+# zackees/ci.yml#399: the `tests` lane builds in its private root's own
 # target dir, so it is its own heavy group and runs beside the host chain.
 # Every host-compiling heavy lane shares target/ and must stay in one group.
 def test_only_the_isolated_tests_lane_has_its_own_heavy_group() -> None:
@@ -145,20 +145,32 @@ def test_only_the_isolated_tests_lane_has_its_own_heavy_group() -> None:
 
 
 def test_the_isolated_test_run_proves_its_tree() -> None:
-    """zackees/ci.yml#196: the bosn test check carries a nonce the container
-    must echo from its /repo, so a container bound to another worktree
-    (zackees/bosn#314) fails the gate instead of attesting the wrong tree."""
+    """zackees/ci.yml#196: the test check carries a nonce the driver must echo
+    from the tree it tests, so a run against another worktree fails the gate
+    instead of attesting the wrong tree."""
     tests = next(c for c in GATE.checks() if c.lane == "tests")
     assert tests.tree_nonce
-    task = (ROOT / "ci" / "bosn_workspace_test.py").read_text(encoding="utf-8")
+    task = (ROOT / "ci" / "workspace_test.py").read_text(encoding="utf-8")
     assert '".gate-nonce"' in task and "gate-nonce: " in task
     assert GATE.NONCE_FILE in (ROOT / ".gitignore").read_text(encoding="utf-8")
 
 
 def test_the_test_suite_only_runs_isolated_locally() -> None:
     lanes = {check.name: check for check in GATE.checks()}
-    tests = lanes["soldr tests (isolated, bosn)"]
-    assert tests.argv == ("bosn", "run", "--task", "test")
+    tests = lanes["soldr tests (isolated, host private root)"]
+    assert tests.argv == (
+        "uv",
+        "run",
+        "--no-project",
+        "--python",
+        "3.13",
+        "python",
+        "ci/workspace_test.py",
+        "--host",
+    )
+    gate = tomllib.loads((ROOT / "local-gate.toml").read_text(encoding="utf-8"))
+    assert tuple(gate["gate"]["isolation"]["runner"]) == tests.argv
+    assert all("bosn" not in check.argv[0] for check in GATE.checks())
     for check in GATE.checks():
         if check.lane != "tests":
             assert "nextest" not in check.argv and "ci-test" not in check.argv, check
@@ -212,20 +224,38 @@ def _echo_script(path: Path, label: str) -> Path:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the nextest run-wrapper is Unix-only")
-def test_isolation_guard_refuses_a_developer_host() -> None:
+def test_a_native_wrapper_override_is_refused_on_a_developer_host() -> None:
+    """soldr#3516: only soldr-nextest-wrapper isolates a test's soldr state,
+    so replacing it is honoured only under CI=true or inside an isolated test
+    (SOLDR_TEST_ISOLATED=1, which that wrapper exports)."""
     refused = _wrapper()
-    assert refused.returncode != 0
-    assert "bosn run --task test" in refused.stderr
+    assert refused.returncode == 97
+    assert "refusing SOLDR_NEXTEST_NATIVE_WRAPPER" in refused.stderr
+    assert "ci/workspace_test.py --host" in refused.stderr
     assert _wrapper(CI="true").returncode == 0
     assert _wrapper(SOLDR_TEST_ISOLATED="1").returncode == 0
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the nextest run-wrapper is Unix-only")
-def test_isolation_guard_runs_before_any_wrapper_resolution(tmp_path: Path) -> None:
+def test_the_override_guard_runs_before_the_override_is_execed(tmp_path: Path) -> None:
     native = _echo_script(tmp_path / "native", "native")
     refused = _shim(["true"], str(native))
     assert refused.returncode == 97
     assert "native" not in refused.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the nextest run-wrapper is Unix-only")
+def test_the_isolating_wrapper_needs_no_marker_on_a_developer_host(
+    tmp_path: Path,
+) -> None:
+    """The derived soldr-nextest-wrapper isolates every test itself, so a
+    host run neither needs nor reads the marker."""
+    profile = tmp_path / "target" / "debug"
+    _echo_script(profile / "soldr-nextest-wrapper", "derived")
+    test_binary = _echo_script(profile / "deps" / "suite-0123", "test")
+    run = _shim([str(test_binary)], None)
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == f"derived {test_binary}"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the nextest run-wrapper is Unix-only")
@@ -437,12 +467,59 @@ def test_a_dead_builders_lock_is_taken_over(tmp_path: Path) -> None:
     assert len(log.read_text(encoding="utf-8").splitlines()) == 1
 
 
-def test_isolated_suite_requires_a_bosn_that_does_not_reap_bursts() -> None:
-    # zackees/bosn#317: bosn < 0.1.5 reaped `ci-test` on an output burst.
-    tests = {check.name: check for check in GATE.checks()}[
-        "soldr tests (isolated, bosn)"
-    ]
-    assert tests.min_version is not None and tests.min_version >= (0, 1, 6)
+def _workspace_test():  # type: ignore[no-untyped-def]
+    return load_script_module(
+        ROOT / "ci" / "workspace_test.py", "soldr_workspace_test_host"
+    )
+
+
+def test_host_run_moves_every_identity_root_off_the_callers_state(
+    tmp_path: Path,
+) -> None:
+    """soldr#3516: the driver's own daemon lifecycle steps resolve a private
+    root, and it never claims or forwards the test-isolation marker."""
+    ws = _workspace_test()
+    real_home = tmp_path / "real"
+    layout = ws.host_layout(tmp_path / "gitdir", tmp_path / "cache")
+    shims = real_home / ".soldr" / "v0.9.49" / "shims"
+    caller = {
+        "PATH": f"{shims}:/bin:{real_home / '.soldr' / 'bin'}",
+        "CI": "true",
+        "SOLDR_TEST_ISOLATED": "0",
+        "IN_CLUD": "1",
+        "CLUD_SESSION_ID": "x",
+        "BASH_ENV": "/x",
+    }
+    env: dict[str, str] = {}
+    ws.host_environment(layout, caller, real_home, env)
+    assert not {"IN_CLUD", "CLUD_SESSION_ID", "BASH_ENV"} & set(env)
+    assert "SOLDR_TEST_ISOLATED" not in env
+    assert "CI" not in env
+    assert env["PATH"] == "/bin"
+    for name in ("HOME", "XDG_CONFIG_HOME", "TMPDIR", "SOLDR_CACHE_DIR"):
+        assert not Path(env[name]).is_relative_to(real_home), name
+    assert env["XDG_RUNTIME_DIR"] == str(layout.runtime)
+    assert env["CARGO_HOME"] == str(real_home / ".cargo")
+
+
+def test_host_root_is_never_inside_a_checkout(tmp_path: Path) -> None:
+    """Fixtures make their pin-free cwd under TMPDIR; a private root below a
+    rust-toolchain.toml would hand every one of them the repository's pin."""
+    ws = _workspace_test()
+    layout = ws.host_layout(ROOT / ".git", tmp_path)
+    assert not layout.tmp.is_relative_to(ROOT)
+    # Nor under the user's home, where a walk up finds the real ~/.cargo.
+    assert not layout.tmp.is_relative_to(Path.home())
+    (tmp_path / "rust-toolchain.toml").write_text("", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    assert ws.pinned_ancestor(tmp_path / "sub") == tmp_path / "rust-toolchain.toml"
+
+
+def test_host_run_refuses_the_callers_home(tmp_path: Path) -> None:
+    ws = _workspace_test()
+    layout = ws.host_layout(tmp_path, tmp_path / "cache")
+    with pytest.raises(ws.IsolationError):
+        ws.host_environment(layout, {}, layout.home, {})
 
 
 def test_main_publisher_promotes_merged_pr_evidence() -> None:

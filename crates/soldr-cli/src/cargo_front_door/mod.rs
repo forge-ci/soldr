@@ -41,6 +41,7 @@ mod cache_plan;
 pub(crate) mod cache_states; // soldr#2302 — HIT/MISS annotations + stats
 mod clang_cl_shim;
 mod cmake_need;
+mod codegen_units;
 mod component_install;
 mod config_args;
 pub(crate) mod cook_hydrate;
@@ -51,8 +52,10 @@ mod disk;
 mod fingerprint_noise;
 mod host_tooling;
 mod inputs;
+mod install_notice;
 mod job_budget;
 mod line_endings;
+pub(crate) mod line_relay; // soldr#3929
 mod lockfile_proof;
 mod log_summary;
 mod nested_cargo;
@@ -62,10 +65,13 @@ pub(crate) mod no_cache_detach;
 mod orphan_rmeta;
 /// `--porcelain` / `SOLDR_PORCELAIN` machine-readable front-door mode.
 pub(crate) mod porcelain;
+/// Failure/error identities and ANSI stripping for the porcelain digest.
+mod porcelain_errors;
 /// Failing-test digest for the porcelain summary (soldr#3961).
 mod porcelain_failures;
 /// `soldr lint` porcelain report and log (soldr#3958).
 pub(crate) mod porcelain_lint;
+mod porcelain_warnings;
 mod profile_debug;
 pub(crate) mod provision;
 mod strip_diagnostics;

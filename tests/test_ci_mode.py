@@ -197,13 +197,16 @@ def test_ci_test_adds_the_linux_x64_e2e_cell_without_the_full_matrix() -> None:
     assert "needs.ci-mode.outputs.mode == 'full'" in _job("e2e-linux-arm64-build")
 
 
-def test_dispatch_requires_full_sha_and_push_is_minimal() -> None:
+def test_dispatch_requires_full_sha_and_push_is_full() -> None:
     assert MODE.select_mode("workflow_dispatch", {}, SHA) == MODE.ModeSelection(
         "full", SHA
     )
     assert MODE.select_mode("push", {"after": SHA}, "") == MODE.ModeSelection(
-        "minimal", SHA
+        "full", SHA
     )
+    assert MODE.select_mode("schedule", {}, SHA) == MODE.ModeSelection("full", SHA)
+    with pytest.raises(ValueError, match="schedule requires"):
+        MODE.select_mode("schedule", {}, "")
     with pytest.raises(ValueError, match="40-character"):
         MODE.select_mode("workflow_dispatch", {}, "main")
     MODE.verify_checkout(SHA, SHA.upper())
@@ -584,9 +587,11 @@ def test_full_smokes_receive_no_repository_secrets(job) -> None:
     assert "secrets:" not in _job(job)
 
 
-def test_merge_queue_keeps_full_validation_on_exact_group_identity():
+def test_merge_queue_runs_linux_lane_on_exact_group_identity():
     event = {"merge_group": {"head_sha": SHA}}
-    assert MODE.select_mode("merge_group", event, "") == MODE.ModeSelection("full", SHA)
+    assert MODE.select_mode("merge_group", event, "") == MODE.ModeSelection(
+        "minimal", SHA
+    )
     with pytest.raises(ValueError, match="merge_group"):
         MODE.select_mode("merge_group", {"merge_group": {"head_sha": "main"}}, "")
 

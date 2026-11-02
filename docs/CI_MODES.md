@@ -150,6 +150,21 @@ name alone does not prove trusted execution when the workflow itself is PR
 controlled. Trusted workflow enforcement and live external-author security
 proof remain required before claiming protected merge enforcement.
 
+## Fast merge queue: deferred full matrix
+
+`pull_request` (without `ci-full`) and `merge_group` runs select `minimal`:
+`Lint` plus `Linux x64` (the host `soldr ci-test` suite). The merge queue
+builds and merges up to five entries per group. The full matrix -- every
+cross-build and target-run, wine, wheels, PEP 517 daemon smoke, cook size,
+setup-soldr smoke, reld live fetches and `Full coverage` -- runs on every push
+to `main`, nightly (`schedule`), candidate `workflow_dispatch`, and on any PR
+labelled `ci-full`.
+
+The single required context is `CI summary`. Besides the tier contract it
+lists every job of its own run attempt through the Actions API and fails on any
+job that did not conclude `success` or `skipped` (cancelled included). It
+fails closed when the job list cannot be read.
+
 ## Local gate: proven lane skips
 
 **The `wine` lane may attest by proof (soldr#3704).** When every changed path
@@ -161,7 +176,7 @@ proof remain required before claiming protected merge enforcement.
 
 **The `tests` lane may narrow by proof (soldr#3731).** When every changed path is
   crate source -- under `crates/<known crate>/`, but not that crate's `Cargo.toml` or
-  `tests/` -- `ci/bosn_workspace_test.py` runs doctests and nextest with `-p` for the
+  `tests/` -- `ci/workspace_test.py` runs doctests and nextest with `-p` for the
   reverse-dependency closure of the changed crates plus `soldr-cli` (whose guards read
   the whole tree), and prints `tests lane: SELECTED [...] (soldr#3731)` with the skipped
   crates. A skipped crate's test binaries are built only from crates outside the change,

@@ -277,7 +277,14 @@ fn lint_rust_uses_canonical_commands_without_a_redundant_check() {
     );
 
     let output = isolated_soldr_command()
-        .args(["--no-cache", "lint", "rust", "--package", "soldr-cli"])
+        .args([
+            "--no-cache",
+            "lint",
+            "rust",
+            "--check",
+            "--package",
+            "soldr-cli",
+        ])
         .env("SOLDR_CACHE_DIR", root.join("cache"))
         // soldr#3203: a no-cache run prepares the target directory Cargo will
         // use, which from this crate is the repository's own `target/` -- the
@@ -462,7 +469,12 @@ fn porcelain_lint_cargo_script(fail_fmt: bool) -> String {
     }
 }
 
-fn run_porcelain_lint(label: &str, fail_fmt: bool) -> (std::process::Output, PathBuf) {
+/// `extra` follows `lint rust`; the verify-only contract passes `--check`.
+fn run_porcelain_lint(
+    label: &str,
+    fail_fmt: bool,
+    extra: &[&str],
+) -> (std::process::Output, PathBuf) {
     let root = unique_temp_dir(label);
     let workspace = root.join("workspace");
     fs::create_dir_all(workspace.join("src")).expect("workspace source dir");
@@ -479,7 +491,9 @@ fn run_porcelain_lint(label: &str, fail_fmt: bool) -> (std::process::Output, Pat
     write_fake_script(&cargo, &porcelain_lint_cargo_script(fail_fmt));
     let output = isolated_soldr_command()
         .args(["--no-cache", "lint", "rust"])
+        .args(extra)
         .current_dir(&workspace)
+        .env_remove("CI")
         .env("SOLDR_PORCELAIN", "1")
         .env("SOLDR_CACHE_DIR", root.join("cache"))
         .env("CARGO_TARGET_DIR", root.join("target"))
@@ -491,7 +505,7 @@ fn run_porcelain_lint(label: &str, fail_fmt: bool) -> (std::process::Output, Pat
 
 #[test]
 fn porcelain_lint_success_prints_exactly_one_summary_line() {
-    let (output, _root) = run_porcelain_lint("lint-porcelain-ok", false);
+    let (output, _root) = run_porcelain_lint("lint-porcelain-ok", false, &["--check"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -501,36 +515,30 @@ fn porcelain_lint_success_prints_exactly_one_summary_line() {
     assert_eq!(stdout.lines().count(), 1, "stdout:\n{stdout}");
     assert!(!stdout.contains(LINT_NOISE_MARKER) && !stderr.contains(LINT_NOISE_MARKER));
     let report: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON line");
-    assert_eq!(report["summary"]["status"], "ok");
+    assert_eq!(report["status"], "ok");
     assert_eq!(report["exit_code"], 0);
-    let names: Vec<_> = report["steps"]
-        .as_array()
-        .expect("steps")
-        .iter()
-        .map(|step| {
-            (
-                step["name"].as_str().unwrap_or_default().to_string(),
-                step["ok"].clone(),
-            )
-        })
-        .collect();
-    assert_eq!(
-        names,
-        vec![
-            ("fmt".to_string(), serde_json::json!(true)),
-            ("clippy".to_string(), serde_json::json!(true)),
-        ]
-    );
+    // soldr#4010: a passing line carries no steps; they live in the log.
+    assert!(report.get("steps").is_none(), "{report}");
     let log = fs::read_to_string(report["log_path"].as_str().expect("log_path")).expect("log");
     assert!(
         log.contains(LINT_NOISE_MARKER),
         "the folded output lives in the log:\n{log}"
     );
+    assert_eq!(step_names(&log), vec!["fmt", "clippy"]);
+}
+
+/// Step names in the order the lint log recorded them.
+fn step_names(log: &str) -> Vec<String> {
+    log.lines()
+        .filter_map(|line| line.strip_prefix("# --- step "))
+        .filter_map(|rest| rest.split(':').next())
+        .map(str::to_string)
+        .collect()
 }
 
 #[test]
 fn porcelain_lint_failure_shows_the_fmt_diff_in_full() {
-    let (output, _root) = run_porcelain_lint("lint-porcelain-fmt", true);
+    let (output, _root) = run_porcelain_lint("lint-porcelain-fmt", true, &["--check"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
@@ -544,6 +552,7 @@ fn porcelain_lint_failure_shows_the_fmt_diff_in_full() {
     );
     assert_eq!(stdout.lines().count(), 1, "stdout:\n{stdout}");
     let report: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON line");
+    assert_eq!(report["status"], "failed");
     assert_eq!(report["summary"]["status"], "failed");
     assert_eq!(report["failed_step"], "fmt");
     assert_eq!(report["exit_code"], 1);
@@ -552,4 +561,17 @@ fn porcelain_lint_failure_shows_the_fmt_diff_in_full() {
         Some(1),
         "lint stops at the failing step"
     );
+}
+
+#[test]
+fn porcelain_lint_formats_in_place_before_the_fmt_check() {
+    // soldr#4006: outside CI and without `--check`, a formatting pass runs
+    // first, so formatting alone never fails the lint.
+    let (output, _root) = run_porcelain_lint("lint-porcelain-fix", false, &[]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "stdout:\n{stdout}");
+    let report: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON line");
+    let log = fs::read_to_string(report["log_path"].as_str().expect("log_path")).expect("log");
+    let names = step_names(&log);
+    assert_eq!(names, vec!["fmt-fix", "fmt", "clippy"]);
 }

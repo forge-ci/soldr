@@ -44,3 +44,10 @@ pub fn spawn_holding_fork_window(
     let _spawn = spawn_guard.then(crate::platform::process::spawn_exclusion::spawn_shared);
     command.spawn()
 }
+
+/// Build the command that launches a shared daemon `binary`. Only Linux
+/// places the daemon in its own resource scope (soldr#4012); here the daemon
+/// is spawned directly.
+pub fn daemon_command(binary: &std::path::Path, _unit: &str, _own_scope: bool) -> Command {
+    Command::new(binary)
+}

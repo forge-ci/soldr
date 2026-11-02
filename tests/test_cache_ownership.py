@@ -39,7 +39,7 @@ WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 
 CACHE_ACTION = "actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809"
 UPLOAD_ACTION = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
-COOK_ACTION = "zackees/setup-soldr/cook@794fb3083729fd6be3396ab6cbd573c9f756d2f5"
+COOK_ACTION = "zackees/setup-soldr/cook@35b5765c99cf392c259e684daeda10a950f72fff"
 
 
 FIXTURE_FAMILY_ID = "fixture-family"

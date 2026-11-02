@@ -78,7 +78,9 @@ const TAIL_POLL: Duration = Duration::from_millis(100);
 /// user asked to *see* the cache work. Being on for both TTY and non-TTY also
 /// means the CI log the feature is validated on always carries the signal.
 pub(crate) fn enabled() -> bool {
+    // soldr#4005: porcelain stays silent on stderr; the run log keeps it all.
     !super::env_flag_truthy(NO_CACHE_STATES_ENV_VAR)
+        && !crate::cargo_front_door::porcelain::enabled()
 }
 
 /// The one-line automatic cache-stats summary, or `None` when nothing cacheable
@@ -180,6 +182,11 @@ pub(crate) fn start_tail(
     args: &[String],
     porcelain: bool,
 ) -> Option<CacheStateTailStart> {
+    // soldr#4018: a verb that compiles nothing (fmt, tree, metadata) would
+    // only relay other builds' records from the shared journal.
+    if !super::cargo_args_are_cacheable(args) {
+        return None;
+    }
     cache_plan.zccache_session()?;
     // Stamp with the same elapsed-seconds prefix as the relayed cargo output
     // when that prefix is on, so the two read as one stream in a CI log.
@@ -210,7 +217,11 @@ pub(crate) fn stop_tail(tail: Option<CacheStateTail>) {
 }
 
 /// Emit the automatic cache-stats summary for a finished build's session.
-pub(crate) fn emit_build_stats(cache_plan: &CargoCachePlan) {
+pub(crate) fn emit_build_stats(cache_plan: &CargoCachePlan, args: &[String]) {
+    // soldr#4018: no compile, so any summary on disk is another build's.
+    if !super::cargo_args_are_cacheable(args) {
+        return;
+    }
     let Some(session) = cache_plan.zccache_session() else {
         return;
     };
@@ -850,7 +861,13 @@ mod tests {
     #[test]
     fn enabled_defaults_on_and_env_disables() {
         // The env var is process-global; assert both directions without
-        // leaving it set for other tests in this binary.
+        // leaving it set for other tests in this binary. An agent session
+        // exports SOLDR_PORCELAIN, which also silences this surface.
+        let _lock = crate::TEST_PROCESS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _porcelain =
+            crate::EnvVarGuard::remove(crate::cargo_front_door::porcelain::PORCELAIN_ENV_VAR);
         std::env::remove_var(NO_CACHE_STATES_ENV_VAR);
         assert!(enabled(), "on by default");
         std::env::set_var(NO_CACHE_STATES_ENV_VAR, "1");

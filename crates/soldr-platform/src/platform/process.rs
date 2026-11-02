@@ -7,6 +7,7 @@
 //! Callers retain timeout/retry policy, which program to launch, lifecycle
 //! state, and diagnostic wording.
 
+pub mod affinity;
 pub mod command;
 pub mod cpu_ticks;
 pub mod exit;

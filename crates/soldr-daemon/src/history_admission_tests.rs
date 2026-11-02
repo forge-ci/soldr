@@ -82,6 +82,35 @@ fn available_memory_prefers_cgroup_headroom_over_mem_available() {
 }
 
 #[test]
+fn reclaimable_page_cache_does_not_force_exclusive_admission() {
+    // soldr#4012: the cgroup is nearly full, but mostly with inactive page
+    // cache. A 2.4 GiB unit must still be allowed to run beside another.
+    let cached = soldr_platform::host::resources::HostResourceSnapshot {
+        cgroup_limit_bytes: Some(16 * GIB),
+        cgroup_current_bytes: Some(15 * GIB),
+        cgroup_inactive_file_bytes: Some(11 * GIB),
+        system_available_bytes: Some(66 * GIB),
+        ..Default::default()
+    };
+    assert_eq!(available_bytes(&cached), Some(12 * GIB));
+    assert!(!history_requires_exclusive(
+        Some(unit(2_446 * MIB, 3)),
+        available_bytes(&cached)
+    ));
+}
+
+#[test]
+fn a_short_host_caps_a_roomy_cgroup() {
+    let short_host = soldr_platform::host::resources::HostResourceSnapshot {
+        cgroup_limit_bytes: Some(16 * GIB),
+        cgroup_current_bytes: Some(GIB),
+        system_available_bytes: Some(4 * GIB),
+        ..Default::default()
+    };
+    assert_eq!(available_bytes(&short_host), Some(4 * GIB));
+}
+
+#[test]
 fn small_units_skip_the_resource_probe() {
     // The probe reads cgroup files and /proc/meminfo; a unit remembered below
     // the probe threshold can never need the whole machine, so it is skipped.

@@ -774,7 +774,13 @@ soldr lint all
 soldr lint --target x86_64-pc-windows-msvc
 soldr lint --target win-x64 --target mac-arm64
 soldr lint --host-only
+soldr lint --check
 ```
+
+Outside CI, the `rust` and `all` suites reformat in place before the fmt check
+and list the rewritten files (`autofixed` in the porcelain JSON), so a
+formatting-only problem never costs a second run. `--check`, or `CI` set in the
+environment, verifies without rewriting (soldr#4006).
 
 `deps` runs `deny check`, `audit`, and `machete` concurrently as cache-disabled
 children because they do not compile Rust. `ci` runs the CI/build-surface policy
@@ -838,11 +844,13 @@ error. Applies to the `rust` and `all` suites. The first failing step stops the 
 
 **Porcelain (soldr#3958).** With `SOLDR_PORCELAIN=1` (or `soldr --porcelain
 lint`), `soldr lint rust` prints ONE JSON line on stdout and nothing else when
-every step passes. It is the same report `soldr cargo` emits under porcelain
-(`schema_version`, `command`, `exit_code`, `duration_ms`, `log_path`,
-`expires_at`, `summary` with `status` `ok`/`failed`), plus two additive fields:
-`steps` (`name`, `ok`, `exit_code`, `duration_ms` per step run) and, on failure,
-`failed_step`. Every step's stdout+stderr is appended to the single log at
+every step passes. It is the same report `soldr cargo` emits under porcelain.
+Schema 2 (soldr#4010): every line has `schema_version`, a top-level `status` (`ok`/`failed`),
+`exit_code`, `duration_ms` and `log_path`. A passing line stops there, plus
+`autofixed`, `installed` or `broker_skew` when they apply. A failing line adds
+`command`, `expires_at`, `summary` (errors, diagnostic,
+failed tests), `steps` (`name`, `ok`, `exit_code`, `duration_ms` per step run)
+and `failed_step`. Every step's stdout+stderr is appended to the single log at
 `log_path`. When a step fails, its complete output (the rustfmt diff, Clippy
 errors and warnings) is printed unfolded on stderr before the JSON line; only
 the output of steps that passed is folded into the log. The `deps`, `ci` and
@@ -2158,6 +2166,8 @@ soldr gc purge --registry-src --all            # delete extracted registry sourc
 soldr gc purge --git-checkouts --all           # delete git checkout worktrees
 soldr gc purge --kind rustup_toolchain --dry-run --all  # list unprotected toolchains; deletes nothing
 soldr gc purge --kind rustup_toolchain --all   # uninstall them via `rustup toolchain uninstall`
+soldr gc purge --kind rustup_toolchain --unused-days 30 --all  # only toolchains no pin used in 30 days
+soldr toolchain dedupe [--json]  # hardlink duplicate toolchains across rustup homes into one store (soldr#4027)
 ```
 
 Defaults:
@@ -2175,11 +2185,14 @@ Safety guards (from `docs/TARGET_GC_PROPOSAL.md`):
 - skip a candidate whose workspace `Cargo.lock` was modified within
   the staleness window
 - skip a candidate whose `target/.cargo-lock` exists (active build)
-- only consider paths under `gc.allowlist_roots` (default: `~/dev`)
+- only consider paths under `gc.allowlist_roots` (default: `~/dev` and
+  `~/.clud/worktrees`)
 
 The summary includes the registry path, eligible candidate count, total
-reclaimable size, skipped/dropped counts, and the largest eligible
-target directories with size and last-used age.
+reclaimable size, skipped/dropped counts, and the next target directories
+to be reclaimed with size, last-used age, and the split of their bytes into
+`shared=` (hardlinked elsewhere, not freed until the last link goes) and
+`unique=` (freed by deleting that target) (soldr#4033).
 
 `gc list --json` uses the issue #323 taxonomy. Derived kinds can be
 purged through explicit opt-in flags or `--kind`; the cargo-owned primary
@@ -2525,14 +2538,19 @@ Liveness is polled at the idle interval, so a PID reused within one interval
 can be mistaken for the original owner. Soldr does not install Task Scheduler jobs, systemd timers,
 launchd agents, or any other OS scheduler.
 
-The embedded artifact budget defaults to 5% of filesystem capacity, clamped to
-40–200 GiB and reduced when needed to preserve recovery space. At 85% fill it
+The embedded artifact budget defaults to 25 GiB (soldr#4028), set with
+`soldr config set zccache.max_size_gb <N>`; `max_size_gb = 0` restores
+zccache's dynamic default (5% of filesystem capacity, clamped to 40–200 GiB and
+reduced when needed to preserve recovery space). The budget is read when the
+daemon starts. `soldr cache stats` shows the store's on-disk size against the
+cap; `soldr cache gc` runs the eviction pass now when no daemon owns the root
+(a live daemon runs it every 5 minutes). At 85% fill it
 evicts LRU artifacts older than four days toward 70%; at 100% fill or critically
 low free space it evicts regardless of age toward 80% plus recovery headroom.
 A daily pass expires artifacts older than 30 days even below budget. Physical,
 hardlink-deduplicated allocated bytes are used. Set exactly one of
 `ZCCACHE_CACHE_SIZE_BYTES` or `ZCCACHE_CACHE_SIZE_PERCENT` to override the
-dynamic budget.
+configured budget.
 
 The same coordinated pass bounds cook artifacts, trash buckets, registered
 workspace targets, PEP517 targets and wheels, daemon events, stale embedded generations,
@@ -2591,7 +2609,60 @@ enabled = true          # opt-out; on by default
 trigger_free_gb = 20    # start GC when free space < this
 target_free_gb = 30     # stop GC when free space >= this
 min_age_secs = 3600     # never touch anything modified within this window
+stale_target_days = 14  # evict target/ dirs idle this many days; 0 = off (soldr#4031)
+dedupe_targets = true   # share identical target/ artifacts across worktrees (soldr#4033)
 ```
+
+`stale_target_days` (soldr#4031, default `14`, `0` = off) is an age-based
+pass that runs regardless of free space, at most once a day: every registered
+`target/` plus every `target/` discovered under `[gc] allowlist_roots`
+(default `~/dev` and the agent worktree root `~/.clud/worktrees`) that has not
+been used for that many days is deleted through the same guarded purge path as
+tier 2 (allowlist, active-build guards, 256M floor, `min_age_secs` floor,
+bounded budget). Idle agent worktrees stop holding their full `target/`
+forever. Setting `allowlist_roots` explicitly replaces both defaults. Disable
+with `soldr config set auto_gc.stale_target_days 0`.
+
+Dependency artifacts are already shared across worktrees through the zccache
+content-addressed store: on a cache hit the output is delivered into each
+worktree's `target/` as a reflink or hardlink when the probed volume pair
+supports it (`--zccache-mode`, see the materialization mode docs), so the
+per-worktree cost on a CoW filesystem is mostly metadata.
+
+`dedupe_targets` (soldr#4033, default `true`) covers what zccache cannot:
+build-script outputs (`target/<profile>/build/<pkg>/out/**`, which never pass
+through the rustc wrapper) and dependency artifacts zccache delivered as plain
+copies. After the stale-target pass, the same daily run hashes (blake3) the
+immutable artifacts of every surviving target and stores each distinct file
+once under `~/.soldr/target-store/`:
+
+- `deps/*.rlib` / `deps/*.rmeta` are reflinked to the stored copy, or, when
+  the volume has no reflink, hardlinked to it after the shared inode is made
+  read-only (rustc replaces these by rename, so an in-place writer fails
+  instead of corrupting other worktrees).
+- build-script `out/` files are only ever reflinked (copy-on-write), never
+  hardlinked, because build scripts often rewrite `OUT_DIR` files in place.
+- targets with a live cargo build are skipped, every `.cargo-lock` is held
+  for the duration, and files younger than `min_age_secs`, under 4 KiB, or
+  changed while hashing are left alone. Hardlinks never cross volumes.
+- store blobs no target links any more are pruned; reflinked blobs are
+  pruned after 30 days unused.
+
+Build scripts are deliberately not *cached* (replayed without running):
+their inputs are arbitrary and `rerun-if-*` is advisory, so a replay could be
+stale. Dedupe only collapses bytes cargo already produced. Run it on demand,
+or preview it, with `soldr gc dedupe`:
+
+```bash
+soldr gc dedupe                       # all known targets under the allowlist roots
+soldr gc dedupe --dry-run             # report what would be shared
+soldr gc dedupe ~/dev/a/target ~/dev/b/target --json
+```
+
+The report lists, per target, `total` / `shared` / `unique` bytes. JSON
+output is `{"schema_version": 1, "report": {...}, "targets": [{"path",
+"total_bytes", "shared_bytes", "unique_bytes"}]}`. On non-Unix hosts the pass
+reports `"supported": false` and changes nothing.
 
 Fallback behavior:
 
@@ -2785,8 +2856,8 @@ Commands:
 | `SOLDR_ZCCACHE_BIN` | Legacy compatibility variable; it does not replace the embedded service on the normal `soldr cargo ...` path. Use `SOLDR_RUSTC_WRAPPER=/path/to/zccache` for an intentional external-wrapper experiment. | unset |
 | `SOLDR_ZCCACHE_LOCAL_DIR` | Legacy compatibility variable from the removed downloaded-zccache flow; ignored by the normal embedded path. | unset |
 | `SOLDR_CACHE_DIR` | Override the exact product root owned by this soldr daemon. **On Windows, keep this path short** — see the note below. | official builds: `~/.soldr`; development builds: `~/.soldr-dev` |
-| `ZCCACHE_CACHE_SIZE_BYTES` | Exact embedded artifact budget in bytes. Mutually exclusive with `ZCCACHE_CACHE_SIZE_PERCENT`. | dynamic 5%, clamped 40–200 GiB |
-| `ZCCACHE_CACHE_SIZE_PERCENT` | Embedded artifact budget as an integer percentage from 1 through 100. Mutually exclusive with `ZCCACHE_CACHE_SIZE_BYTES`. | dynamic 5%, clamped 40–200 GiB |
+| `ZCCACHE_CACHE_SIZE_BYTES` | Exact embedded artifact budget in bytes. Mutually exclusive with `ZCCACHE_CACHE_SIZE_PERCENT`. Outranks `[zccache].max_size_gb`. | `[zccache].max_size_gb` (25 GiB) |
+| `ZCCACHE_CACHE_SIZE_PERCENT` | Embedded artifact budget as an integer percentage from 1 through 100. Mutually exclusive with `ZCCACHE_CACHE_SIZE_BYTES`. Outranks `[zccache].max_size_gb`. | `[zccache].max_size_gb` (25 GiB) |
 | `SOLDR_CACHE_LIFECYCLE` | Embedded-cache durability policy for `soldr cargo ...`. `job` leaves normal background persistence to the long-lived Soldr daemon. `command` requests an embedded cache flush before the command exits; it does not stop the root-owning daemon. | `job` |
 | `SOLDR_CACHE_SHUTDOWN_TIMEOUT_SECS` | Positive compatibility timeout accepted with command-lifetime mode; empty, zero, or malformed values fall back to the default (malformed/zero warn on stderr). Embedded mode uses it to select the flush-on-command path; there is no separate zccache daemon to stop. | `300` |
 | `SOLDR_TRUST_INHERITED_ENV` | Advanced escape hatch for CI/action workflows that intentionally inject soldr/zccache workspace-pinned env into `soldr cargo ...`. Truthy values are equivalent to `--trust-inherited-soldr-env`; unset/default means `soldr cargo ...` derives a fresh soldr workspace context from the current cwd/manifest while preserving normal OS, Cargo, Rust, proxy, cert, and CI env. | unset |

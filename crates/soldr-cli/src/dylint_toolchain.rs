@@ -175,8 +175,21 @@ impl DylintToolchainPlan {
         command.env(CACHE_IDENTITY_ENV_VAR, self.cache_identity());
         command.env(PREPARED_IDENTITY_ENV_VAR, self.cache_identity());
         crate::dylint_driver::apply_dylint_driver_path(command);
+        // soldr#3991: with DYLINT_LINK_ENABLE_COPY_LIBRARY set, cargo-dylint
+        // 6.2.0 skips its own post-build `lib<name>@<toolchain>` copy and
+        // relies on dylint-link to write it. dylint-link only runs when the
+        // link runs, so a fresh Cargo unit or a cache-replayed cdylib leaves
+        // the stamped library missing ("Could not find ... despite successful
+        // build"). Never let the variable reach cargo-dylint, even inherited:
+        // the copy then always happens after the build, independent of
+        // whether the linker ran.
+        command.env_remove(DYLINT_LINK_COPY_LIBRARY_ENV_VAR);
     }
 }
+
+/// Makes cargo-dylint delegate the toolchain-suffixed library copy to
+/// dylint-link; soldr strips it from every Dylint command (soldr#3991).
+pub(crate) const DYLINT_LINK_COPY_LIBRARY_ENV_VAR: &str = "DYLINT_LINK_ENABLE_COPY_LIBRARY";
 
 pub(crate) fn write_success_marker(plan: &DylintToolchainPlan) -> Result<(), SoldrError> {
     let Some(path) = std::env::var_os(SUCCESS_MARKER_ENV_VAR)

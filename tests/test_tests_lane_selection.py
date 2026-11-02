@@ -18,7 +18,7 @@ from conftest import load_script_module
 ROOT = Path(__file__).resolve().parent.parent
 GRAPH = load_script_module(ROOT / "ci" / "crate_graph.py", "soldr_crate_graph")
 HANDOFF = load_script_module(
-    ROOT / "ci" / "bosn_workspace_test.py", "soldr_bosn_workspace_test_sel"
+    ROOT / "ci" / "workspace_test.py", "soldr_bosn_workspace_test_sel"
 )
 WINE = load_script_module(ROOT / "ci" / "wine_lane.py", "soldr_wine_lane_sel")
 
@@ -61,7 +61,7 @@ def test_conservative_inputs_run_everything() -> None:
         "rust-toolchain.toml",
         ".config/nextest.toml",
         ".cargo/config.toml",
-        "ci/bosn_workspace_test.py",
+        "ci/workspace_test.py",
         "ci/crate_graph.py",
         ".github/scripts/nextest_wrapper.sh",
         "tests/test_nextest_memory_guard.py",

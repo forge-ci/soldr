@@ -46,6 +46,9 @@ pub(crate) fn build_session_started(applied: ResolvedJobs) -> Response {
 /// undiscoverability this exists to fix. The detached daemon redirects
 /// stderr into its log file, and `daemon start --foreground` shows it live.
 pub(crate) fn resolve_and_announce() -> ResolvedJobs {
+    if let Some(line) = affinity_reset_line("soldr-daemon") {
+        eprintln!("{line}");
+    }
     let resolved =
         crate::core::jobs::resolve_compile_jobs(crate::daemon::server::config_compile_jobs());
     eprintln!(
@@ -54,4 +57,17 @@ pub(crate) fn resolve_and_announce() -> ResolvedJobs {
         resolved.source.describe(),
     );
     resolved
+}
+
+/// Drop a CPU pin inherited from whoever auto-started this shared process,
+/// before anything sizes itself from `available_parallelism()` (soldr#3995).
+/// Returns the diagnostic line only when the mask actually changed.
+pub(crate) fn affinity_reset_line(who: &str) -> Option<String> {
+    let reset = crate::platform::process::affinity::widen_cpu_affinity()?;
+    (reset.after != reset.before).then(|| {
+        format!(
+            "{who}: widened inherited CPU affinity from {} to {} CPU(s) (soldr#3995)",
+            reset.before, reset.after,
+        )
+    })
 }

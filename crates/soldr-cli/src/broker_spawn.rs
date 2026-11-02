@@ -191,6 +191,12 @@ pub(crate) fn front_door_command_shape(raw_args: &[String]) -> bool {
 /// …) had the same effect. Only KNOWN global flags are skipped: an
 /// unrecognized flag (`--version`, `-V`, `--help`) keeps the deliberate
 /// no-spawn behavior the flag-shaped rule exists for.
+///
+/// `--zccache-mode <MODE>` and `--porcelain` were missing here (they are in
+/// `replay_nextest::is_invocation`'s copy of this list), so
+/// `soldr --zccache-mode copy cargo build` against a cold root read
+/// `--zccache-mode` as the command, started no broker, and every compile
+/// failed with "could not connect to the soldr daemon".
 fn first_command_positional(raw_args: &[String]) -> Option<&String> {
     let mut iter = raw_args.iter().skip(1);
     while let Some(arg) = iter.next() {
@@ -201,12 +207,19 @@ fn first_command_positional(raw_args: &[String]) -> Option<&String> {
             | "--timestamp-lines"
             | "--no-timestamp-lines"
             | "--no-cache-states"
+            | "--porcelain"
             | "--debug" => continue,
-            "--zccache" | "--jobs" => {
+            "--zccache" | "--jobs" | "--zccache-mode" => {
                 let _ = iter.next();
                 continue;
             }
-            value if value.starts_with("--zccache=") || value.starts_with("--jobs=") => continue,
+            value
+                if value.starts_with("--zccache=")
+                    || value.starts_with("--jobs=")
+                    || value.starts_with("--zccache-mode=") =>
+            {
+                continue
+            }
             _ => return Some(arg),
         }
     }
@@ -315,7 +328,7 @@ fn ensure_stable_broker_ready(diagnostics_eligible: bool) -> Result<(), String> 
     if let Some(observed) = observed_instance {
         if known_bad_broker_retirement_candidate(&observed).is_none() {
             if diagnostics_eligible {
-                warn_on_broker_image_mismatch(&observed);
+                warn_on_broker_image_mismatch(&observed, &endpoint.executable_path);
             }
             return Ok(());
         }
@@ -397,7 +410,7 @@ fn ensure_stable_broker_ready(diagnostics_eligible: bool) -> Result<(), String> 
                             if let Some(current) =
                                 broker_instance_at(&runtime, &endpoint.bind_endpoint)
                             {
-                                warn_on_broker_image_mismatch(&current);
+                                warn_on_broker_image_mismatch(&current, &endpoint.executable_path);
                             }
                         }
                         return Ok(());
@@ -414,7 +427,7 @@ fn ensure_stable_broker_ready(diagnostics_eligible: bool) -> Result<(), String> 
                 }
             } else {
                 if diagnostics_eligible {
-                    warn_on_broker_image_mismatch(&instance);
+                    warn_on_broker_image_mismatch(&instance, &endpoint.executable_path);
                 }
                 return Ok(());
             }
@@ -582,36 +595,17 @@ fn stable_broker_is_ready(runtime: &tokio::runtime::Runtime, endpoint: &str) -> 
     broker_instance_at(runtime, endpoint).is_some()
 }
 
+use crate::broker_skew::warn_on_broker_image_mismatch;
+pub(crate) use crate::broker_skew::{
+    broker_image_mismatch_warning, observed_broker_skew, short_broker_identity, BrokerSkew,
+};
+#[cfg(test)]
+use crate::broker_skew::{skew_already_warned, skew_marker_content, BROKER_SKEW_MARKER};
+
 /// The operator-facing recovery command for a broker image/version mismatch.
 /// Named in the front door's warning and asserted by tests so the two cannot
 /// drift apart.
 pub(crate) const BROKER_REMOVE_COMMAND: &str = "soldr broker remove";
-
-/// Render the default mismatch diagnostic. soldr#2549 keeps every ordinary
-/// identity mismatch loud, actionable, and free of lifecycle action; soldr#2920
-/// is the separately classified, evidence-bound `=0.9.0` exception.
-pub(crate) fn broker_image_mismatch_warning(observed: &str, expected: &str) -> String {
-    format!(
-        "soldr: warning: the running broker was started from a different Soldr image\n\
-         soldr:   running broker: {observed}\n\
-         soldr:   this soldr:     {expected}\n\
-         soldr: the broker is a stable singleton and is never replaced automatically; \
-         work continues through it and a matching daemon generation is launched behind it.\n\
-         soldr: to retire it deliberately, run: {BROKER_REMOVE_COMMAND}"
-    )
-}
-
-fn warn_on_broker_image_mismatch(observed: &str) {
-    // A local identity that cannot be computed is not evidence of a mismatch.
-    // Stay quiet rather than warning about a comparison that never happened.
-    let Ok(expected) = crate::broker_server::broker_image_instance_id() else {
-        return;
-    };
-    if observed == expected {
-        return;
-    }
-    eprintln!("{}", broker_image_mismatch_warning(observed, &expected));
-}
 
 fn known_bad_broker_retirement_candidate(
     observed: &str,

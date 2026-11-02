@@ -289,3 +289,11 @@ def test_the_budget_script_is_stdlib_only_with_a_runtime_floor() -> None:
     }
     assert not non_stdlib, non_stdlib
     assert "STDLIB_PYTHON_FLOOR = (3, 11)" in BUDGET_SCRIPT.read_text(encoding="utf-8")
+
+
+def test_ci_pre_janitor_yields_merge_group_to_end_of_queue_sweep() -> None:
+    """Two sweepers on merge_group cancel each other's pending job (run 41335680472)."""
+    pre = _load("ci-pre.yml")["jobs"]["cache-janitor"]["if"]
+    assert "github.event_name != 'merge_group'" in pre
+    queue = _load("ci.yml")["jobs"]["queue-cache-janitor"]["if"]
+    assert "merge_group" not in queue  # end-of-queue still sweeps merge_group

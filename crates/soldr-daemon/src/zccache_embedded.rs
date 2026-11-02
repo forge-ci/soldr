@@ -214,7 +214,8 @@ impl SoldrZccacheService {
         paths: &SoldrPaths,
         daemon_identity: &DaemonProcess,
     ) -> Result<Self, EmbeddedServiceError> {
-        Self::start_with_disk_limits(paths, daemon_identity, disk_cache_limits_from_env()?).await
+        let limits = resolve_disk_cache_limits(paths)?;
+        Self::start_with_disk_limits(paths, daemon_identity, limits).await
     }
 
     /// Test seam (soldr#3669): start with an explicit artifact budget instead
@@ -950,6 +951,26 @@ fn private_zccache_cache_root(paths: &SoldrPaths, identity: &HostIdentity) -> st
 ///
 /// Callers that need to locate zccache-owned state should derive it from this
 /// shared boundary rather than duplicating the stable host identity.
+/// Artifact budget a daemon started now would apply (soldr#4028): the
+/// `ZCCACHE_CACHE_SIZE_*` env override, then `config.toml`
+/// `[zccache].max_size_gb`, then soldr's fixed default cap. A malformed config
+/// must not stop compile caching, so it resolves like an empty one.
+fn resolve_disk_cache_limits(
+    paths: &SoldrPaths,
+) -> Result<(DiskCacheLimits, EmbeddedDiskPolicy), EmbeddedServiceError> {
+    let config_max_bytes = paths
+        .load_config()
+        .unwrap_or_default()
+        .zccache
+        .max_size_bytes();
+    disk_cache_limits_from_env(config_max_bytes)
+}
+
+/// Public view of [`resolve_disk_cache_limits`] for `soldr cache stats`.
+pub fn resolve_disk_policy(paths: &SoldrPaths) -> Result<EmbeddedDiskPolicy, EmbeddedServiceError> {
+    resolve_disk_cache_limits(paths).map(|(_, policy)| policy)
+}
+
 pub fn embedded_cache_root(paths: &SoldrPaths) -> std::path::PathBuf {
     private_zccache_cache_root(paths, &derive_identity())
 }

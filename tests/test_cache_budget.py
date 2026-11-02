@@ -19,6 +19,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 from conftest import load_script_module
@@ -679,8 +680,10 @@ def test_3347_never_retires_a_unique_active_shape() -> None:
 def test_3347_never_retires_an_unknown_prefix() -> None:
     raw = [
         _cook("base", "aaa264c8", CURRENT_LOCK, "0.9.22"),
+        # `cook-base-v3-` is a known schema since setup-soldr's key bump; an
+        # unrecognised layer kind under the same shape must still be left alone.
         entry(
-            f"cook-base-v3-linux-x64-glibc-rustc1.98.1-faaa264c8-l{PRIOR_LOCK}-soldr0.9.21",
+            f"cook-tree-v3-linux-x64-glibc-rustc1.98.1-faaa264c8-l{PRIOR_LOCK}-soldr0.9.21",
             100,
         ),
         entry("mystery-cache-faaa264c8-l" + PRIOR_LOCK, 100),
@@ -1433,3 +1436,48 @@ def test_an_unmapped_via_is_an_error_not_a_guess() -> None:
     }
     with pytest.raises(guard.cache_families.CacheFamilyError, match="VIA_PREFIXES"):
         guard.cache_families.compose_budget(ci_toml, {"g": {"ci_toml_families": ["x"]}})
+
+
+# --------------------------------------------------------------------------
+# cook key schema v3: the lineage rule must not be pinned to `-v2-`
+# --------------------------------------------------------------------------
+
+SCHEMA_V3_FIXTURE = (
+    REPO_ROOT / "tests" / "fixtures" / "actions-cache" / "listing-cook-schema-v3.json"
+)
+# sha256(Cargo.lock)[:16] at main 37bced67, the lock every v3 key carries.
+SCHEMA_V3_LOCK = "545c1ee3e34a8565"
+
+
+def schema_v3_entries() -> list[Any]:
+    return guard.normalize_entries(guard.load_from_json(SCHEMA_V3_FIXTURE).entries)
+
+
+def test_cook_schema_v3_listing_is_over_budget_before_prune() -> None:
+    # Live listing from push run 41338706392: five v2 + five v3 bases.
+    entries = schema_v3_entries()
+    assert len(entries) == 10
+    problems = guard.budget_problems(MANIFEST, guard.load_manifest(MANIFEST), entries)
+    assert any("'cook-layer'" in p for p in problems)
+
+
+def test_cook_key_matches_every_schema_version() -> None:
+    for key in (e.key for e in schema_v3_entries()):
+        assert guard.COOK_KEY.fullmatch(key), key
+
+
+def test_cook_schema_v3_supersedes_prior_lock_v2_generation() -> None:
+    entries = schema_v3_entries()
+    retired = guard.cook_lineage_candidates(entries, SCHEMA_V3_LOCK)
+    assert sorted(e.key for e in retired) == sorted(
+        e.key for e in entries if e.key.startswith("cook-base-v2-")
+    )
+    kept = without(entries, retired)
+    assert len(kept) == 5
+    assert all(e.key.startswith("cook-base-v3-") for e in kept)
+    problems = guard.budget_problems(MANIFEST, guard.load_manifest(MANIFEST), kept)
+    assert not any("'cook-layer'" in p for p in problems)
+
+
+def test_cook_schema_v3_retires_nothing_without_a_known_lock() -> None:
+    assert guard.cook_lineage_candidates(schema_v3_entries(), None) == []

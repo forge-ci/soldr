@@ -77,17 +77,33 @@ mod generation_tests {
     /// binary to that name and running it. This lets a unit test produce a
     /// PID that clears the same identity gate a real daemon would, without
     /// spawning a real soldr-daemon.
+    const FAKE_DAEMON_SLEEPER: &str =
+        "daemon::lifecycle::tests::generations::generation_tests::fake_daemon_sleeper";
+    const FAKE_DAEMON_SLEEP_ENV: &str = "SOLDR_TEST_FAKE_DAEMON_SLEEP_SECS";
+
+    /// Body of the fake daemon spawned by `spawn_fake_daemon`: holds the
+    /// process alive for the requested seconds. Without the variable it is
+    /// an ordinary test that returns at once.
+    #[test]
+    fn fake_daemon_sleeper() {
+        if let Some(secs) = std::env::var(FAKE_DAEMON_SLEEP_ENV)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+        }
+    }
+
     fn spawn_fake_daemon(
         dir: &std::path::Path,
         name: &str,
     ) -> (running_process::SpawnedChild, std::path::PathBuf) {
-        let source = if crate::platform::host::facts::os()
-            == crate::platform::host::facts::HostOs::Windows
-        {
-            std::path::PathBuf::from(r"C:\Windows\System32\timeout.exe")
-        } else {
-            std::path::PathBuf::from("/bin/sleep")
-        };
+        // The image is this test binary itself, re-entered on
+        // `fake_daemon_sleeper`. A host `sleep` is not a portable source: it
+        // is absent from `/bin` on NixOS, and where it exists it may be a
+        // multicall binary (coreutils, busybox) that dispatches on argv[0]
+        // and refuses to run once renamed to `soldr-daemon`.
+        let source = std::env::current_exe().expect("current test executable");
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let unique = dir.join(format!(
             "image-{}",
@@ -101,7 +117,14 @@ mod generation_tests {
         // yields ETXTBSY; that fd closes as soon as the fork execs.
         for _ in 0..50 {
             let mut command = std::process::Command::new(&target);
-            command.arg("30");
+            command
+                .args([
+                    "--exact",
+                    FAKE_DAEMON_SLEEPER,
+                    "--test-threads=1",
+                    "--quiet",
+                ])
+                .env(FAKE_DAEMON_SLEEP_ENV, "30");
             let stdio = running_process::SpawnStdio {
                 stdin: running_process::StdioSource::Null,
                 stdout: running_process::StdioSource::Parent,

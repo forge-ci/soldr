@@ -799,6 +799,7 @@ pub(crate) fn ensure_cargo_toolchain(explicit_channel: Option<&str>) -> Result<(
     }
     let paths = SoldrPaths::new()?;
     let memo_key = cargo_prepare_memo_key(channel, explicit_channel, &manifest);
+    let store = crate::toolchain_store::note_use(&paths, channel);
     if memo_key
         .as_ref()
         .and_then(|key| memoized_toolchain_dir(&paths, key))
@@ -856,6 +857,8 @@ pub(crate) fn ensure_cargo_toolchain(explicit_channel: Option<&str>) -> Result<(
                     .is_some_and(|home| !home.is_empty()),
                 &mut |triple| crate::toolchain_std_libs::reinstall_rust_std(channel, triple),
             )?;
+            let fresh = installed_name.is_none();
+            crate::toolchain_store::link_fresh(&store, fresh, &toolchain_dirs[0]);
             write_cargo_prepare_memo(&paths, key, &toolchain_dirs[0]);
         }
     }

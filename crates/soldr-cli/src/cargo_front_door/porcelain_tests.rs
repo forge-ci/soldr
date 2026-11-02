@@ -414,6 +414,24 @@ fn enabled_follows_the_env_var_only_on_a_truthy_value() {
 }
 
 #[test]
+fn porcelain_silences_the_cache_state_lines() {
+    let _lock = TEST_PROCESS_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _restore = EnvVarGuard::remove(PORCELAIN_ENV_VAR);
+    let _cache = EnvVarGuard::remove("SOLDR_NO_CACHE_STATES");
+    assert!(
+        crate::cargo_front_door::cache_states::enabled(),
+        "on outside porcelain"
+    );
+    std::env::set_var(PORCELAIN_ENV_VAR, "1");
+    assert!(
+        !crate::cargo_front_door::cache_states::enabled(),
+        "soldr#4005: porcelain keeps stderr free of HIT/MISS lines"
+    );
+}
+
+#[test]
 fn failure_report_is_a_well_formed_single_object() {
     let report = report_for_failure("cargo build", -1, None, Some("soldr: cargo timed out"));
     let value = serde_json::to_value(&report).expect("serialize");
@@ -431,6 +449,354 @@ fn command_string_labels_the_run() {
         command_string(&["nextest".to_string(), "run".to_string()]),
         "cargo nextest run"
     );
+}
+
+/// A build that exits zero can still emit warnings. The digest has to say so,
+/// or the caller must open the whole log to find out whether there is anything
+/// to fix (the success half of the #3924 "warnings" clause).
+#[test]
+fn summarize_reports_warnings_on_a_successful_build() {
+    let output = concat!(
+        "warning: unused variable: `spare`\n",
+        " --> src/lib.rs:2:9\n",
+        "  |\n",
+        "2 |     let spare = 41;\n",
+        "  |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_spare`\n",
+        "  |\n",
+        "  = note: `#[warn(unused_variables)]` on by default\n",
+        "\n",
+        "warning: unused import: `std::fmt`\n",
+        " --> src/lib.rs:1:5\n",
+        "\n",
+        "warning: `warny` (lib) generated 2 warnings\n",
+    );
+
+    let summary = summarize("cargo build", 0, output);
+
+    assert_eq!(summary.status, "ok");
+    assert_eq!(summary.exit_code, 0);
+    assert_eq!(summary.error_count, 0);
+    assert!(summary.errors.is_empty());
+    // The tally line is not a warning of its own.
+    assert_eq!(summary.warning_count, 2);
+    assert_eq!(
+        summary.warnings,
+        vec![
+            "warning: unused variable: `spare` [src/lib.rs:2:9]".to_string(),
+            "warning: unused import: `std::fmt` [src/lib.rs:1:5]".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn summarize_reports_no_warnings_for_a_clean_run() {
+    let summary = summarize(
+        "cargo build",
+        0,
+        "   Compiling warny v0.1.0\n    Finished dev\n",
+    );
+    assert_eq!(summary.warning_count, 0);
+    assert!(summary.warnings.is_empty());
+}
+
+/// Only the tally line: nothing to report.
+#[test]
+fn summarize_does_not_count_a_warning_tally_as_a_warning() {
+    let summary = summarize(
+        "cargo build",
+        0,
+        "warning: `warny` (lib) generated 3 warnings\n",
+    );
+    assert_eq!(summary.warning_count, 0);
+    assert!(summary.warnings.is_empty());
+}
+
+#[test]
+fn summarize_sees_coloured_warnings() {
+    let output = concat!(
+        "\u{1b}[1m\u{1b}[33mwarning\u{1b}[0m\u{1b}[1m: unused variable: `spare`\u{1b}[0m\n",
+        " \u{1b}[1m\u{1b}[94m-->\u{1b}[0m src/lib.rs:2:9\n",
+    );
+    let summary = summarize("cargo build", 0, output);
+    assert_eq!(summary.warning_count, 1);
+    assert_eq!(
+        summary.warnings,
+        vec!["warning: unused variable: `spare` [src/lib.rs:2:9]".to_string()]
+    );
+}
+
+#[test]
+fn test_failure_uses_the_structured_digest_not_a_duplicate_excerpt() {
+    // soldr#3961 landed `failed_tests` / `test_results` on main while this
+    // branch was open: a named test failure is now described field-by-field
+    // (name, panic `file:line:col`, message) and the count lines live in
+    // `test_results`. Repeating that in `excerpt` would double the digest for
+    // no new evidence, so the excerpt stays empty here -- and the caller still
+    // never has to open `log_path`.
+    let output = concat!(
+        "   Compiling pfail v0.1.0\n",
+        "    Finished `test` profile\n",
+        "     Running unittests src/lib.rs\n",
+        "test t::wrong_sum ... FAILED\n",
+        "\n",
+        "failures:\n",
+        "\n",
+        "---- t::wrong_sum stdout ----\n",
+        "\n",
+        "thread 't::wrong_sum' (1913010) panicked at src/lib.rs:6:9:\n",
+        "assertion `left == right` failed: two plus two should be five\n",
+        "note: run with `RUST_BACKTRACE=1` for a backtrace\n",
+        "\n",
+        "failures:\n",
+        "    t::wrong_sum\n",
+        "\n",
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n",
+        "error: test failed, to rerun pass `--lib`\n",
+    );
+    let summary = summarize("cargo test", 101, output);
+    assert!(
+        summary.excerpt.is_empty(),
+        "the structured digest already carries this failure: {:?}",
+        summary.excerpt
+    );
+    assert!(!summary.excerpt_truncated);
+    assert_eq!(summary.failed_tests.len(), 1, "{:?}", summary.failed_tests);
+    let failed = &summary.failed_tests[0];
+    assert_eq!(failed.name, "t::wrong_sum");
+    assert_eq!(failed.location.as_deref(), Some("src/lib.rs:6:9"));
+    assert!(
+        failed
+            .message
+            .iter()
+            .any(|m| m.contains("two plus two should be five")),
+        "the assertion message is the actionable line: {:?}",
+        failed.message
+    );
+    assert!(
+        summary
+            .test_results
+            .iter()
+            .any(|r| r.contains("test result: FAILED")),
+        "{:?}",
+        summary.test_results
+    );
+}
+
+#[test]
+fn failure_excerpt_carries_the_compiler_location_for_a_build_error() {
+    let output = concat!(
+        "   Compiling demo v0.1.0\n",
+        "error[E0308]: mismatched types\n",
+        " --> src/main.rs:12:5\n",
+        "  |\n",
+        "12 |     let x: u32 = \"nope\";\n",
+        "  |            ---   ^^^^^^ expected `u32`, found `&str`\n",
+        "  |            |\n",
+        "  |            expected due to this\n",
+        "\n",
+        "error: could not compile `demo` (bin \"demo\") due to 1 previous error\n",
+    );
+    let summary = summarize("cargo build", 101, output);
+    assert!(
+        summary
+            .excerpt
+            .first()
+            .is_some_and(|l| l.starts_with("error[E0308]")),
+        "{:?}",
+        summary.excerpt
+    );
+    assert!(
+        summary
+            .excerpt
+            .iter()
+            .any(|l| l.contains("--> src/main.rs:12:5")),
+        "the location line is what makes the error actionable: {:?}",
+        summary.excerpt
+    );
+    assert!(
+        !summary
+            .excerpt
+            .iter()
+            .any(|l| l.trim_start().starts_with('|')),
+        "the caret art is noise in a digest: {:?}",
+        summary.excerpt
+    );
+}
+
+fn summarize_counts_a_repeated_warning_once() {
+    let output = concat!(
+        "warning: unused variable: `spare`\n",
+        " --> src/lib.rs:2:9\n",
+        "warning: unused variable: `spare`\n",
+        " --> src/lib.rs:2:9\n",
+    );
+    let summary = summarize("cargo test", 0, output);
+    assert_eq!(summary.warning_count, 1);
+    assert_eq!(summary.warnings.len(), 1);
+}
+
+#[test]
+fn summarize_reads_warnings_from_the_cargo_json_stream() {
+    let output = concat!(
+        r#"{"reason":"compiler-message","message":{"level":"warning","message":"unused variable: `spare`","code":null,"spans":[{"file_name":"src/lib.rs","line_start":2,"column_start":9}]}}"#,
+        "\n",
+        r#"{"reason":"compiler-message","message":{"level":"error","message":"mismatched types","code":{"code":"E0308"},"spans":[]}}"#,
+        "\n",
+        r#"{"reason":"build-finished","success":false}"#,
+        "\n",
+    );
+
+    let summary = summarize("cargo build --message-format=json", 1, output);
+
+    assert_eq!(summary.error_count, 1);
+    assert_eq!(summary.warning_count, 1);
+    assert_eq!(
+        summary.warnings,
+        vec!["warning: unused variable: `spare` [src/lib.rs:2:9]".to_string()]
+    );
+}
+
+#[test]
+fn failure_report_carries_no_warning_identities() {
+    let report = report_for_failure("cargo build", 1, None, Some("front door error"));
+    assert_eq!(report.summary.warning_count, 0);
+    assert!(report.summary.warnings.is_empty());
+}
+
+/// Cargo appends a `cargo fix` suggestion to a single-warning tally; that
+/// suffix once slipped past a pure suffix test and was counted as a warning.
+#[test]
+fn summarize_does_not_count_a_warning_tally_with_a_fix_suggestion() {
+    let summary = summarize(
+        "cargo build",
+        0,
+        "warning: `warny` (lib) generated 1 warning (run `cargo fix --lib -p warny` to apply 1 suggestion)\n",
+    );
+    assert_eq!(summary.warning_count, 0);
+    assert!(summary.warnings.is_empty());
+}
+
+fn failure_excerpt_carries_a_build_scripts_c_compiler_error() {
+    // cc-rs relays the C compiler's diagnostics as `cargo:warning=` lines in
+    // the build script's stdout; its own `error occurred in cc-rs` line is a
+    // multi-KB argv that names no source location.
+    let output = concat!(
+        "error: failed to run custom build command for `oracle v0.1.0`\n",
+        "\n",
+        "Caused by:\n",
+        "  process didn't exit successfully: `build-script-build` (exit status: 1)\n",
+        "  --- stdout\n",
+        "  cargo:rerun-if-changed=oracle/windows_keys.c\n",
+        "  OUT_DIR = Some(/tmp/out)\n",
+        "  cargo:warning=oracle/windows_keys.c:42:9: error: unused variable 'k' [-Werror=unused-variable]\n",
+        "  cargo:warning=   42 |     int k;\n",
+        "  cargo:warning=      |         ^\n",
+        "  exit status: 1\n",
+        "  --- stderr\n",
+        "  error occurred in cc-rs: command did not execute successfully: \"cc\" \"-O0\"\n",
+    );
+    let summary = summarize("cargo check", 101, output);
+    assert!(
+        summary
+            .excerpt
+            .iter()
+            .any(|l| l.starts_with("oracle/windows_keys.c:42:9: error: unused variable")),
+        "the C compiler's located error is the actionable line: {:?}",
+        summary.excerpt
+    );
+    assert!(
+        !summary.excerpt.iter().any(|l| l.contains("cargo:warning=")),
+        "the cc-rs relay prefix is noise: {:?}",
+        summary.excerpt
+    );
+}
+
+#[test]
+fn failure_excerpt_is_bounded_on_a_pathological_stream() {
+    let mut output = String::new();
+    for i in 0..5_000 {
+        output.push_str(&format!(
+            "error[E0308]: mismatched types {i} {}\n  --> src/lib.rs:{i}:1\n",
+            "x".repeat(500)
+        ));
+    }
+    let summary = summarize("cargo build", 101, &output);
+    assert_eq!(summary.error_count, 5_000, "the count stays truthful");
+    assert!(summary.excerpt.len() <= 8, "{}", summary.excerpt.len());
+    let bytes: usize = summary.excerpt.iter().map(|l| l.len() + 1).sum();
+    assert!(bytes <= 1_200, "{bytes} bytes");
+    assert!(
+        summary.excerpt.iter().all(|l| l.chars().count() <= 203),
+        "per-line cap: {:?}",
+        summary.excerpt.first().map(|l| l.chars().count())
+    );
+    assert!(
+        summary.excerpt_truncated,
+        "the caller must know it is partial"
+    );
+    // The excerpt must remain valid, single-line JSON -- no invented bytes.
+    let line = serde_json::to_string(&summary).expect("serialize");
+    assert!(!line.contains('\n'), "one JSON line");
+}
+
+#[test]
+fn failure_excerpt_uses_the_json_streams_rendered_message() {
+    let rendered = "error[E0432]: unresolved import `foo`\n --> src/lib.rs:3:5\n  |\n3 | use foo::Bar;\n  |     ^^^ no `foo` in the crate root\n";
+    let output = format!(
+        "{}\n",
+        serde_json::json!({
+            "reason": "compiler-message",
+            "message": {
+                "level": "error",
+                "code": {"code": "E0432"},
+                "message": "unresolved import `foo`",
+                "rendered": rendered,
+            }
+        })
+    );
+    let summary = summarize("cargo build", 101, &output);
+    let excerpt = summary.excerpt.join("\n");
+    assert!(excerpt.contains("error[E0432]"), "{excerpt}");
+    assert!(excerpt.contains("--> src/lib.rs:3:5"), "{excerpt}");
+    assert!(excerpt.contains("no `foo` in the crate root"), "{excerpt}");
+}
+
+#[test]
+fn failure_excerpt_is_colour_blind() {
+    // CI forces colour (soldr#3437); the panic header then carries escapes in
+    // front of `thread '`, which is exactly how a naive scan loses the message.
+    let output = "\u{1b}[31mthread 't::x' panicked at src/lib.rs:2:5:\u{1b}[0m\n\u{1b}[31massertion failed: false\u{1b}[0m\ntest result: FAILED. 0 passed; 1 failed\n";
+    let summary = summarize("cargo test", 101, output);
+    let excerpt = summary.excerpt.join("\n");
+    assert!(excerpt.contains("panicked at src/lib.rs:2:5:"), "{excerpt}");
+    assert!(excerpt.contains("assertion failed: false"), "{excerpt}");
+    assert!(!excerpt.contains('\u{1b}'), "no escape bytes in the digest");
+}
+
+#[test]
+fn success_carries_no_excerpt() {
+    let summary = summarize(
+        "cargo build",
+        0,
+        "   Compiling foo v0.1.0\n    Finished `dev` profile\n",
+    );
+    assert!(summary.excerpt.is_empty());
+    assert!(!summary.excerpt_truncated);
+}
+
+#[test]
+fn pre_capture_failure_reports_its_message_as_the_excerpt() {
+    let report = report_for_failure(
+        "cargo build",
+        FAILURE_EXIT_CODE,
+        None,
+        Some("soldr: could not start cargo\nmore detail"),
+    );
+    assert_eq!(
+        report.summary.excerpt,
+        vec!["soldr: could not start cargo".to_string()]
+    );
+    assert!(!report.summary.excerpt_truncated);
 }
 
 fn libtest_failure(name: &str, line: u32) -> String {
@@ -515,4 +881,107 @@ fn success_summary_stays_free_of_failure_fields() {
     let json = serde_json::to_string(&summary).expect("serialize");
     assert!(!json.contains("failed_tests"), "{json}");
     assert!(!json.contains("test_results"), "{json}");
+}
+
+/// soldr#3985: porcelain carries the broker skew as `broker_skew` in the JSON.
+#[test]
+fn serialize_report_adds_broker_skew_only_when_observed() {
+    let report = report_for_failure("soldr cargo test", 1, None, Some("boom"));
+    let plain = serialize_report(&report, None, &[]).expect("serialize");
+    assert!(!plain.contains("broker_skew"), "{plain}");
+    let skew = crate::broker_spawn::BrokerSkew {
+        running_broker: "soldr-0.9.44-aaaa".into(),
+        this_soldr: "soldr-0.9.46-bbbb".into(),
+        remedy: crate::broker_spawn::BROKER_REMOVE_COMMAND,
+    };
+    let line = serialize_report(&report, Some(&skew), &[]).expect("serialize");
+    let value: serde_json::Value = serde_json::from_str(&line).expect("json");
+    // soldr#4040: one short string, not an object of full identities.
+    assert_eq!(
+        value["broker_skew"],
+        "broker 0.9.44-aaaa is running, this is 0.9.46-bbbb; run: soldr broker remove"
+    );
+    assert_eq!(line.lines().count(), 1);
+}
+
+/// soldr#4010 compaction deleted the whole summary on a passing run, which
+/// silently took the warnings with it: `cargo build` exits zero while printing
+/// `unused variable`, so the caller could only find out by reading `log_path`
+/// back. The bounded warning digest now survives compaction, next to `status`.
+#[test]
+fn a_passing_run_keeps_its_bounded_warnings() {
+    let warning_run = concat!(
+        "warning: unused variable: `spare`\n",
+        " --> src/lib.rs:2:9\n",
+        "warning: unused import: `std::fmt`\n",
+        " --> src/lib.rs:1:5\n",
+        "    Finished `dev` profile [unoptimized] target(s) in 0.15s\n",
+    );
+    let report = report_for_run(&RunReportInputs {
+        command: "cargo build",
+        exit_code: 0,
+        started_at_ms: 1_000,
+        ended_at_ms: 1_500,
+        log_path: None,
+        output: Some(warning_run),
+        cache_lines: 0,
+    });
+    let line = serialize_report(&report, None, &[]).expect("serialize");
+    let value: serde_json::Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["warning_count"], 2);
+    assert_eq!(
+        value["warnings"].as_array().expect("warnings array").len(),
+        2
+    );
+    assert_eq!(
+        value["warnings"][0],
+        "warning: unused variable: `spare` [src/lib.rs:2:9]"
+    );
+    // The rest of the summary stays compacted: this is still the short form.
+    assert!(value.get("summary").is_none(), "{line}");
+    assert!(value.get("command").is_none(), "{line}");
+    assert_eq!(line.lines().count(), 1);
+}
+
+/// Additive: a warning-free passing run keeps exactly its present shape, so
+/// nothing downstream sees a new key on the common path.
+#[test]
+fn a_warning_free_passing_run_keeps_the_compact_shape() {
+    let report = report_for_run(&RunReportInputs {
+        command: "cargo build",
+        exit_code: 0,
+        started_at_ms: 1_000,
+        ended_at_ms: 1_500,
+        log_path: None,
+        output: Some("    Finished `dev` profile [unoptimized] target(s) in 0.15s\n"),
+        cache_lines: 0,
+    });
+    let line = serialize_report(&report, None, &[]).expect("serialize");
+    let value: serde_json::Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(value["status"], "ok");
+    assert!(value.get("warning_count").is_none(), "{line}");
+    assert!(value.get("warnings").is_none(), "{line}");
+}
+
+/// A failing run already carries warnings inside `summary`; the top-level copy
+/// is success-only, so nothing is reported twice.
+#[test]
+fn a_failing_run_does_not_duplicate_warnings_at_the_top_level() {
+    let report = report_for_failure("cargo build", 101, None, None);
+    let line = serialize_report(&report, None, &[]).expect("serialize");
+    let value: serde_json::Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(value["status"], "failed");
+    assert!(value.get("warning_count").is_none(), "{line}");
+}
+
+/// soldr#3960: porcelain lists installed binaries as `installed`.
+#[test]
+fn serialize_report_adds_installed_paths() {
+    let report = report_for_failure("soldr cargo install", 0, None, None);
+    let line = serialize_report(&report, None, &["/x/bin/ghd".to_string()]).expect("serialize");
+    let value: serde_json::Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(value["installed"][0], "/x/bin/ghd");
+    let none = serialize_report(&report, None, &[]).expect("serialize");
+    assert!(!none.contains("installed"), "{none}");
 }

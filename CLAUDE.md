@@ -123,7 +123,7 @@ Anything not registered falls through the generic External subcommand, which res
 
 ## Key Design Rules
 
-- **Frozen built-in commands**: `status`, `clean`, `config`, `cache`, `version`, `help`, `rustup`, `toolchain`, `doctor`, `optimize`, `cook`, `archive`, `build-from-source`, `wheel` (soldr#2139 abi3 wheel surface), **`build` (soldr#1010 blessed surface — see "Two build paths" above)** plus the toolchain passthroughs listed above. These are clap-captured and must NOT be repurposed. Bare cargo built-in verbs — `test`, `check`, `run`, `bench`, `doc`, `fmt`, `clippy`, `tree`, `update`, `fix`, `add`, `remove`, `metadata`, `pkgid`, `search`, `vendor`, `yank`, `owner`, `login`, `logout`, `init`, `new`, `generate-lockfile`, `verify-project`, `locate-project`, `report`, `install`, `uninstall`, `publish`, `package`, `info` — route to `cargo <verb>` via the External arm (see `CARGO_BUILTIN_VERBS` in `crates/soldr-cli/src/cli_args.rs` and the phase-2 hop in `Commands::External` of `crates/soldr-cli/src/soldr_main.rs`). They are NOT soldr-native verbs and may not be reused as such; their soldr meaning is "shorthand for `cargo <verb>`." `build` is the **exception** — it has been promoted to a soldr-native surface and is no longer a pure cargo-builtin alias.
+- **Frozen built-in commands**: `status`, `clean`, `config`, `cache`, `version`, `help`, `rustup`, `toolchain`, `doctor`, `optimize`, `cook`, `archive`, `build-from-source`, `wheel` (soldr#2139 abi3 wheel surface), `blaze` (local-dev JIT passthrough; refuses in CI without `--allow-ci`, owner decision C002), **`build` (soldr#1010 blessed surface — see "Two build paths" above)** plus the toolchain passthroughs listed above. These are clap-captured and must NOT be repurposed. Bare cargo built-in verbs — `test`, `check`, `run`, `bench`, `doc`, `fmt`, `clippy`, `tree`, `update`, `fix`, `add`, `remove`, `metadata`, `pkgid`, `search`, `vendor`, `yank`, `owner`, `login`, `logout`, `init`, `new`, `generate-lockfile`, `verify-project`, `locate-project`, `report`, `install`, `uninstall`, `publish`, `package`, `info` — route to `cargo <verb>` via the External arm (see `CARGO_BUILTIN_VERBS` in `crates/soldr-cli/src/cli_args.rs` and the phase-2 hop in `Commands::External` of `crates/soldr-cli/src/soldr_main.rs`). They are NOT soldr-native verbs and may not be reused as such; their soldr meaning is "shorthand for `cargo <verb>`." `build` is the **exception** — it has been promoted to a soldr-native surface and is no longer a pure cargo-builtin alias.
 - **`ci-test` is also a frozen native verb** (soldr#2867): it is the prescribed host-validation DAG, not shorthand for `test` and not an external tool. It maximizes sharing by compile domain: stable host Clippy subsumes `soldr cargo check`; after Clippy, Nextest test-profile compilation completes before Fresh Nextest execution overlaps the serial Dylint libraries -> workspace-analysis -> UI-test branch; doctests join both branches and retain their rustdoc family; and all eight Dylints use separate target trees keyed by the one exact nightly declared by every lint manifest. Unset `CARGO_BUILD_JOBS` and `SOLDR_JOBS` remain unset, explicit values are preserved byte-for-byte, and only `NEXTEST_TEST_THREADS` is chosen when unset -- measured from CPUs and available memory, with a hysteresis pressure gate and a per-test memory ceiling in the Nextest wrapper (soldr#2885); an explicit value stays authoritative and only warns when memory cannot hold it. Some Nextest test bodies intentionally launch nested Cargo/compiler fixtures; those compiles and Dylint share the daemon's canonical shared/exclusive admission instead of causing a global Cargo cap. Cgroup memory observations remain telemetry and never impose a global Cargo job cap. Dylint is allowed its own toolchain, but it must never reuse or invalidate the stable target tree. `--explain-plan --format json` is the versioned machine-readable contract.
 - **Trap unexpected Cargo calls during Nextest** (soldr#2878): prescribed host validation uses a two-name Cargo capability. Resolve the real rustup Cargo once and keep its absolute path in `SOLDR_REAL_CARGO`, which is private input to the source-built Soldr front door. Set `CARGO` to a separately named CI shim (for example `soldr-ci-cargo`) that re-enters that source binary as `soldr cargo`, and prepend a different fail-closed `cargo` shim to `PATH`. Code that honors `$CARGO` therefore stays inside Soldr; code that hard-codes bare `cargo` hits the trap and fails with a named diagnostic. Cargo itself overwrites `CARGO` with its own executable path before it launches test binaries, so the workflow-level override alone is insufficient: `soldr ci-test` must install `SOLDR_CI_TEST_CARGO_RUNNER` as the host target runner for the `nextest` execution stage only. That runner restores `CARGO` to the allowed shim immediately before execing each test process; do not apply it to `nextest-compile` or unrelated stages. The guard therefore has three required runtime layers: the allowed named shim, the bare-name `PATH` trap, and the Nextest target runner that repairs Cargo's environment rewrite. Pair those layers with a Ripgrep (`rg`) source scan for literal bare-Cargo process launches in test helpers, scripts, and workflow code; `rg` is the fast static check, while the runtime trap remains authoritative for aliases, variables, generated commands, and other dynamically constructed invocations. RED -> GREEN coverage must prove `$CARGO` succeeds through Soldr, bare `cargo` exits through the trap, a Cargo-like parent overwrite is repaired for the test process, and the runner is scoped only to Nextest execution. Intentional compiler fixtures launched by Nextest remain allowed through the named shim and use normal shared/exclusive compiler admission; never make the trap a reason to set `CARGO_BUILD_JOBS`, `SOLDR_JOBS`, or another global cap. This is not an OS sandbox: a child that already captured an absolute real-Cargo path can bypass PATH and `$CARGO`, so retain the Ripgrep/static spawn-path guard and do not claim complete process confinement.
 - **Standalone native compiler verbs are frozen**: `cc` and `c++` are clap-captured catalogue compiler surfaces (soldr#2335), and `ld` / `link` are the standalone target linkers (soldr#3806: `ld` speaks GNU ld syntax for ELF/Mach-O/win-gnu, `link` speaks MSVC link.exe syntax for `*-windows-msvc`). None of them may fall through to external-tool fetching.
@@ -372,7 +372,7 @@ git push                             # (--force-with-lease if the branch was alr
 
 `<CI_LINT_REF>` is the SHA in `ci.toml`'s `linter` -- the one canonical pin (soldr#3616); `ci/local_gate.py` derives `CI_LINT_REF` from it and workflow `ref:` lines are guarded equal. `local-gate run` runs
 `ci/local_gate.py` (lanes `lint` = the remote Lint job exactly, `rust` =
-`soldr lint rust`, `tests` = the test suite in bosn), and on success amends
+`soldr lint rust`, `tests` = the test suite on the host, each test in a wrapper-private soldr root), and on success amends
 HEAD's message with the trailer. Install the pre-push hook once per clone with
 `... ci-lint local-gate install-hook`.
 
@@ -386,13 +386,26 @@ HEAD's message with the trailer. Install the pre-push hook once per clone with
 - **Add Lint checks to `ci/local_gate.py`, never as a step in ci.yml's Lint
   job.** The Lint job runs `ci/local_gate.py --lane lint` and nothing else;
   `ci-lint local-gate lint` (a check in that lane) fails anything else.
-- **Never run soldr's test suite on the host.** It starts soldr daemons and
-  touches soldr state roots. A leaked fixture once claimed the real
-  `~/.soldr` root and wedged every soldr build on the machine (soldr#3516).
-  The nextest run-wrapper refuses unless `CI=true` or `SOLDR_TEST_ISOLATED=1`,
-  which only the bosn image sets. Run the suite with
-  `bosn run --task test` (the gate's `tests` lane). Do not set the marker on
-  a host to get around the refusal.
+- **Every test runs in a private soldr root, enforced by the nextest
+  wrapper (soldr#3516).** Tests start soldr brokers and daemons, which
+  resolve state from `HOME` (broker, pinned bin), `SOLDR_CACHE_DIR` (state
+  root) and `XDG_RUNTIME_DIR` (broker socket fallback, lease DB). A leaked
+  fixture once claimed the real `~/.soldr` and wedged every soldr build on
+  the machine. `soldr-nextest-wrapper` (`src/isolate.rs`) now points all of
+  them into a per-test private directory before every test, keeps the
+  caller's toolchain homes reachable through `~/.cargo`/`~/.rustup` symlinks,
+  drops the outer front door's route/session/wrapper variables
+  (`SOLDR_BROKER_SERVICE`, `SOLDR_BUILD_SESSION_ID`, `RUSTC_WRAPPER`, ...),
+  strips `PATH` entries and variables (`CC`, `CARGO_TARGET_<triple>_LINKER`, ...) that name a
+  program inside the caller's soldr root,
+  exports `SOLDR_TEST_ISOLATED=1` to the test, removes the directory afterwards (Linux also reaps leaked daemons by
+  its `TMPDIR`), and refuses (exit 97) if it cannot. `nextest_wrapper.sh`
+  refuses a `SOLDR_NEXTEST_NATIVE_WRAPPER` override outside `CI=true` or an
+  isolated test, so nothing replaces it. Plain `soldr cargo test` bypasses
+  the wrapper: use nextest. The gate's `tests` lane is
+  `uv run --no-project --python 3.13 python ci/workspace_test.py --host` (no
+  bosn, owner directive 2026-10-16); it keeps its own daemon handoff in
+  `~/.cache/soldr-local-gate/<worktree hash>/`. Never export the marker by hand.
 
 ## Agent Code-Smell Reporting Rule (issue #2741)
 

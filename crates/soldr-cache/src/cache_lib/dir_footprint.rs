@@ -62,7 +62,7 @@ impl Footprint {
 
 /// `(bytes freed by deleting the tree, file count)`. Never follows symlinks;
 /// unreadable entries are skipped so a partial figure is still usable by GC.
-pub(crate) fn measure(path: &Path) -> (u64, u64) {
+pub fn measure(path: &Path) -> (u64, u64) {
     let mut footprint = Footprint::default();
     walk(path, &mut footprint);
     footprint.finish()

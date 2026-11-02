@@ -95,7 +95,7 @@ mod tests {
     fn terminate_tree_reports_esrch_group_as_killed() {
         // A child that already exited: the group is gone, so killpg fails
         // with ESRCH which signal_process_group treats as success.
-        let mut child = Command::new("/bin/true")
+        let mut child = Command::new("true")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()

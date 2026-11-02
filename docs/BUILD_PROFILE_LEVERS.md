@@ -64,11 +64,50 @@ correctly.
   from tracked env, so local incremental dev loops don't poison or
   fragment the shared cache.
 
+## Lever 3: codegen units
+
+[soldr#4014](https://github.com/forge-ci/soldr/issues/4014): **no `[profile.*]`
+in `Cargo.toml` pins `codegen-units = 1`.** `version_lockstep.rs`
+(`no_profile_pins_a_single_codegen_unit`) fails the build if one comes back.
+
+The pin used to hide a scheduling bug. The amalgamated crates.io `zccache`
+package is one huge rustc unit; at Cargo's default of 16 codegen units one
+rustc runs up to `min(16, cores)` LLVM threads. A daemon-spawned rustc does
+not share Cargo's jobserver (the daemon gets `CARGO_MAKEFLAGS` as text over
+IPC, not its fds, and drops it), so those threads take no tokens. Admission
+bounds it instead: zccache's built-in classifier admits its own amalgamated
+crate exclusively, and `crates/soldr-daemon/src/memory_estimate.rs` prices
+each concurrent codegen thread (`codegen_threads`, schema 4 of
+`admission-estimate.jsonl`). Builds that bypass the cache (`ci-bootstrap`)
+run rustc directly under Cargo's jobserver, whose tokens the codegen threads
+already take.
+
+Selection, applied by the cargo front door to the profile the invocation
+compiles with (`--profile`, `--release`, or the subcommand's default):
+
+| Situation | Codegen units |
+|---|---|
+| `SOLDR_CODEGEN_UNITS=<n>` set (positive integer) | `n`, via `CARGO_PROFILE_<PROFILE>_CODEGEN_UNITS` |
+| Shipping build: `SOLDR_RELEASE_CI=1` and the `release` profile | 1 (`CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1`) |
+| Anything else | Cargo's default |
+
+A caller-set `CARGO_PROFILE_<PROFILE>_CODEGEN_UNITS` always wins. The
+publishing lanes (`auto-release.yml`, `.github/scripts/native_release_build.py`)
+also set `CARGO_PROFILE_RELEASE_CODEGEN_UNITS` explicitly, so the published
+binary keeps one unit (MSVC targets keep their existing 16) even when cargo is
+not reached through soldr's front door.
+
+Opt in for one build:
+
+```bash
+SOLDR_CODEGEN_UNITS=1 soldr cargo build --release
+```
+
 ## Per-repo verdicts (2026-07)
 
 | Repo | share-generics | incremental | Verdict |
 |---|---|---|---|
-| **soldr** | Dev + `ci-bootstrap` (opt 0) + `ci-release`/`ci-nextest` (opt 1) get it by default. Shipped `release` is `lto = "thin"` + `codegen-units = 1` — forcing it there trades runtime perf for compile time. | Dev default-on; CI no longer gets `CARGO_INCREMENTAL=0` from Swatinem/rust-cache (banned with no exceptions, CACHE-025, 2026-10-02). | No change |
+| **soldr** | Dev + `ci-bootstrap` (opt 0) + `ci-release`/`ci-nextest` (opt 1) get it by default. Shipped `release` is `lto = "thin"` + one codegen unit (selected by the publishing lane, see [Lever 3](#lever-3-codegen-units)) — forcing it there trades runtime perf for compile time. | Dev default-on; CI no longer gets `CARGO_INCREMENTAL=0` from Swatinem/rust-cache (banned with no exceptions, CACHE-025, 2026-10-02). | No change |
 | **zccache** | 19-crate workspace, but dev (opt 0) is default-on, so the classic big-workspace win is already banked. | Dev default-on; bench workflows pin `CARGO_INCREMENTAL: "0"`. | No change |
 | **clud** | Dev default-on. | zccache excludes `-C incremental` from its cache key, so incremental doesn't fragment the shared cache. | No change |
 | **running-process** | 9-crate workspace; dev default-on. | `ci/reproducible.py` correctly forces `CARGO_INCREMENTAL=0` (incremental artifacts are not stable across runs). | No change |

@@ -206,6 +206,7 @@ mod cwd_guard_tests {
 
 pub mod archive_cmd;
 pub mod binaries;
+pub mod blaze_cmd;
 /// soldr#1012 PR 5 — blessed cross-compile sysroot prep called from
 /// `Commands::Build` for canonical target triples. Coordinates the
 /// xwin-cache materialization + clang-shim install + env var setup.
@@ -236,6 +237,7 @@ pub(crate) mod broker_purge;
 pub(crate) mod broker_reaper;
 pub(crate) mod broker_retry;
 pub(crate) mod broker_server;
+pub mod broker_skew;
 pub mod broker_spawn;
 /// soldr#2900 — Soldr-owned per-build cache bookkeeping. Replaces the
 /// retired private-zccache lifecycle module, which still carried subprocess
@@ -311,6 +313,8 @@ pub(crate) mod dylint_driver;
 /// `dylint_cook`, and `ci_test::plan` all resolve the Dylint channel through
 /// it instead of each deriving or hard-coding its own answer.
 pub(crate) mod dylint_libraries;
+pub(crate) mod dylint_library_store;
+pub(crate) mod dylint_library_uplift;
 pub(crate) mod dylint_prepare;
 /// soldr#3567/#3605 — the single Rustup home Dylint provisions and runs in.
 pub(crate) mod dylint_rustup_home;
@@ -413,6 +417,7 @@ pub(crate) mod toolchain_plugins;
 pub(crate) mod toolchain_prepare;
 pub mod toolchain_readiness;
 pub(crate) mod toolchain_std_libs;
+pub(crate) mod toolchain_store;
 pub mod trampoline;
 /// soldr#3894 — verdict ledger: skip a check whose exact inputs already passed.
 pub mod verdict;

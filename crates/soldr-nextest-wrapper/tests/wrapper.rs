@@ -78,6 +78,44 @@ fn the_test_gets_guards_and_a_private_tmpdir_that_is_removed() {
     assert_eq!(&fields[1..], ["1", "0", "/bin/sh", "unset", "unset"]);
 }
 
+/// soldr#3516: whatever HOME and SOLDR_CACHE_DIR the caller has, the test
+/// resolves its soldr state inside its private directory, which is removed.
+#[test]
+fn the_test_cannot_see_the_callers_soldr_state() {
+    if !linux() {
+        return;
+    }
+    let base = tempfile::tempdir().expect("tmp base");
+    let caller_home = base.path().join("caller-home");
+    let output = wrapped(
+        "echo \"$TMPDIR|$HOME|$SOLDR_CACHE_DIR|$XDG_RUNTIME_DIR|$XDG_CONFIG_HOME|$SOLDR_TEST_ISOLATED|$CARGO_HOME\"; test -O \"$XDG_RUNTIME_DIR\" && touch \"$SOLDR_CACHE_DIR/state\"",
+        |command| {
+            command
+                .env("TMPDIR", base.path())
+                .env("HOME", &caller_home)
+                .env("SOLDR_CACHE_DIR", caller_home.join(".soldr"))
+                .env("XDG_RUNTIME_DIR", base.path().join("caller-run"))
+                .env_remove("CARGO_HOME")
+                .env_remove("SOLDR_TEST_ISOLATED");
+        },
+    );
+    assert!(output.status.success(), "{output:?}");
+    let line = String::from_utf8(output.stdout).expect("utf8");
+    let fields: Vec<&str> = line.trim().split('|').collect();
+    let private = Path::new(fields[0]);
+    for value in &fields[1..5] {
+        assert!(
+            Path::new(value).starts_with(private),
+            "{value} is outside the private root {}",
+            private.display()
+        );
+    }
+    assert_eq!(fields[5], "1");
+    assert_eq!(fields[6], "", "CARGO_HOME is not exported");
+    assert!(!caller_home.exists(), "the caller's home was never touched");
+    assert!(!private.exists(), "the private root is removed afterwards");
+}
+
 #[test]
 fn sigterm_dumps_threads_and_drains_the_test_output() {
     if !linux() {

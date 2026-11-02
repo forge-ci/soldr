@@ -213,32 +213,49 @@ pub(crate) fn run_cache_trim_target_command(
 ) -> Result<(), SoldrError> {
     let canonical = std::path::absolute(&target_dir).unwrap_or_else(|_| target_dir.clone());
 
-    // Reuse the same refusal the prune-target subcommand applies. We
-    // call into prune_target below anyway, but checking up-front means
-    // CI-profile incremental/ removal also bails when a build is live.
-    if let Some(lock) = trim_find_cargo_lock(&canonical) {
-        return Err(SoldrError::Other(format!(
-            "cargo lock present at {} (active build?); refusing to trim",
-            lock.display()
-        )));
-    }
+    // Refuse only when a build actually HOLDS a lock, never merely because a
+    // `.cargo-lock` file exists: cargo leaves that sentinel behind after every
+    // build, so a presence check made trim-target refuse forever on any
+    // checkout that had ever been built. `cargo_lock::probe` acquires each
+    // sentinel and reports Active only when another process holds it.
+    //
+    // The guard is scoped to the steps that write before `prune_target` runs.
+    // `prune_target` re-probes and holds its own guard around its deletions, so
+    // holding ours across that call would make it see our own locks as a live
+    // build (the self-contention this scoping avoids).
+    let (incremental_removed, strip_report) = {
+        let _cargo_locks =
+            match crate::cache_lib::cargo_lock::probe(&canonical).map_err(|error| {
+                SoldrError::Other(format!("cache trim-target: lock probe failed: {error}"))
+            })? {
+                crate::cache_lib::cargo_lock::CargoLockProbe::Idle(guard) => guard,
+                crate::cache_lib::cargo_lock::CargoLockProbe::Active(lock) => {
+                    return Err(SoldrError::Other(format!(
+                        "cargo lock held at {} (active build); refusing to trim",
+                        lock.display()
+                    )));
+                }
+            };
 
-    let mut incremental_removed: Vec<TrimIncrementalEntry> = Vec::new();
-    if matches!(profile, TrimProfile::Ci) {
-        incremental_removed = remove_incremental_dirs(&canonical, dry_run)?;
-    }
+        let mut incremental_removed: Vec<TrimIncrementalEntry> = Vec::new();
+        if matches!(profile, TrimProfile::Ci) {
+            incremental_removed = remove_incremental_dirs(&canonical, dry_run)?;
+        }
 
-    let strip_report = if matches!(profile, TrimProfile::Ci) {
-        let opts = crate::cache_lib::strip_target::StripTargetOptions {
-            dry_run,
-            ..crate::cache_lib::strip_target::StripTargetOptions::all(canonical.clone())
+        let strip_report = if matches!(profile, TrimProfile::Ci) {
+            let opts = crate::cache_lib::strip_target::StripTargetOptions {
+                dry_run,
+                ..crate::cache_lib::strip_target::StripTargetOptions::all(canonical.clone())
+            };
+            Some(
+                crate::cache_lib::strip_target::strip_target(&opts).map_err(|e| {
+                    SoldrError::Other(format!("cache trim-target: strip failed: {e}"))
+                })?,
+            )
+        } else {
+            None
         };
-        Some(
-            crate::cache_lib::strip_target::strip_target(&opts)
-                .map_err(|e| SoldrError::Other(format!("cache trim-target: strip failed: {e}")))?,
-        )
-    } else {
-        None
+        (incremental_removed, strip_report)
     };
 
     let prune_opts = crate::cache_lib::prune_target::PruneTargetOptions {
@@ -265,32 +282,6 @@ pub(crate) fn run_cache_trim_target_command(
         print_cache_trim_target_text(&summary);
     }
     Ok(())
-}
-
-/// Walk `target/{,<profile>}/.cargo-lock` and return the first match.
-/// Copy of the algorithm in `prune_target::find_active_cargo_lock`,
-/// hoisted here so the CI-profile incremental-removal step short-
-/// circuits before any disk write.
-fn trim_find_cargo_lock(target_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    let top = target_dir.join(".cargo-lock");
-    if top.exists() {
-        return Some(top);
-    }
-    let read = std::fs::read_dir(target_dir).ok()?;
-    for entry in read.flatten() {
-        let ft = match entry.file_type() {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        if !ft.is_dir() {
-            continue;
-        }
-        let candidate = entry.path().join(".cargo-lock");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
 }
 
 /// Walk every `target/<profile>/incremental/` and remove the whole
@@ -487,4 +478,48 @@ struct CacheTrimTargetOutput {
     prune_reclaimed_bytes: u64,
     total_reclaimed_bytes: u64,
     total_reclaimed_human: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+
+    fn touch(path: &std::path::Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        File::create(path).unwrap();
+    }
+
+    /// Cargo leaves `.cargo-lock` behind after every build, so the file's
+    /// mere presence must not be read as a live build: that check made
+    /// `trim-target` unusable on every checkout that had ever been built.
+    #[test]
+    fn a_stale_cargo_lock_file_does_not_block_the_trim() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        touch(&target.join("release").join(".cargo-lock"));
+
+        run_cache_trim_target_command(target, TrimProfile::Local, true, false)
+            .expect("a leftover .cargo-lock file must not be treated as an active build");
+    }
+
+    /// The guard that matters is the held lock, and it still refuses.
+    #[test]
+    fn a_held_cargo_lock_still_refuses_the_trim() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let lock = target.join("release").join(".cargo-lock");
+        touch(&lock);
+        let held = File::open(&lock).unwrap();
+        held.lock().expect("take the lock");
+
+        let error = run_cache_trim_target_command(target, TrimProfile::Local, true, false)
+            .expect_err("a held lock must refuse");
+        assert!(
+            format!("{error}").contains("active build"),
+            "unexpected error: {error}"
+        );
+    }
 }

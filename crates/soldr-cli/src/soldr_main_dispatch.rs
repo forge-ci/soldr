@@ -48,7 +48,9 @@ async fn dispatch_build_command(
         cache_enabled,
         trust_inherited_soldr_env,
     } = flags;
+    let command = crate::blaze_cmd::route_command(command);
     let handled = match command {
+        Commands::Blaze { args, allow_ci } => exit_with(crate::blaze_cmd::run(&args, allow_ci)),
         Commands::Build { args } => {
             run_blessed_build(args, cache_enabled, trust_inherited_soldr_env).await
         }
@@ -190,6 +192,7 @@ async fn dispatch_state_command(command: Commands, flags: DispatchFlags) -> Resu
         // Listed rather than `_` so a new command still fails to compile until
         // it is routed to a family.
         Commands::Build { .. }
+        | Commands::Blaze { .. }
         | Commands::Cc(_)
         | Commands::Cxx(_)
         | Commands::Ld(_)

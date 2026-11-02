@@ -173,3 +173,9 @@ pub fn pids_with_env(name: &str, value: &std::ffi::OsStr) -> Vec<u32> {
         })
         .collect()
 }
+
+/// Make `link` a symlink to the directory `target` (a test's private HOME
+/// reaching the caller's toolchain homes, soldr#3516).
+pub fn link_dir(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}

@@ -261,7 +261,16 @@ impl SoldrBackendLauncher {
                 started.elapsed()
             );
         }
-        let mut command = std::process::Command::new(&binary_path);
+        // soldr#4012: a shared daemon must not inherit the cgroup of the
+        // session that launched the broker. `SOLDR_DAEMON_OWN_SCOPE=off`
+        // keeps the direct spawn.
+        let own_scope = !std::env::var(DAEMON_OWN_SCOPE_ENV)
+            .is_ok_and(|value| crate::core::env_flag::is_off_value(&value));
+        let mut command = soldr_platform::process::spawn::daemon_command(
+            &binary_path,
+            &request.key.service_name,
+            own_scope,
+        );
         // soldr#3516: keep the daemon under the broker's own HOME. Applied
         // first so the route's `SOLDR_*` labels and root below still win.
         command.envs(crate::broker_spawn::daemon_home_identity_env());
@@ -710,6 +719,9 @@ fn canonical_backend_binary(
     }
     Ok(binary)
 }
+
+/// Opt-out for placing the daemon in its own systemd user scope (soldr#4012).
+const DAEMON_OWN_SCOPE_ENV: &str = "SOLDR_DAEMON_OWN_SCOPE";
 
 fn configure_backend_command(
     command: &mut std::process::Command,
