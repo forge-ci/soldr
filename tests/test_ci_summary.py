@@ -445,3 +445,48 @@ def test_run_attempt_audit_allows_only_a_superseded_cache_janitor():
     assert SUMMARY.run_attempt_failures(
         [_job("CI Pre / Repository Actions cache budget", "cancelled")]
     )
+
+
+def test_superseded_attempt_concludes_cancelled_not_failure(tmp_path, monkeypatch):
+    """A superseded attempt's summary sees ci-mode cancelled and CI_MODE empty.
+
+    It must cancel itself instead of reporting FAILURE on the PR head.
+    """
+    report_path = cli_environment(tmp_path, monkeypatch)
+    monkeypatch.setenv("CI_MODE", "")
+    monkeypatch.setenv("CI_ATTEMPT_CANCELLED", "true")
+    calls = []
+    monkeypatch.setattr(SUMMARY, "force_cancel_run", lambda *args: calls.append(args))
+    monkeypatch.setattr(SUMMARY, "CANCEL_GRACE_SECONDS", 0)
+    SUMMARY.main()
+    assert calls, "a cancelled attempt must cancel the summary job"
+    assert not report_path.exists(), "no contract verdict on a cancelled attempt"
+
+
+def test_cancelled_attempt_fails_closed_when_cancel_is_refused(tmp_path, monkeypatch):
+    cli_environment(tmp_path, monkeypatch)
+    monkeypatch.setenv("CI_ATTEMPT_CANCELLED", "true")
+
+    def refuse(*_args):
+        raise OSError("403")
+
+    monkeypatch.setattr(SUMMARY, "force_cancel_run", refuse)
+    assert SUMMARY.main() == 1
+
+
+def test_live_attempt_still_fails_on_missing_mode(tmp_path, monkeypatch):
+    cli_environment(tmp_path, monkeypatch)
+    monkeypatch.setenv("CI_MODE", "")
+    monkeypatch.setenv("CI_ATTEMPT_CANCELLED", "false")
+    monkeypatch.setattr(
+        SUMMARY, "force_cancel_run", lambda *_: pytest.fail("must not cancel")
+    )
+    assert SUMMARY.main() == 1
+
+
+def test_summary_job_exposes_attempt_cancellation_and_can_cancel() -> None:
+    summary = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"][
+        "ci-summary"
+    ]
+    assert summary["env"]["CI_ATTEMPT_CANCELLED"] == "${{ cancelled() }}"
+    assert summary["permissions"]["actions"] == "write"

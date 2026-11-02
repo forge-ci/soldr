@@ -1312,12 +1312,15 @@ jobs:
     if: ${{ always() }}
     # The single required context. Besides the tier contract, it lists every
     # job of this run attempt and fails on any that did not succeed.
+    # `actions: write` lets a cancelled (superseded) attempt force-cancel this
+    # job so it concludes cancelled rather than FAILURE (ci_summary.py).
     permissions:
       contents: read
-      actions: read
+      actions: write
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
+      CI_ATTEMPT_CANCELLED: ${{ cancelled() }}
       CI_NEEDS_JSON: ${{ toJSON(needs) }}
       CI_MODE: ${{ needs.ci-mode.outputs.mode }}
       CI_TRUSTED: ${{ needs.ci-mode.outputs.trusted }}

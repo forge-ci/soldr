@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import runpy
+import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -246,7 +247,53 @@ def current_selection_failures(
     return failures
 
 
+def force_cancel_run(repository: str, run_id: str, token: str) -> None:
+    """Ask GitHub to cancel this run, including its `always()` jobs."""
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{repository}/actions/runs/{run_id}/force-cancel",
+        method="POST",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30):
+        pass
+
+
+# How long to wait for GitHub to cancel this job before failing closed.
+CANCEL_GRACE_SECONDS = 120
+
+
+def conclude_cancelled_attempt() -> int:
+    """Turn this job into `cancelled` for a cancelled (e.g. superseded) attempt.
+
+    `always()` still runs the summary after the run is cancelled, and the jobs
+    it judges -- ci-mode included -- are cancelled with empty outputs. Judging
+    them would report FAILURE on the head for a change nobody found faulty and
+    leave a red required context beside the newer, healthy attempt; succeeding
+    would be a false pass. The honest verdict is the attempt's own: cancelled.
+    If GitHub does not cancel this job in time, fail closed.
+    """
+    print("::warning::CI summary: run attempt was cancelled; concluding cancelled")
+    try:
+        force_cancel_run(
+            os.environ.get("GITHUB_REPOSITORY", ""),
+            os.environ.get("GITHUB_RUN_ID", ""),
+            os.environ.get("GITHUB_TOKEN", ""),
+        )
+        time.sleep(CANCEL_GRACE_SECONDS)
+    except (OSError, ValueError) as error:
+        print(f"::error::CI summary failed: cannot cancel the attempt: {error}")
+        return 1
+    print("::error::CI summary failed: the cancelled attempt was not cancelled")
+    return 1
+
+
 def main() -> int:
+    if os.environ.get("CI_ATTEMPT_CANCELLED", "") == "true":
+        return conclude_cancelled_attempt()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--adapter", type=Path, required=True)
     parser.add_argument("--full-contract", type=Path, required=True)
