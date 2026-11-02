@@ -79,6 +79,12 @@ jobs:
         with:
           cache-suffix: ${{ env.PR_CACHE_TAG }}
 
+      # soldr's 5 GiB disk guard fails the dogfood build/tests closed when the
+      # stock image leaves too little room (main run 41501629294). Make room.
+      - name: Reclaim runner disk
+        if: runner.os == 'Linux'
+        run: uv run --no-project --python 3.13 python ci/reclaim_runner_disk.py --require-gib 20
+
       - name: Smoke-test install.sh (soldr#2131)
         shell: bash
         run: |
