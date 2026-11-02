@@ -122,7 +122,7 @@ max-age-hours = 24
 # worst case is steady + the lockfile-change peak (no writer flow pre-prunes;
 # see [flow.main]) + [cache.pr].budget. The janitor's own target is
 # steady <= 8.5 GiB -- the old `total_max_bytes`.
-# They sum to 8686 MiB (8.48 GiB). Sized 2026-10-09 from the live listing
+# They sum to 8563 MiB (8.36 GiB) after the 2026-11-02 cook-layer re-derivation. Sized 2026-10-09 from the live listing
 # (`gh api 'repos/zackees/soldr/actions/caches?per_page=100' --paginate`,
 # 93 entries, 7.39 GiB); re-measure before retuning.
 #
@@ -166,13 +166,18 @@ uv                     = { via = "setup-uv",                   max = "1MB",   pe
 bootstrap-soldr        = { prefix = "bootstrap-soldr-blessed-", max = "50MB", evict = "lru", shapes = { cross-build = { max = "50MB" }, ci-dev = { max = "50MB" }, ci-dev-pr = { max = "50MB" } } }
 
 # -- group cook-layer (janitor: no budget eviction; cook's own lineage rules
-#    prune it), 2480 MiB. Five concurrent flag shapes from one writer (live
-#    546/512/512/426/422 MiB, 2418 MiB on 2026-10-23, when growth of 1-2 MiB
-#    per archive pushed the family to 100.3% and failed the budget gate), so
-#    `max` is the largest shape.
+#    prune it), 2775 MiB. Five concurrent flag shapes from one writer, so
+#    `max` is the largest shape. Re-derived 2026-11-02: the family measured
+#    2.58 GiB (5 entries, 106.7% of the prior 2480 MiB; main run 41501629294)
+#    against 2418 MiB live (546/512/512/426/422) on 2026-10-23. The +224 MiB
+#    (~45 MiB per archive) is 0b9b50a7 (2026-11-01) replacing the vendored
+#    `[patch]` path zccache with the published crates.io crate: a path dep is
+#    first-party and never cooked, the registry crate is a Tier-1 external
+#    dependency and now lands in every archive. Shapes = 2026-10-23 live + 45
+#    MiB + ~5% headroom. Funded by retiring zccache-unit g6.
 #    `cook-delta-v2-` is retired fleet-wide (check_cache_budget.py
 #    RETIRED_PREFIXES) and has no producer here.
-cook                   = { via = "setup-soldr:cook", max = "560MB", min = "1MB", evict = "lru", shapes = { flags1 = { max = "560MB" }, flags2 = { max = "525MB" }, flags3 = { max = "525MB" }, flags4 = { max = "435MB" }, flags5 = { max = "435MB" } } }
+cook                   = { via = "setup-soldr:cook", max = "620MB", min = "1MB", evict = "lru", shapes = { flags1 = { max = "620MB" }, flags2 = { max = "585MB" }, flags3 = { max = "585MB" }, flags4 = { max = "495MB" }, flags5 = { max = "490MB" } } }
 
 # -- group dylint-foundation (janitor: no budget eviction), 608 MiB. One
 #    entry per nightly; the headroom covers a nightly bump's second generation
@@ -199,9 +204,10 @@ soldr-baseline         = { prefix = "soldr-baseline-",                     max =
 soldr-cook             = { prefix = "soldr-cook-",                         max = "32MB",   evict = "lru" }
 soldr-delta            = { prefix = "soldr-delta-",                        max = "16MB",   evict = "lru" }
 
-# -- group zccache-unit (janitor: newest), 2509 MiB. Six ~402 MB lineage
-#    generations live (2411 MiB).
-zccache-unit           = { prefix = "zccache-unit-", max = "419MB", evict = "lru", shapes = { g1 = { max = "419MB" }, g2 = { max = "418MB" }, g3 = { max = "418MB" }, g4 = { max = "418MB" }, g5 = { max = "418MB" }, g6 = { max = "418MB" } } }
+# -- group zccache-unit (janitor: newest), 2091 MiB. Six ~402 MB lineage
+#    generations live (2411 MiB) when sized; 2026-11-02 live was 2 entries,
+#    1.77 GiB (72.1%), so g6 was returned to fund cook-layer.
+zccache-unit           = { prefix = "zccache-unit-", max = "419MB", evict = "lru", shapes = { g1 = { max = "419MB" }, g2 = { max = "418MB" }, g3 = { max = "418MB" }, g4 = { max = "418MB" }, g5 = { max = "418MB" } } }
 
 # Ancestor promotion (CACHE-024, zackees/ci.yml#335). Standardizing on
 # setup-soldr's ancestor encoding -- shortest parent-edge distance from a live
