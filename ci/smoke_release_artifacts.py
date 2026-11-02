@@ -74,6 +74,7 @@ from soldr._process import (  # noqa: E402 -- source-relative bootstrap precedes
 )
 
 MIN_SOLDR_BYTES = 2 * 1024 * 1024  # soldr#1140 stub floor
+PE_SUFFIXES = (".exe", ".dll", ".pyd")
 
 # soldr#3076: `lipo`/`file` need Xcode CLT, which neither a bare Linux host
 # nor the Recovery guest has. A 64-bit little-endian Mach-O starts with the
@@ -203,6 +204,49 @@ def run(cmd: list[str | Path]) -> subprocess.CompletedProcess[str]:
     argv = [str(part) for part in cmd]
     print(f"+ {' '.join(argv)}", flush=True)
     return run_captured(argv, check=True, capture_output=True, text=True)
+
+
+def authenticode_status(binary: Path) -> str:
+    """Windows' own verdict on a PE's signature (chain, timestamp, hash)."""
+    literal = str(binary.resolve()).replace("'", "''")
+    completed = run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            f"(Get-AuthenticodeSignature -LiteralPath '{literal}').Status",
+        ]
+    )
+    return completed.stdout.strip()
+
+
+def check_authenticode(extract: Path, wheel: Path) -> None:
+    """Fail unless every shipped Windows PE carries a Valid signature.
+
+    The release build signs through Azure Artifact Signing on Linux, where
+    only a structural check is possible; this is the cryptographic check, on
+    native Windows, over both the archive and the wheel.
+    """
+    binaries = sorted(p for p in extract.rglob("*") if p.suffix.lower() in PE_SUFFIXES)
+    with tempfile.TemporaryDirectory(prefix="soldr-wheel-pe-") as tmp:
+        with zipfile.ZipFile(wheel) as archive:
+            for index, info in enumerate(archive.infolist()):
+                if Path(info.filename).suffix.lower() in PE_SUFFIXES:
+                    local = Path(tmp) / f"{index}-{Path(info.filename).name}"
+                    local.write_bytes(archive.read(info))
+                    binaries.append(local)
+        unsigned = [
+            f"{path.name}: {status}"
+            for path in binaries
+            if (status := authenticode_status(path)) != "Valid"
+        ]
+    if unsigned:
+        sys.exit(
+            "ERROR: Windows binaries without a Valid Authenticode signature: "
+            + ", ".join(unsigned)
+        )
+    print(f"Authenticode Valid: {len(binaries)} Windows PE file(s)")
 
 
 # The module a shipped wheel must import. The wheel is a maturin binary
@@ -741,6 +785,8 @@ def main() -> int:  # noqa: C901
         if not pdbs:
             sys.exit(f"missing soldr PDB sidecar in {archive}")
         print(f"PDB sidecar present: {pdbs}")
+        if sys.platform == "win32":
+            check_authenticode(extract, wheels[0])
 
     soldr_bin = extract / f"soldr{suffix}"
     size = soldr_bin.stat().st_size

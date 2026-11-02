@@ -300,3 +300,29 @@ def test_wheel_import_targets_a_module_the_wheel_ships() -> None:
         "0.9.11", "soldr-0.9.11-cp310-abi3-macosx_11_0_x86_64.whl"
     )
     assert f"import {module}" in script
+
+
+def test_check_authenticode_covers_archive_and_wheel_pe_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    extract = tmp_path / "extracted"
+    extract.mkdir()
+    (extract / "soldr.exe").write_bytes(b"MZ")
+    (extract / "soldr.pdb").write_bytes(b"pdb")
+    wheel = tmp_path / "soldr.whl"
+    with zipfile.ZipFile(wheel, "w") as out:
+        out.writestr("soldr-1.0.data/scripts/soldr.exe", b"MZ")
+        out.writestr("soldr/__init__.py", b"")
+    seen: list[str] = []
+
+    def status(binary: Path) -> str:
+        seen.append(binary.name)
+        return "NotSigned" if binary.parent != extract else "Valid"
+
+    monkeypatch.setattr(MODULE, "authenticode_status", status)
+    with pytest.raises(SystemExit, match="NotSigned"):
+        MODULE.check_authenticode(extract, wheel)
+    assert sorted(seen) == ["0-soldr.exe", "soldr.exe"]
+
+    monkeypatch.setattr(MODULE, "authenticode_status", lambda _binary: "Valid")
+    MODULE.check_authenticode(extract, wheel)

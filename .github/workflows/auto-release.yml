@@ -158,6 +158,10 @@ jobs:
       - full_ci_gate
     if: needs.prepare.outputs.should_release == 'true' && needs.full_ci_gate.result == 'success' && inputs.promote_run_id == ''
     runs-on: ${{ matrix.runner }}
+    # Azure Artifact Signing trusts this repo's OIDC subject for
+    # refs/heads/main, tags, or a GitHub environment. Releases are dispatched
+    # with `--ref main` (RELEASE.md), so the Windows signing steps get a
+    # trusted subject; id-token: write comes from the workflow permissions.
     # Windows x64's Linux cross-wheel takes roughly 37 minutes cold in the
     # Docker reproduction. Ninety minutes leaves room for runner variance.
     timeout-minutes: 90
@@ -525,6 +529,30 @@ jobs:
         shell: bash
         run: uv run --no-project --python 3.13 .github/scripts/verify_release_bundle.py --target "${{ matrix.target }}" --check glibc-baseline --max-glibc 2.39
 
+      # Azure Artifact Signing (Authenticode). Both Windows lanes cross-build
+      # on Linux, so the signer is a SHA-256-pinned jsign jar driven by the
+      # OIDC azure/login session (no client secret). This runs after every
+      # bundle ratchet and BEFORE manifest.json so the manifest digests, the
+      # archive and the release checksums all describe the signed bytes; the
+      # script fails the step if any staged PE is left unsigned.
+      - name: Azure login for Authenticode signing
+        if: contains(matrix.target, 'pc-windows-msvc')
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Authenticode-sign staged Windows binaries
+        if: contains(matrix.target, 'pc-windows-msvc')
+        shell: bash
+        env:
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          AZURE_SIGN_PUBLISHER: ${{ secrets.AZURE_SIGN_PUBLISHER }}
+        run: uv run --no-project --python 3.13 .github/scripts/sign_windows_release.py sign --package-dir dist/package
+
       - name: Write manifest.json
         # The archive's self-description: versions, target triples,
         # per-binary sha256s, provenance. setup-soldr, the npm install
@@ -631,6 +659,28 @@ jobs:
             --driver target/release/soldr \
             --target "${{ matrix.target }}" \
             --expected-version "${EXPECTED_VERSION#v}"
+
+      # maturin links its own soldr.exe into the wheel, so the wheel is signed
+      # separately (members re-signed, RECORD rewritten). The OIDC assertion
+      # from the first login expires long before the ~40-minute wheel build
+      # finishes, hence the second login.
+      - name: Azure login for Authenticode signing (wheel)
+        if: contains(matrix.target, 'pc-windows-msvc')
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Authenticode-sign the Windows wheel
+        if: contains(matrix.target, 'pc-windows-msvc')
+        shell: bash
+        env:
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          AZURE_SIGN_PUBLISHER: ${{ secrets.AZURE_SIGN_PUBLISHER }}
+        run: uv run --no-project --python 3.13 .github/scripts/sign_windows_release.py sign --wheel dist/*.whl
 
       # soldr#2469 2.2: logic lives in the unit-tested script.
       - name: Lint wheel filenames against workspace version
