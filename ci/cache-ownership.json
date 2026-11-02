@@ -112,7 +112,7 @@
         "setup-soldr-action-runtime-state",
         "setup-soldr-action-dogfood-zccache"
       ],
-      "rationale": "Content-addressed per-unit zccache stores plus setup-soldr's own registry slice, written by the action-smoke and benchmark lanes. The dogfood store is main-gated by a restore/save split in soldr#3047. Recognized buildcache-v2 and cargoregistry-v1 entries retain their platform's newest current-main-lock toolchain store; an entry on that platform with an older lock OR an older toolchain hash is a superseded generation and is reclaimed (soldr#3545 -- a toolchain bump changes the toolchain hash while Cargo.lock often does not, which left a 1.43 GiB family over its 1.30 GiB allocation with no rule that could ever select the stale half). A platform with no current-lock store, unknown formats, and namespaced keys remain protected."
+      "rationale": "Content-addressed per-unit zccache stores plus setup-soldr's own registry slice, written by the action-smoke and benchmark lanes. The dogfood store is main-gated by a restore/save split in soldr#3047. Recognized buildcache-v3 (lineage = os-arch plus job suffix; generation = toolchain plus soldr digest), buildcache-v2 and cargoregistry-v1 entries retain their platform's newest current-main-lock toolchain store; an entry on that platform with an older lock OR an older toolchain hash is a superseded generation and is reclaimed (soldr#3545 -- a toolchain bump changes the toolchain hash while Cargo.lock often does not, which left a 1.43 GiB family over its 1.30 GiB allocation with no rule that could ever select the stale half). A platform with no current-lock store, unknown formats, and namespaced keys remain protected."
     },
     "experiment-lanes": {
       "ci_toml_families": [

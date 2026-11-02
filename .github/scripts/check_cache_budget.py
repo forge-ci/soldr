@@ -719,6 +719,14 @@ ACTION_BUILD_KEY = re.compile(
     r"^(?P<shape>setup-soldr-buildcache-v2-[a-z0-9_]+-[a-z0-9_]+-[0-9a-f]{16})-"
     r"(?P<lock>[0-9a-f]{16})$"
 )
+# zackees/setup-soldr#625 / #237: `<os>-<arch>-<toolchain>-[<job suffix>-]`
+# `<lock>-s<soldr digest>`. The job suffix is part of the lineage (each job
+# restores only its own store), and the soldr digest is part of the generation.
+ACTION_BUILD_KEY_V3 = re.compile(
+    r"^(?P<platform>setup-soldr-buildcache-v3-[a-z0-9_]+-[a-z0-9_]+)-"
+    r"(?P<toolchain>[0-9a-f]{16})-(?:(?P<job>[A-Za-z0-9_.-]+)-)?"
+    r"(?P<lock>[0-9a-f]{16})-s(?P<soldr>[0-9a-f]{16})$"
+)
 ACTION_REGISTRY_KEY = re.compile(
     r"^(?P<platform>setup-soldr-cargoregistry-v1-[a-z0-9_]+-[a-z0-9_]+)-"
     r"(?P<lock>[0-9a-f]{16})-(?P<toolchain>[0-9a-f]{16})$"
@@ -757,7 +765,17 @@ def action_store_lineage_candidates(
     for entry in on_main:
         build = ACTION_BUILD_KEY.fullmatch(entry.key)
         registry = ACTION_REGISTRY_KEY.fullmatch(entry.key)
-        if build:
+        build_v3 = ACTION_BUILD_KEY_V3.fullmatch(entry.key)
+        if build_v3:
+            recognized.append(
+                RecognizedEntry(
+                    entry,
+                    f"{build_v3['platform']}-job={build_v3['job'] or ''}",
+                    f"{build_v3['toolchain']}-s{build_v3['soldr']}",
+                    build_v3["lock"],
+                )
+            )
+        elif build:
             platform, _, toolchain = build["shape"].rpartition("-")
             recognized.append(
                 RecognizedEntry(entry, platform, toolchain, build["lock"])
