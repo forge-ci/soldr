@@ -91,3 +91,13 @@ def test_second_identical_run_carries_the_a5_compile_bound() -> None:
     ).read_text(encoding="utf-8")
     assert 'by_name["warm_same_target"]["misses"] * 5' in source
     assert "second identical run must compile <20% of the cold run" in source
+
+
+def test_killed_symbol_smoke_never_races_first_toolchain_acquisition() -> None:
+    script = dylint_acceptance.BASH
+    cold = script.index("run_case cold /tmp/dylint-acceptance/a")
+    smoke = script.index("  run_symbolized_watchdog_smoke\n")
+    assert cold < smoke, (
+        "the watchdog symbol smoke kills its soldr process; it must run after "
+        "the cold case has installed the pinned toolchain"
+    )

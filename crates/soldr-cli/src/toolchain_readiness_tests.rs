@@ -167,3 +167,32 @@ fn caller_selected_partial_toolchain_has_non_destructive_recovery_guidance() {
     );
     assert!(error.contains("soldr toolchain install"), "{error}");
 }
+
+/// An interrupted `rustup toolchain install` leaves a directory that
+/// `rustup toolchain list` reports as installed but that has no channel
+/// manifest; `rustup component add` then fails with "missing manifest in
+/// toolchain". The Dylint Cache Acceptance lane went red on exactly this.
+#[test]
+fn listed_toolchain_without_channel_manifest_is_not_trusted() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path();
+    let name = "nightly-2026-08-15-x86_64-unknown-linux-gnu";
+    let toolchain = home.join("toolchains").join(name);
+    std::fs::create_dir_all(toolchain.join("bin")).expect("mkdir bin");
+    std::fs::write(native_rustc_path(&toolchain), b"").expect("rustc");
+
+    assert!(
+        listed_toolchain_needs_reinstall(home, name, false).expect("managed home"),
+        "a partial tree in the managed home must be reinstalled"
+    );
+    let error = listed_toolchain_needs_reinstall(home, name, true)
+        .expect_err("a caller-selected home is reported, not removed")
+        .to_string();
+    assert!(error.contains(TOOLCHAIN_CHANNEL_MANIFEST), "{error}");
+
+    let manifest = toolchain.join(TOOLCHAIN_CHANNEL_MANIFEST);
+    std::fs::create_dir_all(manifest.parent().expect("parent")).expect("mkdir rustlib");
+    std::fs::write(&manifest, b"").expect("manifest");
+    assert!(!listed_toolchain_needs_reinstall(home, name, true).expect("complete toolchain"));
+    assert!(!listed_toolchain_needs_reinstall(home, "absent", true).expect("absent toolchain"));
+}
