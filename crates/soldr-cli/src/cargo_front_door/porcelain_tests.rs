@@ -367,6 +367,80 @@ fn command_string_labels_the_run() {
     );
 }
 
+/// A build that exits zero can still emit warnings. The digest has to say so,
+/// or the caller must open the whole log to find out whether there is anything
+/// to fix (the success half of the #3924 "warnings" clause).
+#[test]
+fn summarize_reports_warnings_on_a_successful_build() {
+    let output = concat!(
+        "warning: unused variable: `spare`\n",
+        " --> src/lib.rs:2:9\n",
+        "  |\n",
+        "2 |     let spare = 41;\n",
+        "  |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_spare`\n",
+        "  |\n",
+        "  = note: `#[warn(unused_variables)]` on by default\n",
+        "\n",
+        "warning: unused import: `std::fmt`\n",
+        " --> src/lib.rs:1:5\n",
+        "\n",
+        "warning: `warny` (lib) generated 2 warnings\n",
+    );
+
+    let summary = summarize("cargo build", 0, output);
+
+    assert_eq!(summary.status, "ok");
+    assert_eq!(summary.exit_code, 0);
+    assert_eq!(summary.error_count, 0);
+    assert!(summary.errors.is_empty());
+    // The tally line is not a warning of its own.
+    assert_eq!(summary.warning_count, 2);
+    assert_eq!(
+        summary.warnings,
+        vec![
+            "warning: unused variable: `spare` [src/lib.rs:2:9]".to_string(),
+            "warning: unused import: `std::fmt` [src/lib.rs:1:5]".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn summarize_reports_no_warnings_for_a_clean_run() {
+    let summary = summarize(
+        "cargo build",
+        0,
+        "   Compiling warny v0.1.0\n    Finished dev\n",
+    );
+    assert_eq!(summary.warning_count, 0);
+    assert!(summary.warnings.is_empty());
+}
+
+/// Only the tally line: nothing to report.
+#[test]
+fn summarize_does_not_count_a_warning_tally_as_a_warning() {
+    let summary = summarize(
+        "cargo build",
+        0,
+        "warning: `warny` (lib) generated 3 warnings\n",
+    );
+    assert_eq!(summary.warning_count, 0);
+    assert!(summary.warnings.is_empty());
+}
+
+#[test]
+fn summarize_sees_coloured_warnings() {
+    let output = concat!(
+        "\u{1b}[1m\u{1b}[33mwarning\u{1b}[0m\u{1b}[1m: unused variable: `spare`\u{1b}[0m\n",
+        " \u{1b}[1m\u{1b}[94m-->\u{1b}[0m src/lib.rs:2:9\n",
+    );
+    let summary = summarize("cargo build", 0, output);
+    assert_eq!(summary.warning_count, 1);
+    assert_eq!(
+        summary.warnings,
+        vec!["warning: unused variable: `spare` [src/lib.rs:2:9]".to_string()]
+    );
+}
+
 #[test]
 fn test_failure_uses_the_structured_digest_not_a_duplicate_excerpt() {
     // soldr#3961 landed `failed_tests` / `test_results` on main while this
@@ -465,7 +539,59 @@ fn failure_excerpt_carries_the_compiler_location_for_a_build_error() {
     );
 }
 
+fn summarize_counts_a_repeated_warning_once() {
+    let output = concat!(
+        "warning: unused variable: `spare`\n",
+        " --> src/lib.rs:2:9\n",
+        "warning: unused variable: `spare`\n",
+        " --> src/lib.rs:2:9\n",
+    );
+    let summary = summarize("cargo test", 0, output);
+    assert_eq!(summary.warning_count, 1);
+    assert_eq!(summary.warnings.len(), 1);
+}
+
 #[test]
+fn summarize_reads_warnings_from_the_cargo_json_stream() {
+    let output = concat!(
+        r#"{"reason":"compiler-message","message":{"level":"warning","message":"unused variable: `spare`","code":null,"spans":[{"file_name":"src/lib.rs","line_start":2,"column_start":9}]}}"#,
+        "\n",
+        r#"{"reason":"compiler-message","message":{"level":"error","message":"mismatched types","code":{"code":"E0308"},"spans":[]}}"#,
+        "\n",
+        r#"{"reason":"build-finished","success":false}"#,
+        "\n",
+    );
+
+    let summary = summarize("cargo build --message-format=json", 1, output);
+
+    assert_eq!(summary.error_count, 1);
+    assert_eq!(summary.warning_count, 1);
+    assert_eq!(
+        summary.warnings,
+        vec!["warning: unused variable: `spare` [src/lib.rs:2:9]".to_string()]
+    );
+}
+
+#[test]
+fn failure_report_carries_no_warning_identities() {
+    let report = report_for_failure("cargo build", 1, None, Some("front door error"));
+    assert_eq!(report.summary.warning_count, 0);
+    assert!(report.summary.warnings.is_empty());
+}
+
+/// Cargo appends a `cargo fix` suggestion to a single-warning tally; that
+/// suffix once slipped past a pure suffix test and was counted as a warning.
+#[test]
+fn summarize_does_not_count_a_warning_tally_with_a_fix_suggestion() {
+    let summary = summarize(
+        "cargo build",
+        0,
+        "warning: `warny` (lib) generated 1 warning (run `cargo fix --lib -p warny` to apply 1 suggestion)\n",
+    );
+    assert_eq!(summary.warning_count, 0);
+    assert!(summary.warnings.is_empty());
+}
+
 fn failure_excerpt_carries_a_build_scripts_c_compiler_error() {
     // cc-rs relays the C compiler's diagnostics as `cargo:warning=` lines in
     // the build script's stdout; its own `error occurred in cc-rs` line is a
@@ -692,6 +818,75 @@ fn serialize_report_adds_broker_skew_only_when_observed() {
         "broker 0.9.44-aaaa is running, this is 0.9.46-bbbb; run: soldr broker remove"
     );
     assert_eq!(line.lines().count(), 1);
+}
+
+/// soldr#4010 compaction deleted the whole summary on a passing run, which
+/// silently took the warnings with it: `cargo build` exits zero while printing
+/// `unused variable`, so the caller could only find out by reading `log_path`
+/// back. The bounded warning digest now survives compaction, next to `status`.
+#[test]
+fn a_passing_run_keeps_its_bounded_warnings() {
+    let warning_run = concat!(
+        "warning: unused variable: `spare`\n",
+        " --> src/lib.rs:2:9\n",
+        "warning: unused import: `std::fmt`\n",
+        " --> src/lib.rs:1:5\n",
+        "    Finished `dev` profile [unoptimized] target(s) in 0.15s\n",
+    );
+    let report = report_for_run(&RunReportInputs {
+        command: "cargo build",
+        exit_code: 0,
+        started_at_ms: 1_000,
+        ended_at_ms: 1_500,
+        log_path: None,
+        output: Some(warning_run),
+    });
+    let line = serialize_report(&report, None, &[]).expect("serialize");
+    let value: serde_json::Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["warning_count"], 2);
+    assert_eq!(
+        value["warnings"].as_array().expect("warnings array").len(),
+        2
+    );
+    assert_eq!(
+        value["warnings"][0],
+        "warning: unused variable: `spare` [src/lib.rs:2:9]"
+    );
+    // The rest of the summary stays compacted: this is still the short form.
+    assert!(value.get("summary").is_none(), "{line}");
+    assert!(value.get("command").is_none(), "{line}");
+    assert_eq!(line.lines().count(), 1);
+}
+
+/// Additive: a warning-free passing run keeps exactly its present shape, so
+/// nothing downstream sees a new key on the common path.
+#[test]
+fn a_warning_free_passing_run_keeps_the_compact_shape() {
+    let report = report_for_run(&RunReportInputs {
+        command: "cargo build",
+        exit_code: 0,
+        started_at_ms: 1_000,
+        ended_at_ms: 1_500,
+        log_path: None,
+        output: Some("    Finished `dev` profile [unoptimized] target(s) in 0.15s\n"),
+    });
+    let line = serialize_report(&report, None, &[]).expect("serialize");
+    let value: serde_json::Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(value["status"], "ok");
+    assert!(value.get("warning_count").is_none(), "{line}");
+    assert!(value.get("warnings").is_none(), "{line}");
+}
+
+/// A failing run already carries warnings inside `summary`; the top-level copy
+/// is success-only, so nothing is reported twice.
+#[test]
+fn a_failing_run_does_not_duplicate_warnings_at_the_top_level() {
+    let report = report_for_failure("cargo build", 101, None, None);
+    let line = serialize_report(&report, None, &[]).expect("serialize");
+    let value: serde_json::Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(value["status"], "failed");
+    assert!(value.get("warning_count").is_none(), "{line}");
 }
 
 /// soldr#3960: porcelain lists installed binaries as `installed`.
