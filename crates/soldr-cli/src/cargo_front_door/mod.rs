@@ -39,6 +39,7 @@ mod build_session;
 pub(crate) mod cache_annotations; // soldr#3924 — where those annotations go
 mod cache_plan;
 pub(crate) mod cache_states; // soldr#2302 — HIT/MISS annotations + stats
+pub(crate) mod cache_stats_file; // soldr#2302 — session-keyed stats reader
 mod clang_cl_shim;
 mod cmake_need;
 mod codegen_units;
