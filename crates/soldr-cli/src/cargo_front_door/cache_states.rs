@@ -523,10 +523,13 @@ impl CacheStateTail {
 }
 
 fn emit(line: &str, stamp_from: Option<Instant>) {
-    match stamp_from {
-        Some(t0) => eprintln!("{:>8.2} {line}", t0.elapsed().as_nanos() as f64 / 1e9),
-        None => eprintln!("{line}"),
-    }
+    // soldr#3929: one whole-line write under the relay lock, so this tail
+    // never splices into a relayed cargo/test line.
+    let text = match stamp_from {
+        Some(t0) => format!("{:>8.2} {line}\n", t0.elapsed().as_nanos() as f64 / 1e9),
+        None => format!("{line}\n"),
+    };
+    let _ = super::line_relay::emit_whole_line(&mut std::io::stderr(), text.as_bytes());
 }
 
 fn tail_loop(

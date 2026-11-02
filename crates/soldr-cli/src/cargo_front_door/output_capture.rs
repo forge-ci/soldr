@@ -243,29 +243,31 @@ where
         // soldr#1802: the stamped copy goes to the terminal only. The
         // capture channel below must stay raw — the cargo-JSON parser
         // matches on cargo's exact bytes.
-        let mut stamped =
-            stamp_from.map(|t0| timestamp_tee::TimestampedTee::new(std::io::stdout(), t0));
+        // soldr#3929: whole records only, so a cache-state line written
+        // from another thread can never splice into a relayed test line.
+        let mut terminal: Box<dyn Write> = match stamp_from {
+            Some(t0) => Box::new(timestamp_tee::TimestampedTee::new(
+                line_relay::LineAtomicWriter::new(std::io::stdout()),
+                t0,
+            )),
+            None => Box::new(line_relay::LineAtomicWriter::new(std::io::stdout())),
+        };
         let mut chunk = [0u8; 8192];
         loop {
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
                     let bytes = chunk[..n].to_vec();
-                    match stamped.as_mut() {
-                        Some(tee) => {
-                            let _ = tee.write_all(&bytes);
-                            let _ = tee.flush();
-                        }
-                        None => {
-                            let _ = std::io::stdout().lock().write_all(&bytes);
-                        }
-                    }
+                    let _ = terminal.write_all(&bytes);
+                    let _ = terminal.flush();
                     let _ = tx.send(CapturePipeMessage::Chunk(bytes));
                 }
                 Err(_) => break,
             }
         }
-        let _ = std::io::stdout().lock().flush();
+        let _ = terminal.flush();
+        // Dropping releases the partial last record before EOF is signalled.
+        drop(terminal);
         let _ = tx.send(CapturePipeMessage::Eof);
     });
     rx
@@ -536,9 +538,13 @@ where
         // channel — the diagnostic scanner matches cargo's exact bytes.
         // The terminal copy also drops cargo's cold-tree fingerprint
         // records (see `fingerprint_noise`); the raw copy keeps them.
+        // soldr#3929: whole records only (see `line_relay`).
         let terminal: Box<dyn Write> = match stamp_from {
-            Some(t0) => Box::new(timestamp_tee::TimestampedTee::new(std::io::stderr(), t0)),
-            None => Box::new(std::io::stderr()),
+            Some(t0) => Box::new(timestamp_tee::TimestampedTee::new(
+                line_relay::LineAtomicWriter::new(std::io::stderr()),
+                t0,
+            )),
+            None => Box::new(line_relay::LineAtomicWriter::new(std::io::stderr())),
         };
         let mut terminal = fingerprint_noise::FingerprintNoiseFilter::new(terminal);
         let mut chunk = [0u8; 8192];
@@ -555,6 +561,8 @@ where
             }
         }
         let _ = terminal.finish();
+        // Dropping releases the line writer's partial record before EOF.
+        drop(terminal);
         let _ = tx.send(CapturePipeMessage::Eof);
     });
     rx

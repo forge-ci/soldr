@@ -54,6 +54,7 @@ mod inputs;
 mod install_notice;
 mod job_budget;
 mod line_endings;
+pub(crate) mod line_relay; // soldr#3929
 mod lockfile_proof;
 mod log_summary;
 mod nested_cargo;
