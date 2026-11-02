@@ -189,6 +189,19 @@ def run(
     per-phase bounds below are sized from.
     """
 
+    # Captured output only reaches the log when the child exits. If the hosted
+    # runner is lost mid-probe (run 41511076191: "The hosted runner lost
+    # communication with the server"), nothing is printed at all, so name each
+    # phase as it starts and ends, flushed, so the live log shows where it died.
+    label = " ".join(command)
+    started = time.monotonic()
+    print(f"[smoke] start: {label} (timeout {timeout}s)", flush=True)
+    creationflags = 0
+    if sys.platform == "win32":
+        # A cold Dylint build saturates every core of the 4-vCPU hosted
+        # Windows runner; below-normal priority keeps the runner agent able to
+        # heartbeat instead of being starved into a lost-communication failure.
+        creationflags = subprocess.BELOW_NORMAL_PRIORITY_CLASS
     try:
         completed = run_captured(
             command,
@@ -198,6 +211,7 @@ def run(
             capture_output=True,
             check=False,
             timeout=timeout,
+            creationflags=creationflags,
         )
     except subprocess.TimeoutExpired as exc:
         output = "\n".join(
@@ -220,6 +234,11 @@ def run(
             f"published Dylint probe timed out after {timeout}s "
             f"({' '.join(command)}):\n{output or 'no output'}"
         ) from exc
+    print(
+        f"[smoke] end: {label} exit={completed.returncode} "
+        f"after {time.monotonic() - started:.0f}s",
+        flush=True,
+    )
     if completed.returncode:
         output = "\n".join(
             part
