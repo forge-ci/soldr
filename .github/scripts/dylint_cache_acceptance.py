@@ -406,10 +406,14 @@ hash_libraries() {
 # Keep target directories beneath their worktree roots. zccache deliberately
 # normalizes paths inside each root; arbitrary external target directories
 # are distinct user-selected paths and therefore are not cross-worktree keys.
+run_case cold /tmp/dylint-acceptance/a /tmp/dylint-acceptance/a/target
+# The symbol smoke is killed after a few seconds by design. Run it only once
+# the cold case has fully acquired the pinned toolchain: killing the first
+# soldr invocation interrupted `rustup toolchain install`, leaving a nightly
+# with no channel manifest that every later case then failed on.
 if [[ "$MODE" == "full" ]]; then
   run_symbolized_watchdog_smoke
 fi
-run_case cold /tmp/dylint-acceptance/a /tmp/dylint-acceptance/a/target
 hash_libraries cold /tmp/dylint-acceptance/a/target
 if [[ "$MODE" == "sibling-diagnostic" ]]; then
   run_case sibling_worktree /tmp/dylint-acceptance/b /tmp/dylint-acceptance/b/target

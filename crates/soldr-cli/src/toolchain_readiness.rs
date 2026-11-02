@@ -227,6 +227,81 @@ pub(crate) fn ensure_pinned_toolchain_installed() -> Result<(), SoldrError> {
     }
 }
 
+/// Whether a toolchain `rustup toolchain list` reports as installed is really
+/// a partial tree that must be reinstalled before components can be added.
+///
+/// `rustup toolchain list` reports any directory under `toolchains/`, including
+/// one left behind by an interrupted `rustup toolchain install`. That tree has no
+/// channel manifest, so a later `rustup component add` fails with "missing
+/// manifest in toolchain" instead of repairing it. Only rustup's own copies
+/// (real directories) are checked: a `rustup toolchain link` entry is a symlink
+/// and never has a channel manifest. A missing host std alone is left to
+/// `toolchain_std_libs::repair_missing_std_libs`.
+///
+/// Caller-selected `RUSTUP_HOME` state is never removed automatically; that case
+/// is an error naming the directory and the recovery commands.
+pub(crate) fn listed_toolchain_needs_reinstall(
+    rustup_home: &Path,
+    toolchain_name: &str,
+    caller_selected_home: bool,
+) -> Result<bool, SoldrError> {
+    let directory = rustup_home.join("toolchains").join(toolchain_name);
+    let is_real_dir = std::fs::symlink_metadata(&directory).is_ok_and(|meta| meta.is_dir());
+    if !is_real_dir {
+        return Ok(false);
+    }
+    let missing = MissingToolchainEvidence {
+        channel_manifest: !directory.join(TOOLCHAIN_CHANNEL_MANIFEST).is_file(),
+        native_rustc: !native_rustc_path(&directory).is_file(),
+        host_std: false,
+    };
+    if !missing.channel_manifest && !missing.native_rustc {
+        return Ok(false);
+    }
+    if caller_selected_home {
+        return Err(shared_home_partial_toolchain_error(
+            toolchain_name,
+            &directory,
+            missing,
+        ));
+    }
+    Ok(true)
+}
+
+/// `rustup toolchain list` also lists a tree left by an
+/// interrupted install. Trusting it skipped the install and sent
+/// `rustup component add` into a toolchain with no channel manifest. A
+/// partial tree in soldr's managed home is uninstalled so the caller installs
+/// it again; one in a caller-selected `RUSTUP_HOME` is reported, not removed.
+pub(crate) fn discard_partial_listed(
+    installed_name: Option<String>,
+) -> Result<Option<String>, SoldrError> {
+    let Some(name) = installed_name else {
+        return Ok(None);
+    };
+    let Some(rustup_home) = crate::toolchain::effective_rustup_home() else {
+        return Ok(Some(name));
+    };
+    let caller_selected =
+        std::env::var_os(crate::core::RUSTUP_HOME_ENV_VAR).is_some_and(|home| !home.is_empty());
+    if !listed_toolchain_needs_reinstall(&rustup_home, &name, caller_selected)? {
+        return Ok(Some(name));
+    }
+    eprintln!(
+        "soldr: toolchain {name} is partially installed (an earlier install was \
+         interrupted); reinstalling it"
+    );
+    let mut command = std::process::Command::new(crate::rustup_binary());
+    command.args(["toolchain", "uninstall", &name]);
+    crate::apply_implicit_toolchain_homes(&mut command);
+    crate::core::suppress_windows_console_window(&mut command);
+    crate::toolchain::run_toolchain_command(
+        &mut command,
+        &format!("rustup toolchain uninstall {name}"),
+    )?;
+    Ok(None)
+}
+
 fn shared_home_partial_toolchain_error(
     channel: &str,
     directory: &Path,

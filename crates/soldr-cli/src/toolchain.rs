@@ -814,6 +814,7 @@ pub(crate) fn ensure_cargo_toolchain(explicit_channel: Option<&str>) -> Result<(
     let installed_name = crate::core::command_output_with_timeout(&mut list, "toolchain list")
         .ok()
         .and_then(|output| installed_toolchain_name(&output.stdout, channel));
+    let installed_name = crate::toolchain_readiness::discard_partial_listed(installed_name)?;
     if installed_name.is_none() {
         crate::system_toolchain_pin::with_mismatch_note(channel, || {
             match rustup_toolchain_install_with_profile(channel, manifest.profile.as_deref())? {
