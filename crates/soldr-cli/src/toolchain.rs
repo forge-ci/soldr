@@ -880,8 +880,8 @@ fn discard_partial_listed_toolchain(
     let Some(rustup_home) = effective_rustup_home() else {
         return Ok(Some(name));
     };
-    let caller_selected = std::env::var_os(crate::core::RUSTUP_HOME_ENV_VAR)
-        .is_some_and(|home| !home.is_empty());
+    let caller_selected =
+        std::env::var_os(crate::core::RUSTUP_HOME_ENV_VAR).is_some_and(|home| !home.is_empty());
     if !crate::toolchain_readiness::listed_toolchain_needs_reinstall(
         &rustup_home,
         &name,
