@@ -1,7 +1,0 @@
-{
-  "git": {
-    "sha1": "61b4233bb75e41f4d4212a7790019765c0e1d941",
-    "dirty": true
-  },
-  "path_in_vcs": "crates/zccache"
-}

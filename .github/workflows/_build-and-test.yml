@@ -195,7 +195,7 @@ jobs:
       # on every run, a 139 s step. tests/test_bootstrap_zccache_pin.py fails
       # when Cargo.toml's zccache pin moves without this declaration.
       # bootstrap-embeds-zccache: 1.15.0
-      # bootstrap-zccache-pending: 1.15.5
+      # bootstrap-zccache-pending: 1.15.12
       - name: Setup pinned soldr toolchain
         uses: zackees/setup-soldr@35b5765c99cf392c259e684daeda10a950f72fff
         with:

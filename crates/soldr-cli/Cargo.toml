@@ -24,7 +24,7 @@ publish = false
 # exactly one mimalloc in the binary and the dependency ownership lives with
 # the embedded crate that hosts the daemon. See `crates/soldr-cli/src/lib.rs`
 # for the `#[global_allocator]` declaration.
-running-process = { version = "=4.10.16", default-features = false, features = ["client", "client-async"] }
+running-process = { version = "=4.10.20", default-features = false, features = ["client", "client-async"] }
 soldr-cache = { path = "../soldr-cache" }
 soldr-daemon = { path = "../soldr-daemon" }
 soldr-core = { path = "../soldr-core" }
