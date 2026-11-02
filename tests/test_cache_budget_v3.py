@@ -42,9 +42,7 @@ def write_listing(tmp_path: Path, entries: list[dict]) -> Path:
 
 # The exact key that turned merge-group run 41474544217 red: zackees/setup-soldr
 # moved to buildcache-v3 (setup-soldr#625) while soldr registered only v2.
-LIVE_V3_KEY = (
-    "setup-soldr-buildcache-v3-linux-x64-757e4514c0b6b6ed-12872e99232c5faf-sdbbf770dacb4d26f"
-)
+LIVE_V3_KEY = "setup-soldr-buildcache-v3-linux-x64-757e4514c0b6b6ed-12872e99232c5faf-sdbbf770dacb4d26f"
 
 
 @pytest.mark.parametrize(
