@@ -15,6 +15,10 @@ struct FrontDoorBuildSession {
     compile_journal_start_len: u64,
     compile_fallback_cursor: crate::compile_dispatch::CompileFallbackCursor,
     cache_state_tail: Option<cache_states::CacheStateTail>,
+    /// Where a `--porcelain` run's per-unit cache annotations went instead of
+    /// stderr. `None` for a default run (its annotations streamed live) and for
+    /// a run with no cache session.
+    cache_aux: Option<cache_annotations::DeferredCacheLines>,
 }
 
 impl FrontDoorBuildSession {
@@ -57,12 +61,18 @@ impl FrontDoorBuildSession {
         let compile_fallback_cursor =
             crate::compile_dispatch::compile_daemon_fallback_cursor(paths);
         // soldr#2302: live per-unit HIT/MISS annotations (no-op for a --no-cache run).
-        let cache_state_tail = cache_states::start_tail(
+        // Under --porcelain they are deferred into the durable run log rather
+        // than printed: the caller asked for one JSON line and its counts.
+        let (cache_state_tail, cache_aux) = match cache_states::start_tail(
             &prepared.cache_plan,
             paths,
             compile_journal_start_len,
             &prepared.args,
-        );
+            prepared.porcelain,
+        ) {
+            Some(started) => (started.tail, started.deferred),
+            None => (None, None),
+        };
         Ok(Self {
             session_id,
             started_at_ms,
@@ -73,6 +83,7 @@ impl FrontDoorBuildSession {
             compile_journal_start_len,
             compile_fallback_cursor,
             cache_state_tail,
+            cache_aux,
         })
     }
 
@@ -286,6 +297,11 @@ fn handle_aborted_cargo_run(
         let message = augmented.to_string();
         let failure_log =
             porcelain::write_failure_log(paths, &porcelain::command_string(args), &message);
+        // The tail was already stopped, so these annotations are complete; a
+        // run that aborted must not lose them just because it has no capture
+        // log to append to.
+        let deferred = session.cache_aux.take().map(|aux| aux.drain());
+        porcelain::append_deferred_annotations_to(failure_log.as_deref(), deferred.as_ref());
         porcelain::emit(&porcelain::report_for_failure(
             &porcelain::command_string(args),
             porcelain::FAILURE_EXIT_CODE,
@@ -294,6 +310,20 @@ fn handle_aborted_cargo_run(
         ));
     }
     Err(augmented)
+}
+
+/// Append the annotations a `--porcelain` run deferred from stderr to its
+/// durable log, returning how many moved.
+///
+/// run.rs stops the tail as soon as cargo exits, so the buffer is complete by
+/// the time this runs. Keeping the move here rather than inline leaves
+/// `complete_cargo_run` inside clippy's `too_many_lines` ceiling.
+fn append_deferred_annotations(
+    porcelain_log: Option<&porcelain::PorcelainLogArtifact>,
+    session: &mut FrontDoorBuildSession,
+) -> usize {
+    let deferred = session.cache_aux.take().map(|aux| aux.drain());
+    porcelain::append_deferred_annotations(porcelain_log, deferred.as_ref())
 }
 
 /// Report a signal-terminated child before the exit code loses the signal
@@ -327,6 +357,8 @@ fn complete_cargo_run(
 ) -> Result<i32, SoldrError> {
     let paths = &prepared.paths;
     warn_on_signal_termination(&status);
+    // Before the report is built, so the log and the count agree.
+    let deferred_cache_lines = append_deferred_annotations(porcelain_log.as_ref(), &mut session);
     let captured_stderr_for_diagnosis = diagnostic_capture;
     crate::verdict::gate::note_output(captured_stderr_for_diagnosis.as_deref());
     let compile_fallback_log =
@@ -342,6 +374,7 @@ fn complete_cargo_run(
         &status,
         effective_exit_code,
         captured_stderr_for_diagnosis.as_deref(),
+        deferred_cache_lines,
     );
 
     // Phase 2: send BuildSessionEnd before the success/failure
