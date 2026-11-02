@@ -19,17 +19,16 @@ ordinary CI noise. (The old `verify_vendor_state.py` gate did not cover it
 either -- it only enforced discipline while vendoring was active, so it was
 inert after soldr#2837 and was deleted as such in soldr#3324.)
 
-zccache#1955 brought zccache back into the tree on purpose, but in a different
-shape: `_vender/zccache` is the *published amalgamated* crate (one package),
-wired through `[patch.crates-io]`, so soldr's tests exercise and can fix the
-exact compiler-cache code it ships. The 19 internal `zccache-*` packages must
-stay out of the graph, and running-process stays a registry dependency; the
-`VENDORED_AMALGAMATIONS` checks below pin that.
+zccache#1955 later brought zccache back as a `[patch.crates-io]` path to its
+vendored amalgamation. That was retired when soldr ingested the published
+zccache 1.15.11: cargo strips `[patch]` from a published package, so the patch
+meant soldr built and tested code its consumers never received. zccache is
+therefore held to the same registry-only rule as running-process, and
+`test_no_vendored_zccache_tree_remains` keeps the vendored tree from returning.
 
 The checks are deliberately specific to these two dependency families.
-`[patch.crates-io]` is still legitimately used for `notify` and
-`filetime_creation` (soldr#2406), and `_vender/` still holds the cap-std
-family, so a blanket "no path deps" rule would be wrong.
+`[patch.crates-io]` is still used for `notify`, `filetime_creation`, `winx`
+and the cap-std family (soldr#2406), and `_vender/` still holds them, so a blanket "no path deps" rule would be wrong.
 """
 
 from __future__ import annotations
@@ -45,15 +44,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # `running-process-platform-internal`, ...) are covered without listing all 22.
 EXTERNALIZED = ("zccache", "running-process")
 
-# zccache#1955: crates vendored as their single published amalgamation. Each maps
-# the package name to the only `_vender/` path it may resolve from.
-VENDORED_AMALGAMATIONS = {"zccache": "_vender/zccache"}
-
 
 def is_externalized(name: str) -> bool:
-    return name not in VENDORED_AMALGAMATIONS and any(
-        family in name for family in EXTERNALIZED
-    )
+    return any(family in name for family in EXTERNALIZED)
 
 
 def workspace_manifests() -> list[Path]:
@@ -197,14 +190,7 @@ def test_no_manifest_declares_a_path_dependency_on_them() -> None:
         for dep in dependency_specs(text):
             if "path" not in dep.spec:
                 continue
-            externalized_into_vender = (
-                is_externalized(dep.name) and "_vender" in dep.spec
-            )
-            amalgamation_off_its_vendor_path = (
-                dep.name in VENDORED_AMALGAMATIONS
-                and f'"{VENDORED_AMALGAMATIONS[dep.name]}"' not in dep.spec
-            )
-            if externalized_into_vender or amalgamation_off_its_vendor_path:
+            if is_externalized(dep.name):
                 offenders.append(f"{manifest.relative_to(REPO_ROOT)}: {dep.spec}")
     assert not offenders, "path dependencies reintroduced (soldr#2835):\n" + "\n".join(
         offenders
@@ -226,10 +212,7 @@ def test_no_patch_redirects_them_into_the_tree() -> None:
             if not in_patch or stripped.startswith("#") or "=" not in stripped:
                 continue
             name = stripped.split("=", 1)[0].strip()
-            if is_externalized(name) or (
-                name in VENDORED_AMALGAMATIONS
-                and f'"{VENDORED_AMALGAMATIONS[name]}"' not in stripped
-            ):
+            if is_externalized(name):
                 offenders.append(f"{manifest.relative_to(REPO_ROOT)}: {stripped}")
     assert not offenders, (
         "patched back to a local checkout (soldr#2835):\n" + "\n".join(offenders)
@@ -254,29 +237,21 @@ def test_no_submodule_is_declared_for_them() -> None:
     assert not offenders, f"submodule gitlink reintroduced (soldr#2835): {offenders}"
 
 
-# -------------------------- vendored amalgamations ---------------------------
+# ------------------------------ retired vendor -------------------------------
 
 
-def test_vendored_amalgamation_is_one_local_package() -> None:
-    """zccache#1955: `_vender/zccache` is the published single-crate amalgamation.
+def test_no_vendored_zccache_tree_remains() -> None:
+    """The published zccache is the only zccache soldr builds.
 
-    The regression this guards is the pre-#2837 shape: the upstream workspace's
-    internal `zccache-*` crates returning as local path units. Exactly the one
-    amalgamated package may be local, and it must be the vendored copy.
+    A `_vender/zccache` tree is how a local-only fix gets carried again: it
+    compiles, every soldr test passes against it, and the published soldr
+    ships the registry crate without it. Fixes go to zccache and are
+    published; soldr bumps the pin.
     """
-    packages = locked_packages()
-    for name, vendored_path in VENDORED_AMALGAMATIONS.items():
-        matching = [pkg for pkg in packages if pkg.name == name]
-        assert len(matching) == 1, f"expected exactly one {name} package: {matching}"
-        assert matching[0].source is None, (
-            f"{name} must resolve to {vendored_path}, found {matching[0].source}"
-        )
-        assert (REPO_ROOT / vendored_path / "Cargo.toml").is_file()
-        internal = sorted(
-            pkg.name
-            for pkg in packages
-            if pkg.name != name and pkg.name.startswith(f"{name}-")
-        )
-        assert not internal, (
-            f"{name}'s internal workspace crates are back in the graph: {internal}"
-        )
+    assert not (REPO_ROOT / "_vender" / "zccache").exists()
+    zccache = [pkg for pkg in locked_packages() if pkg.name == "zccache"]
+    assert len(zccache) == 1, f"expected exactly one zccache package: {zccache}"
+    internal = sorted(
+        pkg.name for pkg in locked_packages() if pkg.name.startswith("zccache-")
+    )
+    assert not internal, f"zccache's internal workspace crates are back: {internal}"

@@ -607,6 +607,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dispatch2"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
+dependencies = [
+ "bitflags 2.13.1",
+ "objc2",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1306,9 +1316,9 @@ dependencies = [
 
 [[package]]
 name = "kernal-api"
-version = "0.1.26"
+version = "0.1.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f18d3cbb9bd8f6a590cf9b5a75297c542786fcef93bb3ff7245eb8f8b1b09561"
+checksum = "12e468c71f4b47168e9897f04c3ef23c863aad335d0a387888b44873a6f2428d"
 dependencies = [
  "blake3",
  "crash-handler",
@@ -1325,7 +1335,7 @@ dependencies = [
  "object",
  "reflink-copy",
  "running-process",
- "sysinfo",
+ "sysinfo 0.30.13",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1559,9 +1569,9 @@ dependencies = [
 
 [[package]]
 name = "mimalloc-pprof"
-version = "0.9.4"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f51af22471c0f8e22c9d9413bf4d3cec756ad6ee02179a923b346fcef74af670"
+checksum = "d26c55d67571b57373a078262cb6efb4f8a2ff0719157c452217e604c6bd7306"
 dependencies = [
  "cc",
 ]
@@ -1684,6 +1694,63 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "objc2"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08849bbd4767dfae9457696856ae1c84fe4e0281bbe4a7abff2d0e06fb7981f8"
+dependencies = [
+ "objc2-encode",
+]
+
+[[package]]
+name = "objc2-core-foundation"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536"
+dependencies = [
+ "bitflags 2.13.1",
+ "dispatch2",
+ "objc2",
+]
+
+[[package]]
+name = "objc2-encode"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef25abbcd74fb2609453eb695bd2f860d389e457f67dc17cafc8b8cbc89d0c33"
+
+[[package]]
+name = "objc2-foundation"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
+dependencies = [
+ "bitflags 2.13.1",
+ "objc2",
+]
+
+[[package]]
+name = "objc2-io-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33fafba39597d6dc1fb709123dfa8289d39406734be322956a69f0931c73bb15"
+dependencies = [
+ "libc",
+ "objc2-core-foundation",
+]
+
+[[package]]
+name = "objc2-open-directory"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb82bed227edf5201dfedf072bba4015a33d3d4a98519837295a90f0a23f676d"
+dependencies = [
+ "objc2",
+ "objc2-core-foundation",
+ "objc2-foundation",
 ]
 
 [[package]]
@@ -2225,9 +2292,9 @@ dependencies = [
 
 [[package]]
 name = "running-process"
-version = "4.10.16"
+version = "4.10.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c040ca81d60235a6027ef3115629049829464758e1011500902c8a2355727812"
+checksum = "5bd593727c580946bd825f06916220d6ece7d9f055d2b056afa195ccc44a9f88"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2245,7 +2312,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "sysinfo",
+ "sysinfo 0.30.13",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -2256,16 +2323,16 @@ dependencies = [
 
 [[package]]
 name = "running-process-platform-internal"
-version = "4.10.16"
+version = "4.10.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ef39418f8c71399ea811c5daba36f2325516cc02c3b2169473400411941ed5f"
+checksum = "85698b355d15e56fc9a7f072902c008207e4ce2d060f1708639b9dcc48d2f9d6"
 dependencies = [
  "blake3",
  "dirs",
  "interprocess",
  "libc",
  "miniz_oxide",
- "sysinfo",
+ "sysinfo 0.39.6",
  "thiserror",
  "tokio",
  "widestring",
@@ -2275,9 +2342,9 @@ dependencies = [
 
 [[package]]
 name = "running-process-protocol"
-version = "4.10.16"
+version = "4.10.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c51894dfa970ac24213066f37b33656fd92c7053ef3e94f184b70000d8cf48f7"
+checksum = "79437cf615e5f2012b818eadddd9b95ff4a23aa43ff64a74379d76e7b1a5f564"
 dependencies = [
  "prost",
  "prost-build",
@@ -2580,7 +2647,7 @@ dependencies = [
  "soldr-fetch",
  "soldr-platform",
  "strsim",
- "sysinfo",
+ "sysinfo 0.30.13",
  "tar",
  "tempfile",
  "thiserror",
@@ -2803,6 +2870,21 @@ dependencies = [
  "once_cell",
  "rayon",
  "windows 0.52.0",
+]
+
+[[package]]
+name = "sysinfo"
+version = "0.39.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2071df9448915b71c4fe6d25deaf1c22f12bd234f01540b77312bb8e41361e6"
+dependencies = [
+ "libc",
+ "memchr",
+ "ntapi",
+ "objc2-core-foundation",
+ "objc2-io-kit",
+ "objc2-open-directory",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -3722,7 +3804,9 @@ dependencies = [
 
 [[package]]
 name = "zccache"
-version = "1.15.5"
+version = "1.15.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9037862453b3f362dafd096f682226d2fb0e3b691b3d3674eb3704e4a2b6fc4c"
 dependencies = [
  "arc-swap",
  "bincode",
@@ -3743,6 +3827,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "strum",
  "tar",
  "tempfile",
  "thiserror",

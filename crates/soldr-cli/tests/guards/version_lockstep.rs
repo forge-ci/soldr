@@ -376,7 +376,7 @@ fn externalized_dependencies_are_exact_and_consistent() {
         .expect("root [workspace.dependencies] must pin zccache");
     assert_eq!(
         extract_dependency_version(&workspace_line).as_deref(),
-        Some("=1.15.5"),
+        Some("=1.15.11"),
         "the workspace must pin the exact released zccache version"
     );
     assert!(
@@ -397,10 +397,10 @@ fn externalized_dependencies_are_exact_and_consistent() {
     }
 
     for (dependency, version, manifests) in [
-        ("zccache", "1.15.5", &[][..]),
+        ("zccache", "1.15.11", &[][..]),
         (
             "running-process",
-            "4.10.16",
+            "4.10.20",
             &[
                 "crates/soldr-cli/Cargo.toml",
                 "crates/soldr-daemon/Cargo.toml",
@@ -409,7 +409,7 @@ fn externalized_dependencies_are_exact_and_consistent() {
         ),
         (
             "kernal-api",
-            "0.1.26",
+            "0.1.33",
             &["crates/soldr-platform/Cargo.toml"][..],
         ),
     ] {
