@@ -97,6 +97,7 @@ pub(crate) const SOLDR_BUILTIN_VERBS: &[&str] = &[
     "wheel",
     "cargo",
     "dylint",
+    "blaze", // C002 — local-dev JIT passthrough (Commands::Blaze)
     "cook",
     "lint",
     // soldr#3894 — verdict ledger inspection.

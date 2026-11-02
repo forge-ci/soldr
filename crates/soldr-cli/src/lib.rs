@@ -206,6 +206,7 @@ mod cwd_guard_tests {
 
 pub mod archive_cmd;
 pub mod binaries;
+pub mod blaze_cmd;
 /// soldr#1012 PR 5 — blessed cross-compile sysroot prep called from
 /// `Commands::Build` for canonical target triples. Coordinates the
 /// xwin-cache materialization + clang-shim install + env var setup.

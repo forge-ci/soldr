@@ -380,6 +380,22 @@ pub(crate) enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run a build/run/test/check through the `blaze` JIT daemon (local dev only)
+    ///
+    /// `soldr blaze <cargo-verb> [args...]` hands the invocation to `blaze`
+    /// instead of cargo. blaze is a local development accelerator and is
+    /// never the authority on whether the workspace compiles: its borrow
+    /// checker finds about two thirds of rustc's borrow errors and it builds
+    /// with its own pinned nightly, bypassing soldr's blessed toolchain.
+    /// This command therefore refuses to run in CI unless `--allow-ci` is
+    /// passed, and prints a one-line notice naming what it bypassed.
+    Blaze {
+        /// Pass this through to blaze's own invocation instead of refusing in CI
+        #[arg(long)]
+        allow_ci: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Prepare Dylint dependencies or run the Dylint extension
     Dylint {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
