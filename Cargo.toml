@@ -18,12 +18,12 @@ members = [
 # running-process were `_vender/` submodules with their own [workspace]
 # declarations, and each needed excluding so cargo would not fold its crates
 # into soldr's workspace and mis-version them. They are exact crates.io
-# dependencies now (`zccache = { version = "=1.15.11" }` in
+# dependencies now (`zccache = { version = "=1.15.12" }` in
 # `[workspace.dependencies]`, the single pin every member inherits;
 # `running-process = { version = "=4.10.20" }`), so there is no nested
 # workspace left to exclude. Neither has a `[patch]`: cargo strips `[patch]`
 # from a published package, so a patched zccache (zccache#1955 vendored one
-# until soldr ingested the published 1.15.11) meant soldr built and tested
+# until soldr ingested the published 1.15.12) meant soldr built and tested
 # code that no consumer of the published crate would get.
 #
 # `tests/test_externalized_dependency_sources.py` fails if a path dep, a
@@ -75,7 +75,7 @@ libraries = [{ path = "dylints/*" }]
 [workspace.dependencies]
 # The one zccache pin (soldr#3604): every member uses `workspace = true`.
 # `default-features = false` can only be set here; a member cannot re-disable it.
-zccache = { version = "=1.15.11", default-features = false }
+zccache = { version = "=1.15.12", default-features = false }
 cap-fs-ext = "3.4.4"
 cap-std = "3.4.4"
 tokio = { version = "1", features = ["full"] }

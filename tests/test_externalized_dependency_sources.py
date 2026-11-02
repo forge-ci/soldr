@@ -21,7 +21,7 @@ inert after soldr#2837 and was deleted as such in soldr#3324.)
 
 zccache#1955 later brought zccache back as a `[patch.crates-io]` path to its
 vendored amalgamation. That was retired when soldr ingested the published
-zccache 1.15.11: cargo strips `[patch]` from a published package, so the patch
+zccache 1.15.12: cargo strips `[patch]` from a published package, so the patch
 meant soldr built and tested code its consumers never received. zccache is
 therefore held to the same registry-only rule as running-process, and
 `test_no_vendored_zccache_tree_remains` keeps the vendored tree from returning.

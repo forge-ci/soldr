@@ -12,7 +12,7 @@
 //! every new checkout while re-runs in the same path hit.
 //!
 //! The fix lives in zccache (`DepGraph::best_equivalent_candidate`, published
-//! in zccache 1.15.11 via zccache#2034); this pins it from soldr's side.
+//! in zccache 1.15.12 via zccache#2034); this pins it from soldr's side.
 
 use std::path::Path;
 
