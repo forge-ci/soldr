@@ -210,25 +210,60 @@ fn cache_trim_target_dry_run_does_not_modify_disk() {
 }
 
 #[test]
-fn cache_trim_target_refuses_when_cargo_lock_present() {
-    let cache_root = unique_temp_dir("cache-trim-target-locked");
+fn cache_trim_target_ignores_a_stale_cargo_lock_file() {
+    let cache_root = unique_temp_dir("cache-trim-target-stale-lock");
     let target = cache_root.join("target");
     let parent = target.join("debug/deps");
     fs::create_dir_all(&parent).expect("create deps");
     let rlib = parent.join("libfoo-aaaaaaaaaaaaa.rlib");
     fs::write(&rlib, b"x").unwrap();
-    fs::write(target.join(".cargo-lock"), b"").unwrap();
+    // Cargo leaves this sentinel behind after every build. Its existence is
+    // not activity (cargo_lock.rs: "Existence alone is not activity"), so a
+    // finished build must not block the trim forever.
+    let lock = target.join(".cargo-lock");
+    fs::write(&lock, b"").unwrap();
 
     let output = Command::new(common::soldr_bin())
         .args(["cache", "trim-target"])
         .arg(&target)
         .args(["--profile", "ci", "--force"])
         .output()
-        .expect("failed to run soldr cache trim-target with lock");
+        .expect("failed to run soldr cache trim-target with a stale lock");
+
+    assert!(
+        output.status.success(),
+        "a stale .cargo-lock file must not be treated as an active build: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(rlib.exists(), "the newest artifact must be kept");
+    assert!(lock.exists(), "the sentinel file itself is never deleted");
+}
+
+#[test]
+fn cache_trim_target_refuses_when_cargo_lock_is_held() {
+    use std::fs::File;
+
+    let cache_root = unique_temp_dir("cache-trim-target-held-lock");
+    let target = cache_root.join("target");
+    let parent = target.join("debug/deps");
+    fs::create_dir_all(&parent).expect("create deps");
+    let rlib = parent.join("libfoo-bbbbbbbbbbbbb.rlib");
+    fs::write(&rlib, b"x").unwrap();
+    let lock = target.join(".cargo-lock");
+    fs::write(&lock, b"").unwrap();
+    let held = File::open(&lock).expect("open sentinel");
+    held.lock().expect("hold the sentinel lock");
+
+    let output = Command::new(common::soldr_bin())
+        .args(["cache", "trim-target"])
+        .arg(&target)
+        .args(["--profile", "ci", "--force"])
+        .output()
+        .expect("failed to run soldr cache trim-target with a held lock");
 
     assert!(
         !output.status.success(),
-        "cache trim-target must refuse when .cargo-lock is present"
+        "a held .cargo-lock must refuse the trim"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -238,8 +273,5 @@ fn cache_trim_target_refuses_when_cargo_lock_present() {
 
     // Nothing on disk should have been touched.
     assert!(rlib.exists(), "lock refusal must not delete anything");
-    assert!(
-        target.join(".cargo-lock").exists(),
-        "lock file must survive"
-    );
+    assert!(lock.exists(), "lock file must survive");
 }
