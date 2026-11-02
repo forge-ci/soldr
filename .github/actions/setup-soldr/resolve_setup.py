@@ -284,6 +284,12 @@ def main() -> None:
 
     # Build-artifact cache (Soldr-owned zccache compilation cache).
     # Key shape: setup-soldr-buildcache-v1-{os}-{arch}-{toolchain-digest}-{sha}.
+    # Deliberately v1, NOT a mirror of zackees/setup-soldr (which emits v3,
+    # setup-soldr#625). This is soldr's own repo-root composite action
+    # (action.yml); no soldr workflow uses it -- they pin zackees/setup-soldr --
+    # so its v1 keys land only in consumers' caches, never in soldr's, and
+    # ci/cache-ownership.json does not register v1. A soldr workflow adopting
+    # this action must register the v1 prefix in cache_families.VIA_PREFIXES.
     # Restore falls back through the same toolchain lineage and then any
     # OS+arch cache, letting GitHub's own-branch -> PR base -> default branch
     # restore order provide parent -> child lineage without user config.

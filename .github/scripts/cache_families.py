@@ -55,7 +55,12 @@ SIZE_UNITS = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3}
 # producer that bumps its prefix shows up as an unregistered key in the
 # budget verdict, loudly.
 VIA_PREFIXES: dict[str, tuple[str, ...]] = {
-    "setup-soldr:build-cache": ("setup-soldr-buildcache-v2-",),
+    # v3: zackees/setup-soldr#625 (live producer); v2 entries persist on main
+    # and must stay registered so lineage pruning keeps reclaiming them.
+    "setup-soldr:build-cache": (
+        "setup-soldr-buildcache-v3-",
+        "setup-soldr-buildcache-v2-",
+    ),
     "setup-soldr:cargo-registry": ("setup-soldr-cargoregistry-v1-",),
     "setup-soldr:cook": ("cook-base-v3-", "cook-base-v2-"),
     "setup-soldr:soldr-mini": ("soldr-mini-v2-",),
