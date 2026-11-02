@@ -814,7 +814,7 @@ pub(crate) fn ensure_cargo_toolchain(explicit_channel: Option<&str>) -> Result<(
     let installed_name = crate::core::command_output_with_timeout(&mut list, "toolchain list")
         .ok()
         .and_then(|output| installed_toolchain_name(&output.stdout, channel));
-    let installed_name = discard_partial_listed_toolchain(installed_name)?;
+    let installed_name = crate::toolchain_readiness::discard_partial_listed(installed_name)?;
     if installed_name.is_none() {
         crate::system_toolchain_pin::with_mismatch_note(channel, || {
             match rustup_toolchain_install_with_profile(channel, manifest.profile.as_deref())? {
@@ -864,41 +864,6 @@ pub(crate) fn ensure_cargo_toolchain(explicit_channel: Option<&str>) -> Result<(
         }
     }
     Ok(())
-}
-
-/// `rustup toolchain list` also lists a tree left by an
-/// interrupted install. Trusting it skipped the install and sent
-/// `rustup component add` into a toolchain with no channel manifest. A
-/// partial tree in soldr's managed home is uninstalled so the caller installs
-/// it again; one in a caller-selected `RUSTUP_HOME` is reported, not removed.
-fn discard_partial_listed_toolchain(
-    installed_name: Option<String>,
-) -> Result<Option<String>, SoldrError> {
-    let Some(name) = installed_name else {
-        return Ok(None);
-    };
-    let Some(rustup_home) = effective_rustup_home() else {
-        return Ok(Some(name));
-    };
-    let caller_selected =
-        std::env::var_os(crate::core::RUSTUP_HOME_ENV_VAR).is_some_and(|home| !home.is_empty());
-    if !crate::toolchain_readiness::listed_toolchain_needs_reinstall(
-        &rustup_home,
-        &name,
-        caller_selected,
-    )? {
-        return Ok(Some(name));
-    }
-    eprintln!(
-        "soldr: toolchain {name} is partially installed (an earlier install was \
-         interrupted); reinstalling it"
-    );
-    let mut command = std::process::Command::new(rustup_binary());
-    command.args(["toolchain", "uninstall", &name]);
-    apply_implicit_toolchain_homes(&mut command);
-    suppress_windows_console_window(&mut command);
-    run_toolchain_command(&mut command, &format!("rustup toolchain uninstall {name}"))?;
-    Ok(None)
 }
 
 pub(crate) use crate::toolchain_prepare::{run_prepare_inner, LinkerSummary, PrepareSummary};

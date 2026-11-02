@@ -268,6 +268,40 @@ pub(crate) fn listed_toolchain_needs_reinstall(
     Ok(true)
 }
 
+/// `rustup toolchain list` also lists a tree left by an
+/// interrupted install. Trusting it skipped the install and sent
+/// `rustup component add` into a toolchain with no channel manifest. A
+/// partial tree in soldr's managed home is uninstalled so the caller installs
+/// it again; one in a caller-selected `RUSTUP_HOME` is reported, not removed.
+pub(crate) fn discard_partial_listed(
+    installed_name: Option<String>,
+) -> Result<Option<String>, SoldrError> {
+    let Some(name) = installed_name else {
+        return Ok(None);
+    };
+    let Some(rustup_home) = crate::toolchain::effective_rustup_home() else {
+        return Ok(Some(name));
+    };
+    let caller_selected =
+        std::env::var_os(crate::core::RUSTUP_HOME_ENV_VAR).is_some_and(|home| !home.is_empty());
+    if !listed_toolchain_needs_reinstall(&rustup_home, &name, caller_selected)? {
+        return Ok(Some(name));
+    }
+    eprintln!(
+        "soldr: toolchain {name} is partially installed (an earlier install was \
+         interrupted); reinstalling it"
+    );
+    let mut command = std::process::Command::new(crate::rustup_binary());
+    command.args(["toolchain", "uninstall", &name]);
+    crate::apply_implicit_toolchain_homes(&mut command);
+    crate::core::suppress_windows_console_window(&mut command);
+    crate::toolchain::run_toolchain_command(
+        &mut command,
+        &format!("rustup toolchain uninstall {name}"),
+    )?;
+    Ok(None)
+}
+
 fn shared_home_partial_toolchain_error(
     channel: &str,
     directory: &Path,
