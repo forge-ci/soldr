@@ -358,9 +358,9 @@ def test_executor_contract_owns_every_3084_handoff_edge() -> None:
         "SOLDR_TARGET_WARN_FREE_GB": "1",
         "SOLDR_TARGET_BLOCK_FREE_GB": "1",
         "RUSTUP_TOOLCHAIN": "channel-from-toolchain-ensure",
-        "CARGO_HOME": "$HOME/.soldr/cargo",
-        "RUSTUP_HOME": "$HOME/.soldr/rustup",
-        "PATH": "$WORK/shims:$HOME/.soldr/cargo/bin:$PATH",
+        "CARGO_HOME": "$WORK/cargo-home",
+        "RUSTUP_HOME": "$WORK/rustup-home",
+        "PATH": "$WORK/shims:$WORK/cargo-home/bin:$PATH",
     }
     assert set(contract["required_share_files"]) == set(MODULE.REPLAY_SHARE_FILES)
     assert contract["capabilities"] == {
@@ -708,8 +708,7 @@ def test_guest_phase_timing_runs_under_posix_sh(tmp_path: Path) -> None:
     bin_dir.mkdir()
     date = bin_dir / "date"
     date.write_text(
-        '#!/bin/sh\nif [ -e "$DATE_STATE" ]; then echo 105; '
-        'else : > "$DATE_STATE"; echo 100; fi\n',
+        '#!/bin/sh\nif [ -e "$DATE_STATE" ]; then echo 105; else : > "$DATE_STATE"; echo 100; fi\n',
         encoding="utf-8",
     )
     date.chmod(0o755)
@@ -737,19 +736,70 @@ def test_guest_phase_timing_runs_under_posix_sh(tmp_path: Path) -> None:
     ]
 
 
-def test_toolchain_stage_exposes_the_bootstrapped_rustup() -> None:
+def test_toolchain_stage_exposes_the_bootstrapped_rustup(tmp_path: Path) -> None:
     """soldr#3846: the guest has no system rustup; after `toolchain ensure`
     the rustup soldr bootstrapped into its own root must be reachable by the
-    tests: its homes are exported after ensure, and its cargo/bin joins PATH
-    behind the shims once `toolchain link` succeeds."""
+    tests even after isolation strips PATH entries in the outer soldr root."""
     script = "\n".join(MODULE._stage_toolchain())
     ensure = script.index("toolchain ensure --json")
     homes = script.index("export CARGO_HOME RUSTUP_HOME")
     link = script.index("toolchain link --shim-dir")
-    path = script.index('PATH="$WORK/shims:$HOME/.soldr/cargo/bin:$PATH"')
+    path = script.index('PATH="$WORK/shims:$WORK/cargo-home/bin:$PATH"')
     assert ensure < homes < link < path
-    assert 'CARGO_HOME="$HOME/.soldr/cargo"' in script
-    assert 'RUSTUP_HOME="$HOME/.soldr/rustup"' in script
+    assert 'CARGO_HOME="$WORK/cargo-home"' in script
+    assert 'RUSTUP_HOME="$WORK/rustup-home"' in script
+
+    home = tmp_path / "home"
+    cargo_bin = home / ".soldr" / "cargo" / "bin"
+    cargo_bin.mkdir(parents=True)
+    (home / ".soldr" / "rustup").mkdir()
+    _stub(
+        cargo_bin,
+        "rustup",
+        '[ -d "$CARGO_HOME" ] && [ -d "$RUSTUP_HOME" ] || exit 1\n'
+        'printf "installed-toolchain\\n"\n',
+    )
+    soldr = tmp_path / "soldr"
+    _stub(
+        tmp_path,
+        "soldr",
+        'case "$2" in\n'
+        'ensure) echo \'{"channel":"1.98.1"}\' ;;\n'
+        'link) mkdir -p "$WORK/shims" ;;\n'
+        "esac\n",
+    )
+    (tmp_path / "workspace").mkdir()
+    isolated_home = tmp_path / "isolated-home"
+    isolated_home.mkdir()
+    guest = tmp_path / "toolchain-test.sh"
+    guest.write_text(
+        "stage_start() { :; }\nstage_end() { :; }\n"
+        'record() { [ "$2" != fail ] || exit 1; }\n'
+        "EXTRACT_WORKSPACE_OK=0\n"
+        + script
+        # Model the wrapper removing the outer soldr root from PATH and
+        # changing HOME. Homes remain explicit, as in the real guest.
+        + '\n[ "$TOOLCHAIN_LINK_OK" -eq 0 ] || exit 1\n'
+        + 'case "$CARGO_HOME:$RUSTUP_HOME" in *"$HOME/.soldr"*) exit 1 ;; esac\n'
+        + 'PATH="$WORK/shims:$WORK/cargo-home/bin"\n'
+        + 'HOME="$WORK/isolated-home"\n'
+        + "export HOME PATH SOLDR_TEST_FORBID_TOOLCHAIN_INSTALL=1\n"
+        + "rustup which rustc\n",
+        encoding="utf-8",
+    )
+    result = run_captured(
+        ["sh", str(guest)],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "WORK": str(tmp_path),
+            "SOLDR_BIN": str(soldr),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "installed-toolchain"
 
 
 def test_recovery_filter_drops_native_link_tests_only_in_the_guest() -> None:
