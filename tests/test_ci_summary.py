@@ -500,3 +500,86 @@ def test_summary_job_exposes_attempt_cancellation_and_can_cancel() -> None:
     assert "GITHUB_ENV" in flag["run"]
     assert run["if"] == "${{ success() || cancelled() }}"
     assert summary["permissions"]["actions"] == "write"
+
+
+@pytest.mark.parametrize("flag", ["", "true"])
+@pytest.mark.parametrize(
+    "bad", ["failure", "timed_out", "startup_failure", "action_required"]
+)
+def test_cancelled_selector_cannot_hide_failed_job(tmp_path, monkeypatch, flag, bad):
+    cli_environment(tmp_path, monkeypatch)
+    monkeypatch.setenv("CI_MODE", "")
+    monkeypatch.setenv("CI_ATTEMPT_CANCELLED", flag)
+    monkeypatch.setenv(
+        "CI_NEEDS_JSON",
+        json.dumps(
+            {
+                "ci-mode": {"result": "cancelled", "outputs": {}},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        SUMMARY,
+        "list_run_attempt_jobs",
+        lambda *_: [
+            _job("CI mode", "cancelled"),
+            _job("Required child", bad),
+        ],
+    )
+    monkeypatch.setattr(
+        SUMMARY, "force_cancel_run", lambda *_: pytest.fail("must not cancel")
+    )
+    assert SUMMARY.main() == 1
+
+
+def test_cancelled_selector_without_flag_concludes_cancelled(
+    tmp_path, monkeypatch, capsys
+):
+    report_path = cli_environment(tmp_path, monkeypatch)
+    monkeypatch.delenv("CI_ATTEMPT_CANCELLED", raising=False)
+    monkeypatch.setenv("CI_MODE", "")
+    monkeypatch.setenv(
+        "CI_NEEDS_JSON",
+        json.dumps(
+            {
+                "ci-mode": {"result": "cancelled", "outputs": {}},
+                "lint": {"result": "cancelled", "outputs": {}},
+            }
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(
+        SUMMARY,
+        "list_run_attempt_jobs",
+        lambda *args: calls.append(args)
+        or [
+            _job("CI mode", "cancelled"),
+            _job("Lint", "cancelled"),
+        ],
+    )
+    monkeypatch.setattr(SUMMARY, "force_cancel_run", lambda *_: None)
+
+    # Model GitHub terminating the process after accepting force-cancel.
+    def cancelled(_seconds):
+        raise SystemExit(130)
+
+    monkeypatch.setattr(SUMMARY.time, "sleep", cancelled)
+    with pytest.raises(SystemExit) as result:
+        SUMMARY.main()
+    assert result.value.code == 130
+    assert calls
+    assert "concluding cancelled" in capsys.readouterr().out
+    assert not report_path.exists()
+
+
+def test_failed_selector_with_empty_mode_still_fails(tmp_path, monkeypatch):
+    cli_environment(tmp_path, monkeypatch)
+    monkeypatch.setenv("CI_MODE", "")
+    monkeypatch.delenv("CI_ATTEMPT_CANCELLED", raising=False)
+    monkeypatch.setenv(
+        "CI_NEEDS_JSON", json.dumps({"ci-mode": {"result": "failure", "outputs": {}}})
+    )
+    monkeypatch.setattr(
+        SUMMARY, "force_cancel_run", lambda *_: pytest.fail("must not cancel")
+    )
+    assert SUMMARY.main() == 1
