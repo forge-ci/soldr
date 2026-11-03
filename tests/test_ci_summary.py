@@ -488,5 +488,15 @@ def test_summary_job_exposes_attempt_cancellation_and_can_cancel() -> None:
     summary = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"][
         "ci-summary"
     ]
-    assert summary["env"]["CI_ATTEMPT_CANCELLED"] == "${{ cancelled() }}"
+    # Status functions are invalid outside `if:`; an env use breaks the file.
+    assert "cancelled()" not in str(summary.get("env", {}))
+    flag, run = [
+        s
+        for s in summary["steps"]
+        if "CI_ATTEMPT_CANCELLED" in s.get("run", "")
+        or "ci_summary.py" in s.get("run", "")
+    ]
+    assert flag["if"] == "${{ cancelled() }}"
+    assert "GITHUB_ENV" in flag["run"]
+    assert run["if"] == "${{ success() || cancelled() }}"
     assert summary["permissions"]["actions"] == "write"

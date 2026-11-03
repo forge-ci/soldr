@@ -1320,7 +1320,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
-      CI_ATTEMPT_CANCELLED: ${{ cancelled() }}
       CI_NEEDS_JSON: ${{ toJSON(needs) }}
       CI_MODE: ${{ needs.ci-mode.outputs.mode }}
       CI_TRUSTED: ${{ needs.ci-mode.outputs.trusted }}
@@ -1339,7 +1338,13 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.13"
-      - run: python3 .github/scripts/ci_summary.py --adapter ci/summary-contract.json --full-contract ci/canonical-targets.json --report "$RUNNER_TEMP/ci-summary.json"
+      # Status functions such as cancelled() are only valid in `if:`, so a
+      # cancelled (superseded) attempt is flagged for ci_summary.py here.
+      - name: Flag a cancelled attempt
+        if: ${{ cancelled() }}
+        run: echo "CI_ATTEMPT_CANCELLED=true" >> "$GITHUB_ENV"
+      - if: ${{ success() || cancelled() }}
+        run: python3 .github/scripts/ci_summary.py --adapter ci/summary-contract.json --full-contract ci/canonical-targets.json --report "$RUNNER_TEMP/ci-summary.json"
       - name: Upload merge summary
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
