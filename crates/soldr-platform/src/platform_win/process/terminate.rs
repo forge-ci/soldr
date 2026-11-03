@@ -216,7 +216,14 @@ impl TrackedDescendant {
         // SAFETY: the handle came from `open_process` and is not used again.
         unsafe { windows_sys::Win32::Foundation::CloseHandle(terminate_handle) };
         if let Some(error) = terminate_error {
-            return Err(error);
+            // A descendant that exits on its own between the query above and
+            // TerminateProcess -- a `cmd.exe` whose awaited `ping` was just
+            // killed leaves-first -- makes TerminateProcess fail with
+            // ERROR_ACCESS_DENIED. The retained handle can still prove that
+            // exit; only an unproven failure weakens the result.
+            if !exited_despite_failed_terminate(self.created, self.times().ok()) {
+                return Err(error);
+            }
         }
         self.termination_requested = true;
         Ok(())
@@ -312,10 +319,27 @@ fn retain_snapshot(pids: &[u32], known: &mut Vec<TrackedDescendant>) -> Vec<u32>
                     known.push(tracked);
                 }
             }
+            Err(error) if open_failure_proves_gone(&error) => {}
             Err(_) => untracked.push(*pid),
         }
     }
     untracked
+}
+
+/// `OpenProcess` answers ERROR_INVALID_PARAMETER when no process holds the
+/// pid any more: the snapshot entry exited before it could be opened. That is
+/// the outcome termination wants, not an unverifiable descendant, and it
+/// leaves nothing to signal -- killing the bare pid could only hit a recycled
+/// one. Every other open failure (access denied, ...) stays untracked.
+fn open_failure_proves_gone(error: &io::Error) -> bool {
+    const ERROR_INVALID_PARAMETER: i32 = 87;
+    error.raw_os_error() == Some(ERROR_INVALID_PARAMETER)
+}
+
+/// A failed TerminateProcess still completes the request when the retained
+/// handle proves the same process has exited.
+fn exited_despite_failed_terminate(expected_created: u64, observed: Option<ProcessTimes>) -> bool {
+    completion_proven(expected_created, observed, true)
 }
 
 /// Preserve the old fresh-snapshot behaviour for a descendant that cannot be
@@ -447,14 +471,32 @@ fn descendants_of(root: u32) -> Option<Vec<u32>> {
     // after this point.
     unsafe { CloseHandle(snapshot) };
 
-    Some(collect_descendants(&edges, root))
+    // A parent edge is only trusted when the child was created no earlier
+    // than the process now holding the parent PID (see `collect_descendants`).
+    // Without the root's own creation time no edge can be proven, so the
+    // sweep reports itself unverified instead of guessing.
+    process_creation_token(root)?;
+    Some(collect_descendants(&edges, root, process_creation_token))
 }
 
 /// Breadth-first walk of `edges` from `root`, parents before children.
 ///
 /// Split out from the snapshot so the traversal -- including its cycle and
 /// self-parent guards -- is unit-testable on any host.
-fn collect_descendants(edges: &[(u32, u32)], root: u32) -> Vec<u32> {
+///
+/// Windows never rewrites `th32ParentProcessID` when a parent exits, and it
+/// recycles PIDs aggressively. An orphan whose dead parent's PID was reused by
+/// a process in our tree would otherwise be collected -- and terminated --
+/// as our descendant, even though it is unrelated. On the Windows arm64
+/// target-run lane this reached the test process itself, which died mid-test
+/// with no panic output while its own children leaked. A real child is always
+/// created at or after its parent, so an edge counts only when both creation
+/// times are known and the child's is not earlier than the parent's.
+fn collect_descendants(
+    edges: &[(u32, u32)],
+    root: u32,
+    created: impl Fn(u32) -> Option<u64>,
+) -> Vec<u32> {
     let mut ordered = Vec::new();
     let mut frontier = vec![root];
     // `seen` carries `root` from the start so a process reporting itself as its
@@ -463,8 +505,14 @@ fn collect_descendants(edges: &[(u32, u32)], root: u32) -> Vec<u32> {
     let mut seen = vec![root];
 
     while let Some(parent) = frontier.pop() {
+        let Some(parent_created) = created(parent) else {
+            continue;
+        };
         for (pid, ppid) in edges {
             if *ppid != parent || seen.contains(pid) {
+                continue;
+            }
+            if !created(*pid).is_some_and(|child| child >= parent_created) {
                 continue;
             }
             seen.push(*pid);

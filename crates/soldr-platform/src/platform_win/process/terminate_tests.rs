@@ -37,30 +37,60 @@ fn descendants_have_initialized_times(pids: &[u32]) -> bool {
         })
 }
 
+/// Fixture creation times: a lower PID was created earlier, so every edge in
+/// the shape tests below is a genuine parent -> child edge.
+fn in_pid_order(pid: u32) -> Option<u64> {
+    Some(u64::from(pid))
+}
+
+#[test]
+fn an_orphan_naming_a_recycled_parent_pid_is_not_collected() {
+    // 900 was created long ago by a parent that has since exited.
+    // That PID (300) was then recycled for a new child of the root. The stale
+    // edge 900 -> 300 must not make 900 (or its child 950) a descendant.
+    let edges = [(300, 100), (900, 300), (950, 900), (400, 300)];
+    let created = |pid| match pid {
+        100 => Some(10),
+        300 => Some(20),
+        400 => Some(30),
+        900 => Some(1),
+        950 => Some(2),
+        _ => None,
+    };
+    assert_eq!(collect_descendants(&edges, 100, created), vec![300, 400]);
+}
+
+#[test]
+fn an_edge_without_creation_times_is_not_trusted() {
+    let edges = [(200, 100), (300, 100)];
+    let created = |pid| (pid != 300).then_some(u64::from(pid));
+    assert_eq!(collect_descendants(&edges, 100, created), vec![200]);
+}
+
 #[test]
 fn descendants_are_ordered_parents_before_children() {
     // 100 -> 200 -> 300, plus an unrelated 400.
     let edges = [(200, 100), (300, 200), (400, 1)];
-    assert_eq!(collect_descendants(&edges, 100), vec![200, 300]);
+    assert_eq!(collect_descendants(&edges, 100, in_pid_order), vec![200, 300]);
 }
 
 #[test]
 fn unrelated_processes_are_never_collected() {
     let edges = [(200, 100), (400, 1), (500, 400)];
-    assert_eq!(collect_descendants(&edges, 100), vec![200]);
+    assert_eq!(collect_descendants(&edges, 100, in_pid_order), vec![200]);
 }
 
 #[test]
 fn a_leaf_root_has_no_descendants() {
     let edges = [(200, 100), (300, 200)];
-    assert!(collect_descendants(&edges, 300).is_empty());
+    assert!(collect_descendants(&edges, 300, in_pid_order).is_empty());
 }
 
 #[test]
 fn a_self_parenting_process_does_not_loop() {
     // Recycled pids can produce a self-edge; the walk must still finish.
     let edges = [(100, 100), (200, 100)];
-    assert_eq!(collect_descendants(&edges, 100), vec![200]);
+    assert_eq!(collect_descendants(&edges, 100, in_pid_order), vec![200]);
 }
 
 #[test]
@@ -68,7 +98,7 @@ fn a_cycle_back_to_the_root_does_not_loop() {
     // 100 -> 200 -> 300 -> 100. The root is pre-seeded as seen, so the edge
     // closing the cycle is ignored rather than revisited forever.
     let edges = [(200, 100), (300, 200), (100, 300)];
-    assert_eq!(collect_descendants(&edges, 100), vec![200, 300]);
+    assert_eq!(collect_descendants(&edges, 100, in_pid_order), vec![200, 300]);
 }
 
 /// Spawn `cmd -> ping` and return `(child, grandchild pids)` once the
@@ -395,4 +425,32 @@ fn pid_reuse_is_a_new_identity_even_with_the_same_pid() {
         exited: 0,
     };
     assert!(!completion_proven(original.created, Some(recycled), true));
+}
+
+/// leaves-first termination kills `ping`, and its waiting
+/// `cmd.exe` then exits by itself before its own TerminateProcess, which fails
+/// with ERROR_ACCESS_DENIED. A proven exit must not be reported as a failure.
+#[test]
+fn a_descendant_that_exits_before_terminate_still_completes() {
+    let exited = ProcessTimes {
+        created: 10,
+        exited: 99,
+    };
+    assert!(exited_despite_failed_terminate(10, Some(exited)));
+    let running = ProcessTimes {
+        created: 10,
+        exited: 0,
+    };
+    assert!(!exited_despite_failed_terminate(10, Some(running)));
+    assert!(!exited_despite_failed_terminate(10, None));
+    assert!(!exited_despite_failed_terminate(11, Some(exited)));
+}
+
+/// a snapshot entry that exited before OpenProcess is gone, not
+/// unverifiable; any other open failure still weakens the claim.
+#[test]
+fn a_vanished_snapshot_entry_is_gone_not_untracked() {
+    assert!(open_failure_proves_gone(&io::Error::from_raw_os_error(87)));
+    assert!(!open_failure_proves_gone(&io::Error::from_raw_os_error(5)));
+    assert!(!open_failure_proves_gone(&io::Error::other("query failed")));
 }
