@@ -291,9 +291,55 @@ def conclude_cancelled_attempt() -> int:
     return 1
 
 
+def cancelled_attempt_result(needs: JsonDocument) -> int | None:
+    """Recognize selector cancellation before validating its missing outputs.
+
+    A cancellation flag alone must never mask a failing required job, including
+    reusable-workflow children visible only in the attempt's complete API list.
+    """
+    selector = needs.get("ci-mode", {})
+    cancelled_selector = (
+        isinstance(selector, dict)
+        and selector.get("result") == "cancelled"
+        and selector.get("outputs") == {}
+        and not os.environ.get("CI_MODE", "")
+    )
+    if not cancelled_selector and os.environ.get("CI_ATTEMPT_CANCELLED") != "true":
+        return None
+    failures = [
+        f"job {name!r} concluded {value.get('result')}"
+        for name, value in needs.fields.items()
+        if value.get("result") not in (*_AUDIT_OK, "cancelled")
+    ]
+    try:
+        jobs = list_run_attempt_jobs(
+            os.environ.get("GITHUB_REPOSITORY", ""),
+            os.environ.get("GITHUB_RUN_ID", ""),
+            os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+            os.environ.get("GITHUB_TOKEN", ""),
+        )
+        # Only cancelled jobs are expected in a cancelled attempt. Preserve all
+        # other audit failures, including empty lists and unfinished jobs.
+        failures += run_attempt_failures(
+            [
+                (
+                    {**job, "conclusion": "skipped"}
+                    if job.get("conclusion") == "cancelled"
+                    else job
+                )
+                for job in jobs
+            ]
+        )
+    except (OSError, ValueError) as error:
+        failures.append(f"cannot list run attempt jobs: {error}")
+    if failures:
+        for failure in failures:
+            print(f"::error::CI summary failed: {failure}")
+        return 1
+    return conclude_cancelled_attempt()
+
+
 def main() -> int:
-    if os.environ.get("CI_ATTEMPT_CANCELLED", "") == "true":
-        return conclude_cancelled_attempt()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--adapter", type=Path, required=True)
     parser.add_argument("--full-contract", type=Path, required=True)
@@ -304,6 +350,9 @@ def main() -> int:
     adapter = JsonDocument(json.loads(adapter_raw))
     full = JsonDocument(json.loads(full_raw))
     needs = JsonDocument(json.loads(os.environ["CI_NEEDS_JSON"]))
+    cancelled = cancelled_attempt_result(needs)
+    if cancelled is not None:
+        return cancelled
     inputs: Selection = {
         "mode": os.environ.get("CI_MODE", ""),
         "docs_only": os.environ.get("DOCS_ONLY", "") == "true",
