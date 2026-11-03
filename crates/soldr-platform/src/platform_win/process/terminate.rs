@@ -216,7 +216,14 @@ impl TrackedDescendant {
         // SAFETY: the handle came from `open_process` and is not used again.
         unsafe { windows_sys::Win32::Foundation::CloseHandle(terminate_handle) };
         if let Some(error) = terminate_error {
-            return Err(error);
+            // A descendant that exits on its own between the query above and
+            // TerminateProcess -- a `cmd.exe` whose awaited `ping` was just
+            // killed leaves-first -- makes TerminateProcess fail with
+            // ERROR_ACCESS_DENIED. The retained handle can still prove that
+            // exit; only an unproven failure weakens the result.
+            if !exited_despite_failed_terminate(self.created, self.times().ok()) {
+                return Err(error);
+            }
         }
         self.termination_requested = true;
         Ok(())
@@ -312,10 +319,27 @@ fn retain_snapshot(pids: &[u32], known: &mut Vec<TrackedDescendant>) -> Vec<u32>
                     known.push(tracked);
                 }
             }
+            Err(error) if open_failure_proves_gone(&error) => {}
             Err(_) => untracked.push(*pid),
         }
     }
     untracked
+}
+
+/// `OpenProcess` answers ERROR_INVALID_PARAMETER when no process holds the
+/// pid any more: the snapshot entry exited before it could be opened. That is
+/// the outcome termination wants, not an unverifiable descendant, and it
+/// leaves nothing to signal -- killing the bare pid could only hit a recycled
+/// one. Every other open failure (access denied, ...) stays untracked.
+fn open_failure_proves_gone(error: &io::Error) -> bool {
+    const ERROR_INVALID_PARAMETER: i32 = 87;
+    error.raw_os_error() == Some(ERROR_INVALID_PARAMETER)
+}
+
+/// A failed TerminateProcess still completes the request when the retained
+/// handle proves the same process has exited.
+fn exited_despite_failed_terminate(expected_created: u64, observed: Option<ProcessTimes>) -> bool {
+    completion_proven(expected_created, observed, true)
 }
 
 /// Preserve the old fresh-snapshot behaviour for a descendant that cannot be

@@ -426,3 +426,31 @@ fn pid_reuse_is_a_new_identity_even_with_the_same_pid() {
     };
     assert!(!completion_proven(original.created, Some(recycled), true));
 }
+
+/// leaves-first termination kills `ping`, and its waiting
+/// `cmd.exe` then exits by itself before its own TerminateProcess, which fails
+/// with ERROR_ACCESS_DENIED. A proven exit must not be reported as a failure.
+#[test]
+fn a_descendant_that_exits_before_terminate_still_completes() {
+    let exited = ProcessTimes {
+        created: 10,
+        exited: 99,
+    };
+    assert!(exited_despite_failed_terminate(10, Some(exited)));
+    let running = ProcessTimes {
+        created: 10,
+        exited: 0,
+    };
+    assert!(!exited_despite_failed_terminate(10, Some(running)));
+    assert!(!exited_despite_failed_terminate(10, None));
+    assert!(!exited_despite_failed_terminate(11, Some(exited)));
+}
+
+/// a snapshot entry that exited before OpenProcess is gone, not
+/// unverifiable; any other open failure still weakens the claim.
+#[test]
+fn a_vanished_snapshot_entry_is_gone_not_untracked() {
+    assert!(open_failure_proves_gone(&io::Error::from_raw_os_error(87)));
+    assert!(!open_failure_proves_gone(&io::Error::from_raw_os_error(5)));
+    assert!(!open_failure_proves_gone(&io::Error::other("query failed")));
+}
