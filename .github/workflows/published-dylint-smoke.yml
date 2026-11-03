@@ -36,6 +36,7 @@ jobs:
         shell: bash
         env:
           EXPECTED_VERSION: ${{ inputs.expected_version }}
+          PYTHONUNBUFFERED: '1'
         run: >-
           uv run --no-project --python 3.13 ci/smoke_published_dylint.py
           --expected-version "$EXPECTED_VERSION"
