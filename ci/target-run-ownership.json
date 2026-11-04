@@ -114,7 +114,8 @@
         "cli_wrapper",
         "cli_wrapper_identity",
         "cold_first_compile",
-        "zccache_trampoline_gate"
+        "zccache_trampoline_gate",
+        "cli_wrapper_output_detach"
       ],
       "disposition": "target-replay",
       "reason": "These sources cross native executable, linker, compiler-wrapper, rustdoc, process-tree, shim, and binary-identity boundaries."
@@ -910,6 +911,20 @@
         "aarch64-unknown-linux-musl"
       ],
       "reason": "A dangling symlink inside a retired cache store is purged (the link, not its target) without pinning the store; exercises Unix link semantics (soldr#3365)."
+    },
+    {
+      "id": "wrapper-output-detach",
+      "source_id": "cargo-front-target-replay",
+      "test_prefix": "cli_wrapper_output_detach::",
+      "targets": [
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "reason": "Unix hardlink inode ownership and permissions must survive a direct real compiler overwrite without changing the protected cache blob."
     }
   ]
 }

@@ -122,6 +122,18 @@ pub fn assert_inherited_wrapper_coherent(boundary: &str) -> Result<(), SoldrErro
     }
 }
 
+/// Wrapper sources after validating the owned mirror and sanctioned chains.
+/// The mirror remains the effective wrapper when cargo-llvm-cov temporarily
+/// installs its own outer wrapper and chains back to the displaced image.
+pub(crate) fn coherent_wrapper_sources(boundary: &str) -> Result<Vec<OsString>, SoldrError> {
+    assert_inherited_wrapper_coherent(boundary)?;
+    Ok(std::env::var_os(EFFECTIVE_WRAPPER_ENV)
+        .or_else(|| std::env::var_os("RUSTC_WRAPPER"))
+        .into_iter()
+        .chain(std::env::var_os("RUSTC_WORKSPACE_WRAPPER"))
+        .collect())
+}
+
 /// Whether a mismatched `RUSTC_WRAPPER`/mirror pair is cargo-llvm-cov's
 /// sanctioned chained-wrapper protocol rather than drift (soldr#3504).
 ///

@@ -841,6 +841,7 @@ fn a_build_holding_the_root_lease_no_longer_starves_the_store_pass() {
             db_path: crate::cache_lib::data_db_path(&paths),
             compile_service: Arc::clone(&service),
             shutdown: Arc::new(ShutdownSignal::default()),
+            activity: MaintenanceActivity::default(),
         };
         let build = crate::cache_lib::build_active::BuildActivityLease::acquire(&paths, 7)
             .expect("build lease");
@@ -995,6 +996,7 @@ fn status_reports_retired_store_bytes() {
             db_path: crate::cache_lib::data_db_path(&paths),
             compile_service: Arc::clone(&service),
             shutdown: Arc::new(ShutdownSignal::default()),
+            activity: MaintenanceActivity::default(),
         };
 
         use fs2::FileExt as _;
@@ -1055,6 +1057,7 @@ fn deferred_full_pass_escapes_starvation_after_threshold() {
             db_path: crate::cache_lib::data_db_path(&paths),
             compile_service: Arc::clone(&service),
             shutdown: Arc::new(ShutdownSignal::default()),
+            activity: MaintenanceActivity::default(),
         };
         let build = crate::cache_lib::build_active::BuildActivityLease::acquire(&paths, 7)
             .expect("build lease");

@@ -479,6 +479,9 @@ pub struct WireStatusInfo {
     /// treat as unknown rather than idle.
     #[prost(uint32, optional, tag = "12")]
     pub in_flight_compiles: Option<u32>,
+    /// v26: absent on legacy daemons, which is unknown activity.
+    #[prost(bool, optional, tag = "13")]
+    pub maintenance_active: Option<bool>,
 }
 
 #[derive(Clone, PartialEq, Message)]

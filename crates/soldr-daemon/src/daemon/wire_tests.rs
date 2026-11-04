@@ -372,6 +372,7 @@ fn status_response_round_trips_with_cook_stats() {
         compile_jobs: 12,
         compile_jobs_source: "SOLDR_JOBS".to_string(),
         in_flight_compiles: Some(5),
+        maintenance_active: Some(false),
     };
     let resp = Response::Status(info.clone());
     let bytes = encode_response(&resp);
@@ -400,7 +401,16 @@ fn status_in_flight_count_distinguishes_absent_from_zero() {
         compile_jobs: 1,
         compile_jobs_source: "default".to_string(),
         in_flight_compiles: None,
+        maintenance_active: Some(false),
     };
+    for expected in [None, Some(false), Some(true)] {
+        info.maintenance_active = expected;
+        let bytes = encode_response(&Response::Status(info.clone()));
+        match decode_response(&bytes).expect("decode") {
+            Response::Status(decoded) => assert_eq!(decoded.maintenance_active, expected),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
     for expected in [None, Some(0), Some(3)] {
         info.in_flight_compiles = expected;
         let bytes = encode_response(&Response::Status(info.clone()));

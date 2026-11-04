@@ -432,6 +432,7 @@ pub mod wheel_stamp;
 pub(crate) mod worktree_target;
 pub mod wrapper;
 pub mod wrapper_identity;
+mod wrapper_role;
 /// `wrapper_target` holds the wrapper hot-path target-registry routing
 /// extracted out of `wrapper.rs` so integration tests under
 /// `tests/cargo_front_door/cli_wrapper_perf.rs` can drive it in-process (issue #474).

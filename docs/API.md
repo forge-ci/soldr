@@ -16,7 +16,7 @@ It has four invocation modes:
 2. `soldr <tool> [args...]`
    Fetches and runs a Rust CLI tool binary.
 3. `soldr rustc ...`
-   Low-level passthrough wrapper mode for explicit `RUSTC_WRAPPER=soldr` usage.
+   Native compiler command; Cargo callbacks use the internal wrapper entry.
 4. `soldr cc ...` / `soldr c++ ...`
    Compile native source through a catalogue-backed compiler and sysroot.
 
@@ -427,6 +427,12 @@ soldr /path/to/rustc --crate-name foo ...
 
 In this mode, soldr should act as the transparent build-assistance layer around `rustc`.
 
+Compiler identity is resolved in the client before cache dispatch, so the daemon's
+`PATH` cannot select a Soldr compiler shim recursively. Wrapper callbacks require
+an existing broker route and never bootstrap one. A standalone `soldr rustc ...`
+or `soldr clippy-driver ...` command prepares its own route, including when the
+shell exports `RUSTC_WRAPPER=soldr`.
+
 Current implementation status:
 
 - Wrapper mode still transparently resolves the real `rustc`, preferring direct binaries before `rustup`
@@ -439,7 +445,10 @@ Current implementation status:
 
 When soldr starts, it decides its mode in this order:
 
-1. If `argv[1]` looks like `rustc` or a path to `rustc`, enter wrapper mode.
+1. An explicit compiler path enters wrapper mode. A bare compiler name enters
+   wrapper mode only with verified live Soldr ancestor and wrapper-image identity;
+   an unverifiable claimed lineage fails before broker bootstrap. Without a
+   lineage claim, bare `rustc` and `clippy-driver` are native commands.
 2. Otherwise, parse CLI commands with Clap.
 3. `cargo` is a first-class built-in subcommand.
 4. Any other first argument falls through to the External arm, which itself tries dispatch in order: cargo verb shorthand (see [Cargo Verb Shorthand](#cargo-verb-shorthand)) first; if no match, treat the argument as a tool name to fetch and run.
@@ -2571,8 +2580,16 @@ so every abandoned cook origin eventually expires.
 
 Builds hold a shared root-maintenance lease from before `BuildSessionStart`
 through sanitized archive publication. Maintenance holds the exclusive side
-for the complete pass, so a build cannot begin in the probe/delete gap. Daemon
-shutdown lets an already-started pass finish. Soldr embeds zccache with
+for the complete destructive worker, so a build cannot begin in the probe/delete
+gap even if the async waiter is cancelled. The build-safe independent store
+sweep reports activity without taking another root lease. Daemon status reports
+`maintenance_active`; the broker and native idle watchdog treat either compiles
+or maintenance as busy. Missing activity fields from older daemons remain
+unknown under the broker's existing bounded policy. An already-running stable
+broker needs an operator restart to learn this status field; upgrading Soldr
+does not replace that live broker automatically. Cooperative daemon shutdown
+lets an already-started pass finish; SIGTERM retains its existing fast exit.
+Soldr embeds zccache with
 host-owned maintenance, so zccache does not also start its standalone periodic
 maintenance scheduler inside the same process.
 

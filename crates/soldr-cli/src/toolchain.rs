@@ -71,6 +71,7 @@ struct CargoPrepareFingerprint<'a> {
 /// Run a rustup-managed toolchain binary with pass-through args.
 pub(crate) fn run_toolchain_passthrough(tool: &str, args: &[String]) -> Result<i32, SoldrError> {
     let binary = resolve_dylint_scoped_binary(tool)?;
+    crate::fallback_detach::detach_outputs_for_toolchain(tool, args)?;
     let mut command = std::process::Command::new(&binary);
     command.args(args);
     crate::binaries::apply_resolved_toolchain_homes(&mut command, &binary);
@@ -79,10 +80,8 @@ pub(crate) fn run_toolchain_passthrough(tool: &str, args: &[String]) -> Result<i
     Ok(status.code().unwrap_or(1))
 }
 
-/// Run rustc-like toolchain binaries through the same wrapper path Cargo
-/// uses when caching is enabled. The wrapper path owns zccache routing and
-/// non-cacheable probe bypasses; cache-disabled direct invocations keep the
-/// historical passthrough behavior.
+/// Route cached rustc-like calls through the wrapper, otherwise run them
+/// directly after protecting existing cache-delivered outputs.
 pub(crate) fn run_rustc_like(
     tool: &str,
     args: &[String],
@@ -101,7 +100,7 @@ pub(crate) fn run_rustc_like(
     );
     raw_args.push(binary.to_string_lossy().into_owned());
     raw_args.extend(args.iter().cloned());
-    crate::wrapper::run_rustc_wrapper(&raw_args, crate::startup_profile::WrapperProfile::new())
+    crate::wrapper_role::run_native_compiler(&raw_args)
 }
 
 /// Run rustfmt directly for non-cacheable invocations, otherwise route

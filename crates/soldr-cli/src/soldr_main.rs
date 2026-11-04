@@ -189,9 +189,17 @@ pub fn run() -> std::process::ExitCode {
     let raw_args = multicall::apply_shim_argv0_override(raw_args);
 
     let inherited_provenance = crate::replay_nextest::InheritedProvenance::capture();
+    let compiler_callback = match crate::wrapper_role::capture(&raw_args) {
+        Ok(callback) => callback,
+        Err(error) => {
+            eprintln!("soldr: {error}");
+            exit_guard::mark_spoke();
+            return std::process::ExitCode::from(1);
+        }
+    };
     // Re-entrancy guard (soldr#2547/#2566): judge inherited parentage and
     // stamp IN_SOLDR_PID before any dispatch, spawn, or runtime setup.
-    if let Some(code) = crate::reentrancy_guard::enforce_and_mark(&raw_args) {
+    if let Some(code) = crate::reentrancy_guard::enforce_and_mark(&raw_args, compiler_callback) {
         exit_guard::mark_spoke();
         guarded_exit(code);
     }
@@ -221,12 +229,13 @@ pub fn run() -> std::process::ExitCode {
     }
     startup_trace::phase(startup_trace::phase::MULTICALL_DISPATCH);
 
-    guarded_exit(run_main(raw_args, &inherited_provenance));
+    guarded_exit(run_main(raw_args, &inherited_provenance, compiler_callback));
 }
 
 fn run_main(
     raw_args: Vec<String>,
     inherited_provenance: &crate::replay_nextest::InheritedProvenance,
+    compiler_callback: bool,
 ) -> i32 {
     // RUSTC_WRAPPER mode: cargo passes `soldr /path/to/rustc <args...>`
     // Must be checked before clap parsing.
@@ -247,7 +256,7 @@ fn run_main(
     // Route client control through the broker; standalone daemons never install this hook.
     let _ = crate::broker_control_transport::install();
     startup_trace::phase(startup_trace::phase::BROKER_CONTROL_TRANSPORT);
-    if raw_args.len() > 1 && wrapper::is_wrapper_invocation(&raw_args[1]) {
+    if compiler_callback {
         // soldr#2545: a Soldr-owned wrapper lineage must arrive with the
         // effective-wrapper mirror still matching RUSTC_WRAPPER. Drift here
         // means something rewired the wrapper identity mid-build; failing

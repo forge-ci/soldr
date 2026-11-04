@@ -114,7 +114,8 @@ use serde::{Deserialize, Serialize};
 ///   replies, the deprecated single-frame `Compile` reply, `Backpressure`, and
 ///   the status `ipc_burst_stats` counters only that verb populated are gone.
 ///   Every compile travels the broker SESSION route.
-pub const PROTOCOL_VERSION: u32 = 25;
+/// * v26: status reports maintenance activity through blocking-worker completion.
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// Chunk granularity for streamed compile output (#983 Phase 5b), now
 /// emitted as SESSION frames. 64 KiB is the same buffer size cargo's own pipe readers use
@@ -580,6 +581,10 @@ pub struct StatusInfo {
     /// never idle.
     #[serde(default)]
     pub in_flight_compiles: Option<u32>,
+    /// Includes cleanup workers whose async awaiter was cancelled. Absent on
+    /// legacy daemons: consumers must treat absence as unknown, never idle.
+    #[serde(default)]
+    pub maintenance_active: Option<bool>,
 }
 
 /// Canonical `compile_backend` value emitted by the daemon. The
@@ -665,8 +670,8 @@ mod tests {
     // soldr#2023 renamed this from the v20 spelling when the daemon began
     // publishing its applied compile limit.
     #[test]
-    fn protocol_version_is_v25_after_deleting_the_direct_ipc_compile_verb() {
-        assert_eq!(PROTOCOL_VERSION, 25);
+    fn protocol_version_is_v26_with_maintenance_activity() {
+        assert_eq!(PROTOCOL_VERSION, 26);
     }
 
     #[test]
@@ -708,6 +713,7 @@ mod tests {
             compile_jobs: 8,
             compile_jobs_source: "default".to_string(),
             in_flight_compiles: Some(0),
+            maintenance_active: Some(false),
         };
         assert_eq!(info.cook_stats_or_zero(), CookStats::default());
     }

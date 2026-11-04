@@ -338,6 +338,7 @@ message WireStatusInfo {
   // as unknown, never as idle -- an absent field decoded as 0 let the reaper
   // SIGTERM a daemon that was cutting a compile in flight.
   optional uint32 in_flight_compiles = 12;
+  optional bool maintenance_active = 13;
 }
 
 message WireCookStats {

@@ -125,6 +125,17 @@ fn wrapper_invocation_is_never_eligible() {
 }
 
 #[test]
+fn bare_native_compiler_commands_are_broker_eligible() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    for tool in ["rustc", "clippy-driver"] {
+        assert!(front_door_broker_spawn_eligible(&[
+            "soldr".into(),
+            tool.into()
+        ]));
+    }
+}
+
+#[test]
 fn broker_subcommand_itself_does_not_recursively_spawn() {
     let _guard = ENV_LOCK.lock().unwrap();
     let raw_args = vec![

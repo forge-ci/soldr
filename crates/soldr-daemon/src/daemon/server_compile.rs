@@ -147,26 +147,26 @@ fn hex_lower(bytes: &[u8; 32]) -> String {
     out
 }
 
-/// Is the daemon idle enough to exit? Compiles in flight are activity
+/// Is the daemon idle enough to exit? Compiles and maintenance are activity
 /// (soldr#3377): SESSION compiles arriving through the shims never touch the
 /// control-request clock, so without this a build running past the idle
 /// timeout lost its daemon mid-flight and every in-flight compile saw
 /// "SESSION relay closed before Exit".
-fn idle_exit_due(idle_for: Duration, idle_timeout: Duration, inflight_compiles: usize) -> bool {
-    inflight_compiles == 0 && idle_for >= idle_timeout
+fn idle_exit_due(idle_for: Duration, idle_timeout: Duration, inflight_compiles: usize, maintenance_active: bool) -> bool {
+    inflight_compiles == 0 && !maintenance_active && idle_for >= idle_timeout
 }
 
 async fn run_idle_watchdog(state: Arc<State>, idle_timeout: Duration) {
     loop {
         tokio::time::sleep(IDLE_POLL_INTERVAL).await;
         let inflight = crate::daemon::inflight_compiles::count();
-        if inflight > 0 {
+        if inflight > 0 || state.maintenance_activity.is_active() {
             // Restart the idle clock: the timeout counts from the last
-            // compile, not from the last control request.
+            // compile or maintenance, not from the last control request.
             state.touch_activity();
             continue;
         }
-        if idle_exit_due(state.idle_for(), idle_timeout, inflight) {
+        if idle_exit_due(state.idle_for(), idle_timeout, inflight, state.maintenance_activity.is_active()) {
             // Tag the exit reason BEFORE notifying so the main task's
             // post-shutdown lifecycle JSONL emit picks `died-idle`.
             state.exit_via_idle.store(true, Ordering::Relaxed);
@@ -212,14 +212,21 @@ mod idle_watchdog_tests {
     #[test]
     fn a_daemon_with_compiles_in_flight_is_never_idle() {
         let timeout = Duration::from_secs(1800);
-        assert!(!idle_exit_due(timeout * 10, timeout, 1));
-        assert!(!idle_exit_due(timeout * 10, timeout, 16));
+        assert!(!idle_exit_due(timeout * 10, timeout, 1, false));
+        assert!(!idle_exit_due(timeout * 10, timeout, 16, false));
+    }
+
+    #[test]
+    fn maintenance_keeps_native_idle_watchdog_alive() {
+        let timeout = Duration::from_secs(1800);
+        assert!(!idle_exit_due(timeout * 10, timeout, 0, true));
+        assert!(idle_exit_due(timeout * 10, timeout, 0, false));
     }
 
     #[test]
     fn an_idle_daemon_exits_only_after_the_timeout() {
         let timeout = Duration::from_secs(1800);
-        assert!(!idle_exit_due(timeout - Duration::from_secs(1), timeout, 0));
-        assert!(idle_exit_due(timeout, timeout, 0));
+        assert!(!idle_exit_due(timeout - Duration::from_secs(1), timeout, 0, false));
+        assert!(idle_exit_due(timeout, timeout, 0, false));
     }
 }

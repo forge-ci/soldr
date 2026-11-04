@@ -268,7 +268,7 @@ pub(crate) fn decide(
 
 /// Enforce (when strict) and stamp the marker. Returns `Some(exit_code)`
 /// when the process must terminate instead of dispatching.
-pub(crate) fn enforce_and_mark(raw_args: &[String]) -> Option<i32> {
+pub(crate) fn enforce_and_mark(raw_args: &[String], compiler_callback: bool) -> Option<i32> {
     let strict = match GuardMode::from_env_value(std::env::var(GUARD_MODE_ENV).ok().as_deref()) {
         Ok(mode) => mode.is_enforcing(),
         Err(value) => {
@@ -343,9 +343,37 @@ pub(crate) fn enforce_and_mark(raw_args: &[String]) -> Option<i32> {
     std::env::set_var(IN_SOLDR_PID_ENV, current_pid.to_string());
     std::env::set_var(
         IN_SOLDR_ROLE_ENV,
-        own_role(raw_args, wrapper_invocation).as_str(),
+        own_role(raw_args, compiler_callback).as_str(),
     );
     None
+}
+
+/// Legacy native version-forward edges use the same cooperative provenance
+/// contract as the guard. Image/ancestry validation remains with the caller.
+pub(crate) fn native_forward_edge_allowed(pid: u32) -> bool {
+    let role = std::env::var(IN_SOLDR_ROLE_ENV)
+        .ok()
+        .and_then(|value| Role::parse(&value));
+    if role != Some(Role::FrontDoor) {
+        return false;
+    }
+    let edges: Vec<_> = [
+        GLOBAL_DELEGATION_EDGE,
+        crate::version_trampoline::SOLDR_TRAMPOLINING_ENV_VAR,
+    ]
+    .into_iter()
+    .filter(|key| std::env::var_os(key).is_some())
+    .collect();
+    !edges.is_empty()
+        && decide(
+            true,
+            Some(&pid.to_string()),
+            std::process::id(),
+            false,
+            false,
+            &edges,
+            role,
+        ) == GuardDecision::Allow
 }
 
 /// Routing variables the diagnostic is allowed to disclose. An allowlist,

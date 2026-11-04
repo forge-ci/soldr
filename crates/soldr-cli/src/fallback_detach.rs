@@ -1,4 +1,8 @@
-//! Issue #1817 — COW-detach declared rustc outputs before a direct fallback.
+//! COW-detach declared rustc outputs before a direct compiler invocation.
+//!
+//! The wrapper also uses this transition when caching is explicitly disabled
+//! or an invocation is not cacheable. Those paths can overwrite outputs from
+//! an earlier cached build just as a mid-build fallback can (issue #1817).
 //!
 //! When the compile daemon becomes unavailable *mid-build*, soldr falls back to
 //! running rustc directly. The build began with a managed zccache session, so
@@ -39,10 +43,8 @@ use std::path::{Path, PathBuf};
 
 use crate::core::SoldrError;
 
-/// Emit kinds whose output path is a simple extension swap on the primary
-/// artifact stem. `link` is deliberately absent: the parser's `output_file` /
-/// `-o` is authoritative for it, and a link product is a fresh write rather
-/// than an overwrite of a delivered cache artifact.
+/// Emit kinds whose inferred output uses the artifact stem. Link products
+/// are fresh writes; only explicitly named link outputs need detachment.
 const EMIT_EXTENSIONS: &[(&str, &str)] = &[
     ("dep-info", "d"),
     ("obj", "o"),
@@ -93,17 +95,45 @@ pub(crate) fn detach_outputs_for_direct_exec(rustc_argv: &[String]) -> Result<()
     Ok(())
 }
 
+/// Adapt a direct toolchain launch to the same compiler-output ownership gate.
+pub(crate) fn detach_outputs_for_toolchain(tool: &str, args: &[String]) -> Result<(), SoldrError> {
+    if !crate::wrapper::is_wrapper_invocation(tool) {
+        return Ok(());
+    }
+    let compiler_args: Vec<_> = std::iter::once(tool.to_owned())
+        .chain(args.iter().cloned())
+        .collect();
+    detach_outputs_for_direct_exec(&compiler_args)
+}
+
 /// Derive the declared output family from rustc arguments.
 ///
-/// Mirrors the mediated path's `rustc_expected_output_paths`. Uses zccache's
-/// own argument parser (re-exported as `zccache::depgraph`) so the two sides
-/// cannot drift on `--emit`, `--out-dir`, or `-C extra-filename`.
+/// Reuses zccache's argument parser. Explicit emit paths take precedence;
+/// rustc adapts `-o` only when multiple unnamed emit kinds remain. The
+/// characterization cases below are captured from real compiler outputs.
 fn declared_output_paths(args: &[String], cwd: &Path) -> Vec<PathBuf> {
-    let parsed = zccache::depgraph::parse_rustc_args(args, cwd);
+    let mut parsed = zccache::depgraph::parse_rustc_args(args, cwd);
+    // The pinned parser retains historical explicit emit paths. Rustc merges
+    // flags by kind, with the last occurrence replacing even an explicit
+    // path with an inferred one. Resolve only the effective list through the
+    // same parser so superseded files are never detached.
+    let emits = effective_emit_specs(args);
+    if !emits.is_empty() {
+        let effective =
+            zccache::depgraph::parse_rustc_args(&[format!("--emit={}", emits.join(","))], cwd);
+        parsed.emit_types = effective.emit_types;
+        parsed.explicit_emit_paths = effective.explicit_emit_paths;
+    }
     let dir: PathBuf = parsed
-        .out_dir
+        .output_file
         .as_ref()
-        .map(|d| d.as_path().to_path_buf())
+        .and_then(|output| output.as_path().parent().map(Path::to_path_buf))
+        .or_else(|| {
+            parsed
+                .out_dir
+                .as_ref()
+                .map(|dir| dir.as_path().to_path_buf())
+        })
         .unwrap_or_else(|| cwd.to_path_buf());
     let suffix = parsed.extra_filename.clone().unwrap_or_default();
     let crate_name = parsed
@@ -117,25 +147,50 @@ fn declared_output_paths(args: &[String], cwd: &Path) -> Vec<PathBuf> {
     // would leave the inferred path behind whenever the explicit one
     // redirects to a different directory — which is the normal case.
     let mut derived: Vec<(String, PathBuf)> = Vec::new();
+    let implicit_count = parsed
+        .emit_types
+        .iter()
+        .filter(|emit| {
+            !parsed
+                .explicit_emit_paths
+                .iter()
+                .any(|(kind, _)| kind == *emit)
+        })
+        .count();
     for emit in &parsed.emit_types {
+        if parsed
+            .explicit_emit_paths
+            .iter()
+            .any(|(kind, _)| kind == emit)
+        {
+            continue;
+        }
+        if implicit_count == 1 {
+            if let Some(output) = &parsed.output_file {
+                derived.push((emit.clone(), output.as_path().to_path_buf()));
+                continue;
+            }
+        }
         match emit.as_str() {
-            // rustc names the metadata product `lib<crate><suffix>.rmeta`
-            // regardless of crate type, which is exactly the file in the
-            // reported failures.
+            // Inferred metadata names retain the crate name even when
+            // other emit kinds adapt the stem of `-o`.
             "metadata" => derived.push((
                 emit.clone(),
                 dir.join(format!("lib{crate_name}{suffix}.rmeta")),
             )),
-            // The parser's `output_file` / `-o` is authoritative for the link
-            // product, and a fresh link is not an overwrite of a delivered
-            // cache artifact.
+            // Fresh inferred links replace the product instead of
+            // overwriting its protected inode.
             "link" => {}
             other => {
                 if let Some((_, ext)) = EMIT_EXTENSIONS.iter().find(|(kind, _)| *kind == other) {
-                    derived.push((
-                        emit.clone(),
-                        dir.join(format!("{crate_name}{suffix}.{ext}")),
-                    ));
+                    let stem = parsed
+                        .output_file
+                        .as_ref()
+                        .and_then(|output| output.as_path().file_stem())
+                        .unwrap_or_else(|| std::ffi::OsStr::new(&crate_name));
+                    let mut name = stem.to_os_string();
+                    name.push(format!("{suffix}.{ext}"));
+                    derived.push((emit.clone(), dir.join(name)));
                 }
             }
         }
@@ -154,10 +209,38 @@ fn declared_output_paths(args: &[String], cwd: &Path) -> Vec<PathBuf> {
     for (_, path) in derived {
         push_unique(&mut paths, path);
     }
-    if let Some(output) = parsed.output_file.as_ref() {
-        push_unique(&mut paths, output.as_path().to_path_buf());
+    if parsed.emit_types.is_empty() {
+        if let Some(output) = parsed.output_file.as_ref() {
+            push_unique(&mut paths, output.as_path().to_path_buf());
+        }
     }
     paths
+}
+
+fn effective_emit_specs(args: &[String]) -> Vec<&str> {
+    let mut effective: Vec<(&str, &str)> = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            break;
+        }
+        let emits = if arg == "--emit" {
+            args.next().map(String::as_str)
+        } else {
+            arg.strip_prefix("--emit=")
+        };
+        if let Some(emits) = emits {
+            for spec in emits.split(',') {
+                let kind = spec.split_once('=').map_or(spec, |(kind, _)| kind);
+                if let Some((_, current)) = effective.iter_mut().find(|(key, _)| *key == kind) {
+                    *current = spec;
+                } else {
+                    effective.push((kind, spec));
+                }
+            }
+        }
+    }
+    effective.into_iter().map(|(_, spec)| spec).collect()
 }
 
 fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
@@ -172,6 +255,123 @@ mod tests {
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|a| (*a).to_string()).collect()
+    }
+
+    #[test]
+    fn duplicate_emit_paths_follow_last_occurrence_per_kind() {
+        let root = tempfile::tempdir().unwrap();
+        for (emits, expected) in [
+            (
+                vec!["--emit=metadata=old.rmeta,metadata"],
+                vec!["libprobe.rmeta"],
+            ),
+            (
+                vec!["--emit=metadata=old.rmeta", "--emit=metadata"],
+                vec!["libprobe.rmeta"],
+            ),
+            (
+                vec!["--emit=metadata=old.rmeta,metadata=new.rmeta"],
+                vec!["new.rmeta"],
+            ),
+            (
+                vec!["--emit=metadata=old.rmeta", "--emit=obj"],
+                vec!["old.rmeta", "probe.o"],
+            ),
+            (vec!["--emit=link=old.rlib,link"], vec![]),
+        ] {
+            let mut args = argv(&[
+                "rustc",
+                "--crate-name=probe",
+                "--crate-type=lib",
+                "probe.rs",
+            ]);
+            args.extend(emits.iter().map(|arg| arg.to_string()));
+            let mut actual = declared_output_paths(&args, root.path());
+            let mut expected: Vec<_> = expected
+                .into_iter()
+                .map(|path| root.path().join(path))
+                .collect();
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected, "{emits:?}");
+        }
+    }
+
+    #[test]
+    fn explicit_output_plans_only_effective_unnamed_emit_products() {
+        let cases: &[(&[&str], &[&str])] = &[
+            (
+                &["--emit=metadata", "-o", "/out/requested.rmeta"],
+                &["/out/requested.rmeta"],
+            ),
+            (
+                &[
+                    "--emit=metadata=/explicit/kind.rmeta",
+                    "-o",
+                    "/out/unwritten",
+                ],
+                &["/explicit/kind.rmeta"],
+            ),
+            (
+                &["--emit=metadata,link", "-o", "/out/custom.output"],
+                &["/out/libprobe.rmeta"],
+            ),
+            (
+                &[
+                    "--emit=dep-info,obj",
+                    "-o",
+                    "/out/custom.output",
+                    "--out-dir=/ignored",
+                    "-Cextra-filename=-xyz",
+                ],
+                &["/out/custom-xyz.d", "/out/custom-xyz.o"],
+            ),
+            (
+                &[
+                    "--emit=metadata=/explicit/kind.rmeta,obj",
+                    "-o",
+                    "/out/custom.output",
+                ],
+                &["/explicit/kind.rmeta", "/out/custom.output"],
+            ),
+            (
+                &[
+                    "--emit=metadata,link=/explicit/linked",
+                    "-o",
+                    "/out/custom.output",
+                ],
+                &["/out/custom.output", "/explicit/linked"],
+            ),
+            (
+                &[
+                    "--emit=metadata,obj",
+                    "--out-dir=/out",
+                    "-Cextra-filename=-xyz",
+                ],
+                &["/out/libprobe-xyz.rmeta", "/out/probe-xyz.o"],
+            ),
+            (
+                &["--emit=metadata,metadata", "-o", "/out/requested.rmeta"],
+                &["/out/requested.rmeta"],
+            ),
+            (
+                &[
+                    "--emit=metadata=/explicit/kind.rmeta,link=/explicit/linked",
+                    "-o",
+                    "/out/unwritten",
+                ],
+                &["/explicit/kind.rmeta", "/explicit/linked"],
+            ),
+        ];
+        for (flags, expected) in cases {
+            let mut args = argv(&["--crate-name=probe", "--crate-type=lib"]);
+            args.extend(argv(flags));
+            let mut actual = declared_output_paths(&args, Path::new("/cwd"));
+            actual.sort();
+            let mut expected: Vec<_> = expected.iter().map(PathBuf::from).collect();
+            expected.sort();
+            assert_eq!(actual, expected, "{flags:?}");
+        }
     }
 
     #[test]
