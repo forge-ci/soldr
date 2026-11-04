@@ -246,6 +246,15 @@ def test_macos_allowlist_accepts_system_libraries_and_frameworks() -> None:
     assert check_linked_libs.disallowed_libs("macho", names) == []
 
 
+def test_macos_allowlist_accepts_the_objective_c_runtime() -> None:
+    # objc2's bindings link Apple's Objective-C runtime, which Apple ships only
+    # as a dylib; there is no static alternative to opt into. Treating it as a
+    # vendored dependency failed the 0.9.52 macOS release lanes.
+    assert (
+        check_linked_libs.disallowed_libs("macho", ["/usr/lib/libobjc.A.dylib"]) == []
+    )
+
+
 def test_macos_allowlist_rejects_a_third_party_dylib() -> None:
     assert check_linked_libs.disallowed_libs(
         "macho", ["/usr/local/lib/libssl.3.dylib"]

@@ -277,6 +277,11 @@ MACOS_ALLOW = [
     "/usr/lib/libc++*.dylib",
     "/usr/lib/libiconv*.dylib",
     "/usr/lib/libresolv*.dylib",
+    # The Objective-C runtime. Apple ships it only as a dylib -- there is no
+    # static libobjc to opt into -- and every crate that binds Cocoa/Foundation
+    # through `objc2` links it. Rejecting it failed the 0.9.52 macOS release
+    # lanes on a system library the binary is required to have.
+    "/usr/lib/libobjc*.dylib",
     "/System/Library/Frameworks/*",
 ]
 
