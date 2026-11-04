@@ -1,4 +1,4 @@
-"""Reclaim disk on a GitHub-hosted Linux runner before a soldr dogfood lane.
+"""Reclaim disk on a GitHub-hosted Linux runner before builds or archive replay.
 
 The setup-soldr smoke lane builds and nextests ``soldr-cli`` on a stock
 ``ubuntu-24.04`` runner. soldr's fail-closed disk guard
@@ -80,6 +80,9 @@ def main(argv: list[str] | None = None) -> int:
     volume = Path(args.volume)
     before = free_gib(volume)
     print(f"reclaim: {volume} free before = {before:.2f} GiB")
+    # Attribute image and restored build/cache bytes without deleting useful state.
+    for candidate in ("/usr/share", "/usr/local/lib", "/opt", str(volume)):
+        subprocess.run(["du", "-sh", candidate], check=False)
     for path in RECLAIM_DIRS:
         remove_dir(path)
     after = free_gib(volume)
@@ -88,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(
             f"\x1b[31mreclaim: FATAL: only {after:.2f} GiB free on {volume} after "
             f"reclaim, below the lane's {args.require_gib:.0f} GiB floor; soldr's "
-            "5 GiB disk guard would block the dogfood build/tests.\x1b[0m\n"
+            "build or archive extraction cannot safely proceed.\x1b[0m\n"
         )
         return 1
     return 0

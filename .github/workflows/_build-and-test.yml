@@ -128,6 +128,12 @@ jobs:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
           submodules: recursive
 
+      # Make room before toolchain/cache hydration and archive extraction.
+      - name: Reclaim unused hosted Linux SDKs
+        if: runner.os == 'Linux'
+        shell: bash
+        run: python3 ci/reclaim_runner_disk.py --require-gib 20
+
       - name: Enlarge swap (OOM headroom)
         if: runner.os == 'Linux'
         shell: bash
