@@ -111,7 +111,15 @@ def coverage_failures(
     for job in sorted(required_jobs(contract)):
         result = needs.get(job)
         state = result.get("result") if isinstance(result, dict) else "missing"
-        if state != "success":
+        if state in {"cancelled", "abandoned"}:
+            # No runner means no execution proof, even for capacity starvation.
+            # `needs` cannot attest runner allocation; never infer a waiver from
+            # a cancellation. Keep the required check and release gate closed.
+            failures.append(
+                f"{job}: {state} (execution unproven; runner capacity does not "
+                "waive required coverage; rerun the lane)"
+            )
+        elif state != "success":
             failures.append(f"{job}: {state or 'missing'}")
     for target in contract.fields["targets"]:
         ci = target["ci"]
