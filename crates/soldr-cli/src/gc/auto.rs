@@ -486,8 +486,8 @@ fn run_auto_gc_background(paths_root: std::path::PathBuf, log_path: std::path::P
             "auto-gc volume={} free_gib={:.2} trigger_gib={} target_gib={} paths={} status=detected",
             plan.volume_key,
             (plan.free_bytes as f64) / (crate::cache_lib::auto_gc::GIB as f64),
-            validated.trigger_free_gb,
-            validated.target_free_gb,
+            plan.trigger_bytes / crate::cache_lib::auto_gc::GIB,
+            plan.target_bytes / crate::cache_lib::auto_gc::GIB,
             plan.paths.len()
         );
         let _ = append_auto_gc_log_line(&log_path, &line);
@@ -518,9 +518,7 @@ fn run_auto_gc_background(paths_root: std::path::PathBuf, log_path: std::path::P
 
         // Re-probe and decide whether to escalate.
         let mut free_bytes = probe.free_bytes(&plan.paths[0].path).unwrap_or(0);
-        let target_bytes = validated
-            .target_free_gb
-            .saturating_mul(crate::cache_lib::auto_gc::GIB);
+        let target_bytes = plan.target_bytes;
 
         // Tier 2: soldr target purge (only if the volume holds workspace
         // targets and we're still under target).
@@ -676,7 +674,7 @@ fn run_auto_gc_background(paths_root: std::path::PathBuf, log_path: std::path::P
                     tiers exhausted; run `soldr gc sweep --aggressive`",
                     plan.volume_key,
                     (free_bytes as f64) / (crate::cache_lib::auto_gc::GIB as f64),
-                    validated.target_free_gb,
+                    plan.target_bytes / crate::cache_lib::auto_gc::GIB,
                 ),
             );
         }

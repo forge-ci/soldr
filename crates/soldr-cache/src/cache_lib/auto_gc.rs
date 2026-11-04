@@ -71,6 +71,11 @@ pub trait DiskFreeProbe {
     /// if the volume can't be resolved (missing path, permission
     /// error, etc.). Implementations should be cheap.
     fn free_bytes(&self, path: &Path) -> Option<u64>;
+    /// Capacity of the same volume. Unknown capacity preserves the
+    /// absolute GiB thresholds, including for older custom probes.
+    fn capacity_bytes(&self, _path: &Path) -> Option<u64> {
+        None
+    }
 }
 
 /// Trait abstracting "what is this path's volume?" so the per-volume
@@ -98,14 +103,69 @@ pub struct VolumePlan {
 pub fn validate_config(config: &AutoGcConfig) -> (AutoGcConfig, Vec<String>) {
     let mut warnings = Vec::new();
     let mut out = config.clone();
-    if out.target_free_gb < out.trigger_free_gb {
+    // Do not turn the adaptive default target into a custom absolute
+    // value before capacity is known. The effective target is clamped by
+    // free_space_thresholds after both policies have been resolved.
+    let adaptive_target = out.target_free_gb == AutoGcConfig::default_target_free_gb()
+        && out.target_free_percent.is_none();
+    if out.target_free_gb < out.trigger_free_gb && !adaptive_target {
         warnings.push(format!(
             "auto_gc.target_free_gb ({}) < trigger_free_gb ({}); clamping target to trigger",
             out.target_free_gb, out.trigger_free_gb
         ));
         out.target_free_gb = out.trigger_free_gb;
     }
+    for (name, value) in [
+        ("trigger_free_percent", &mut out.trigger_free_percent),
+        ("target_free_percent", &mut out.target_free_percent),
+    ] {
+        if value.is_some_and(|percent| percent > 100) {
+            warnings.push(format!("auto_gc.{name} exceeds 100; clamping to 100"));
+            *value = Some(100);
+        }
+    }
     (out, warnings)
+}
+
+/// Shared CLI/daemon pressure policy. Keep a proportional reserve on large
+/// disks without changing an operator's custom absolute thresholds.
+pub fn free_space_thresholds(config: &AutoGcConfig, capacity: Option<u64>) -> (u64, u64) {
+    fn threshold(
+        gib: u64,
+        default_gib: u64,
+        percent: Option<u8>,
+        default_percent: u8,
+        capacity: Option<u64>,
+    ) -> u64 {
+        let percent = percent
+            .unwrap_or(if gib == default_gib {
+                default_percent
+            } else {
+                0
+            })
+            .min(100);
+        let proportional = capacity.map_or(0, |bytes| {
+            // Divide first, including the remainder, to avoid overflow at
+            // u64::MAX without losing the fractional threshold.
+            bytes / 100 * u64::from(percent) + bytes % 100 * u64::from(percent) / 100
+        });
+        gib.saturating_mul(GIB).max(proportional)
+    }
+    let trigger = threshold(
+        config.trigger_free_gb,
+        AutoGcConfig::default_trigger_free_gb(),
+        config.trigger_free_percent,
+        10,
+        capacity,
+    );
+    let target = threshold(
+        config.target_free_gb,
+        AutoGcConfig::default_target_free_gb(),
+        config.target_free_percent,
+        15,
+        capacity,
+    );
+    (trigger, target.max(trigger))
 }
 
 /// Clamp every age (in seconds) to be at least `floor_secs`. Used to
@@ -207,9 +267,6 @@ pub fn plan_auto_gc<D: DiskFreeProbe, V: VolumeProbe>(
     if !config.enabled {
         return Vec::new();
     }
-    let trigger_bytes = config.trigger_free_gb.saturating_mul(GIB);
-    let target_bytes = config.target_free_gb.saturating_mul(GIB);
-
     // Group paths by volume key.
     let mut by_volume: BTreeMap<String, Vec<AutoGcPath>> = BTreeMap::new();
     for entry in paths {
@@ -225,6 +282,8 @@ pub fn plan_auto_gc<D: DiskFreeProbe, V: VolumeProbe>(
         .filter_map(|(volume_key, paths)| {
             let probe_path = paths.first()?.path.clone();
             let free_bytes = disk.free_bytes(&probe_path)?;
+            let (trigger_bytes, target_bytes) =
+                free_space_thresholds(config, disk.capacity_bytes(&probe_path));
             if free_bytes >= trigger_bytes {
                 return None;
             }
@@ -262,6 +321,7 @@ mod tests {
     struct FixedDisk {
         per_volume: HashMap<String, u64>,
         volume_for: HashMap<PathBuf, String>,
+        capacity: Option<u64>,
     }
 
     impl FixedDisk {
@@ -269,6 +329,7 @@ mod tests {
             Self {
                 per_volume: HashMap::new(),
                 volume_for: HashMap::new(),
+                capacity: None,
             }
         }
 
@@ -289,6 +350,10 @@ mod tests {
             let key = self.volume_for.get(path)?;
             self.per_volume.get(key).copied()
         }
+
+        fn capacity_bytes(&self, _path: &Path) -> Option<u64> {
+            self.capacity
+        }
     }
 
     impl VolumeProbe for FixedDisk {
@@ -299,6 +364,108 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    #[test]
+    fn large_volume_plans_reclamation_before_absolute_floor() {
+        let mut probe = FixedDisk::new();
+        probe.capacity = Some(2000 * GIB);
+        probe.add("C", 74 * GIB).map(&p("C:/cargo"), "C");
+        let plans = plan_auto_gc(
+            &AutoGcConfig::default(),
+            &[AutoGcPath {
+                kind: AutoGcPathKind::CargoHome,
+                path: p("C:/cargo"),
+            }],
+            &probe,
+            &probe,
+        );
+        assert_eq!(plans.len(), 1, "74 GiB free on 2 TiB is under pressure");
+        assert_eq!(plans[0].trigger_bytes, 200 * GIB);
+        assert_eq!(plans[0].target_bytes, 300 * GIB);
+        assert_eq!(next_tier(250 * GIB, plans[0].target_bytes, 1), Some(2));
+        assert_eq!(next_tier(300 * GIB, plans[0].target_bytes, 1), None);
+    }
+
+    #[test]
+    fn headroom_preserves_absolute_overrides_and_probe_fallback() {
+        let mut config = AutoGcConfig::default();
+        assert_eq!(free_space_thresholds(&config, None), (20 * GIB, 30 * GIB));
+        assert_eq!(
+            free_space_thresholds(&config, Some(100 * GIB)),
+            (20 * GIB, 30 * GIB)
+        );
+        config.trigger_free_gb = 50;
+        config.target_free_gb = 80;
+        assert_eq!(
+            free_space_thresholds(&config, Some(2000 * GIB)),
+            (50 * GIB, 80 * GIB)
+        );
+        config.trigger_free_percent = Some(10);
+        config.target_free_percent = Some(15);
+        assert_eq!(
+            free_space_thresholds(&config, Some(2000 * GIB)),
+            (200 * GIB, 300 * GIB)
+        );
+        config.trigger_free_percent = Some(0);
+        config.target_free_percent = Some(0);
+        assert_eq!(
+            free_space_thresholds(&config, Some(2000 * GIB)),
+            (50 * GIB, 80 * GIB)
+        );
+        config = AutoGcConfig {
+            trigger_free_gb: 250,
+            ..AutoGcConfig::default()
+        };
+        config = validate_config(&config).0;
+        assert_eq!(
+            free_space_thresholds(&config, Some(2000 * GIB)),
+            (250 * GIB, 300 * GIB)
+        );
+        config = AutoGcConfig {
+            target_free_gb: 50,
+            ..AutoGcConfig::default()
+        };
+        assert_eq!(
+            free_space_thresholds(&config, Some(2000 * GIB)),
+            (200 * GIB, 200 * GIB)
+        );
+    }
+
+    #[test]
+    fn headroom_bounds_percentages_target_and_arithmetic() {
+        let mut config = AutoGcConfig {
+            trigger_free_percent: Some(100),
+            target_free_percent: Some(1),
+            ..AutoGcConfig::default()
+        };
+        assert_eq!(
+            free_space_thresholds(&config, Some(u64::MAX)),
+            (u64::MAX, u64::MAX)
+        );
+        config.trigger_free_gb = u64::MAX;
+        assert_eq!(free_space_thresholds(&config, None), (u64::MAX, u64::MAX));
+        config.trigger_free_percent = Some(101);
+        let (validated, warnings) = validate_config(&config);
+        assert_eq!(validated.trigger_free_percent, Some(100));
+        assert!(!warnings.is_empty());
+    }
+
+    #[test]
+    fn unreadable_free_space_does_not_plan_speculative_eviction() {
+        let mut probe = FixedDisk::new();
+        probe.capacity = Some(2000 * GIB);
+        probe.map(&p("C:/cargo"), "C");
+        assert!(plan_auto_gc(
+            &AutoGcConfig::default(),
+            &[AutoGcPath {
+                kind: AutoGcPathKind::CargoHome,
+                path: p("C:/cargo")
+            }],
+            &probe,
+            &probe,
+        )
+        .is_empty());
     }
 
     #[test]

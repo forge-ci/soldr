@@ -28,6 +28,10 @@ Tier-0 work is unconditional and bounded: it runs even when the volume is above
 the pressure trigger, so nothing can grow without limit between firings.
 Anything gated behind a tier is best-effort by design.
 
+Default disk-pressure headroom scales to volume capacity; custom absolute
+thresholds remain absolute unless a percentage is configured. See
+[`docs/API.md`](../../../../docs/API.md#invocation-fallback-and-cargo-volume-gc-issue-323).
+
 ## Scratch reclamation
 
 `sweep_stale_scratch` reclaims aged entries from the scratch root

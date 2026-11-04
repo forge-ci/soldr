@@ -244,6 +244,35 @@ fn stale_target_age_converts_days_and_honors_floor() {
 }
 
 #[test]
+fn stale_target_pass_prunes_orphan_store_without_workspace_targets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("soldr");
+    let orphan = root.join("target-store/hard/unused");
+    std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+    std::fs::write(&orphan, b"unused dedupe artifact").unwrap();
+    let empty = tmp.path().join("empty-dev");
+    std::fs::create_dir_all(&empty).unwrap();
+    std::fs::write(
+        root.join("config.toml"),
+        format!("[gc]\nallowlist_roots = [{:?}]\n", empty.to_string_lossy()),
+    )
+    .unwrap();
+    let paths = SoldrPaths::with_root(root.clone());
+    run_stale_target_pass(
+        &paths,
+        &crate::core::AutoGcConfig::default(),
+        &root.join("gc.log"),
+    );
+    if std::fs::metadata(&root)
+        .ok()
+        .and_then(|m| crate::platform::fs::identity::hardlink_identity(&m))
+        .is_some()
+    {
+        assert!(!orphan.exists(), "no target references this store blob");
+    }
+}
+
+#[test]
 fn stale_target_pass_evicts_idle_discovered_target_once_per_day() {
     let home = tempfile::tempdir().expect("tempdir");
     let dev = home.path().join("dev");

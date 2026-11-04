@@ -56,9 +56,8 @@ fn run_stale_target_pass(
             log_path,
             "auto-gc stale-targets skipped=true reason=no_workspace_targets",
         );
-        return;
     }
-    if let Some(age_secs) = age_secs {
+    if let Some(age_secs) = age_secs.filter(|_| !targets.is_empty()) {
         let outcome = run_soldr_target_purge_background(paths, &targets, discovered, age_secs);
         let _ = append_auto_gc_log_line(
             log_path,
@@ -69,6 +68,9 @@ fn run_stale_target_pass(
         );
     }
     if config.dedupe_targets {
+        // An empty target inventory can still leave unreferenced blobs in
+        // the store after worktrees were removed. The dedupe pass also
+        // prunes that store, so it must run even with no surviving targets.
         let survivors: Vec<_> = targets.into_iter().filter(|t| t.is_dir()).collect();
         let opts = super::target_dedupe::DedupeOptions::for_paths(paths, config.min_age_secs);
         let report = super::target_dedupe::dedupe_targets(&survivors, &opts);

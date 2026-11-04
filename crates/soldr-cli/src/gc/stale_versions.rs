@@ -16,9 +16,9 @@
 //!   installs; delete older ones unused for the same window. `dylint*` and
 //!   `rustup` entries are left to their own owners.
 //!
-//! "Used" is the newest mtime/atime among the entry and its children two
-//! levels deep, which covers shim `*.materialized-v1.json` refreshes and
-//! executable reads under `bin/`.
+//! "Used" is the newest mtime among directories and mtime/atime among files,
+//! two levels deep. Directory atimes are excluded: the GC walk itself reads
+//! those directories and must not renew their retention on every sweep.
 //!
 //! Content-addressed sharing across versions was evaluated: shim images are
 //! already keyed by binary hash and no hash recurs across releases, so
@@ -208,6 +208,9 @@ fn older_than(used: SystemTime, now: SystemTime, max_unused: Duration) -> bool {
 fn last_used(path: &Path) -> SystemTime {
     fn stamp(meta: &std::fs::Metadata) -> SystemTime {
         let m = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        if meta.is_dir() {
+            return m;
+        }
         let a = meta.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
         m.max(a)
     }

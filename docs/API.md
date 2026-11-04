@@ -2613,12 +2613,24 @@ Configure in `~/.soldr/config.toml`:
 ```toml
 [auto_gc]
 enabled = true          # opt-out; on by default
-trigger_free_gb = 20    # start GC when free space < this
-target_free_gb = 30     # stop GC when free space >= this
+trigger_free_gb = 20    # absolute start-GC floor
+target_free_gb = 30     # absolute stop-GC floor
+# trigger_free_percent = 10 # optional percentage reserve
+# target_free_percent = 15  # optional percentage goal
 min_age_secs = 3600     # never touch anything modified within this window
 stale_target_days = 14  # evict target/ dirs idle this many days; 0 = off (soldr#4031)
 dedupe_targets = true   # share identical target/ artifacts across worktrees (soldr#4033)
 ```
+
+The default GiB floors scale with capacity: start below the larger of 20 GiB
+or 10% free, and reclaim toward the larger of 30 GiB or 15% free. Both the
+daemon and detached fallback use this policy. Custom GiB values remain
+absolute unless the corresponding percentage is explicitly configured;
+`*_free_percent = 0` selects absolute-only behavior even for the default
+GiB values (including an explicitly written `20`/`30`). Each knob is resolved
+independently, so a custom target below the scaled trigger is raised to the
+trigger. Unknown capacity falls back to the GiB floors. Percentages are
+clamped to 100 and the effective target is never below the trigger.
 
 `stale_target_days` (soldr#4031, default `14`, `0` = off) is an age-based
 pass that runs regardless of free space, at most once a day: every registered

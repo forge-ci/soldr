@@ -124,6 +124,10 @@ impl crate::cache_lib::auto_gc::DiskFreeProbe for SystemVolumeProbe {
         let probe = existing_filesystem_probe_path(path);
         available_space(&probe).ok()
     }
+
+    fn capacity_bytes(&self, path: &std::path::Path) -> Option<u64> {
+        fs2::total_space(existing_filesystem_probe_path(path)).ok()
+    }
 }
 
 impl crate::cache_lib::auto_gc::VolumeProbe for SystemVolumeProbe {
