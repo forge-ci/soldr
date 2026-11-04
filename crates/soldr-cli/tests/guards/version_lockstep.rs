@@ -410,7 +410,10 @@ fn externalized_dependencies_are_exact_and_consistent() {
         (
             "kernal-api",
             "0.1.33",
-            &["crates/soldr-platform/Cargo.toml"][..],
+            &[
+                "crates/soldr-platform/Cargo.toml",
+                "crates/soldr-cli/Cargo.toml",
+            ][..],
         ),
     ] {
         let locked = format!("name = \"{dependency}\"\nversion = \"{version}\"");

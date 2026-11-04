@@ -375,8 +375,8 @@ impl AliasError {
 /// 5. **Special: `all`** — explicit error (caller must expand).
 /// 6. **Rust triple passthrough** — accepted if `looks_like_rust_triple`.
 /// 7. **Reject** with [`AliasError::Unknown`] including a
-///    Jaro-Winkler best-match suggestion (reuses the `strsim` dep
-///    already on the workspace).
+///    Jaro-Winkler best-match suggestion (via the shared kernal-api
+///    facade, `kernal_api::text::name_similarity`).
 pub fn resolve_soldr_target(input: &str) -> Result<ResolvedTarget, AliasError> {
     let raw = input.trim();
     let lower = raw.to_ascii_lowercase();
@@ -600,13 +600,13 @@ fn check_thirty2_bit(input: &str) -> Option<&'static str> {
 fn best_match_suggestion(input: &str) -> &'static str {
     let mut best: (f64, &'static str) = (-1.0, "win-x64");
     for (alias, _) in CANONICAL_ALIASES {
-        let score = strsim::jaro_winkler(input, alias);
+        let score = kernal_api::text::name_similarity(input, alias).unwrap_or(0.0);
         if score > best.0 {
             best = (score, alias);
         }
     }
     for &alias in SPECIAL_ALIASES {
-        let score = strsim::jaro_winkler(input, alias);
+        let score = kernal_api::text::name_similarity(input, alias).unwrap_or(0.0);
         if score > best.0 {
             best = (score, alias);
         }
