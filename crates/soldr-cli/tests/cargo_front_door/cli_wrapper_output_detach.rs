@@ -62,3 +62,51 @@ fn no_cache_rustc_detaches_protected_metadata_outputs() {
         assert_ne!(fs::read(&output).unwrap(), original);
     }
 }
+
+#[test]
+fn explicit_output_detachment_preserves_unrelated_readonly_files() {
+    for emit in ["metadata", "metadata,link", "metadata=kind.rmeta"] {
+        let dir = common::unique_temp_dir("direct-output-sentinel");
+        let products = dir.join("products");
+        fs::create_dir_all(&products).unwrap();
+        let source = dir.join("probe.rs");
+        fs::write(&source, "pub fn value() -> u32 { 42 }\n").unwrap();
+        let requested = products.join("requested.rmeta");
+        let unrelated = if emit == "metadata" {
+            dir.join("libprobe.rmeta")
+        } else {
+            requested.clone()
+        };
+        fs::write(&unrelated, b"unrelated protected content").unwrap();
+        fs::set_permissions(&unrelated, fs::Permissions::from_mode(0o444)).unwrap();
+        let identity = fs::metadata(&unrelated).unwrap();
+        let result = common::isolated_soldr_command()
+            .args([
+                "--no-cache",
+                "rustc",
+                "--crate-name=probe",
+                "--crate-type=lib",
+                "--edition=2021",
+            ])
+            .arg(format!("--emit={emit}"))
+            .arg(&source)
+            .arg("-o")
+            .arg(&requested)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{emit}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let after = fs::metadata(&unrelated).unwrap();
+        assert_eq!(after.ino(), identity.ino(), "{emit}");
+        assert_eq!(
+            after.permissions().mode(),
+            identity.permissions().mode(),
+            "{emit}"
+        );
+        assert_eq!(fs::read(unrelated).unwrap(), b"unrelated protected content");
+    }
+}
