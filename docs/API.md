@@ -2513,6 +2513,13 @@ Set `SOLDR_TARGET_AUTO_PRUNE_ENABLED=0` to disable the watchdog
 entirely. The watchdog is layered on top of the legacy 2 GiB low-disk
 advisory (issue #289) and never replaces it.
 
+**On CI (`CI` set to anything but a falsy spelling) the block threshold
+defaults to `0`** — the watchdog still probes, still warns, and still runs
+the pre-build reclaim, but it never aborts. A hosted runner's free space is
+the platform's choice, so aborting there reports an infrastructure fact as a
+build failure that no diff can fix. Setting `SOLDR_TARGET_BLOCK_FREE_GB`
+explicitly overrides this, including back to a non-zero value.
+
 ### Daemon-owned cache maintenance (issues #1762–#1764)
 
 Each `soldr-daemon` owns exactly the one root selected by `SoldrPaths`:
@@ -2902,7 +2909,7 @@ Commands:
 | `SOLDR_RELD_BIN` | Absolute path to a `reld` executable that overrides the managed on-demand install described under `SOLDR_LINKER`. Intended for reld development — build reld locally and point soldr at it instead of fetching the pinned release. | unset (managed install) |
 | `SOLDR_OPTIMIZE_HELPER_OUTPUT` | Internal: set by the parent soldr process when it re-launches itself elevated via `--as-elevated-helper`. The elevated child writes its JSON status to this path so the parent can read and propagate it. | unset |
 | `SOLDR_TARGET_WARN_FREE_GB` | Free-space threshold (in GiB) below which the host-volume disk watchdog (issue #574) emits a one-line stderr warning before `soldr cargo ...` dispatches the build. The watchdog probes the disk hosting the project's `target/` dir, falling back to CWD when `target/` doesn't exist yet. | `10` |
-| `SOLDR_TARGET_BLOCK_FREE_GB` | Free-space threshold (in GiB) below which the host-volume disk watchdog (issue #574) refuses to start the build, pointing the user at `soldr gc target --purge`. Always strictly less than `SOLDR_TARGET_WARN_FREE_GB`; inverted thresholds collapse to "block wins". | `5` |
+| `SOLDR_TARGET_BLOCK_FREE_GB` | Free-space threshold (in GiB) below which the host-volume disk watchdog (issue #574) refuses to start the build, pointing the user at `soldr gc target --purge`. Always strictly less than `SOLDR_TARGET_WARN_FREE_GB`; inverted thresholds collapse to "block wins". Defaults to `0` on CI (`CI` set to a non-falsy value), so a small hosted runner never aborts a build; an explicit value still wins. | `5` local / `0` CI |
 | `SOLDR_TARGET_AUTO_PRUNE_ENABLED` | Master toggle for the host-volume disk watchdog (issue #574). Falsy values (`0`, `false`, `no`, `off`, empty — case-insensitive) disable the watchdog entirely. | `1` |
 | `SOLDR_GC_TARGET_ROOT` | Default walk root for `soldr gc target` (issue #574). The `--root <PATH>` flag always takes precedence. | `~/dev` |
 | `SOLDR_TEST_DISK_FREE_BYTES` | Test seam for the watchdog: when set to a `u64` byte count (or `error`), overrides the real `fs2::available_space` probe so tests can drive every threshold edge. Internal — never set this in production. | unset |

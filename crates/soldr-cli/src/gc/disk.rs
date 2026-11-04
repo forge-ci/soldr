@@ -8,6 +8,7 @@
 //! watchdog tied to cross-repo `target/` reclamation via
 //! `soldr gc target`.
 
+use soldr_core::core::env_flag;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -41,6 +42,38 @@ pub(crate) fn reset_test_disk_probe_cursor() {
 
 pub(crate) const DEFAULT_WARN_FREE_GB: u64 = 10;
 pub(crate) const DEFAULT_BLOCK_FREE_GB: u64 = 5;
+
+/// Block threshold used on CI when `SOLDR_TARGET_BLOCK_FREE_GB` is unset.
+///
+/// A CI runner's volume size is the platform's choice, not a property of the
+/// commit being built: a hosted runner that is down to ~2.7 GiB free makes
+/// every job on it fail at the front door with a message telling the reader to
+/// run `soldr gc target --purge` against a disk they do not own. That turns an
+/// infrastructure fact into a red build nobody can fix from the diff.
+///
+/// So on CI the default drops to zero: the watchdog still probes, still warns
+/// below [`DEFAULT_WARN_FREE_GB`], and still runs the pre-build reclaim, but it
+/// never aborts. An explicit `SOLDR_TARGET_BLOCK_FREE_GB` (including a non-zero
+/// value) still wins, because that is a deliberate choice by the workflow.
+pub(crate) const CI_BLOCK_FREE_GB: u64 = 0;
+
+/// Resolve the default block threshold for this host.
+///
+/// Pure so the CI/local split is unit-testable without mutating the process
+/// environment (which parallel tests share).
+pub(crate) fn default_block_free_gb(is_ci: bool) -> u64 {
+    if is_ci {
+        CI_BLOCK_FREE_GB
+    } else {
+        DEFAULT_BLOCK_FREE_GB
+    }
+}
+
+/// `CI` is a foreign variable: any value but an explicit falsy spelling means
+/// "running in CI", matching how the rest of soldr reads it.
+fn on_ci() -> bool {
+    env_flag::foreign_flag("CI")
+}
 
 const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
 
@@ -108,7 +141,8 @@ pub(crate) fn check_disk_or_warn_or_block(workdir: &Path) -> DiskCheckOutcome {
         return DiskCheckOutcome::Disabled;
     }
     let warn_gib = env_u64(WARN_FREE_GB_ENV_VAR).unwrap_or(DEFAULT_WARN_FREE_GB);
-    let block_gib = env_u64(BLOCK_FREE_GB_ENV_VAR).unwrap_or(DEFAULT_BLOCK_FREE_GB);
+    let block_gib =
+        env_u64(BLOCK_FREE_GB_ENV_VAR).unwrap_or_else(|| default_block_free_gb(on_ci()));
 
     // Why: if the user inverts thresholds, prefer "block wins" so the
     // safety net is conservative rather than silently broken.
@@ -616,6 +650,54 @@ mod tests {
         let path = std::path::Path::new(".");
         for _ in 0..4 {
             assert_eq!(free_bytes_for(path).unwrap(), 7 * BYTES_PER_GIB);
+        }
+    }
+
+    #[test]
+    fn ci_default_block_threshold_is_zero_and_local_is_five() {
+        // CI runners are sized by the platform; a small runner must not turn
+        // into a front-door abort that no diff can fix.
+        assert_eq!(default_block_free_gb(true), CI_BLOCK_FREE_GB);
+        assert_eq!(default_block_free_gb(true), 0);
+        assert_eq!(default_block_free_gb(false), DEFAULT_BLOCK_FREE_GB);
+    }
+
+    #[test]
+    fn a_zero_block_threshold_warns_but_never_blocks() {
+        // 2.7 GiB free is exactly the CI case that aborted the Windows lane:
+        // under a zero block threshold it is a warn, not a block.
+        let free = 2_900_000_000_u64;
+        let outcome = classify_outcome(free, DEFAULT_WARN_FREE_GB, CI_BLOCK_FREE_GB);
+        match outcome {
+            DiskCheckOutcome::Warn {
+                free_bytes,
+                threshold_gib,
+            } => {
+                assert_eq!(free_bytes, free);
+                assert_eq!(threshold_gib, DEFAULT_WARN_FREE_GB);
+            }
+            other => panic!("expected Warn under a zero block threshold, got {other:?}"),
+        }
+
+        // Even a full disk only warns: the abort path is unreachable at zero.
+        assert!(matches!(
+            classify_outcome(0, DEFAULT_WARN_FREE_GB, CI_BLOCK_FREE_GB),
+            DiskCheckOutcome::Warn { .. }
+        ));
+    }
+
+    #[test]
+    fn ci_detection_reads_the_ci_variable() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = EnvVarGuard::set("CI", "1");
+        assert!(on_ci(), "CI=1 must read as CI");
+
+        // Falsy spellings still mean "not CI", as everywhere else in soldr.
+        for falsy in ["0", "false", "no", "off"] {
+            let _falsy = EnvVarGuard::set("CI", falsy);
+            assert!(!on_ci(), "CI={falsy} must not read as CI");
         }
     }
 }
