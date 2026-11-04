@@ -3,12 +3,16 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import TypeAlias, cast
 
 import pytest
 from conftest import load_script_module
 
-JsonObject = dict[str, Any]
+# Raw GitHub/PyPI documents are serialization boundaries, not internal records.
+JsonValue: TypeAlias = (
+    str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
+)
+JsonObject = dict[str, JsonValue]
 REPO_ROOT = Path(__file__).resolve().parents[1]
 validate = load_script_module(
     REPO_ROOT / ".github" / "scripts" / "validate_npm_release_recovery.py"
@@ -151,7 +155,7 @@ def test_rejects_unpublished_or_mutable_release(
 
 def test_rejects_github_pypi_wheel_mismatch(tmp_path: Path) -> None:
     pypi = _pypi()
-    pypi["urls"].append(
+    cast(list[JsonValue], pypi["urls"]).append(
         {"filename": "soldr-0.9.0-py3-none-extra.whl", "packagetype": "bdist_wheel"}
     )
     with pytest.raises(validate.ValidationError, match="wheel sets do not match"):
@@ -170,7 +174,7 @@ def test_rejects_missing_canonical_release_cell(tmp_path: Path, kind: str) -> No
     release = _release()
     pypi = _pypi()
     if kind == "pypi-wheel":
-        pypi["urls"].pop()
+        cast(list[JsonValue], pypi["urls"]).pop()
     else:
         suffix = {
             "archive": ".tar.zst",
@@ -179,15 +183,19 @@ def test_rejects_missing_canonical_release_cell(tmp_path: Path, kind: str) -> No
         }[kind]
         removed = next(
             asset["name"]
-            for asset in release["assets"]
-            if asset["name"].endswith(suffix)
+            for asset in cast(list[JsonObject], release["assets"])
+            if cast(str, asset["name"]).endswith(suffix)
         )
         release["assets"] = [
-            asset for asset in release["assets"] if asset["name"] != removed
+            asset
+            for asset in cast(list[JsonObject], release["assets"])
+            if asset["name"] != removed
         ]
         if kind == "wheel":
             pypi["urls"] = [
-                item for item in pypi["urls"] if item["filename"] != removed
+                item
+                for item in cast(list[JsonObject], pypi["urls"])
+                if item["filename"] != removed
             ]
     with pytest.raises(validate.ValidationError, match="missing"):
         validate.validate_recovery(
@@ -203,7 +211,7 @@ def test_rejects_missing_canonical_release_cell(tmp_path: Path, kind: str) -> No
 @pytest.mark.parametrize("size", [0, -1, None, "1024", True])
 def test_rejects_invalid_expected_asset_size(tmp_path: Path, size: object) -> None:
     release = _release()
-    release["assets"][0]["size"] = size
+    cast(list[JsonObject], release["assets"])[0]["size"] = cast(JsonValue, size)
     with pytest.raises(validate.ValidationError, match="invalid size"):
         validate.validate_recovery(
             repository="zackees/soldr",
