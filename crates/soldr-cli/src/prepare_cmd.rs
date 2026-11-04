@@ -347,7 +347,10 @@ pub fn fuzzy_score(input: &str, candidate: &str) -> f64 {
     let common = i.bytes().zip(c.bytes()).take_while(|(a, b)| a == b).count();
     let max_len = i.len().max(c.len()).max(1);
     let prefix_score = common as f64 / max_len as f64;
-    let jw = strsim::jaro_winkler(&i, &c);
+    // Same Jaro-Winkler implementation as before, now routed through the
+    // shared kernal-api facade (bounded at 4096 bytes; an over-limit input
+    // scores 0, which is the "no signal" value this blend expects).
+    let jw = kernal_api::text::name_similarity(&i, &c).unwrap_or(0.0);
     0.5 * prefix_score + 0.5 * jw
 }
 
