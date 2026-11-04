@@ -53,3 +53,34 @@ def test_fails_loudly_below_floor(tmp_path, capsys):
 def test_never_removes_lane_toolchains():
     for keep in ("rust", "cargo", "uv", "powershell", "python"):
         assert not any(keep in d.lower() for d in reclaim.RECLAIM_DIRS)
+
+
+def test_archive_shards_reclaim_before_download_and_keep_disk_guards():
+    import yaml
+
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load(
+        (root / ".github/workflows/_ci-target-run.yml").read_text()
+    )
+    steps = workflow["jobs"]["target-run"]["steps"]
+    reclaim_index = next(
+        i
+        for i, step in enumerate(steps)
+        if "ci/reclaim_runner_disk.py" in step.get("run", "")
+    )
+    download_index = next(
+        i
+        for i, step in enumerate(steps)
+        if step.get("uses", "").startswith("actions/download-artifact@")
+    )
+    assert reclaim_index < download_index
+    assert steps[reclaim_index]["if"] == "runner.os == 'Linux'"
+    assert "--require-gib 20" in steps[reclaim_index]["run"]
+    replay = next(
+        step["run"]
+        for step in steps
+        if step.get("name") == "Run owned pre-built native tests"
+    )
+    assert "--min-free-gib 20" in replay
+    assert "--archive-multiple 4" in replay
+    assert "--min-free-gib 10" in replay

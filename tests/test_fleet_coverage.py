@@ -48,7 +48,7 @@ def test_foreign_adapter_does_not_inherit_soldr_jobs():
 
 
 @pytest.mark.parametrize(
-    "status", ["skipped", "cancelled", "neutral", "failure", "", None]
+    "status", ["skipped", "cancelled", "abandoned", "neutral", "failure", "", None]
 )
 def test_each_unsuccessful_cell_refuses_full_coverage(status):
     needs = states()
@@ -200,3 +200,20 @@ def test_default_contract_report_requires_candidate_identity(tmp_path, monkeypat
     with pytest.raises(ValueError, match="both candidate SHAs"):
         COVERAGE.main()
     assert not report.exists()
+
+
+@pytest.mark.parametrize("status", ["cancelled", "abandoned"])
+@pytest.mark.parametrize("runner", ["", "GitHub Actions runner"])
+def test_capacity_cancellation_never_authorizes_release(status, runner):
+    needs = states()
+    needs["board-run"] = {"result": status, "runner_name": runner, "steps": []}
+    failures = COVERAGE.coverage_failures(
+        COVERAGE.JsonDocument(contract()),
+        COVERAGE.JsonDocument(needs),
+        expected_sha=SHA,
+        selected_sha=SHA,
+    )
+    assert len(failures) == 1
+    assert f"board-run: {status}" in failures[0]
+    assert "execution unproven" in failures[0]
+    assert "rerun the lane" in failures[0]

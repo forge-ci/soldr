@@ -60,7 +60,7 @@ def passing():
 
 
 @pytest.mark.parametrize(
-    "state", ["missing", "skipped", "cancelled", "neutral", "failure"]
+    "state", ["missing", "skipped", "cancelled", "abandoned", "neutral", "failure"]
 )
 def test_green_aggregate_cannot_hide_one_unsuccessful_platform(state):
     needs = passing()
@@ -68,7 +68,13 @@ def test_green_aggregate_cannot_hide_one_unsuccessful_platform(state):
         del needs["run"]
     else:
         needs["run"] = {"result": state}
-    assert f"run: {state}" in check(needs)
+    expected = f"run: {state}"
+    if state in {"cancelled", "abandoned"}:
+        expected += (
+            " (execution unproven; runner capacity does not waive required "
+            "coverage; rerun the lane)"
+        )
+    assert expected in check(needs)
 
 
 def test_full_pass_binds_candidate_and_includes_the_test_tier():
