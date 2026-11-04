@@ -27,15 +27,25 @@ import json
 import subprocess
 import sys
 import time
-from typing import Any
+from dataclasses import dataclass
 from pathlib import Path
 
 # Use regular-file capture without an installed Python dependency.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 # pylint: disable-next=wrong-import-position
-from soldr._process import run_captured  # noqa: E402 -- source-relative bootstrap precedes this import
+from soldr._process import (
+    run_captured,
+)  # noqa: E402 -- source-relative bootstrap precedes this import
 
-Check = dict[str, Any]
+
+@dataclass(frozen=True)
+class Check:
+    """The named check fields used by the waiter."""
+
+    name: str
+    bucket: str
+    link: str
+
 
 FAIL_BUCKETS = {"fail"}
 DONE_BUCKETS = {"pass", "skipping"}
@@ -59,7 +69,10 @@ def fetch_checks(pr: str, repo: str | None) -> list[Check]:
         raise SystemExit(3)
     # `gh pr checks` exits 8 when checks are pending and 1 when any failed,
     # but still prints the JSON payload; only an empty payload is an error.
-    checks: list[Check] = json.loads(proc.stdout or "[]")
+    checks = [
+        Check(name=row["name"], bucket=row["bucket"], link=row["link"])
+        for row in json.loads(proc.stdout or "[]")
+    ]
     return checks
 
 
@@ -105,7 +118,7 @@ def cancel_inflight_runs(sha: str, repo: str | None) -> list[str]:
 def summarize(checks: list[Check]) -> str:
     counts: dict[str, int] = {}
     for check in checks:
-        counts[check["bucket"]] = counts.get(check["bucket"], 0) + 1
+        counts[check.bucket] = counts.get(check.bucket, 0) + 1
     return ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "no checks yet"
 
 
@@ -139,11 +152,11 @@ def main() -> int:  # noqa: C901
             print(f"[{int(time.monotonic() - started):>5}s] {summary}", flush=True)
             last_summary = summary
 
-        failed = [c for c in checks if c["bucket"] in FAIL_BUCKETS]
+        failed = [c for c in checks if c.bucket in FAIL_BUCKETS]
         if failed:
             print("\nFAILED:")
             for check in failed:
-                print(f"  - {check['name']}  {check['link']}")
+                print(f"  - {check.name}  {check.link}")
             if args.cancel:
                 cancelled = cancel_inflight_runs(
                     head_sha(args.pr, args.repo), args.repo
@@ -155,14 +168,14 @@ def main() -> int:  # noqa: C901
             return 1
 
         elapsed = time.monotonic() - started
-        if checks and all(c["bucket"] in DONE_BUCKETS for c in checks):
+        if checks and all(c.bucket in DONE_BUCKETS for c in checks):
             print("\nALL PASSED")
             return 0
         if not checks and elapsed > args.grace:
             print("\nno checks reported for this PR head", file=sys.stderr)
             return 2
         if elapsed > args.timeout:
-            pending = [c["name"] for c in checks if c["bucket"] not in DONE_BUCKETS]
+            pending = [c.name for c in checks if c.bucket not in DONE_BUCKETS]
             print(f"\nTIMEOUT with pending: {', '.join(pending)}", file=sys.stderr)
             return 2
         time.sleep(args.interval)

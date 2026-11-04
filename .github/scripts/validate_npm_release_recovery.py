@@ -14,7 +14,7 @@ import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TypeAlias, cast
 
 # Use regular-file capture without an installed Python dependency.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -55,7 +55,11 @@ class ValidationError(RuntimeError):
     """The requested npm recovery is not tied to a complete release."""
 
 
-JsonObject = dict[str, Any]
+# Raw GitHub/PyPI documents are serialization boundaries, not internal records.
+JsonValue: TypeAlias = (
+    str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
+)
+JsonObject = dict[str, JsonValue]
 JsonFetcher = Callable[[str, str | None], JsonObject]
 GitRunner = Callable[[Path, Sequence[str]], str]
 
@@ -198,11 +202,11 @@ def validate_recovery(  # noqa: C901
     }
     pypi_url = f"https://pypi.org/pypi/soldr/{version}/json"
     pypi = get_json(pypi_url, None)
-    if pypi.get("info", {}).get("version") != version:
+    if cast(JsonObject, pypi.get("info", {})).get("version") != version:
         raise ValidationError("PyPI release version does not match the requested tag")
     pypi_wheels = {
         item.get("filename")
-        for item in pypi.get("urls", [])
+        for item in cast(list[JsonValue], pypi.get("urls", []))
         if isinstance(item, dict) and item.get("packagetype") == "bdist_wheel"
     }
     missing_pypi = sorted(
