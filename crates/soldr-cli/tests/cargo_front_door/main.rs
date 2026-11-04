@@ -31,7 +31,6 @@ mod cli_reentrancy_guard_canary;
 mod cli_toolchain_download_guard;
 mod cli_wrapper;
 mod cli_wrapper_identity;
-#[cfg(unix)]
 mod cli_wrapper_output_detach;
 mod cli_wrapper_perf;
 mod cold_first_compile;

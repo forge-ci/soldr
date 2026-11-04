@@ -2,11 +2,30 @@
 //! hardlinks with private writable outputs without changing the cached inode.
 
 use crate::common;
+use soldr_platform::fs::{identity, permissions};
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::Path;
+
+fn unix_ownership_available() -> bool {
+    if matches!(
+        soldr_platform::host::facts::os(),
+        soldr_platform::host::facts::HostOs::Windows
+    ) {
+        eprintln!("skipped: native link-count ownership proof requires Unix");
+        return false;
+    }
+    true
+}
+
+fn hardlink(path: &Path) -> identity::HardlinkIdentity {
+    identity::hardlink_identity(&fs::metadata(path).unwrap()).expect("native Unix file identity")
+}
 
 #[test]
 fn no_cache_rustc_detaches_protected_metadata_outputs() {
+    if !unix_ownership_available() {
+        return;
+    }
     let rustc = common::rustup_which("rustc");
     for (explicit_output, frontend) in [(false, false), (true, false), (false, true), (true, true)]
     {
@@ -16,15 +35,15 @@ fn no_cache_rustc_detaches_protected_metadata_outputs() {
         let blob = dir.join("immutable-cache-blob");
         let original = b"protected cached metadata";
         fs::write(&blob, original).unwrap();
-        fs::set_permissions(&blob, fs::Permissions::from_mode(0o444)).unwrap();
+        permissions::restore_mode(&blob, Some(0o444)).unwrap();
         let output = dir.join(if explicit_output {
             "requested.rmeta"
         } else {
             "libcompiler_identity_probe.rmeta"
         });
         fs::hard_link(&blob, &output).unwrap();
-        let identity = fs::metadata(&blob).unwrap();
-        assert_eq!(fs::metadata(&output).unwrap().ino(), identity.ino());
+        let identity = hardlink(&blob);
+        assert_eq!(hardlink(&output).index, identity.index);
         let mut command = common::isolated_soldr_command();
         if frontend {
             command.args(["--no-cache", "rustc"]);
@@ -50,21 +69,24 @@ fn no_cache_rustc_detaches_protected_metadata_outputs() {
             "explicit_output={explicit_output}, frontend={frontend}: {}",
             String::from_utf8_lossy(&result.stderr)
         );
-        let cached = fs::metadata(&blob).unwrap();
-        assert_eq!(cached.ino(), identity.ino());
-        assert_eq!(cached.dev(), identity.dev());
-        assert_eq!(cached.permissions().mode() & 0o777, 0o444);
-        assert_eq!(cached.nlink(), 1);
+        let cached = hardlink(&blob);
+        assert_eq!(cached.index, identity.index);
+        assert_eq!(cached.dev, identity.dev);
+        assert_eq!(permissions::mode(&blob).unwrap() & 0o777, 0o444);
+        assert_eq!(cached.links, 1);
         assert_eq!(fs::read(&blob).unwrap(), original);
-        let compiled = fs::metadata(&output).unwrap();
-        assert_ne!(compiled.ino(), cached.ino());
-        assert_ne!(compiled.permissions().mode() & 0o200, 0);
+        let compiled = hardlink(&output);
+        assert_ne!(compiled.index, cached.index);
+        assert_ne!(permissions::mode(&output).unwrap() & 0o200, 0);
         assert_ne!(fs::read(&output).unwrap(), original);
     }
 }
 
 #[test]
 fn explicit_output_detachment_preserves_unrelated_readonly_files() {
+    if !unix_ownership_available() {
+        return;
+    }
     for emit in ["metadata", "metadata,link", "metadata=kind.rmeta"] {
         let dir = common::unique_temp_dir("direct-output-sentinel");
         let products = dir.join("products");
@@ -78,8 +100,9 @@ fn explicit_output_detachment_preserves_unrelated_readonly_files() {
             requested.clone()
         };
         fs::write(&unrelated, b"unrelated protected content").unwrap();
-        fs::set_permissions(&unrelated, fs::Permissions::from_mode(0o444)).unwrap();
-        let identity = fs::metadata(&unrelated).unwrap();
+        permissions::restore_mode(&unrelated, Some(0o444)).unwrap();
+        let identity = hardlink(&unrelated);
+        let original_mode = permissions::mode(&unrelated);
         let result = common::isolated_soldr_command()
             .args([
                 "--no-cache",
@@ -100,13 +123,10 @@ fn explicit_output_detachment_preserves_unrelated_readonly_files() {
             "{emit}: {}",
             String::from_utf8_lossy(&result.stderr)
         );
-        let after = fs::metadata(&unrelated).unwrap();
-        assert_eq!(after.ino(), identity.ino(), "{emit}");
-        assert_eq!(
-            after.permissions().mode(),
-            identity.permissions().mode(),
-            "{emit}"
-        );
+        let after = hardlink(&unrelated);
+        assert_eq!(after.index, identity.index, "{emit}");
+        assert_eq!(permissions::mode(&unrelated), original_mode, "{emit}");
         assert_eq!(fs::read(unrelated).unwrap(), b"unrelated protected content");
     }
 }
+
