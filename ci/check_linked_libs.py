@@ -274,6 +274,9 @@ LINUX_ALLOW = [
 
 MACOS_ALLOW = [
     "/usr/lib/libSystem.B.dylib",
+    # Objective-C runtime: an OS system dylib present on every macOS,
+    # not a vendorable dependency with a static/bundled alternative.
+    "/usr/lib/libobjc.A.dylib",
     "/usr/lib/libc++*.dylib",
     "/usr/lib/libiconv*.dylib",
     "/usr/lib/libresolv*.dylib",

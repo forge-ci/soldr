@@ -238,6 +238,7 @@ def test_linux_allowlist_rejects_a_vendored_shared_library() -> None:
 def test_macos_allowlist_accepts_system_libraries_and_frameworks() -> None:
     names = [
         "/usr/lib/libSystem.B.dylib",
+        "/usr/lib/libobjc.A.dylib",
         "/usr/lib/libc++.1.dylib",
         "/usr/lib/libiconv.2.dylib",
         "/usr/lib/libresolv.9.dylib",
@@ -248,7 +249,7 @@ def test_macos_allowlist_accepts_system_libraries_and_frameworks() -> None:
 
 def test_macos_allowlist_rejects_a_third_party_dylib() -> None:
     assert check_linked_libs.disallowed_libs(
-        "macho", ["/usr/local/lib/libssl.3.dylib"]
+        "macho", ["/usr/lib/libobjc.A.dylib", "/usr/local/lib/libssl.3.dylib"]
     ) == ["/usr/local/lib/libssl.3.dylib"]
 
 
