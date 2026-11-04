@@ -145,7 +145,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: zackees/ci.yml
-          ref: ae7d754e79c004647f5a16e7589aa371a9ff0e35
+          ref: 9d6875b9b33c3ea54aa70cfcce8fcb1a2668747e
           path: .ci-lint
           persist-credentials: false
           sparse-checkout: ci_lint
