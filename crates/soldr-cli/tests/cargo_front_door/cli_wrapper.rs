@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-fn cached_named_compiler_ignores_daemon_path(tool: &str, callback: bool) {
+fn cached_named_compiler_ignores_daemon_path(tool: &str, callback: bool, forward: Option<&str>) {
     // Unix executable lookup can select a same-named shim from PATH. The
     // regression uses a failing sentinel instead of a recursive Soldr shim,
     // so the old code fails promptly without wedging a daemon's admission.
@@ -73,6 +73,27 @@ fn cached_named_compiler_ignores_daemon_path(tool: &str, callback: bool) {
             .env_remove("RUSTC_WORKSPACE_WRAPPER")
             .env_remove("SOLDR_EFFECTIVE_RUSTC_WRAPPER")
             .env_remove("SOLDR_EFFECTIVE_RUSTC_WRAPPER_ORIGIN");
+        if let Some(forward) = forward {
+            let script = format!("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'soldr 999.0.0'; exit 0; fi\nexec '{}' \"$@\"\n", common::soldr_bin().display());
+            if forward == "global" {
+                write_fake_script(&poison.join("soldr"), &script);
+                let mut manifest = fs::OpenOptions::new()
+                    .append(true)
+                    .open(fixture.path().join("Cargo.toml"))
+                    .unwrap();
+                writeln!(
+                    manifest,
+                    "\n[package.metadata.soldr]\nprefer_newer_global = true"
+                )
+                .unwrap();
+                command.env_remove(soldr_cli::global_upgrade::GLOBAL_DELEGATION_DISABLE_ENV_VAR);
+            } else {
+                let bin = cache.join("bin/soldr-99.0.0");
+                fs::create_dir_all(&bin).unwrap();
+                write_fake_script(&bin.join("soldr"), &script);
+                command.args(["--as", "99.0.0"]);
+            }
+        }
         command
             .arg(tool)
             .args([
@@ -101,22 +122,22 @@ fn cached_named_compiler_ignores_daemon_path(tool: &str, callback: bool) {
 
 #[test]
 fn cached_bare_rustc_uses_resolved_client_compiler() {
-    cached_named_compiler_ignores_daemon_path("rustc", true);
+    cached_named_compiler_ignores_daemon_path("rustc", true, None);
 }
 
 #[test]
 fn cached_bare_clippy_driver_uses_resolved_client_compiler() {
-    cached_named_compiler_ignores_daemon_path("clippy-driver", true);
+    cached_named_compiler_ignores_daemon_path("clippy-driver", true, None);
 }
 
 #[test]
 fn cold_native_rustc_bootstraps_broker() {
-    cached_named_compiler_ignores_daemon_path("rustc", false);
+    cached_named_compiler_ignores_daemon_path("rustc", false, None);
 }
 
 #[test]
 fn cold_native_clippy_driver_bootstraps_broker() {
-    cached_named_compiler_ignores_daemon_path("clippy-driver", false);
+    cached_named_compiler_ignores_daemon_path("clippy-driver", false, None);
 }
 
 #[test]
@@ -293,4 +314,17 @@ fn wrapper_mode_stdin_source_propagates_nonzero_exit_code() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+}
+
+#[test]
+fn native_compilers_survive_actual_global_forwarding() {
+    for tool in ["rustc", "clippy-driver"] {
+        cached_named_compiler_ignores_daemon_path(tool, false, Some("global"));
+    }
+}
+#[test]
+fn native_compilers_survive_actual_version_trampoline() {
+    for tool in ["rustc", "clippy-driver"] {
+        cached_named_compiler_ignores_daemon_path(tool, false, Some("trampoline"));
+    }
 }

@@ -199,7 +199,7 @@ pub fn run() -> std::process::ExitCode {
     };
     // Re-entrancy guard (soldr#2547/#2566): judge inherited parentage and
     // stamp IN_SOLDR_PID before any dispatch, spawn, or runtime setup.
-    if let Some(code) = crate::reentrancy_guard::enforce_and_mark(&raw_args) {
+    if let Some(code) = crate::reentrancy_guard::enforce_and_mark(&raw_args, compiler_callback) {
         exit_guard::mark_spoke();
         guarded_exit(code);
     }
