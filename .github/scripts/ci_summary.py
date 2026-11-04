@@ -233,7 +233,10 @@ def settled_run_attempt_jobs(repository: str, run_id: str, attempt: str, token: 
                 _AUDIT_EXEMPT_PREFIXES + _AUDIT_UNORDERED_PREFIXES
             )
         ]
-        print(f"Run attempt jobs: attempt {number}/8; unfinished jobs: {pending}", flush=True)
+        print(
+            f"Run attempt jobs: attempt {number}/8; unfinished jobs: {pending}",
+            flush=True,
+        )
         if not pending or number == 8:
             return jobs
         time.sleep(10)
