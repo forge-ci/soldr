@@ -216,6 +216,33 @@ def list_run_attempt_jobs(repository: str, run_id: str, attempt: str, token: str
         page += 1
 
 
+def settled_run_attempt_jobs(repository: str, run_id: str, attempt: str, token: str):
+    """Refresh stale job states before auditing; CI Pre is never waited on.
+
+    Eight snapshots allow 70 seconds of consistency lag, within the summary's
+    five-minute timeout. Exhaustion returns the last snapshot for the normal
+    fail-closed audit; an unfinished job never becomes a successful job.
+    """
+    for number in range(1, 9):
+        jobs = list_run_attempt_jobs(repository, run_id, attempt, token)
+        pending = [
+            str(job.get("name", ""))
+            for job in jobs
+            if job.get("status") != "completed"
+            and not str(job.get("name", "")).startswith(
+                _AUDIT_EXEMPT_PREFIXES + _AUDIT_UNORDERED_PREFIXES
+            )
+        ]
+        print(
+            f"Run attempt jobs: attempt {number}/8; unfinished jobs: {pending}",
+            flush=True,
+        )
+        if not pending or number == 8:
+            return jobs
+        time.sleep(10)
+    raise AssertionError("unreachable job listing attempt")
+
+
 def current_selection_failures(
     event: dict | None,
     *,
@@ -415,7 +442,7 @@ def main() -> int:
         failures += current_failures
         try:
             failures += run_attempt_failures(
-                list_run_attempt_jobs(
+                settled_run_attempt_jobs(
                     os.environ.get("GITHUB_REPOSITORY", ""),
                     os.environ.get("GITHUB_RUN_ID", ""),
                     os.environ.get("GITHUB_RUN_ATTEMPT", ""),

@@ -589,3 +589,55 @@ def test_failed_selector_with_empty_mode_still_fails(tmp_path, monkeypatch):
         SUMMARY, "force_cancel_run", lambda *_: pytest.fail("must not cancel")
     )
     assert SUMMARY.main() == 1
+
+
+@pytest.mark.parametrize("outcome", ["success", "unfinished", "failure", "cancelled"])
+def test_cli_retries_stale_job_snapshot(tmp_path, monkeypatch, capsys, outcome):
+    report_path = cli_environment(tmp_path, monkeypatch)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "merge_group")
+    monkeypatch.setenv("SELECTED_SHA", SHA)
+    snapshots = []
+    sleeps = []
+
+    def listing(*_args):
+        snapshots.append(True)
+        if len(snapshots) == 1 or outcome == "unfinished":
+            return [_job("Lint", None, "in_progress")]
+        return [_job("Lint", outcome)]
+
+    monkeypatch.setattr(SUMMARY, "list_run_attempt_jobs", listing)
+    monkeypatch.setattr(SUMMARY.time, "sleep", sleeps.append)
+    assert SUMMARY.main() == int(outcome != "success")
+    report = json.loads(report_path.read_text())
+    assert len(snapshots) == (8 if outcome == "unfinished" else 2)
+    assert sleeps == [10] * (len(snapshots) - 1)
+    assert "attempt 1/8" in capsys.readouterr().out
+    if outcome == "unfinished":
+        assert report["failures"] == ["job 'Lint' has not completed (in_progress)"]
+    elif outcome != "success":
+        assert report["failures"] == [f"job 'Lint' concluded {outcome}"]
+    else:
+        assert report["success"]
+
+
+@pytest.mark.parametrize("conclusion", ["success", "failure", "cancelled"])
+def test_job_snapshot_retry_never_waits_on_ci_pre(monkeypatch, conclusion):
+    jobs = [
+        _job("CI summary", None, "in_progress"),
+        _job("End-of-queue cache janitor", None, "queued"),
+        _job("CI Pre / plan", None, "in_progress"),
+        _job("CI Pre / Cache janitor", "cancelled"),
+        _job("Lint", conclusion),
+    ]
+    calls = []
+    monkeypatch.setattr(
+        SUMMARY, "list_run_attempt_jobs", lambda *args: calls.append(args) or jobs
+    )
+    monkeypatch.setattr(
+        SUMMARY.time, "sleep", lambda _: pytest.fail("must not wait on CI Pre")
+    )
+    snapshot = SUMMARY.settled_run_attempt_jobs("owner/repo", "123", "2", "token")
+    assert calls == [("owner/repo", "123", "2", "token")]
+    assert SUMMARY.run_attempt_failures(snapshot) == (
+        [] if conclusion == "success" else [f"job 'Lint' concluded {conclusion}"]
+    )
