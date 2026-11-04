@@ -1,4 +1,8 @@
-//! Issue #1817 — COW-detach declared rustc outputs before a direct fallback.
+//! COW-detach declared rustc outputs before a direct compiler invocation.
+//!
+//! The wrapper also uses this transition when caching is explicitly disabled
+//! or an invocation is not cacheable. Those paths can overwrite outputs from
+//! an earlier cached build just as a mid-build fallback can (issue #1817).
 //!
 //! When the compile daemon becomes unavailable *mid-build*, soldr falls back to
 //! running rustc directly. The build began with a managed zccache session, so

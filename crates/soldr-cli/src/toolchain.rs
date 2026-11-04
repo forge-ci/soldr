@@ -71,6 +71,12 @@ struct CargoPrepareFingerprint<'a> {
 /// Run a rustup-managed toolchain binary with pass-through args.
 pub(crate) fn run_toolchain_passthrough(tool: &str, args: &[String]) -> Result<i32, SoldrError> {
     let binary = resolve_dylint_scoped_binary(tool)?;
+    if crate::wrapper::is_wrapper_invocation(tool) {
+        let compiler_args: Vec<_> = std::iter::once(binary.to_string_lossy().into_owned())
+            .chain(args.iter().cloned())
+            .collect();
+        crate::fallback_detach::detach_outputs_for_direct_exec(&compiler_args)?;
+    }
     let mut command = std::process::Command::new(&binary);
     command.args(args);
     crate::binaries::apply_resolved_toolchain_homes(&mut command, &binary);

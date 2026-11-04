@@ -348,6 +348,7 @@ fn direct_exec_tool(
     profile: Option<WrapperProfile>,
 ) -> Result<i32, SoldrError> {
     let tool_path = resolve_wrapper_tool_path(tool_arg, tool_stem)?;
+    crate::fallback_detach::detach_outputs_for_direct_exec(&effective_args[1..])?;
 
     let mut command = std::process::Command::new(&tool_path);
     command.args(&effective_args[2..]);
