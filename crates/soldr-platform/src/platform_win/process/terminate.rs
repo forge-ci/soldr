@@ -41,7 +41,14 @@ pub fn terminate_tree(child: &mut Child) -> io::Result<TreeKill> {
 
     // Safe to read parent links now: we hold the child handle un-reaped, so
     // Windows cannot recycle `root` out from under the walk.
-    let enumerated = descendants_of(root);
+    let root_created = process_creation_token(root);
+    let enumerated = descendants_with_tokens(root, |pid| {
+        if pid == root {
+            root_created
+        } else {
+            process_creation_token(pid)
+        }
+    });
 
     // Every descendant ever seen, with a query-only handle retained until the
     // verification budget expires. A retained handle stays attached to the
@@ -107,7 +114,11 @@ pub fn terminate_tree(child: &mut Child) -> io::Result<TreeKill> {
         // The snapshot or a query/identity/terminate request failed, so report
         // the weaker guarantee rather than claiming a tree kill we did not
         // prove.
-        return Ok(TreeKill::ProcessKilled);
+        return Ok(unverified_tree(
+            root,
+            "initial identity or termination request failed",
+            &known,
+        ));
     }
 
     // Verification sweep. TerminateProcess is asynchronous, and a shell can
@@ -116,13 +127,32 @@ pub fn terminate_tree(child: &mut Child) -> io::Result<TreeKill> {
     // whatever is still standing until nothing is, or the budget expires.
     let deadline = std::time::Instant::now() + VERIFY_BUDGET;
     loop {
-        let sweep = descendants_of(root);
+        // Child and TrackedDescendant keep these process objects alive, so
+        // their PIDs cannot be reused until those handles are closed. Reuse
+        // their captured identities rather than reopening a killed process:
+        // OpenProcess may reject it while the retained handle remains valid.
+        let sweep = descendants_with_tokens(root, |pid| {
+            retained_creation_token(
+                pid,
+                root_created
+                    .map(|created| (root, created))
+                    .into_iter()
+                    .chain(known.iter().map(|tracked| (tracked.pid, tracked.created))),
+                process_creation_token,
+            )
+        });
         let descendants = match sweep {
             Some(descendants) => descendants,
             // A failed snapshot proves nothing. Do not let a later empty
             // snapshot erase that failure: a verified kill requires every
             // snapshot used for verification to have succeeded.
-            None => return Ok(TreeKill::ProcessKilled),
+            None => {
+                return Ok(unverified_tree(
+                    root,
+                    "verification snapshot failed",
+                    &known,
+                ))
+            }
         };
         // A shell can spawn one more child in the window before its own
         // termination lands, so retain and terminate each newly observed pid.
@@ -131,7 +161,11 @@ pub fn terminate_tree(child: &mut Child) -> io::Result<TreeKill> {
         best_effort_terminate(&untracked);
         verified &= request_termination(&mut known);
         if !verified {
-            return Ok(TreeKill::ProcessKilled);
+            return Ok(unverified_tree(
+                root,
+                "fresh identity or termination request failed",
+                &known,
+            ));
         }
         if all_exited(&known) {
             return Ok(TreeKill::TreeKilled);
@@ -140,7 +174,11 @@ pub fn terminate_tree(child: &mut Child) -> io::Result<TreeKill> {
             // Out of budget with survivors still live, or never able to look.
             // Say so: the whole point of soldr#2605 is that this case used to
             // report success.
-            return Ok(TreeKill::ProcessKilled);
+            return Ok(unverified_tree(
+                root,
+                "descendant exit proof deadline expired",
+                &known,
+            ));
         }
         std::thread::sleep(VERIFY_POLL);
     }
@@ -148,6 +186,20 @@ pub fn terminate_tree(child: &mut Child) -> io::Result<TreeKill> {
 
 const PROCESS_TERMINATE: u32 = 0x0001;
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+fn unverified_tree(root: u32, reason: &str, known: &[TrackedDescendant]) -> TreeKill {
+    eprintln!("soldr: process-tree cleanup for root {root} could not be verified: {reason}");
+    for tracked in known.iter().take(8) {
+        eprintln!(
+            "soldr: descendant pid={} created={} termination_requested={} times={:?}",
+            tracked.pid,
+            tracked.created,
+            tracked.termination_requested,
+            tracked.times()
+        );
+    }
+    TreeKill::ProcessKilled
+}
 // Test-only: terminate_tests.rs proves the identity handle works under a
 // token that denies SYNCHRONIZE.
 #[cfg(test)]
@@ -208,19 +260,24 @@ impl TrackedDescendant {
             self.termination_requested = true;
             return Ok(());
         }
-        let terminate_handle = open_process(self.pid, PROCESS_TERMINATE)?;
-        let terminated = unsafe {
-            windows_sys::Win32::System::Threading::TerminateProcess(terminate_handle, 1)
-        };
-        let terminate_error = (terminated == 0).then(io::Error::last_os_error);
-        // SAFETY: the handle came from `open_process` and is not used again.
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(terminate_handle) };
-        if let Some(error) = terminate_error {
+        let termination = open_process(self.pid, PROCESS_TERMINATE).and_then(|terminate_handle| {
+            // SAFETY: this process identity is pinned by query_handle, and the
+            // newly opened handle has PROCESS_TERMINATE access.
+            let terminated = unsafe {
+                windows_sys::Win32::System::Threading::TerminateProcess(terminate_handle, 1)
+            };
+            let error = (terminated == 0).then(io::Error::last_os_error);
+            // SAFETY: the handle came from open_process and is not used again.
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(terminate_handle) };
+            error.map_or(Ok(()), Err)
+        });
+        if let Err(error) = termination {
             // A descendant that exits on its own between the query above and
             // TerminateProcess -- a `cmd.exe` whose awaited `ping` was just
             // killed leaves-first -- makes TerminateProcess fail with
-            // ERROR_ACCESS_DENIED. The retained handle can still prove that
-            // exit; only an unproven failure weakens the result.
+            // ERROR_ACCESS_DENIED, including from OpenProcess itself. The
+            // retained handle can still prove that exit; only an unproven
+            // failure weakens the result.
             if !exited_despite_failed_terminate(self.created, self.times().ok()) {
                 return Err(error);
             }
@@ -242,9 +299,7 @@ impl Drop for TrackedDescendant {
 /// SYNCHRONIZE: restricted/job-object tokens commonly grant query access while
 /// denying the combined TERMINATE | SYNCHRONIZE shape that broke #2929.
 fn open_process(pid: u32, access: u32) -> io::Result<windows_sys::Win32::Foundation::HANDLE> {
-    let handle = unsafe {
-        windows_sys::Win32::System::Threading::OpenProcess(access, 0, pid)
-    };
+    let handle = unsafe { windows_sys::Win32::System::Threading::OpenProcess(access, 0, pid) };
     if handle.is_null() {
         return Err(io::Error::last_os_error());
     }
@@ -308,19 +363,29 @@ pub(crate) fn process_creation_token(pid: u32) -> Option<u64> {
 /// make the final result `ProcessKilled`, because no retained handle can prove
 /// their identity or exit.
 fn retain_snapshot(pids: &[u32], known: &mut Vec<TrackedDescendant>) -> Vec<u32> {
+    retain_snapshot_with(pids, known, TrackedDescendant::open)
+}
+
+fn retain_snapshot_with(
+    pids: &[u32],
+    known: &mut Vec<TrackedDescendant>,
+    mut open: impl FnMut(u32) -> io::Result<TrackedDescendant>,
+) -> Vec<u32> {
     let mut untracked = Vec::new();
     for pid in pids {
-        match TrackedDescendant::open(*pid) {
-            Ok(tracked) => {
-                if !known
-                    .iter()
-                    .any(|prior| prior.pid == tracked.pid && prior.created == tracked.created)
-                {
-                    known.push(tracked);
-                }
-            }
+        // The retained handle pins both the identity and PID, including after
+        // exit. A second OpenProcess can fail for that killed process and must
+        // not turn an already tracked descendant into an untracked one.
+        if known.iter().any(|tracked| tracked.pid == *pid) {
+            continue;
+        }
+        match open(*pid) {
+            Ok(tracked) => known.push(tracked),
             Err(error) if open_failure_proves_gone(&error) => {}
-            Err(_) => untracked.push(*pid),
+            Err(error) => {
+                eprintln!("soldr: could not retain descendant {pid}: {error}");
+                untracked.push(*pid);
+            }
         }
     }
     untracked
@@ -363,7 +428,14 @@ fn terminate_pids_leaves_first(pids: &[u32], mut terminate: impl FnMut(u32)) {
 fn request_termination(known: &mut [TrackedDescendant]) -> bool {
     let mut complete = true;
     for tracked in known.iter_mut().rev() {
-        if !tracked.termination_requested && tracked.request_termination().is_err() {
+        if tracked.termination_requested {
+            continue;
+        }
+        if let Err(error) = tracked.request_termination() {
+            eprintln!(
+                "soldr: could not terminate tracked descendant {}: {error}",
+                tracked.pid
+            );
             complete = false;
         }
     }
@@ -438,7 +510,23 @@ const VERIFY_POLL: std::time::Duration = std::time::Duration::from_millis(25);
 /// `None` means the process snapshot could not be taken, which is distinct from
 /// `Some(vec![])` ("the root is a leaf") -- the caller reports a weaker kill for
 /// the former and a complete one for the latter.
+#[cfg(test)]
 fn descendants_of(root: u32) -> Option<Vec<u32>> {
+    descendants_with_tokens(root, process_creation_token)
+}
+
+/// Prefer identities pinned by live handles; only fresh PIDs need opening.
+fn retained_creation_token(
+    pid: u32,
+    mut retained: impl Iterator<Item = (u32, u64)>,
+    query: impl FnOnce(u32) -> Option<u64>,
+) -> Option<u64> {
+    retained
+        .find_map(|(retained_pid, created)| (retained_pid == pid).then_some(created))
+        .or_else(|| query(pid))
+}
+
+fn descendants_with_tokens(root: u32, created: impl Fn(u32) -> Option<u64>) -> Option<Vec<u32>> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -475,8 +563,8 @@ fn descendants_of(root: u32) -> Option<Vec<u32>> {
     // than the process now holding the parent PID (see `collect_descendants`).
     // Without the root's own creation time no edge can be proven, so the
     // sweep reports itself unverified instead of guessing.
-    process_creation_token(root)?;
-    Some(collect_descendants(&edges, root, process_creation_token))
+    created(root)?;
+    Some(collect_descendants(&edges, root, created))
 }
 
 /// Breadth-first walk of `edges` from `root`, parents before children.

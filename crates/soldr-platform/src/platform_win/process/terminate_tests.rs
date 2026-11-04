@@ -71,7 +71,10 @@ fn an_edge_without_creation_times_is_not_trusted() {
 fn descendants_are_ordered_parents_before_children() {
     // 100 -> 200 -> 300, plus an unrelated 400.
     let edges = [(200, 100), (300, 200), (400, 1)];
-    assert_eq!(collect_descendants(&edges, 100, in_pid_order), vec![200, 300]);
+    assert_eq!(
+        collect_descendants(&edges, 100, in_pid_order),
+        vec![200, 300]
+    );
 }
 
 #[test]
@@ -98,7 +101,10 @@ fn a_cycle_back_to_the_root_does_not_loop() {
     // 100 -> 200 -> 300 -> 100. The root is pre-seeded as seen, so the edge
     // closing the cycle is ignored rather than revisited forever.
     let edges = [(200, 100), (300, 200), (100, 300)];
-    assert_eq!(collect_descendants(&edges, 100, in_pid_order), vec![200, 300]);
+    assert_eq!(
+        collect_descendants(&edges, 100, in_pid_order),
+        vec![200, 300]
+    );
 }
 
 /// Spawn `cmd -> ping` and return `(child, grandchild pids)` once the
@@ -144,8 +150,7 @@ fn spawn_cmd_with_ping_grandchild() -> (std::process::Child, Vec<u32>) {
 /// ping's natural timeout, so EOF is a concrete proof that the descendant was
 /// actually terminated rather than merely becoming unreachable in a snapshot.
 #[allow(clippy::zombie_processes)]
-fn spawn_cmd_with_ping_grandchild_and_stderr_pipe(
-) -> (
+fn spawn_cmd_with_ping_grandchild_and_stderr_pipe() -> (
     std::process::Child,
     Vec<u32>,
     std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
@@ -364,7 +369,11 @@ fn query_only_handle_and_successful_terminate_can_prove_completion() {
         exited: 99,
     };
     assert!(is_same_process(10, Some(before.created)));
-    assert!(completion_proven(10, Some(after), terminate_request_succeeded(true)));
+    assert!(completion_proven(
+        10,
+        Some(after),
+        terminate_request_succeeded(true)
+    ));
 }
 
 #[test]
@@ -453,4 +462,57 @@ fn a_vanished_snapshot_entry_is_gone_not_untracked() {
     assert!(open_failure_proves_gone(&io::Error::from_raw_os_error(87)));
     assert!(!open_failure_proves_gone(&io::Error::from_raw_os_error(5)));
     assert!(!open_failure_proves_gone(&io::Error::other("query failed")));
+}
+
+#[test]
+fn verification_uses_pinned_identities_when_killed_processes_cannot_be_reopened() {
+    // root -> shell -> held child. All query handles were retained before
+    // termination, but opening those PIDs again now fails. A fresh-PID-only
+    // walk loses even the root and cannot verify a successful tree kill.
+    let retained = [(100, 10), (200, 20), (300, 30)];
+    let created = |pid| {
+        retained_creation_token(pid, retained.into_iter(), |_| {
+            panic!("verification reopened retained PID {pid}")
+        })
+    };
+    assert_eq!(created(100), Some(10));
+    assert_eq!(
+        collect_descendants(&[(200, 100), (300, 200)], 100, created),
+        vec![200, 300]
+    );
+}
+
+#[test]
+fn verification_still_queries_fresh_pids_and_rejects_stale_parent_edges() {
+    let retained = [(100, 20)];
+    let created = |pid| {
+        retained_creation_token(pid, retained.into_iter(), |fresh| match fresh {
+            200 => Some(10), // An old orphan naming the retained root's PID.
+            300 => Some(30), // A child spawned just before termination.
+            _ => None,
+        })
+    };
+    assert_eq!(
+        created(400),
+        None,
+        "a missing fresh identity proves nothing"
+    );
+    assert_eq!(
+        collect_descendants(&[(200, 100), (300, 100)], 100, created),
+        vec![300]
+    );
+}
+
+#[test]
+fn retaining_a_known_snapshot_pid_preserves_the_original_handle() {
+    let pid = std::process::id();
+    let mut known = vec![TrackedDescendant::open(pid).expect("retain current process")];
+    let original_handle = known[0].query_handle;
+    assert!(retain_snapshot_with(&[pid], &mut known, |_| {
+        panic!("already retained process must not be reopened")
+    })
+    .is_empty());
+    assert_eq!(known.len(), 1);
+    assert_eq!(known[0].query_handle, original_handle);
+    assert_eq!(known[0].times().expect("retained identity").exited, 0);
 }
