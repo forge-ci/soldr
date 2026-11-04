@@ -379,8 +379,8 @@ pub struct GcConfig {
 /// ```toml
 /// [auto_gc]
 /// enabled = true            # opt-out; on by default
-/// trigger_free_gb = 20      # start GC when free space < this
-/// target_free_gb  = 30      # stop GC when free space >= this
+/// trigger_free_gb = 20      # absolute floor (default also scales to 10%)
+/// target_free_gb  = 30      # absolute floor (default also scales to 15%)
 /// min_age_secs    = 3600    # never touch files modified in this window
 /// ```
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -391,14 +391,24 @@ pub struct AutoGcConfig {
     /// Defaults to `true` (opt-out).
     #[serde(default = "AutoGcConfig::default_enabled")]
     pub enabled: bool,
-    /// Auto-GC fires when free space on a soldr-relevant volume drops
-    /// below this threshold (in GiB).
+    /// Absolute trigger floor in GiB. The default also scales to 10% of
+    /// capacity; non-default values stay absolute unless a percentage is set.
     #[serde(default = "AutoGcConfig::default_trigger_free_gb")]
     pub trigger_free_gb: u64,
-    /// Auto-GC stops escalating once free space reaches this number of
-    /// GiB on the affected volume. Must be >= `trigger_free_gb`.
+    /// Absolute target floor in GiB. The default also scales to 15% of
+    /// capacity; non-default values stay absolute unless a percentage is set.
     #[serde(default = "AutoGcConfig::default_target_free_gb")]
     pub target_free_gb: u64,
+    /// Optional percentage headroom, combined with the GiB floor. When
+    /// absent, the default GiB threshold scales to 10% of capacity; a
+    /// custom GiB threshold stays absolute. `0` selects absolute-only.
+    #[serde(default)]
+    pub trigger_free_percent: Option<u8>,
+    /// Target percentage headroom. Like the trigger, an absent value
+    /// scales the default GiB threshold (to 15%), preserving custom GiB
+    /// thresholds. The effective target is never below the trigger.
+    #[serde(default)]
+    pub target_free_percent: Option<u8>,
     /// Floor applied uniformly to every age-based filter used by
     /// auto-GC. Files / directories modified within this many seconds
     /// of "now" are never touched.
@@ -447,6 +457,8 @@ impl Default for AutoGcConfig {
             enabled: Self::default_enabled(),
             trigger_free_gb: Self::default_trigger_free_gb(),
             target_free_gb: Self::default_target_free_gb(),
+            trigger_free_percent: None,
+            target_free_percent: None,
             min_age_secs: Self::default_min_age_secs(),
             stale_target_days: Self::default_stale_target_days(),
             dedupe_targets: Self::default_dedupe_targets(),
@@ -609,7 +621,19 @@ mod tests {
         assert!(cfg.auto_gc.enabled);
         assert_eq!(cfg.auto_gc.trigger_free_gb, 20);
         assert_eq!(cfg.auto_gc.target_free_gb, 30);
+        assert_eq!(cfg.auto_gc.trigger_free_percent, None);
+        assert_eq!(cfg.auto_gc.target_free_percent, None);
         assert_eq!(cfg.auto_gc.min_age_secs, 3600);
+    }
+
+    #[test]
+    fn auto_gc_percentage_overrides_parse_and_reject_negative_values() {
+        let cfg: SoldrConfig =
+            toml::from_str("[auto_gc]\ntrigger_free_percent = 0\ntarget_free_percent = 15\n")
+                .unwrap();
+        assert_eq!(cfg.auto_gc.trigger_free_percent, Some(0));
+        assert_eq!(cfg.auto_gc.target_free_percent, Some(15));
+        assert!(toml::from_str::<SoldrConfig>("[auto_gc]\ntrigger_free_percent = -1\n").is_err());
     }
 
     #[test]

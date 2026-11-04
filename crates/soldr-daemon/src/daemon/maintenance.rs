@@ -317,8 +317,11 @@ async fn run_once_with_lease_state(
         .zccache
         .as_ref()
         .is_some_and(|report| report.pressure != "none");
-    let local_pressure =
-        root_below_pressure_threshold(&context.paths, status.filesystem_free_bytes);
+    let local_pressure = root_below_pressure_threshold(
+        &context.paths,
+        status.filesystem_free_bytes,
+        status.filesystem_capacity_bytes,
+    );
     let do_pressure_cleanup = kind == MaintenanceKind::Full || zccache_pressure || local_pressure;
 
     let paths = context.paths.clone();
@@ -805,16 +808,18 @@ fn configured_gc_roots(config: &crate::core::SoldrConfig) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-fn root_below_pressure_threshold(paths: &SoldrPaths, free_bytes: Option<u64>) -> bool {
+fn root_below_pressure_threshold(
+    paths: &SoldrPaths,
+    free_bytes: Option<u64>,
+    capacity_bytes: Option<u64>,
+) -> bool {
     let Ok(config) = paths.load_config() else {
         return false;
     };
     config.auto_gc.enabled
         && free_bytes.is_some_and(|free| {
-            free < config
-                .auto_gc
-                .trigger_free_gb
-                .saturating_mul(crate::cache_lib::auto_gc::GIB)
+            free < crate::cache_lib::auto_gc::free_space_thresholds(&config.auto_gc, capacity_bytes)
+                .0
         })
 }
 

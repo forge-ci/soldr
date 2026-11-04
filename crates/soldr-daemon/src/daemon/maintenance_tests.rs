@@ -11,6 +11,40 @@ pub(super) const FS_BARRIER_DIR_ENV: &str = "SOLDR_TEST_SWEEP_FS_BARRIER_DIR";
 const FS_BARRIER_ROOT_ENV: &str = "SOLDR_TEST_SWEEP_FIXTURE_ROOT";
 const SWEEP_CHILD_TEST: &str = "daemon::maintenance::tests::sweep_fs_phase_child_holds_the_barrier";
 
+#[test]
+fn pressure_uses_capacity_headroom_and_preserves_custom_absolute_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = SoldrPaths::with_root(tmp.path().to_path_buf());
+    let gib = crate::cache_lib::auto_gc::GIB;
+    assert!(root_below_pressure_threshold(
+        &paths,
+        Some(74 * gib),
+        Some(2000 * gib)
+    ));
+    assert!(!root_below_pressure_threshold(&paths, Some(74 * gib), None));
+    assert!(!root_below_pressure_threshold(
+        &paths,
+        None,
+        Some(2000 * gib)
+    ));
+    std::fs::write(
+        &paths.config_file,
+        "[auto_gc]\ntrigger_free_gb = 50\ntarget_free_gb = 80\n",
+    )
+    .unwrap();
+    assert!(!root_below_pressure_threshold(
+        &paths,
+        Some(74 * gib),
+        Some(2000 * gib)
+    ));
+    std::fs::write(&paths.config_file, "[auto_gc]\nenabled = false\n").unwrap();
+    assert!(!root_below_pressure_threshold(
+        &paths,
+        Some(gib),
+        Some(2000 * gib)
+    ));
+}
+
 // The child half of the cross-process regression test.
 //
 // Inert unless the parent set [`FS_BARRIER_ROOT_ENV`], so a normal

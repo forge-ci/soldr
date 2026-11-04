@@ -101,3 +101,41 @@ fn splits_packaging_revisions() {
     assert_eq!(split_revision("llvm-21.1.5-r2"), ("llvm-21.1.5", 2));
     assert_eq!(split_revision("llvm-21.1.5"), ("llvm-21.1.5", 0));
 }
+
+#[test]
+fn directory_reads_do_not_extend_version_retention() {
+    let tmp = tempfile::tempdir().unwrap();
+    let old = tmp.path().join("v0.9.40");
+    mkdir_with_file(&old);
+    let before = SystemTime::now() - 30 * DAY;
+    let old_stamp = filetime::FileTime::from_system_time(before);
+    let now_stamp = filetime::FileTime::from_system_time(SystemTime::now());
+    filetime::set_file_times(old.join("shims/rustc"), old_stamp, old_stamp).unwrap();
+    for dir in [&old, &old.join("shims")] {
+        // A previous GC walk has read these directories, not used the tools.
+        filetime::set_file_times(dir, now_stamp, old_stamp).unwrap();
+    }
+    assert!(is_stale(&old, SystemTime::now(), 14 * DAY));
+    let paths = SoldrPaths::with_root(tmp.path().to_path_buf());
+    mkdir_with_file(&tmp.path().join("v0.9.47"));
+    mkdir_with_file(&tmp.path().join("v0.9.48"));
+    let report = sweep_stale_versions(&paths, "0.9.48", SystemTime::now(), 14 * DAY);
+    assert_eq!(report.version_dirs_removed, vec!["v0.9.40"]);
+}
+
+#[test]
+fn recently_executed_tool_still_protects_old_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    mkdir_with_file(tmp.path());
+    let before = filetime::FileTime::from_system_time(SystemTime::now() - 30 * DAY);
+    for path in [tmp.path().to_path_buf(), tmp.path().join("shims")] {
+        filetime::set_file_times(path, before, before).unwrap();
+    }
+    filetime::set_file_times(
+        tmp.path().join("shims/rustc"),
+        filetime::FileTime::now(),
+        before,
+    )
+    .unwrap();
+    assert!(!is_stale(tmp.path(), SystemTime::now(), 14 * DAY));
+}
