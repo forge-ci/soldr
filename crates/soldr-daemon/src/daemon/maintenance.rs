@@ -258,6 +258,22 @@ struct RunOnceOutcome {
     lease_acquired: bool,
 }
 
+fn local_components_succeeded(status: &MaintenanceStatus) -> bool {
+    status.zccache_error.is_none()
+        && [
+            &status.cook,
+            &status.history,
+            &status.pep517_targets,
+            &status.pep517_wheels,
+            &status.trash,
+            &status.workspace_targets,
+            &status.daemon_events,
+            &status.legacy_zccache,
+        ]
+        .iter()
+        .all(|component| component.error.is_none())
+}
+
 async fn run_once_with_lease_state(
     context: &MaintenanceContext,
     kind: MaintenanceKind,
@@ -346,20 +362,7 @@ async fn run_once_with_lease_state(
             status.workspace_targets = local.workspace_targets;
             status.daemon_events = local.daemon_events;
             status.legacy_zccache = local.legacy_zccache;
-            let components_ok = status.zccache_error.is_none()
-                && [
-                    &status.cook,
-                    &status.history,
-                    &status.pep517_targets,
-                    &status.pep517_wheels,
-                    &status.trash,
-                    &status.workspace_targets,
-                    &status.daemon_events,
-                    &status.legacy_zccache,
-                ]
-                .iter()
-                .all(|component| component.error.is_none());
-            if components_ok {
+            if local_components_succeeded(&status) {
                 status.successful_at_ms = Some(unix_millis(now));
                 if kind == MaintenanceKind::Full {
                     status.last_full_at_ms = Some(unix_millis(now));
