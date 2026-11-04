@@ -112,7 +112,18 @@ pub(crate) fn detach_outputs_for_toolchain(tool: &str, args: &[String]) -> Resul
 /// rustc adapts `-o` only when multiple unnamed emit kinds remain. The
 /// characterization cases below are captured from real compiler outputs.
 fn declared_output_paths(args: &[String], cwd: &Path) -> Vec<PathBuf> {
-    let parsed = zccache::depgraph::parse_rustc_args(args, cwd);
+    let mut parsed = zccache::depgraph::parse_rustc_args(args, cwd);
+    // The pinned parser retains historical explicit emit paths. Rustc merges
+    // flags by kind, with the last occurrence replacing even an explicit
+    // path with an inferred one. Resolve only the effective list through the
+    // same parser so superseded files are never detached.
+    let emits = effective_emit_specs(args);
+    if !emits.is_empty() {
+        let effective =
+            zccache::depgraph::parse_rustc_args(&[format!("--emit={}", emits.join(","))], cwd);
+        parsed.emit_types = effective.emit_types;
+        parsed.explicit_emit_paths = effective.explicit_emit_paths;
+    }
     let dir: PathBuf = parsed
         .output_file
         .as_ref()
@@ -206,6 +217,32 @@ fn declared_output_paths(args: &[String], cwd: &Path) -> Vec<PathBuf> {
     paths
 }
 
+fn effective_emit_specs(args: &[String]) -> Vec<&str> {
+    let mut effective: Vec<(&str, &str)> = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            break;
+        }
+        let emits = if arg == "--emit" {
+            args.next().map(String::as_str)
+        } else {
+            arg.strip_prefix("--emit=")
+        };
+        if let Some(emits) = emits {
+            for spec in emits.split(',') {
+                let kind = spec.split_once('=').map_or(spec, |(kind, _)| kind);
+                if let Some((_, current)) = effective.iter_mut().find(|(key, _)| *key == kind) {
+                    *current = spec;
+                } else {
+                    effective.push((kind, spec));
+                }
+            }
+        }
+    }
+    effective.into_iter().map(|(_, spec)| spec).collect()
+}
+
 fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
     if !paths.contains(&path) {
         paths.push(path);
@@ -218,6 +255,46 @@ mod tests {
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|a| (*a).to_string()).collect()
+    }
+
+    #[test]
+    fn duplicate_emit_paths_follow_last_occurrence_per_kind() {
+        let root = tempfile::tempdir().unwrap();
+        for (emits, expected) in [
+            (
+                vec!["--emit=metadata=old.rmeta,metadata"],
+                vec!["libprobe.rmeta"],
+            ),
+            (
+                vec!["--emit=metadata=old.rmeta", "--emit=metadata"],
+                vec!["libprobe.rmeta"],
+            ),
+            (
+                vec!["--emit=metadata=old.rmeta,metadata=new.rmeta"],
+                vec!["new.rmeta"],
+            ),
+            (
+                vec!["--emit=metadata=old.rmeta", "--emit=obj"],
+                vec!["old.rmeta", "probe.o"],
+            ),
+            (vec!["--emit=link=old.rlib,link"], vec![]),
+        ] {
+            let mut args = argv(&[
+                "rustc",
+                "--crate-name=probe",
+                "--crate-type=lib",
+                "probe.rs",
+            ]);
+            args.extend(emits.iter().map(|arg| arg.to_string()));
+            let mut actual = declared_output_paths(&args, root.path());
+            let mut expected: Vec<_> = expected
+                .into_iter()
+                .map(|path| root.path().join(path))
+                .collect();
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected, "{emits:?}");
+        }
     }
 
     #[test]

@@ -130,3 +130,115 @@ fn explicit_output_detachment_preserves_unrelated_readonly_files() {
     }
 }
 
+#[test]
+fn duplicate_emit_kinds_preserve_superseded_readonly_paths() {
+    if !unix_ownership_available() {
+        return;
+    }
+    for (emits, stale, product) in [
+        (
+            &["--emit=metadata=old.rmeta,metadata"][..],
+            "old.rmeta",
+            "libprobe.rmeta",
+        ),
+        (
+            &["--emit=metadata=old.rmeta", "--emit=metadata"][..],
+            "old.rmeta",
+            "libprobe.rmeta",
+        ),
+        (
+            &["--emit=metadata=old.rmeta,metadata=new.rmeta"][..],
+            "old.rmeta",
+            "new.rmeta",
+        ),
+        (
+            &["--emit=link=old.rlib,link"][..],
+            "old.rlib",
+            "libprobe.rlib",
+        ),
+        (
+            &["--emit=link=old.rlib", "--emit=link"][..],
+            "old.rlib",
+            "libprobe.rlib",
+        ),
+    ] {
+        let dir = common::unique_temp_dir("superseded-emit-sentinel");
+        let source = dir.join("probe.rs");
+        fs::write(&source, "pub fn value() -> u32 { 42 }\n").unwrap();
+        let sentinel = dir.join(stale);
+        fs::write(&sentinel, b"superseded output must stay untouched").unwrap();
+        permissions::restore_mode(&sentinel, Some(0o444)).unwrap();
+        let before = hardlink(&sentinel);
+        let mode = permissions::mode(&sentinel);
+        let result = common::isolated_soldr_command()
+            .args([
+                "--no-cache",
+                "rustc",
+                "--crate-name=probe",
+                "--crate-type=lib",
+                "--edition=2021",
+            ])
+            .args(emits)
+            .arg(&source)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{emits:?}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(hardlink(&sentinel), before, "{emits:?}");
+        assert_eq!(permissions::mode(&sentinel), mode, "{emits:?}");
+        assert_eq!(
+            fs::read(&sentinel).unwrap(),
+            b"superseded output must stay untouched"
+        );
+        assert!(dir.join(product).metadata().unwrap().len() > 0, "{emits:?}");
+    }
+}
+
+#[test]
+fn distinct_emit_flags_keep_both_declared_outputs() {
+    if !unix_ownership_available() {
+        return;
+    }
+    let dir = common::unique_temp_dir("distinct-emit-outputs");
+    let source = dir.join("probe.rs");
+    fs::write(&source, "pub fn value() -> u32 { 42 }\n").unwrap();
+    let blob = dir.join("immutable-blob");
+    fs::write(&blob, b"original cached metadata").unwrap();
+    permissions::restore_mode(&blob, Some(0o444)).unwrap();
+    let output = dir.join("old.rmeta");
+    fs::hard_link(&blob, &output).unwrap();
+    let before = hardlink(&blob);
+    let result = common::isolated_soldr_command()
+        .args([
+            "--no-cache",
+            "rustc",
+            "--crate-name=probe",
+            "--crate-type=lib",
+            "--edition=2021",
+            "--emit=metadata=old.rmeta",
+            "--emit=obj",
+        ])
+        .arg(&source)
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let after = hardlink(&blob);
+    assert_eq!(
+        (after.dev, after.index, after.links),
+        (before.dev, before.index, 1)
+    );
+    assert_eq!(permissions::mode(&blob).unwrap() & 0o777, 0o444);
+    assert_eq!(fs::read(&blob).unwrap(), b"original cached metadata");
+    assert_ne!(hardlink(&output).index, after.index);
+    assert_ne!(permissions::mode(&output).unwrap() & 0o200, 0);
+    assert!(dir.join("probe.o").metadata().unwrap().len() > 0);
+}
