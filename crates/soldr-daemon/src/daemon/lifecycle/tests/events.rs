@@ -240,6 +240,7 @@ mod status_retry_tests {
             compile_jobs: 1,
             compile_jobs_source: "test".to_string(),
             in_flight_compiles: Some(0),
+            maintenance_active: Some(false),
         }
     }
 

@@ -349,6 +349,7 @@ struct State {
     /// redb `cook_index_v1` table, not in process-local state.
     cook_hits_this_session: AtomicU64,
     shutdown: Arc<crate::daemon::maintenance::ShutdownSignal>,
+    maintenance_activity: crate::daemon::maintenance::MaintenanceActivity,
     /// L4 (issue soldr#980) — background drain task that coalesces
     /// per-compile redb event writes. The SESSION compile handler
     /// pushes into a tokio mpsc instead of opening redb directly. See
@@ -396,6 +397,7 @@ impl State {
             compile_backend: COMPILE_BACKEND_EMBEDDED.to_string(),
             compile_jobs,
             compile_jobs_source,
+            maintenance_active: Some(self.maintenance_activity.is_active()),
             in_flight_compiles: Some(
                 u32::try_from(crate::daemon::inflight_compiles::count()).unwrap_or(u32::MAX),
             ),

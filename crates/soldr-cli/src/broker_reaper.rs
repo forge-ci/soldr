@@ -379,12 +379,12 @@ pub(crate) fn record_route_request(
 /// What a route's daemon reports about its own workload (soldr#3815).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DaemonLoad {
-    /// Compiles are in flight: the route is in use whoever started it.
+    /// Compiles or maintenance are active: the route is still in use.
     Busy,
     /// The daemon answered and has nothing in flight, or is not running.
     Idle,
     /// The daemon could not be asked (timeout, protocol error), or answered
-    /// without the in-flight count (an image that predates it). Fail safe:
+    /// without both activity fields (an image that predates them). Fail safe:
     /// a daemon that cannot be shown idle is not reaped on this sweep -- but
     /// only for [`MAX_UNANSWERED_BUSY_PROBES`] sweeps in a row.
     Unknown,
@@ -471,6 +471,15 @@ pub(crate) fn lock_registry(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+fn daemon_load(compiles: Option<u32>, maintenance: Option<bool>) -> DaemonLoad {
+    match (compiles, maintenance) {
+        (Some(1..), _) | (_, Some(true)) => DaemonLoad::Busy,
+        (Some(0), Some(false)) => DaemonLoad::Idle,
+        // Legacy images did not answer both activity questions.
+        _ => DaemonLoad::Unknown,
+    }
+}
+
 fn probe_daemon_load(
     registry: &std::sync::Mutex<BackendRegistry>,
     service_name: &str,
@@ -493,13 +502,7 @@ fn probe_daemon_load(
         return DaemonLoad::Idle;
     };
     match status_direct(std::path::Path::new(&endpoint)) {
-        Ok(info) => match info.in_flight_compiles {
-            Some(0) => DaemonLoad::Idle,
-            Some(_) => DaemonLoad::Busy,
-            // A daemon image that predates the field: it answered, but not
-            // the question asked. Unknown, never idle.
-            None => DaemonLoad::Unknown,
-        },
+        Ok(info) => daemon_load(info.in_flight_compiles, info.maintenance_active),
         Err(ClientError::NotRunning) => DaemonLoad::Idle,
         Err(_) => DaemonLoad::Unknown,
     }

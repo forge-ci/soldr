@@ -366,6 +366,7 @@ pub fn status_info_to_wire(info: &StatusInfo) -> proto::WireStatusInfo {
         compile_jobs: info.compile_jobs,
         compile_jobs_source: info.compile_jobs_source.clone(),
         in_flight_compiles: info.in_flight_compiles,
+        maintenance_active: info.maintenance_active,
     }
 }
 
@@ -381,6 +382,7 @@ pub fn status_info_from_wire(wire: proto::WireStatusInfo) -> StatusInfo {
         compile_jobs: wire.compile_jobs,
         compile_jobs_source: wire.compile_jobs_source,
         in_flight_compiles: wire.in_flight_compiles,
+        maintenance_active: wire.maintenance_active,
     }
 }
 

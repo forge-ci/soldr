@@ -79,9 +79,9 @@ const REPLY_TIMEOUT: Duration = Duration::from_millis(2_000);
 /// longer than the generic status/shutdown request timeout.
 const CACHE_FLUSH_REPLY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Historical protocols that must remain able to retire their daemon during
-/// an in-place upgrade. v24 is the immediately preceding daemon protocol;
+/// an in-place upgrade. v25 is the immediately preceding daemon protocol;
 /// v17 is the last protocol whose shutdown acknowledgement lacked identity.
-const SHUTDOWN_COMPAT_PROTOCOL_VERSIONS: &[u32] = &[24, 17];
+const SHUTDOWN_COMPAT_PROTOCOL_VERSIONS: &[u32] = &[25, 24, 17];
 
 /// Default compile-dispatch timeout — rustc may take minutes for a release
 /// build of a large crate, so the default stays generous (30 minutes): a

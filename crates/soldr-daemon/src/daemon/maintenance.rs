@@ -17,7 +17,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod activity;
 mod retired_status;
+pub use activity::MaintenanceActivity;
 
 pub const PRESSURE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 pub const FULL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -43,6 +45,7 @@ pub struct MaintenanceContext {
     pub db_path: PathBuf,
     pub compile_service: Arc<SoldrZccacheService>,
     pub shutdown: Arc<ShutdownSignal>,
+    pub activity: MaintenanceActivity,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +263,7 @@ async fn run_once_with_lease_state(
     kind: MaintenanceKind,
     now: SystemTime,
 ) -> RunOnceOutcome {
+    let _activity = context.activity.enter();
     let mut status = MaintenanceStatus::new(context, kind, now);
     let previous = read_status(&context.paths);
     let previous_deferrals = previous
@@ -268,7 +272,7 @@ async fn run_once_with_lease_state(
     status.consecutive_full_deferrals = previous_deferrals;
     // Measured before any sweep, so the report shows what the pass found.
     retired_status::measure_retired(context, &mut status);
-    let _maintenance_lease =
+    let maintenance_lease =
         match crate::cache_lib::build_active::MaintenanceLease::try_acquire(&context.paths) {
             Ok(None) => {
                 // The build defers soldr's own destructive collectors, which
@@ -326,10 +330,12 @@ async fn run_once_with_lease_state(
 
     let paths = context.paths.clone();
     let db_path = context.db_path.clone();
-    let local = tokio::task::spawn_blocking(move || {
-        run_local_components(&paths, &db_path, kind, now, do_pressure_cleanup)
-    })
-    .await;
+    let local = context
+        .activity
+        .worker(Some(maintenance_lease), move || {
+            run_local_components(&paths, &db_path, kind, now, do_pressure_cleanup)
+        })
+        .await;
     match local {
         Ok(local) => {
             status.cook = local.cook;
@@ -440,6 +446,7 @@ pub async fn run_manual_root(root: PathBuf) -> Result<MaintenanceStatus, String>
         db_path,
         compile_service: Arc::clone(&service),
         shutdown: Arc::new(ShutdownSignal::default()),
+        activity: MaintenanceActivity::default(),
     };
     let now = SystemTime::now();
     let status = run_once(&context, MaintenanceKind::Full, now).await;
@@ -464,12 +471,18 @@ async fn measure_store(
     now: SystemTime,
     status: &mut MaintenanceStatus,
 ) {
-    match context.compile_service.maintain_disk(full).await {
-        Ok(report) => {
+    let service = Arc::clone(&context.compile_service);
+    let report = context
+        .activity
+        .store(async move { service.maintain_disk(full).await })
+        .await;
+    match report {
+        Ok(Ok(report)) => {
             status.zccache = Some(report);
             status.zccache_measured_at_ms = Some(unix_millis(now));
         }
-        Err(error) => status.zccache_error = Some(error.to_string()),
+        Ok(Err(error)) => status.zccache_error = Some(error.to_string()),
+        Err(error) => status.zccache_error = Some(format!("store_worker_failed: {error}")),
     }
 }
 
@@ -512,11 +525,13 @@ async fn run_store_pass(
     // the lease-held pass, so a deferred full pass remains due.
     measure_store(context, false, now, status).await;
     let paths = context.paths.clone();
-    let legacy = tokio::task::spawn_blocking(move || {
-        let config = paths.load_config().unwrap_or_default();
-        legacy_zccache_outcome(&paths, kind, now, &daemon_policy_actions(config, kind))
-    })
-    .await;
+    let legacy = context
+        .activity
+        .worker(None, move || {
+            let config = paths.load_config().unwrap_or_default();
+            legacy_zccache_outcome(&paths, kind, now, &daemon_policy_actions(config, kind))
+        })
+        .await;
     match legacy {
         Ok(Some(outcome)) => status.legacy_zccache = outcome,
         Ok(None) => {}

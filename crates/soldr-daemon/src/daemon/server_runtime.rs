@@ -383,6 +383,7 @@ async fn run_async_recording(
         last_activity_ms: AtomicU64::new(0),
         exit_via_idle: AtomicBool::new(false),
         cook_hits_this_session: AtomicU64::new(0),
+        maintenance_activity: Default::default(),
         shutdown,
         event_batcher,
         compile_service,
@@ -412,6 +413,7 @@ async fn run_async_recording(
         db_path: state.db_path.clone(),
         compile_service: Arc::clone(&state.compile_service),
         shutdown: Arc::clone(&state.shutdown),
+        activity: state.maintenance_activity.clone(),
     };
     let maintenance_handle = tokio::spawn(async move {
         crate::daemon::maintenance::run_loop(maintenance_context).await;

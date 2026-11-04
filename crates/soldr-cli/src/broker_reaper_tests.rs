@@ -524,3 +524,42 @@ fn a_new_request_resets_the_unanswered_streak() {
         .record_request("soldr-daemon-a", identified(2, 2), at);
     assert!(defer_busy_candidates(&table, route(), at, |_| DaemonLoad::Unknown).is_empty());
 }
+
+#[test]
+fn maintenance_work_is_busy_until_complete_and_legacy_status_is_unknown() {
+    for (compiles, maintenance, expected) in [
+        (Some(0), Some(true), DaemonLoad::Busy),
+        (Some(0), Some(false), DaemonLoad::Idle),
+        (Some(0), None, DaemonLoad::Unknown),
+        (None, Some(false), DaemonLoad::Unknown),
+        (Some(1), None, DaemonLoad::Busy),
+        (None, Some(true), DaemonLoad::Busy),
+    ] {
+        assert_eq!(daemon_load(compiles, maintenance), expected);
+    }
+}
+
+#[test]
+fn maintenance_probe_defers_reaping_then_reaps_after_an_idle_window() {
+    let (table, start) = reap_candidate_table();
+    let at = start + DEFAULT_GRACE * 2;
+    let route = || vec!["soldr-daemon-a".to_string()];
+    assert!(defer_busy_candidates(&table, route(), at, |_| {
+        daemon_load(Some(0), Some(true))
+    })
+    .is_empty());
+    let verdict = table
+        .lock()
+        .sweep(at + Duration::from_secs(1), DEFAULT_GRACE, |_| false);
+    assert_eq!(verdict[0].1, RouteVerdict::Draining);
+    let verdict = table
+        .lock()
+        .sweep(at + DEFAULT_GRACE, DEFAULT_GRACE, |_| false);
+    assert_eq!(verdict[0].1, RouteVerdict::Reap);
+    assert_eq!(
+        defer_busy_candidates(&table, route(), at + DEFAULT_GRACE, |_| {
+            daemon_load(Some(0), Some(false))
+        }),
+        route()
+    );
+}

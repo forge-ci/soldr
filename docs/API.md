@@ -2580,8 +2580,16 @@ so every abandoned cook origin eventually expires.
 
 Builds hold a shared root-maintenance lease from before `BuildSessionStart`
 through sanitized archive publication. Maintenance holds the exclusive side
-for the complete pass, so a build cannot begin in the probe/delete gap. Daemon
-shutdown lets an already-started pass finish. Soldr embeds zccache with
+for the complete destructive worker, so a build cannot begin in the probe/delete
+gap even if the async waiter is cancelled. The build-safe independent store
+sweep reports activity without taking another root lease. Daemon status reports
+`maintenance_active`; the broker and native idle watchdog treat either compiles
+or maintenance as busy. Missing activity fields from older daemons remain
+unknown under the broker's existing bounded policy. An already-running stable
+broker needs an operator restart to learn this status field; upgrading Soldr
+does not replace that live broker automatically. Cooperative daemon shutdown
+lets an already-started pass finish; SIGTERM retains its existing fast exit.
+Soldr embeds zccache with
 host-owned maintenance, so zccache does not also start its standalone periodic
 maintenance scheduler inside the same process.
 
