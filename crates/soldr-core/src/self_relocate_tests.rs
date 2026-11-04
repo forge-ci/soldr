@@ -10,6 +10,22 @@ use tempfile::TempDir;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+#[test]
+fn executable_image_identity_accepts_copies_and_rejects_other_images() {
+    let root = TempDir::new().unwrap();
+    let source = root.path().join("source");
+    let copy = root.path().join("copy");
+    fs::write(&source, b"same executable image").unwrap();
+    fs::copy(&source, &copy).unwrap();
+    assert!(same_executable_image(&source, &copy));
+    fs::write(&copy, b"unrelated executable image").unwrap();
+    assert!(!same_executable_image(&source, &copy));
+    assert!(!same_executable_image(
+        &source,
+        &root.path().join("missing")
+    ));
+}
+
 struct EnvVarGuard {
     key: &'static str,
     previous: Option<OsString>,

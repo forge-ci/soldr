@@ -314,6 +314,12 @@ pub(crate) fn run_rustc_wrapper(
     // soldr's `RUSTC_WRAPPER` for workspace crates.
     if zccache_routed_tool && !non_cacheable && crate::cache_lib::cache_enabled_in_current_process()
     {
+        // Resolve in the client context, exactly as direct execution does.
+        // A bare compiler name reaching the daemon can select Soldr's own
+        // PATH shim and recursively wait on the admission lease we hold.
+        let compiler = resolve_wrapper_tool_path(tool_arg, tool_stem)?;
+        let mut daemon_args = compile_args[1..].to_vec();
+        daemon_args[0] = compiler.to_string_lossy().into_owned();
         // L1 (issue #977 / #980 L1): dispatch the rustc invocation to
         // the daemon's embedded zccache service over IPC. The legacy
         // `zccache.exe` fork was deleted in the L1 second pass.
@@ -324,7 +330,7 @@ pub(crate) fn run_rustc_wrapper(
         //
         // Cacheable rustc invocations always use the broker SESSION route.
         // The broker owns daemon acquisition and placement; failure is hard.
-        return crate::compile_dispatch::compile_via_daemon(&compile_args[1..]);
+        return crate::compile_dispatch::compile_via_daemon(&daemon_args);
     }
 
     direct_exec_tool(tool_arg, tool_stem, &compile_args, Some(profile))

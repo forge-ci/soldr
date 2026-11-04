@@ -101,7 +101,7 @@ pub(crate) fn run_rustc_like(
     );
     raw_args.push(binary.to_string_lossy().into_owned());
     raw_args.extend(args.iter().cloned());
-    crate::wrapper::run_rustc_wrapper(&raw_args, crate::startup_profile::WrapperProfile::new())
+    crate::wrapper_role::run_native_compiler(&raw_args)
 }
 
 /// Run rustfmt directly for non-cacheable invocations, otherwise route

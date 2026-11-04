@@ -12,6 +12,113 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+fn cached_named_compiler_ignores_daemon_path(tool: &str, callback: bool) {
+    // Unix executable lookup can select a same-named shim from PATH. The
+    // regression uses a failing sentinel instead of a recursive Soldr shim,
+    // so the old code fails promptly without wedging a daemon's admission.
+    if matches!(
+        soldr_platform::host::facts::os(),
+        soldr_platform::host::facts::HostOs::Windows
+    ) {
+        return;
+    }
+    let real = rustup_which(tool);
+    let fixture = tempfile::tempdir().unwrap();
+    let cache = fixture.path().join("cache");
+    let home = fixture.path().join("home");
+    let poison = fixture.path().join("poison-path");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&poison).unwrap();
+    write_fake_script(
+        &poison.join(tool),
+        "#!/bin/sh\necho unexpected-PATH-compiler >&2\nexit 77\n",
+    );
+    let source = fixture.path().join("probe.rs");
+    let artifact = fixture.path().join("libcompiler_identity_probe.rmeta");
+    fs::write(&source, "pub fn value() -> u32 { 42 }\n").unwrap();
+    fs::write(
+        fixture.path().join("Cargo.toml"),
+        "[package]\nname = 'compiler-identity-probe'\nversion = '0.1.0'\nedition = '2021'\n[lib]\npath = 'probe.rs'\n",
+    ).unwrap();
+    let _broker = BrokerHomeGuard::new(&cache, &home);
+    let configure = |command: &mut Command| {
+        command
+            .env("SOLDR_CACHE_DIR", &cache)
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("PATH", prepend_to_path(&poison))
+            .env("SOLDR_CACHE_ENABLED", "1")
+            .env("SOLDR_AUTO_GC_DISABLED", "1")
+            .env(
+                format!("SOLDR_REAL_{}", tool.replace('-', "_").to_ascii_uppercase()),
+                &real,
+            );
+    };
+    let mut command = common::isolated_soldr_command_in(fixture.path());
+    configure(&mut command);
+    if callback {
+        // A real foreground Soldr process owns the Cargo lineage. Its fake
+        // Cargo child supplies a bare compiler just as Cargo may do for RUSTC.
+        let cargo = fixture.path().join("cargo-probe");
+        write_fake_script(&cargo, &format!(
+            "#!/bin/sh\ncase \"$1\" in --version|-V) echo 'cargo 1.95.0'; exit 0;; esac\nexec \"$RUSTC_WRAPPER\" {tool} --crate-name compiler_identity_probe --crate-type=lib --emit=metadata --edition=2021 '{}' --out-dir '{}'\n",
+            source.display(), fixture.path().display(),
+        ));
+        command
+            .env("SOLDR_REAL_CARGO", cargo)
+            .args(["cargo", "build"]);
+    } else {
+        command
+            .env("RUSTC_WRAPPER", common::soldr_bin())
+            .env_remove("RUSTC_WORKSPACE_WRAPPER")
+            .env_remove("SOLDR_EFFECTIVE_RUSTC_WRAPPER")
+            .env_remove("SOLDR_EFFECTIVE_RUSTC_WRAPPER_ORIGIN");
+        command
+            .arg(tool)
+            .args([
+                "--crate-name",
+                "compiler_identity_probe",
+                "--crate-type=lib",
+                "--emit=metadata",
+                "--edition=2021",
+            ])
+            .arg(&source)
+            .arg("--out-dir")
+            .arg(fixture.path());
+    }
+    let output = common::tracked_child::spawn_tracked(&mut command)
+        .unwrap()
+        .wait_bounded(Duration::from_secs(30));
+    assert!(
+        !output.timed_out && output.status.is_some_and(|status| status.success()),
+        "cached {tool} must use the client's resolved compiler, not daemon PATH: {}\n{}",
+        output.disposition(),
+        output.stderr_lossy(),
+    );
+    assert!(artifact.metadata().is_ok_and(|meta| meta.len() > 0));
+    assert!(!output.stderr_lossy().contains("unexpected-PATH-compiler"));
+}
+
+#[test]
+fn cached_bare_rustc_uses_resolved_client_compiler() {
+    cached_named_compiler_ignores_daemon_path("rustc", true);
+}
+
+#[test]
+fn cached_bare_clippy_driver_uses_resolved_client_compiler() {
+    cached_named_compiler_ignores_daemon_path("clippy-driver", true);
+}
+
+#[test]
+fn cold_native_rustc_bootstraps_broker() {
+    cached_named_compiler_ignores_daemon_path("rustc", false);
+}
+
+#[test]
+fn cold_native_clippy_driver_bootstraps_broker() {
+    cached_named_compiler_ignores_daemon_path("clippy-driver", false);
+}
+
 #[test]
 fn rustup_resolution_failure_reports_raw_error_and_ci_guidance() {
     let output = Command::new(common::soldr_bin())

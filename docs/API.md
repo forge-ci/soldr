@@ -16,7 +16,7 @@ It has four invocation modes:
 2. `soldr <tool> [args...]`
    Fetches and runs a Rust CLI tool binary.
 3. `soldr rustc ...`
-   Low-level passthrough wrapper mode for explicit `RUSTC_WRAPPER=soldr` usage.
+   Native compiler command; Cargo callbacks use the internal wrapper entry.
 4. `soldr cc ...` / `soldr c++ ...`
    Compile native source through a catalogue-backed compiler and sysroot.
 
@@ -427,6 +427,12 @@ soldr /path/to/rustc --crate-name foo ...
 
 In this mode, soldr should act as the transparent build-assistance layer around `rustc`.
 
+Compiler identity is resolved in the client before cache dispatch, so the daemon's
+`PATH` cannot select a Soldr compiler shim recursively. Wrapper callbacks require
+an existing broker route and never bootstrap one. A standalone `soldr rustc ...`
+or `soldr clippy-driver ...` command prepares its own route, including when the
+shell exports `RUSTC_WRAPPER=soldr`.
+
 Current implementation status:
 
 - Wrapper mode still transparently resolves the real `rustc`, preferring direct binaries before `rustup`
@@ -439,7 +445,10 @@ Current implementation status:
 
 When soldr starts, it decides its mode in this order:
 
-1. If `argv[1]` looks like `rustc` or a path to `rustc`, enter wrapper mode.
+1. An explicit compiler path enters wrapper mode. A bare compiler name enters
+   wrapper mode only with verified live Soldr ancestor and wrapper-image identity;
+   an unverifiable claimed lineage fails before broker bootstrap. Without a
+   lineage claim, bare `rustc` and `clippy-driver` are native commands.
 2. Otherwise, parse CLI commands with Clap.
 3. `cargo` is a first-class built-in subcommand.
 4. Any other first argument falls through to the External arm, which itself tries dispatch in order: cargo verb shorthand (see [Cargo Verb Shorthand](#cargo-verb-shorthand)) first; if no match, treat the argument as a tool name to fetch and run.

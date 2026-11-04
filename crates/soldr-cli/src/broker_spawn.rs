@@ -165,10 +165,10 @@ pub(crate) fn front_door_command_shape(raw_args: &[String]) -> bool {
     if first_positional.starts_with('-') {
         return false;
     }
-    // A rustc-wrapper re-entry must never reach here -- see module doc.
-    // Belt-and-suspenders: `run_main` already returns before calling this
-    // module on that path, but the predicate stays correct standalone.
-    if crate::wrapper::is_wrapper_invocation(first_positional) {
+    // Explicit compiler paths are callbacks. Bare names are also native
+    // commands; run_main captures verified callback lineage before its guard
+    // stamps the environment and returns before this module for those calls.
+    if crate::wrapper_role::explicit_callback(first_positional) {
         return false;
     }
     // Don't spawn a broker to service a direct `soldr broker ...`

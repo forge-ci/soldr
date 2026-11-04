@@ -608,6 +608,19 @@ fn exe_identity(path: &Path) -> Result<ExeIdentity, SoldrError> {
     exe_identity_with_progress(path, &mut |_, _, _| {}, hash_file_with_progress)
 }
 
+/// Compare executable images, including runtime copies of the same image.
+/// Unreadable images never establish identity. Callers should use this only
+/// when a same-inode check cannot establish a claimed internal spawn edge.
+pub fn same_executable_image(left: &Path, right: &Path) -> bool {
+    if crate::platform::fs::identity::same_file(left, right) {
+        return true;
+    }
+    match (exe_identity(left), exe_identity(right)) {
+        (Ok(left), Ok(right)) => left.hash_hex == right.hash_hex,
+        _ => false,
+    }
+}
+
 fn exe_identity_with_progress(
     path: &Path,
     progress: &mut dyn FnMut(&'static str, u64, u64),
