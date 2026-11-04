@@ -235,6 +235,12 @@ struct CargoDocRoute<'a> {
     rustc: &'a Path,
     rustup: &'a Path,
     hold_phase: Option<&'a str>,
+    service: Option<&'a CargoDocFixtureService>,
+}
+
+struct CargoDocFixtureService {
+    home: PathBuf,
+    daemon_executable: PathBuf,
 }
 
 struct CargoDocRouteProcess<'a> {
@@ -478,6 +484,7 @@ fn run_cargo_doc_route(route: CargoDocRoute<'_>) -> Result<CargoDocRouteResult, 
         rustc,
         rustup,
         hold_phase,
+        service,
     } = route;
     let mut command = isolated_soldr_command();
     command
@@ -505,6 +512,15 @@ fn run_cargo_doc_route(route: CargoDocRoute<'_>) -> Result<CargoDocRouteResult, 
         command.env("SOLDR_TEST_CARGO_DOC_HOLD_PHASE", phase);
     } else {
         command.env_remove("SOLDR_TEST_CARGO_DOC_HOLD_PHASE");
+    }
+    if let Some(service) = service {
+        command
+            .env("HOME", &service.home)
+            .env("USERPROFILE", &service.home)
+            .env(
+                soldr_cli::daemon::lifecycle::SOLDR_DAEMON_EXE_ENV_VAR,
+                &service.daemon_executable,
+            );
     }
     // Match the product timeout boundary: the merged platform helper kills
     // this root's complete process group on Unix and snapshots its tree on
@@ -784,6 +800,7 @@ fn assert_normal_cargo_doc_route(label: &str, args: &[&str]) {
         rustc: &rustc,
         rustup: &rustup,
         hold_phase: None,
+        service: None,
     })
     .unwrap_or_else(|error| panic!("failed to run soldr doc route {label}: {error}"));
     let CargoDocRouteResult::Completed(output) = result else {
@@ -843,10 +860,28 @@ fn bare_doc_keeps_rustc_wrapped_but_rustdoc_direct() {
 /// proof rather than merely a short wall-clock assertion.
 fn assert_cargo_doc_held_phase(label: &str, args: &[&str], hold_phase: &str) {
     let cache_root = unique_temp_dir(&format!("cargo-doc-held-phase-{label}"));
+    let home = cache_root.join("home");
+    fs::create_dir_all(&home).expect("create held-route fixture home");
+    let _broker = BrokerHomeGuard::new(&cache_root, &home);
+    // The deadline owns Cargo's tree, not the persistent broker/daemon.
+    // Windows snapshots include detached services when the timed root starts
+    // them; Unix process groups exclude them. Maintenance intentionally stays
+    // alive after requester loss (#4092), so start it from a sibling command
+    // and reap it through the fixture guard instead of the route's deadline.
+    let daemon_executable =
+        crate::fixture_daemon_isolation::start_fixture_broker_daemon(&cache_root, &home);
+    let service = CargoDocFixtureService {
+        home,
+        daemon_executable,
+    };
     let log_path = cache_root.join("tool.log");
     let source_path = write_rustdoc_source(&cache_root);
     let (rustup, cargo, rustc, _rustdoc, _zccache) =
         install_fake_cargo_doc_toolchain(&log_path, &source_path);
+
+    let daemon_pid = common::route_claim::route_claim_pid(&cache_root)
+        .expect("deadline fixture service must be ready before spawning the timed route");
+    assert!(soldr_platform::process::inspect::is_alive(daemon_pid));
 
     let result = run_cargo_doc_route(CargoDocRoute {
         label,
@@ -857,8 +892,13 @@ fn assert_cargo_doc_held_phase(label: &str, args: &[&str], hold_phase: &str) {
         rustc: &rustc,
         rustup: &rustup,
         hold_phase: Some(hold_phase),
+        service: Some(&service),
     })
     .unwrap_or_else(|error| panic!("held cargo-doc route {label} was not cleaned up: {error}"));
+    assert!(
+        soldr_platform::process::inspect::is_alive(daemon_pid),
+        "route cleanup must leave the independently owned fixture service alive"
+    );
     let CargoDocRouteResult::TimedOut(timeout) = result else {
         panic!("held cargo-doc route {label} unexpectedly completed");
     };
