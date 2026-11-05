@@ -129,15 +129,18 @@ pub async fn install_release_asset(
         .sha256
         .as_deref()
         .map(|sha| (asset.name.as_str(), sha));
-    super::super::archive::download_and_extract_with_pin(
-        paths,
-        cache_name,
-        version,
-        &asset.url,
-        &target,
-        binary_names,
-        pin,
-    )
+    // Explicit release installs bypass the repository-fetch retry loop.
+    super::super::retry::with_backoff(cache_name, || {
+        super::super::archive::download_and_extract_with_pin(
+            paths,
+            cache_name,
+            version,
+            &asset.url,
+            &target,
+            binary_names,
+            pin,
+        )
+    })
     .await
 }
 

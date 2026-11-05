@@ -21,14 +21,11 @@ enum ArchiveSource<'a> {
 
 // soldr#2132: deliberately NOT wrapped in `super::retry::with_backoff`.
 //
-// Every call site here -- `download_and_extract` at mod.rs:579 and
-// `download_and_extract_with_pin` at :829 and :953, the latter two via
-// `try_embedded_manifest_v6` / `try_manifest_first` -- is reached from
-// `fetch_repo_binary_once`, which IS the body of the retry loop in
-// `fetch_repo_binary_with_paths`. Adding a retry here would nest inside that
-// one: 4 outer x 4 inner = up to 16 downloads and ~2.5 minutes of sleeping
-// before a genuinely dead host is reported. The outer loop already covers
-// this path; the right number of retry layers is one.
+// Repository resolution (including manifest, binstall and QuickInstall paths)
+// retries in `fetch_repo_binary_with_paths`. The independent reld bootstrap
+// and explicit release-install API each retry at their own entry point.
+// Keep this leaf single-attempt: retrying here would multiply those budgets.
+// Zig uses its own downloader and retry layer.
 
 pub(super) async fn download_and_extract(
     paths: &SoldrPaths,
@@ -225,6 +222,15 @@ async fn download_and_extract_with_pin_inner(
             let client = asset_http_client("release asset download")?;
             let resp =
                 send_asset_request(get_request(&client, url), url, ASSET_HEADER_TIMEOUT).await?;
+            // A missing asset is permanent, unlike a transient 5xx or timeout.
+            // Preserve that distinction for the caller's retry classifier.
+            if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                return Err(SoldrError::ReleaseNotFound(format!(
+                    "asset download {} failed: HTTP {}",
+                    super::stream_download::safe_asset_url(url),
+                    resp.status()
+                )));
+            }
             (
                 url,
                 stream_response_to_temp_file(resp, url, ASSET_IDLE_TIMEOUT).await?,
