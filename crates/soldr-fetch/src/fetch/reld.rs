@@ -68,15 +68,18 @@ pub(crate) async fn ensure_reld_from(
     );
     let url = format!("{base_url}/v{MANAGED_RELD_VERSION}/{asset_name}");
     eprintln!("soldr: fetching reld v{MANAGED_RELD_VERSION} ({asset_name})...");
-    let resolved = super::archive::download_and_extract_with_pin(
-        paths,
-        "reld",
-        MANAGED_RELD_VERSION,
-        &url,
-        &host,
-        &["reld"],
-        Some((&asset_name, asset.sha256)),
-    )
+    // This bootstrap bypasses the repository-fetch retry loop.
+    let resolved = super::retry::with_backoff("reld", || {
+        super::archive::download_and_extract_with_pin(
+            paths,
+            "reld",
+            MANAGED_RELD_VERSION,
+            &url,
+            &host,
+            &["reld"],
+            Some((&asset_name, asset.sha256)),
+        )
+    })
     .await?;
     if !resolved.is_file() {
         return Err(SoldrError::Archive(format!(
@@ -199,9 +202,15 @@ mod tests {
         gz.finish().expect("finish gzip")
     }
 
-    /// Serve `body` for exactly one GET request, then close. Returns the
-    /// server's `http://127.0.0.1:<port>` base.
+    /// Serve `body` for GET requests. Returns the local HTTP fixture base.
     async fn serve_once(body: Vec<u8>) -> (String, std::sync::Arc<std::sync::atomic::AtomicU32>) {
+        serve_with_initial_status(body, "200 OK").await
+    }
+
+    async fn serve_with_initial_status(
+        body: Vec<u8>,
+        initial_status: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicU32>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let address = listener.local_addr().expect("addr");
         let hits = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -211,11 +220,16 @@ mod tests {
                 let Ok((mut socket, _)) = listener.accept().await else {
                     break;
                 };
-                hits_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let attempt = hits_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let status = if attempt == 0 {
+                    initial_status
+                } else {
+                    "200 OK"
+                };
                 let mut buf = [0_u8; 2048];
                 let _ = socket.read(&mut buf).await;
                 let header = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 let _ = socket.write_all(header.as_bytes()).await;
@@ -224,6 +238,53 @@ mod tests {
             }
         });
         (format!("http://{address}"), hits)
+    }
+
+    fn fetch_after_initial_status(status: &'static str) -> (Result<PathBuf, SoldrError>, u32) {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let body = build_fixture_archive(b"fixture reld");
+        let sha256 = hex::encode(sha2::Sha256::digest(&body));
+        let asset = ReleaseAsset {
+            triple: "test-fixture",
+            extension: "tar.gz",
+            sha256: Box::leak(sha256.into_boxed_str()),
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let paths = SoldrPaths::with_root(temp.path().to_path_buf());
+        let rt = runtime();
+        let (base_url, hits) = rt.block_on(serve_with_initial_status(body, status));
+        let result = rt.block_on(ensure_reld_from(&paths, &base_url, &asset));
+        if let Ok(path) = &result {
+            assert_eq!(
+                std::fs::read(path).expect("installed reld"),
+                b"fixture reld"
+            );
+        }
+        (result, hits.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    #[test]
+    fn ensure_reld_from_retries_504_and_installs_verified_asset() {
+        let (result, hits) = fetch_after_initial_status("504 Gateway Timeout");
+        assert!(
+            result.is_ok(),
+            "transient asset failure must recover: {result:?}"
+        );
+        assert_eq!(
+            hits, 2,
+            "one failed download followed by one successful download"
+        );
+    }
+
+    #[test]
+    fn ensure_reld_from_does_not_retry_404() {
+        let (result, hits) = fetch_after_initial_status("404 Not Found");
+        let error = result.expect_err("missing asset must fail");
+        assert!(matches!(&error, SoldrError::ReleaseNotFound(_)), "{error}");
+        assert!(error.to_string().contains("404"), "{error}");
+        assert_eq!(hits, 1, "a missing asset must not be retried");
     }
 
     /// soldr#3276 §2/§3: `ensure_reld_from` against a local HTTP fixture
