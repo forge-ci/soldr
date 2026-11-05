@@ -469,7 +469,7 @@ jobs:
         # empty string is a valid spelling of `full`, so that path is unchanged.
         env:
           SOLDR_SAVE_PROFILE: ${{ inputs.bootstrap_artifact_name != '' && 'cook' || '' }}
-        uses: zackees/setup-soldr/cook@35b5765c99cf392c259e684daeda10a950f72fff
+        uses: zackees/setup-soldr/cook@c6f5541a9a528a5bd3a4dfee911dee3d61cf6db0
         with:
           cache: ${{ (inputs.target == 'x86_64-pc-windows-gnu' || inputs.target == 'x86_64-unknown-linux-gnu' || inputs.target == 'aarch64-pc-windows-msvc' || inputs.target == 'x86_64-pc-windows-msvc' || inputs.target == 'aarch64-unknown-linux-gnu') && 'true' || 'false' }}
           # soldr#3019: fatal on `main`, a warning on pull requests.

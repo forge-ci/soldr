@@ -36,7 +36,7 @@ def test_release_workflow_builds_and_publishes_musllinux_wheels() -> None:
         REPO_ROOT / ".github" / "scripts" / "release_detect.py"
     ).read_text(encoding="utf-8")
     assert (
-        "uses: zackees/setup-soldr@35b5765c99cf392c259e684daeda10a950f72fff" in workflow
+        "uses: zackees/setup-soldr@c6f5541a9a528a5bd3a4dfee911dee3d61cf6db0" in workflow
     )
     assert "version: 0.9.27" not in workflow  # one pin: setup-soldr's default
     assert "cross-targets: ${{ matrix.setup_target }}" in workflow

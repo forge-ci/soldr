@@ -200,7 +200,7 @@ jobs:
         run: date +%s > "${{ runner.temp }}/dogfood-zccache-restored-at"
 
       - name: Stop setup-soldr builder cache before dogfood build
-        uses: zackees/setup-soldr/cleanup@35b5765c99cf392c259e684daeda10a950f72fff
+        uses: zackees/setup-soldr/cleanup@c6f5541a9a528a5bd3a4dfee911dee3d61cf6db0
 
       - name: Build through soldr
         shell: pwsh

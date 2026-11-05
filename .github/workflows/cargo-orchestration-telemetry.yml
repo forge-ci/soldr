@@ -60,7 +60,7 @@ jobs:
         run: soldr cargo build -p soldr-cli --bin soldr
 
       - name: Stop setup-soldr builder cache before source telemetry
-        uses: zackees/setup-soldr/cleanup@35b5765c99cf392c259e684daeda10a950f72fff
+        uses: zackees/setup-soldr/cleanup@c6f5541a9a528a5bd3a4dfee911dee3d61cf6db0
 
       - name: Retire the bootstrap broker before source telemetry
         shell: bash
