@@ -900,7 +900,16 @@ fn assert_cargo_doc_held_phase(label: &str, args: &[&str], hold_phase: &str) {
         "route cleanup must leave the independently owned fixture service alive"
     );
     let CargoDocRouteResult::TimedOut(timeout) = result else {
-        panic!("held cargo-doc route {label} unexpectedly completed");
+        let CargoDocRouteResult::Completed(output) = result else {
+            unreachable!();
+        };
+        panic!(
+            "held cargo-doc route {label} unexpectedly completed: {:?}; markers={:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            output.phase_markers,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     };
 
     assert_eq!(
