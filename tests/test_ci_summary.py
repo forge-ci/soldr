@@ -736,3 +736,71 @@ def test_trusted_merge_queue_entry_is_accepted_without_an_author_permission():
         assert "attested skip is limited to a writer's minimal PR" in check(
             needs, mode="minimal", event_name=event, trusted=True
         ), event
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "success",
+        "failure",
+        "cancelled",
+        "timed_out",
+        "startup_failure",
+        "action_required",
+    ],
+)
+def test_empty_then_stale_snapshot_is_refreshed(tmp_path, monkeypatch, outcome):
+    report_path = cli_environment(tmp_path, monkeypatch)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "merge_group")
+    monkeypatch.setenv("SELECTED_SHA", SHA)
+    snapshots = iter(
+        [
+            [],
+            [_job("Lint", None, "in_progress")],
+            [_job("Lint", outcome)],
+        ]
+    )
+    sleeps = []
+    monkeypatch.setattr(SUMMARY, "list_run_attempt_jobs", lambda *_: next(snapshots))
+    monkeypatch.setattr(SUMMARY.time, "sleep", sleeps.append)
+    assert SUMMARY.main() == int(outcome != "success")
+    assert sleeps == [10, 10]
+    assert json.loads(report_path.read_text())["failures"] == (
+        [] if outcome == "success" else [f"job 'Lint' concluded {outcome}"]
+    )
+
+
+def test_empty_snapshot_exhaustion_fails_closed(monkeypatch):
+    calls, sleeps = [], []
+    monkeypatch.setattr(
+        SUMMARY, "list_run_attempt_jobs", lambda *_: calls.append(True) or []
+    )
+    monkeypatch.setattr(SUMMARY.time, "sleep", sleeps.append)
+    jobs = SUMMARY.settled_run_attempt_jobs("owner/repo", "123", "1", "token")
+    assert SUMMARY.run_attempt_failures(jobs) == ["run attempt job list is empty"]
+    assert len(calls) == 8
+    assert sleeps == [10] * 7
+
+
+def test_pagination_does_not_trust_stale_total_count(monkeypatch):
+    from io import BytesIO
+
+    pages = []
+    # A full page with a stale total_count must not hide the next page's failure.
+    batches = [
+        [_job(f"job-{i}", "success") for i in range(100)],
+        [_job("Linux", "failure")],
+        [],
+    ]
+
+    def fetch(request, timeout):
+        pages.append(request.full_url)
+        return BytesIO(
+            json.dumps({"total_count": 100, "jobs": batches[len(pages) - 1]}).encode()
+        )
+
+    monkeypatch.setattr(SUMMARY.urllib.request, "urlopen", fetch)
+    jobs = SUMMARY.list_run_attempt_jobs("owner/repo", "123", "1", "token")
+    assert len(jobs) == 101
+    assert SUMMARY.run_attempt_failures(jobs) == ["job 'Linux' concluded failure"]
+    assert pages[-1].endswith("page=2")
