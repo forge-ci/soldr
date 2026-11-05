@@ -122,7 +122,7 @@ max-age-hours = 24
 # worst case is steady + the lockfile-change peak (no writer flow pre-prunes;
 # see [flow.main]) + [cache.pr].budget. The janitor's own target is
 # steady <= 8.5 GiB -- the old `total_max_bytes`.
-# They sum to 8563 MiB (8.36 GiB) after the 2026-11-02 cook-layer re-derivation. Sized 2026-10-09 from the live listing
+# They sum to 8437 MiB (8.24 GiB) after the 2026-11-05 compile/zccache-unit rebalance. Sized 2026-10-09 from the live listing
 # (`gh api 'repos/zackees/soldr/actions/caches?per_page=100' --paginate`,
 # 93 entries, 7.39 GiB); re-measure before retuning.
 #
@@ -185,10 +185,14 @@ cook                   = { via = "setup-soldr:cook", max = "620MB", min = "1MB",
 dylint-foundation      = { prefix = "dylint-foundation-",                  max = "600MB",  evict = "lru" }
 dylint-driver          = { prefix = "dylint-driver-",                      max = "8MB",    evict = "lru" }
 
-# -- group setup-soldr-action-stores (janitor: newest), 1370 MiB.
-# `compile` is setup-soldr's build cache: two writers (linux-x64 648 MB,
-# windows-x64 388 MB live), declared as the two shapes that exist.
-compile                = { via = "setup-soldr:build-cache",   max = "680MB", lockfile = true, min = "1MB", evict = "lru", promote = "ancestor", shapes = { linux-x64 = { max = "680MB" }, windows-x64 = { max = "410MB" } } }
+# -- group setup-soldr-action-stores (janitor: newest), 282 MiB.
+# `compile` has no live entries in the 2026-11-05 REST listing
+# (after merge-group run 41942905548); every setup-soldr caller sets
+# build-cache: false. Retain the 1 MiB minimum per historical writer; return 962 MiB
+# to zccache-unit and release 126 MiB (including lockfile-change headroom).
+# Re-measure before
+# enabling a writer: these allowances do not cover the former linked trees.
+compile                = { via = "setup-soldr:build-cache",   max = "1MB", lockfile = true, min = "1MB", evict = "lru", promote = "ancestor", shapes = { linux-x64 = { max = "1MB" }, windows-x64 = { max = "1MB" } } }
 registry               = { via = "setup-soldr:cargo-registry", max = "140MB", lockfile = true, per = "none", evict = "lru" }
 dogfood-zccache        = { prefix = "setup-soldr-dogfood-zccache-", max = "70MB", evict = "lru", shapes = { current = { max = "70MB" }, previous = { max = "70MB" } } }
 
@@ -204,10 +208,14 @@ soldr-baseline         = { prefix = "soldr-baseline-",                     max =
 soldr-cook             = { prefix = "soldr-cook-",                         max = "32MB",   evict = "lru" }
 soldr-delta            = { prefix = "soldr-delta-",                        max = "16MB",   evict = "lru" }
 
-# -- group zccache-unit (janitor: newest), 2091 MiB. Six ~402 MB lineage
-#    generations live (2411 MiB) when sized; 2026-11-02 live was 2 entries,
-#    1.77 GiB (72.1%), so g6 was returned to fund cook-layer.
-zccache-unit           = { prefix = "zccache-unit-", max = "419MB", evict = "lru", shapes = { g1 = { max = "419MB" }, g2 = { max = "418MB" }, g3 = { max = "418MB" }, g4 = { max = "418MB" }, g5 = { max = "418MB" } } }
+# -- group zccache-unit (janitor: newest), 3053 MiB. Merge-group run
+#    41942905548 (2026-11-05T00:39Z) measured 3 entries / 2.54 GiB against
+#    2091 MiB. The 2026-11-05 REST listing has two genuine main
+#    generations, 890.52 / 915.80 MiB: no foreign prefixes. Budget three
+#    generations at the larger measured size + ~11% headroom (3053 MiB).
+#    Fund the 962 MiB increase from compile's disabled writers above; keep
+#    the repository ceiling unchanged. Older generations remain evictable.
+zccache-unit           = { prefix = "zccache-unit-", max = "1018MB", evict = "lru", shapes = { g1 = { max = "1018MB" }, g2 = { max = "1018MB" }, g3 = { max = "1017MB" } } }
 
 # Ancestor promotion (CACHE-024, zackees/ci.yml#335). Standardizing on
 # setup-soldr's ancestor encoding -- shortest parent-edge distance from a live

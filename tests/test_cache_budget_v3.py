@@ -89,3 +89,32 @@ def test_v3_lineage_is_per_job_and_retires_superseded_generations() -> None:
     ]
     entries = guard.normalize_entries(rows)
     assert guard.prune_candidates(entries, lock) == [entries[0], entries[2]]
+
+
+def test_queue_zccache_footprint_rebalance() -> None:
+    """Run 41942905548's 2.54 GiB row fits without raising the repo ceiling."""
+    manifest = guard.load_manifest(MANIFEST)
+    budget = manifest["budget"]
+    # Rounded log measurement, represented as three synthetic generations.
+    used = int(2.54 * 1024**3)
+    entries = guard.normalize_entries(
+        [
+            entry(f"zccache-unit-v1-linux-lock-m{i}-hash", size)
+            for i, size in enumerate((used // 3, used // 3, used - 2 * (used // 3)))
+        ]
+    )
+    old = json.loads(json.dumps(manifest))
+    old["budget"]["families"]["zccache-unit"]["max_bytes"] = 2091 * 1024**2
+    assert any(
+        "family 'zccache-unit'" in problem
+        for problem in guard.budget_problems(MANIFEST, old, entries)
+    )
+    assert guard.budget_problems(MANIFEST, manifest, entries) == []
+    assert budget["total_max_bytes"] == 8437 * 1024**2
+    assert budget["fail_total_bytes"] == int(9.5 * 1024**3)
+    # A single growing archive still trips the unchanged per-family guard.
+    oversized = guard.normalize_entries([entry("zccache-unit-growth", 3054 * 1024**2)])
+    assert any(
+        "family 'zccache-unit'" in problem
+        for problem in guard.budget_problems(MANIFEST, manifest, oversized)
+    )

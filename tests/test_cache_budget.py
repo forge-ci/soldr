@@ -600,6 +600,8 @@ def without(entries: list, dropped: list) -> list:
 def test_3347_fixture_is_red_raw() -> None:
     entries = lineage_entries()
     manifest = guard.load_manifest(MANIFEST)
+    # Preserve the historical allocation that made this captured row red.
+    manifest["budget"]["families"]["zccache-unit"]["max_bytes"] = 2091 * 1024**2
     problems = guard.budget_problems(MANIFEST, manifest, entries)
     assert any("'cook-layer'" in p for p in problems)
     assert any("'zccache-unit'" in p for p in problems)
@@ -643,9 +645,11 @@ def test_3347_policy_is_not_green_when_a_family_truly_does_not_fit() -> None:
     # candidate (the newest main generation is what required jobs restore), so
     # it must stay red. (This used the rust-cache-residual family until
     # CACHE-025 retired it on 2026-10-02.)
+    manifest = guard.load_manifest(MANIFEST)
+    oversized = manifest["budget"]["families"]["zccache-unit"]["max_bytes"] + 1
     entries = [
         (
-            guard.CacheEntry(e.key, e.ref, 3_000_000_000, e.id, e.created_at)
+            guard.CacheEntry(e.key, e.ref, oversized, e.id, e.created_at)
             if e.key.startswith("zccache-unit-")
             else e
         )
@@ -737,6 +741,10 @@ def test_3398_live_listing_is_red_raw() -> None:
 def test_3398_prune_fits_setup_soldr_action_stores() -> None:
     entries = dogfood_entries()
     manifest = guard.load_manifest(MANIFEST)
+    # This historical fixture predates disabling the linked build-cache writers.
+    manifest["budget"]["families"]["setup-soldr-action-stores"]["max_bytes"] = (
+        1370 * 1024**2
+    )
     effective = without(entries, guard.prune_candidates(entries))
     problems = guard.budget_problems(MANIFEST, manifest, effective)
     assert not any("'setup-soldr-action-stores'" in p for p in problems)
