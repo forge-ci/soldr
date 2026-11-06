@@ -468,7 +468,7 @@ Usage, in the lane that produces the artifact:
     s3-bucket: ${{ secrets.CACHE_BUCKET }}
     s3-endpoint: ${{ secrets.CACHE_ENDPOINT }}
     placement-path: ${{ env.SOLDR_COOK_CACHE_ROOT }}
-    placement-prefer: s3        # release layers are 0.7-1.4 GB; dev ~20 MB
+    placement-prefer: s3        # this layer is hundreds of MB; a ~20 MB layer stays on GitHub
     gh-cache-budget: 7GiB
 ```
 
@@ -493,12 +493,15 @@ falls to S3 rather than GitHub, because writing into an unmeasured cache
 evicts somebody else's layer — which is the failure this whole section is
 about. `SOLDR_GH_CACHE_USED_BYTES` overrides the lookup for tests.
 
-The numbers behind `placement-prefer: s3`, measured on `obs-rust/obs-studio`
-(121 entries, 8428 MB against the 10240 MB ceiling): the three `--release`
-cook layers are 1358 MB, 875 MB and 720 MB, while the three dev-profile layers
-are 19 MB, 19 MB and 23 MB. Sending release to level 2 puts 5475 MB on GitHub
-and 2953 MB on S3, leaving ~4.7 GiB of headroom so ordinary churn stops
-evicting unrelated families.
+`placement-prefer: s3` follows a layer's size class, not its profile name: a
+layer in the hundreds of MB goes to level 2, and a layer of about 20 MB stays on
+GitHub. Measured on `obs-rust/obs-studio` (169 entries, 9429 MB against the
+10240 MB ceiling), the `--profile dev -- --tests` cook layers are the large ones
+(875 MB on Windows and 720 MB on macOS, with a Linux layer of about 1.4 GB that
+is currently absent), while the two `--release` layers are 19 MB and 23 MB.
+Sending the two large layers present to level 2 puts 7834 MB on GitHub and
+1595 MB on S3, leaving about 2.3 GiB of headroom, and the Linux layer goes to
+level 2 as well when it returns, so it does not reduce that headroom.
 
 ### The janitor converges; the verdict charges whoever caused it (zackees/ci.yml#6)
 
