@@ -149,6 +149,17 @@
         "build-and-test-zccache-unit"
       ],
       "rationale": "store_cap_bytes is the UNCOMPRESSED on-disk trim cap; the group's ci.toml footprint is the compressed Actions budget. Trimming the on-disk store to max_bytes evicted the ci-test driver build's ~381 dependency units every run, leaving that step at 0 hits (soldr#3458: measured working set with the driver units 2.92 GiB; a saved generation compresses about 4x). The ci-test host lane's cross-run compiler store: soldr#3041's Tier-2 per-unit object store (zccache-unit-*), restored by lockfile-hash prefix, saved on main only, and pruned and trimmed to this allocation before the save (soldr#3120, soldr#3252). Allocation rebalanced by 0.05 GiB to rust-cache-residual in 2026-09 (live usage was 0.82 GiB) and by a further 0.40 GiB on 2026-10-01 (live 0.00 GiB; 1.55 GiB still covers the ~0.73 GiB compressed working set soldr#3458 measured). zackees/ci.yml#209 returned 0.90 GiB from rust-cache-residual when it retired the wheel-cross rust-cache producer (live 2026-10-02: two main generations, 1.54 GiB). soldr#3043's stable cook archives (stable-cook-*) shared this family until soldr#3396 retired them: that prototype restored the previous lockfile's cook directory through a restore-keys prefix and never pruned it, so one entry grew to 2.8 GB. stable-cook-* is now a retired prefix in check_cache_budget.py, and check_cache_ownership.py R8 rejects any new appending prefix-fallback cache without a registered prune step. The ci.toml prefix is a contract: a producer keyed outside every declared family is rejected by the gate as an unregistered producer."
+    },
+    "solo-tombstone": {
+      "ci_toml_families": [
+        "solo-tombstone"
+      ],
+      "evict": "lru",
+      "evict_rationale": "Reclaim least-recently-used poison/skip markers when their dedicated 1 MiB allocation fills; no newest-entry protection or borrowing from live toolchain caches. Losing a marker permits a later retry.",
+      "entries": [
+        "setup-soldr-solo-tombstone"
+      ],
+      "rationale": "setup-soldr src/lib/solo-poison.ts writes ~252-byte solo-tombstone-v1-<inner key> markers for skipped/poisoned layers. The inner key belongs to its original family (for example solo-toolchain-v3- belongs to pinned-immutable-download); the outer prefix deterministically owns only the marker, never the live layer. Separate bounded metadata allocation prevents unregistered-producer merge-queue failures and unbounded accumulation."
     }
   },
   "experiment_workflows": [
@@ -651,6 +662,14 @@
       "mechanism": "actions/upload-artifact",
       "tier": "none",
       "rationale": "One-off restored-image measurements and logs retained for human review."
+    },
+    {
+      "id": "setup-soldr-solo-tombstone",
+      "workflow": "ci.yml",
+      "step": "setup-soldr: save skipped/poisoned solo layer tombstone",
+      "mechanism": "actions/cache",
+      "tier": "attestation-evidence",
+      "rationale": "Tiny poison/skip metadata wrapping an inner layer key; no compiler products. Dedicated solo-tombstone family bounds these markers independently of the inner layer family."
     }
   ]
 }

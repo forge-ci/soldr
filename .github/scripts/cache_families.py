@@ -115,6 +115,8 @@ def family_footprint(ci_toml: dict, family_id: str, spec: dict) -> int:
 
 def family_prefixes(family_id: str, spec: dict) -> tuple[str, ...]:
     """The key prefixes a family owns: its literal `prefix`, or its `via`'s."""
+    # solo-tombstone-v1- explicitly owns metadata wrapping an inner layer key.
+    # Never unwrap it: live solo-toolchain-v3- entries keep their original owner.
     literal = spec.get("prefix")
     if isinstance(literal, str) and literal:
         return (literal,)

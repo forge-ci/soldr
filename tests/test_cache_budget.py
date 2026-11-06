@@ -1260,6 +1260,7 @@ def test_real_manifest_declares_evict_only_for_the_safe_families() -> None:
         name: spec["evict"] for name, spec in families.items() if "evict" in spec
     }
     assert evictable == {
+        "solo-tombstone": "lru",
         # zackees/ci.yml#198: tiny attestation evidence; an evicted entry only
         # makes hydration pick an older (or no) attested ancestor.
         "attestation-evidence": "lru",
