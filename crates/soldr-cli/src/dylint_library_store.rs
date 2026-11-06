@@ -45,9 +45,15 @@ pub(crate) fn store_dir(
     hasher.update(b"soldr-dylint-libraries-v1\0");
     hasher.update(channel.as_bytes());
     for library in &libraries {
-        let relative = library.strip_prefix(workspace_root).unwrap_or(library);
+        // The key names the library by its directory name, not by its path
+        // inside this checkout: a subtree worker roots the repository one
+        // level down (`sub/dylints/one` instead of `dylints/one`), and the
+        // bytes are identical, so keying on the path made it rebuild the
+        // whole 350 MB tree for a layout difference alone. Two libraries in
+        // one workspace can never share a directory name.
+        let name = library.file_name().unwrap_or_else(|| library.as_os_str());
         hasher.update(b"\0lib\0");
-        hasher.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
+        hasher.update(name.to_string_lossy().replace('\\', "/").as_bytes());
         for name in KEY_FILES {
             hasher.update(b"\0file\0");
             hasher.update(name.as_bytes());

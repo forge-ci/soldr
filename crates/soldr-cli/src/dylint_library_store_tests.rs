@@ -100,3 +100,43 @@ fn a_redundant_copy_is_dropped_when_the_store_is_populated() {
     assert!(link.join("shared").is_file());
     assert!(!store.join("dup").exists());
 }
+
+/// A worker whose checkout roots a subtree, or who exports the repo into a
+/// different directory layout, still has the same lint libraries at a
+/// different depth. The store key must ignore that leading path: the build
+/// tree depends on the dependency graph, not on where the checkout sits.
+#[test]
+fn a_subtree_checkout_at_a_different_depth_shares_the_same_store_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let flat = tmp.path().join("flat");
+    let nested = tmp.path().join("subtree/repo");
+    workspace(&flat, "lock");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(
+        nested.join("Cargo.toml"),
+        "[workspace]\n[workspace.metadata.dylint]\nlibraries = [{ path = \"dylints/*\" }]\n",
+    )
+    .unwrap();
+    // A subtree checkout roots the repo one level down: the libraries are
+    // the same bytes but at a different relative path inside the workspace.
+    std::fs::create_dir_all(nested.join("sub/dylints/one/src")).unwrap();
+    std::fs::write(
+        nested.join("Cargo.toml"),
+        "[workspace]\n[workspace.metadata.dylint]\nlibraries = [{ path = \"sub/dylints/*\" }]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        nested.join("sub/dylints/one/Cargo.toml"),
+        "[package]\nname = \"one\"\n",
+    )
+    .unwrap();
+    std::fs::write(nested.join("sub/dylints/one/Cargo.lock"), "lock").unwrap();
+    std::fs::write(nested.join("sub/dylints/one/src/lib.rs"), "// v1\n").unwrap();
+
+    let store = tmp.path().join("store");
+    assert_eq!(
+        store_dir(&store, &flat, "nightly-2026-08-15"),
+        store_dir(&store, &nested, "nightly-2026-08-15"),
+        "the same lint set at a different checkout depth must reuse one 350 MB build tree"
+    );
+}
