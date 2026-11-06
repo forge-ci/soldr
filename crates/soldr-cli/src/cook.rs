@@ -293,6 +293,9 @@ pub(crate) async fn run_cook(args: &[String], cache_enabled: bool) -> Result<i32
     // `resolve_cook_target_dir`, so the #621 short-circuit checked below could
     // never fire on a hydrated tree. Left unset for a `--target`-less cook, so
     // that path keeps its existing bare-`target/` behaviour exactly.
+    crate::cargo_front_door::cook_hydrate_profile::publish_cook_profile(resolve_profile_name(
+        &parsed,
+    ));
     if let Some(triple) = parsed.target.as_deref() {
         std::env::set_var(
             crate::cargo_front_door::cook_hydrate::SOLDR_COOK_HYDRATE_TARGET_ENV,

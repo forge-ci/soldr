@@ -46,6 +46,7 @@ mod codegen_units;
 mod component_install;
 mod config_args;
 pub(crate) mod cook_hydrate;
+pub(crate) mod cook_hydrate_profile;
 mod darwin_embed;
 /// soldr#2546 — opt-in build process tracing (`soldr --debug`).
 pub(crate) mod debug_trace;
