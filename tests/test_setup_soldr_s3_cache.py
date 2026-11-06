@@ -479,14 +479,82 @@ def test_janitor_evicts_a_stale_cook_layer(s3) -> None:
         size=900 * 1024**2,
         last_modified=now,
     )
-    plan = s3.plan_eviction(
-        [stale, fresh], limit=1024**3, now=now, protected=set()
-    )
+    plan = s3.plan_eviction([stale, fresh], limit=1024**3, now=now, protected=set())
     assert [o.name for o in plan.to_delete] == [stale.name], (
         "only the aged cook layer should be evicted; the fresh one is inside "
         "MIN_EVICT_AGE and must survive"
     )
     assert plan.after == 900 * 1024**2
+
+
+# --- GitHub -> S3 demotion plan ---------------------------------------------
+
+
+def _gh(s3, entries):
+    return [
+        s3.GhCacheEntry(id=i, key=k, size=sz, last_accessed=ts)
+        for i, k, sz, ts in entries
+    ]
+
+
+def test_demotion_is_a_noop_under_budget(s3) -> None:
+    entries = _gh(s3, [(1, "cook-a", 400, NOW - timedelta(days=2))])
+    plan = s3.plan_demotion(
+        entries, budget=1024, now=NOW, protected=set(), max_bytes=4096
+    )
+    assert plan.to_demote == []
+    assert plan.before == plan.after == 400
+
+
+def test_demotion_takes_the_least_recently_accessed_first(s3) -> None:
+    entries = _gh(
+        s3,
+        [
+            (1, "cook-newest", 300, NOW - timedelta(days=1)),
+            (2, "cook-oldest", 300, NOW - timedelta(days=9)),
+            (3, "cook-middle", 300, NOW - timedelta(days=5)),
+        ],
+    )
+    plan = s3.plan_demotion(
+        entries, budget=600, now=NOW, protected=set(), max_bytes=4096
+    )
+    # 900 total against a 600 budget: one 300-byte demotion reaches the budget.
+    assert [e.key for e in plan.to_demote] == ["cook-oldest"]
+    assert plan.after == 600
+
+
+def test_demotion_respects_max_bytes(s3) -> None:
+    entries = _gh(
+        s3,
+        [
+            (1, "cook-a", 400, NOW - timedelta(days=9)),
+            (2, "cook-b", 400, NOW - timedelta(days=8)),
+        ],
+    )
+    plan = s3.plan_demotion(entries, budget=0, now=NOW, protected=set(), max_bytes=401)
+    assert [e.key for e in plan.to_demote] == ["cook-a"], (
+        "one sweep must stop at the byte cap; the rest waits for the next "
+        "merge-queue run rather than blowing the job timeout"
+    )
+
+
+def test_demotion_skips_protected_and_recent_entries(s3) -> None:
+    entries = _gh(
+        s3,
+        [
+            (1, "cook-protected", 400, NOW - timedelta(days=9)),
+            (2, "cook-fresh", 400, NOW - timedelta(minutes=5)),
+            (3, "cook-evictable", 400, NOW - timedelta(days=9)),
+        ],
+    )
+    plan = s3.plan_demotion(
+        entries,
+        budget=0,
+        now=NOW,
+        protected={"cook-protected"},
+        max_bytes=4096,
+    )
+    assert [e.key for e in plan.to_demote] == ["cook-evictable"]
 
 
 # --- CLI restore -> save round trip (fake transport, real tar+zstd) ----------

@@ -410,6 +410,72 @@ def run_janitor(
     return plan
 
 
+# --- GitHub -> S3 demotion plan ----------------------------------------------
+
+
+@dataclass(frozen=True)
+class GhCacheEntry:
+    """One actions/cache entry, as the REST API describes it.
+
+    There is no download/restore endpoint in the REST API -- restoring is the
+    cache *service*, reachable only from inside a job -- so this type carries
+    what the plan needs and nothing that implies we can fetch it over REST.
+    """
+
+    id: int
+    key: str
+    size: int
+    last_accessed: datetime
+
+
+@dataclass
+class DemotionPlan:
+    before: int
+    after: int
+    to_demote: list["GhCacheEntry"] = field(default_factory=list)
+
+
+def plan_demotion(
+    entries: list[GhCacheEntry],
+    *,
+    budget: int,
+    now: datetime,
+    protected: set[str],
+    max_bytes: int,
+    min_age: timedelta = MIN_EVICT_AGE,
+) -> DemotionPlan:
+    """Which GitHub entries to move to S3, oldest access first.
+
+    ``max_bytes`` bounds one sweep: demotion runs sequentially in the single
+    merge-queue run, so an unbounded plan would turn one bad budget into a
+    multi-gigabyte upload inside a job timeout.
+    """
+    total = sum(e.size for e in entries)
+    plan = DemotionPlan(before=total, after=total)
+    if total <= budget:
+        return plan
+    moved = 0
+    candidates = sorted(
+        (
+            e
+            for e in entries
+            if e.key not in protected and now - e.last_accessed >= min_age
+        ),
+        key=lambda e: (e.last_accessed, e.key),
+    )
+    for entry in candidates:
+        if plan.after <= budget:
+            break
+        # Never exceed the sweep cap: the point is to bound one run's upload,
+        # so an entry that would cross it waits for the next merge-queue run.
+        if max_bytes and moved + entry.size > max_bytes:
+            break
+        plan.to_demote.append(entry)
+        plan.after -= entry.size
+        moved += entry.size
+    return plan
+
+
 # --- save --------------------------------------------------------------------
 
 
