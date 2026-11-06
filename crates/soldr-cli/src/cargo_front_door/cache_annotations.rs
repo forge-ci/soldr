@@ -144,6 +144,14 @@ mod tests {
     fn a_porcelain_run_defers_its_annotations_instead_of_printing_them() {
         use super::super::cache_states::{BuildScope, CacheStateTail};
 
+        let _lock = crate::TEST_PROCESS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Exercise the explicit deferred sink independently of the caller's
+        // switches, which otherwise disable the tail before it sees the sink.
+        let _porcelain = crate::EnvVarGuard::remove(super::super::porcelain::PORCELAIN_ENV_VAR);
+        let _cache_states =
+            crate::EnvVarGuard::remove(super::super::cache_states::NO_CACHE_STATES_ENV_VAR);
         let dir = tempfile::tempdir().expect("tempdir");
         let journal = dir.path().join("compile_journal.jsonl");
         std::fs::write(
