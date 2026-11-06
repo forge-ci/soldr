@@ -575,7 +575,8 @@ fn green_indexed_prefix() -> String {
 
 /// Resolve the `target/<triple?>/<profile>/` directory cargo-chef
 /// just populated. cargo's mapping: `--release` → `release`, no
-/// flag → `debug` (the "dev" profile), `--profile=<name>` → `<name>`.
+/// flag → `debug` (the "dev" profile), `--profile=<name>` → the directory
+/// `cook_hydrate::profile_dir_name` gives `<name>`.
 /// With `--target X` the artifacts land under `target/X/<profile>/`.
 fn resolve_cook_target_dir(manifest_dir: &Path, args: &CookArgs) -> PathBuf {
     let invocation_dir = std::env::current_dir().unwrap_or_else(|_| manifest_dir.to_path_buf());
@@ -605,15 +606,7 @@ fn resolve_cook_target_dir_with(
 }
 
 fn resolve_profile_dir_name(args: &CookArgs) -> &str {
-    if let Some(p) = args.profile.as_deref() {
-        // `dev` is special-cased by cargo → `debug` dir on disk.
-        return if p == "dev" { "debug" } else { p };
-    }
-    if args.release {
-        "release"
-    } else {
-        "debug"
-    }
+    crate::cargo_front_door::cook_hydrate::profile_dir_name(resolve_profile_name(args))
 }
 
 fn resolve_profile_name(args: &CookArgs) -> &str {
@@ -866,7 +859,9 @@ where
         })?;
     let origin = origin_url(&ctx.manifest_dir);
     let branch_name = current_branch_name(&ctx.manifest_dir);
-    let profile = resolve_profile_name(args).to_string();
+    let profile =
+        crate::cargo_front_door::cook_hydrate::cook_index_profile_name(resolve_profile_name(args))
+            .to_string();
 
     // 3. Resolve paths under ~/.soldr/.
     let cook_dir = cook_cache_dir(paths);

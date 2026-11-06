@@ -1008,3 +1008,21 @@ fn already_indexed_archive_requires_exact_match_and_matching_bytes_on_disk() {
         None
     );
 }
+
+/// soldr#4108: the directory `soldr cook` treats as the cooked tree must be the
+/// one cargo writes: `test` builds into `debug` and `bench` into `release`.
+#[test]
+fn cook_profile_dir_matches_cargo() {
+    for (flags, dir) in [
+        (&[][..], "debug"),
+        (&["--release"][..], "release"),
+        (&["--profile", "dev"][..], "debug"),
+        (&["--profile", "test"][..], "debug"),
+        (&["--profile", "release"][..], "release"),
+        (&["--profile", "bench"][..], "release"),
+        (&["--profile", "custom"][..], "custom"),
+    ] {
+        let parsed = parse_cook_args(&argv(flags)).expect("parse");
+        assert_eq!(resolve_profile_dir_name(&parsed), dir, "{flags:?}");
+    }
+}
