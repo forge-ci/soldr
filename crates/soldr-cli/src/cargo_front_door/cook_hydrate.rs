@@ -13,6 +13,7 @@
 //! < 100 ms. A daemon-down path is silent. Pre-flight failure NEVER
 //! blocks the cargo invocation — every branch falls through cleanly.
 
+use super::cook_hydrate_profile::hydrate_profile_name;
 use crate::cache_lib::cook_archive::{
     self, compute_recipe_hash_proxy, extract_skip_existing, quarantine_artifact, sha_abbrev,
     verify_sha256,
@@ -208,7 +209,7 @@ fn try_hydrate(args: &[String], paths: &SoldrPaths, rustc: &Path) -> Option<()> 
     // about 10 s a time in CI (soldr#3117).
     if target_already_cooked(
         &resolve_target_dir(&manifest_dir, args),
-        profile_dir_name(&resolve_profile_name(args)),
+        profile_dir_name(&hydrate_profile_name(args)),
     ) {
         return None;
     }
@@ -230,7 +231,7 @@ fn try_hydrate(args: &[String], paths: &SoldrPaths, rustc: &Path) -> Option<()> 
 
     let recipe_hash = compute_recipe_hash_proxy(&manifest_dir)?;
     let triple = resolve_target_triple(&manifest_dir, args)?;
-    let profile_name = resolve_profile_name(args);
+    let profile_name = hydrate_profile_name(args);
     let channel = read_rust_toolchain_manifest(&manifest_dir)
         .ok()
         .and_then(|m| m.channel)
@@ -428,7 +429,7 @@ fn resolve_target_triple(manifest_dir: &Path, args: &[String]) -> Option<String>
 /// cargo profile NAME (the same string cargo passes through to
 /// `[profile.<NAME>]`). Maps to a directory name via
 /// [`profile_dir_name`].
-fn resolve_profile_name(args: &[String]) -> String {
+pub(super) fn resolve_profile_name(args: &[String]) -> String {
     if let Some(value) = extract_arg_value(args, "--profile") {
         return value;
     }
