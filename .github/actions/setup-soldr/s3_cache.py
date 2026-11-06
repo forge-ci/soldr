@@ -786,12 +786,99 @@ def cmd_save(env: dict) -> int:
     return 0
 
 
+# --- placement CLI -----------------------------------------------------------
+
+
+def du_bytes(root: Path) -> int:
+    """Total size of the files under ``root`` (a missing path is 0 bytes)."""
+    if not root.exists():
+        return 0
+    if root.is_file():
+        return root.stat().st_size
+    return sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+
+
+def gh_cache_used_bytes(env: dict) -> int | None:
+    """Repository GitHub cache usage, or None when it cannot be read.
+
+    ``SOLDR_GH_CACHE_USED_BYTES`` overrides the lookup so the placement decision
+    is unit-testable without network. A failed lookup returns None and the
+    caller falls back to the conservative choice rather than guessing zero.
+    """
+    override = env.get("SOLDR_GH_CACHE_USED_BYTES", "").strip()
+    if override:
+        return int(override)
+    repository = env.get("SOLDR_GITHUB_REPOSITORY", "").strip()
+    token = env.get("SOLDR_GITHUB_TOKEN", "").strip()
+    if not (repository and token):
+        return None
+    url = f"https://api.github.com/repos/{repository}/actions/cache/usage"
+    headers = {
+        "authorization": f"Bearer {token}",
+        "accept": "application/vnd.github+json",
+        "x-github-api-version": "2022-11-28",
+        "user-agent": "soldr-setup-s3-cache",
+    }
+    try:
+        status, _hdrs, body = urllib_transport("GET", url, headers, None)
+    except Exception as error:  # pylint: disable=broad-exception-caught
+        # A usage lookup that fails must not fail the job: the caller turns
+        # "unknown" into the conservative S3 placement.
+        del error
+        return None
+    if status != 200:
+        return None
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None
+    used = data.get("active_caches_size_in_bytes")
+    return int(used) if isinstance(used, (int, float)) else None
+
+
+def cmd_placement(env: dict) -> int:
+    """Decide, and report, which single store an artifact belongs in."""
+    root = Path(env.get("INPUT_PLACEMENT_PATH", "") or "")
+    size = du_bytes(root)
+    budget = resolve_limit(env.get("INPUT_GH_CACHE_BUDGET", ""))
+    prefer = env.get("INPUT_PLACEMENT_PREFER", "auto").strip().lower()
+    used = gh_cache_used_bytes(env)
+    if used is None:
+        # Unknown usage: the second tier is the safe home, because writing to a
+        # full GitHub cache evicts somebody else's layer.
+        placement = Placement("s3", "GitHub cache usage unavailable")
+    else:
+        placement = choose_placement(
+            size=size,
+            gh_used=used,
+            gh_budget=budget,
+            prefer="s3" if prefer == "s3" else "github",
+        )
+        placement = Placement(
+            placement.store,
+            f"{placement.reason} (size={size} used={used} budget={budget})",
+        )
+    print(f"s3-cache placement: {placement.store} -- {placement.reason}")
+    target = env.get("GITHUB_OUTPUT", "").strip()
+    if target:
+        # Write through the env the caller passed, not os.environ: cmd_placement
+        # is unit-tested with a dict and must not depend on the process env.
+        with open(target, "a", encoding="utf-8") as fh:
+            fh.write(f"placement={placement.store}\n")
+            fh.write(f"placement_size_bytes={size}\n")
+    return 0
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) != 2 or argv[1] not in ("restore", "save"):
-        print("usage: s3_cache.py restore|save", file=sys.stderr)
+    if len(argv) != 2 or argv[1] not in ("restore", "save", "placement"):
+        print("usage: s3_cache.py restore|save|placement", file=sys.stderr)
         return 2
     env = dict(os.environ)
-    return cmd_restore(env) if argv[1] == "restore" else cmd_save(env)
+    if argv[1] == "restore":
+        return cmd_restore(env)
+    if argv[1] == "placement":
+        return cmd_placement(env)
+    return cmd_save(env)
 
 
 if __name__ == "__main__":
