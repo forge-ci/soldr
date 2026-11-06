@@ -497,6 +497,72 @@ def _gh(s3, entries):
     ]
 
 
+def test_du_bytes_sums_files_and_tolerates_a_missing_root(s3, tmp_path) -> None:
+    root = tmp_path / "layer"
+    (root / "a").mkdir(parents=True)
+    (root / "a" / "one").write_bytes(b"x" * 100)
+    (root / "two").write_bytes(b"y" * 50)
+    assert s3.du_bytes(root) == 150
+    assert s3.du_bytes(tmp_path / "absent") == 0
+
+
+def test_placement_cli_writes_the_decision_to_github_output(
+    s3, tmp_path, monkeypatch
+) -> None:
+    root = tmp_path / "layer"
+    root.mkdir()
+    (root / "blob").write_bytes(b"z" * 2048)
+    out = tmp_path / "out"
+    env = {
+        "INPUT_PLACEMENT_PATH": str(root),
+        "INPUT_GH_CACHE_BUDGET": "4096",
+        "SOLDR_GH_CACHE_USED_BYTES": "1024",
+        "GITHUB_OUTPUT": str(out),
+    }
+    assert s3.cmd_placement(env) == 0
+    written = (out).read_text()
+    assert "placement=github" in written
+    assert "placement_size_bytes=2048" in written
+
+
+def test_placement_cli_falls_to_s3_when_usage_is_unknown(
+    s3, tmp_path, monkeypatch, capsys
+) -> None:
+    # No token, no override: writing to an unmeasured GitHub cache risks
+    # evicting another family's layer, so the second tier wins.
+    root = tmp_path / "layer"
+    root.mkdir()
+    (root / "blob").write_bytes(b"z" * 1024)
+    out = tmp_path / "out"
+    env = {
+        "INPUT_PLACEMENT_PATH": str(root),
+        "INPUT_GH_CACHE_BUDGET": "4096",
+        "GITHUB_OUTPUT": str(out),
+    }
+    monkeypatch.delenv("SOLDR_GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("SOLDR_GITHUB_REPOSITORY", raising=False)
+    assert s3.cmd_placement(env) == 0
+    assert "placement=s3" in out.read_text()
+    # The reason is logged, not exported, and it must say why S3 won.
+    assert "usage unavailable" in capsys.readouterr().out
+
+
+def test_placement_cli_honours_a_forced_tier(s3, tmp_path) -> None:
+    root = tmp_path / "layer"
+    root.mkdir()
+    (root / "blob").write_bytes(b"z" * 10)
+    out = tmp_path / "out"
+    env = {
+        "INPUT_PLACEMENT_PATH": str(root),
+        "INPUT_GH_CACHE_BUDGET": "4096",
+        "INPUT_PLACEMENT_PREFER": "s3",
+        "SOLDR_GH_CACHE_USED_BYTES": "0",
+        "GITHUB_OUTPUT": str(out),
+    }
+    assert s3.cmd_placement(env) == 0
+    assert "placement=s3" in out.read_text()
+
+
 def test_placement_prefers_github_when_it_fits(s3) -> None:
     p = s3.choose_placement(size=400, gh_used=1024, gh_budget=4096)
     assert (p.store, p.reason) == ("github", "fits the GitHub budget")

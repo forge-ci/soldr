@@ -5,16 +5,56 @@ description: >-
   with the same s3-* inputs given to setup-soldr. On merge_group runs
   it also enforces s3-cache-limit (the singleton janitor); on every other
   event it only writes this run's keys. No-op when S3 was not enabled.
+outputs:
+  placement:
+    description: >-
+      Where this run's artifact belongs: "github" or "s3". Empty when no
+      placement-path was given. A caller that also saves to actions/cache
+      should gate that save on `placement == 'github'` so a layer is never
+      written to both stores.
+    value: ${{ steps.placement.outputs.placement }}
 inputs:
   s3-bucket: {required: false, default: ""}
   s3-endpoint: {required: false, default: ""}
   s3-region: {required: false, default: ""}
   s3-cache-limit: {required: false, default: ""}
+  placement-path:
+    description: >-
+      Path of the artifact to place (e.g. the cook cache root). When set, the
+      action decides whether this artifact belongs in GitHub or S3 and skips the
+      S3 write when GitHub is the home.
+    required: false
+    default: ""
+  placement-prefer:
+    description: >-
+      "auto" (default) decides on free space; "s3" forces the second tier for a
+      layer class whose GitHub slot is expensive (measured release cook layers
+      are 0.7-1.4 GB against ~20 MB for dev ones).
+    required: false
+    default: "auto"
+  gh-cache-budget:
+    description: >-
+      Size the GitHub Actions cache may reach before new artifacts overflow to
+      S3. Defaults to the script's own default when empty.
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
-    - shell: pwsh
-      if: ${{ inputs.s3-bucket != '' }}
+    - name: Decide placement
+      id: placement
+      shell: pwsh
+      if: ${{ inputs.s3-bucket != '' && inputs.placement-path != '' }}
+      env:
+        INPUT_PLACEMENT_PATH: ${{ inputs.placement-path }}
+        INPUT_PLACEMENT_PREFER: ${{ inputs.placement-prefer }}
+        INPUT_GH_CACHE_BUDGET: ${{ inputs.gh-cache-budget }}
+        SOLDR_GITHUB_REPOSITORY: ${{ github.repository }}
+        SOLDR_GITHUB_TOKEN: ${{ github.token }}
+      run: python "${{ github.action_path }}/../s3_cache.py" placement
+    - name: Upload to S3
+      shell: pwsh
+      if: ${{ inputs.s3-bucket != '' && (inputs.placement-path == '' || steps.placement.outputs.placement == 's3') }}
       env:
         INPUT_S3_BUCKET: ${{ inputs.s3-bucket }}
         INPUT_S3_ENDPOINT: ${{ inputs.s3-endpoint }}
