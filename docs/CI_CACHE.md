@@ -438,6 +438,68 @@ directly instead of waiting on GitHub's schedule; see the script's own
 docstring for the selection policy. The sizes in `ci.toml` record the live
 listing they were measured from.
 
+### Overflow to a second tier instead of growing (soldr#4099)
+
+A budget slower than demand only moves the eviction; it does not remove it.
+The ceiling is also not a knob — raising it is a billing change, not a config
+change — so the way to keep a large artifact class alive is to give it a second
+home: GitHub as level 1, an S3-compatible bucket as level 2.
+
+**An artifact lives in exactly one of them.** Not because duplicating is
+expensive to store (S3 is cheap) but because a shadow copy ages under two
+independent eviction clocks and doubles every save's upload — runner egress,
+PUT latency, and in parallel lanes, times N. Deciding once is both cheaper and
+much easier to reason about.
+
+The decision is made **when the artifact is written**, not by a sweep
+afterwards. Moving an entry between the two stores later cannot be made
+reliable: the Actions cache service matches on the key *and* a version hash
+computed from the restore path list, and no REST endpoint exposes that version.
+A janitor can list entries and delete them; it cannot fetch them. Gating the
+write is the only point where the choice is both informed and enforceable.
+
+Usage, in the lane that produces the artifact:
+
+```yaml
+- name: Save the cook layer
+  id: cache-save
+  uses: zackees/setup-soldr/s3-save@v0
+  with:
+    s3-bucket: ${{ secrets.CACHE_BUCKET }}
+    s3-endpoint: ${{ secrets.CACHE_ENDPOINT }}
+    placement-path: ${{ env.SOLDR_COOK_CACHE_ROOT }}
+    placement-prefer: s3        # release layers are 0.7-1.4 GB; dev ~20 MB
+    gh-cache-budget: 7GiB
+```
+
+`s3-save` exports `placement` as `github` or `s3`. A lane that also writes the
+same artifact with `actions/cache/save` gates that step on the output, so the
+two stores never both receive it:
+
+```yaml
+- name: Save to GitHub cache
+  if: steps.cache-save.outputs.placement == 'github'
+  uses: actions/cache/save@v4
+  with:
+    path: ${{ env.SOLDR_COOK_CACHE_ROOT }}
+    key: ${{ env.SOLDR_COOK_CACHE_KEY }}
+```
+
+Omit `placement-path` and nothing changes: `setup` and `build` keep behaving
+exactly as they did, writing to whichever store they were configured for.
+
+**When usage cannot be read, the answer is level 2.** A failed usage lookup
+falls to S3 rather than GitHub, because writing into an unmeasured cache
+evicts somebody else's layer — which is the failure this whole section is
+about. `SOLDR_GH_CACHE_USED_BYTES` overrides the lookup for tests.
+
+The numbers behind `placement-prefer: s3`, measured on `obs-rust/obs-studio`
+(121 entries, 8428 MB against the 10240 MB ceiling): the three `--release`
+cook layers are 1358 MB, 875 MB and 720 MB, while the three dev-profile layers
+are 19 MB, 19 MB and 23 MB. Sending release to level 2 puts 5475 MB on GitHub
+and 2953 MB on S3, leaving ~4.7 GiB of headroom so ordinary churn stops
+evicting unrelated families.
+
 ### The janitor converges; the verdict charges whoever caused it (zackees/ci.yml#6)
 
 The budget is enforced by `.github/workflows/ci-pre.yml` ("CI Pre"), the first
