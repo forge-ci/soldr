@@ -434,6 +434,61 @@ def test_disabled_without_bucket_or_credentials(s3) -> None:
     assert "access_key='a'" not in repr(cfg)
 
 
+# --- cook family -------------------------------------------------------------
+
+
+def test_cook_is_a_janitor_family(s3) -> None:
+    # The janitor sweeps `FAMILIES`; a cook layer that is not listed there is
+    # never evicted and silently grows the bucket past its limit.
+    assert "cook" in s3.FAMILIES
+
+
+def test_cook_family_is_opt_in_and_carries_its_prefix(s3) -> None:
+    env = {
+        "INPUT_CACHE": "false",
+        "INPUT_BUILD_CACHE": "false",
+        "INPUT_COOK_CACHE": "true",
+        "SETUP_COOK_CACHE_ROOT": "/tmp/cook",
+        "SETUP_COOK_CACHE_KEY": "cook-cache-f9e7e4902-linux-host-release-v1",
+        "SETUP_COOK_CACHE_RESTORE_PREFIX": "cook-cache-f9e7e4902-linux-host-",
+    }
+    families = s3._families_from_env(env)
+    assert [f["family"] for f in families] == ["cook"]
+    assert families[0]["key"].startswith("cook-cache-f9e7e4902-")
+    assert families[0]["prefixes"] == ["cook-cache-f9e7e4902-linux-host-"]
+
+
+def test_cook_family_is_absent_when_not_requested(s3) -> None:
+    env = {
+        "INPUT_CACHE": "false",
+        "INPUT_BUILD_CACHE": "false",
+        "INPUT_COOK_CACHE": "false",
+    }
+    assert s3._families_from_env(env) == []
+
+
+def test_janitor_evicts_a_stale_cook_layer(s3) -> None:
+    now = NOW
+    stale = s3.S3Object(
+        name="cook/cook-cache-f1c7475cf-macos-arm64-dev-v1.tar.zst",
+        size=900 * 1024**2,
+        last_modified=now - timedelta(days=3),
+    )
+    fresh = s3.S3Object(
+        name="cook/cook-cache-f9e7e4902-linux-host-release-v1.tar.zst",
+        size=900 * 1024**2,
+        last_modified=now,
+    )
+    plan = s3.plan_eviction(
+        [stale, fresh], limit=1024**3, now=now, protected=set()
+    )
+    assert [o.name for o in plan.to_delete] == [stale.name], (
+        "only the aged cook layer should be evicted; the fresh one is inside "
+        "MIN_EVICT_AGE and must survive"
+    )
+    assert plan.after == 900 * 1024**2
+
+
 # --- CLI restore -> save round trip (fake transport, real tar+zstd) ----------
 
 

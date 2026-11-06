@@ -6,7 +6,8 @@ Off unless the caller sets the ``s3-bucket`` input *and* supplies
 secrets. Without them ``restore`` reports ``enabled=false`` and the action
 keeps using actions/cache exactly as before.
 
-Layout: ``<family>/<key>.tar.zst`` where ``key`` is the cache key
+Layout: ``<family>/<key>.tar.zst`` for families ``setup`` (toolchain),
+``build`` (build cache) and ``cook`` (``soldr cook`` dependency layers), where ``key`` is the cache key
 ``resolve_setup.py`` already computed, so its restore prefixes become S3
 ``ListObjectsV2`` prefixes (newest ``LastModified`` wins, as with
 actions/cache).
@@ -47,7 +48,7 @@ SECRET_KEY_ENV = "SOLDR_S3_CACHE_SECRET_KEY"
 STATE_ENV = "SOLDR_S3_CACHE_STATE"
 DEFAULT_LIMIT = "50G"
 MIN_EVICT_AGE = timedelta(minutes=30)
-FAMILIES = ("setup", "build")
+FAMILIES = ("setup", "build", "cook")
 SINGLETON_EVENT = "merge_group"
 UNSIGNED_PAYLOAD = "UNSIGNED-PAYLOAD"
 
@@ -512,6 +513,18 @@ def _families_from_env(env: dict) -> list[dict]:
                 "path": env["SETUP_CACHE_ROOT"],
                 "key": env["SETUP_CACHE_KEY"],
                 "prefixes": [env.get("SETUP_CACHE_RESTORE_PREFIX", "")],
+            }
+        )
+    if env.get("INPUT_COOK_CACHE", "").strip().lower() == "true":
+        # `soldr cook`'s dependency layers. Same restore-prefix semantics as the
+        # other families: the consumer computes the key, we only need its prefix
+        # so a newer archive of the same platform/profile can satisfy the miss.
+        out.append(
+            {
+                "family": "cook",
+                "path": env["SETUP_COOK_CACHE_ROOT"],
+                "key": env["SETUP_COOK_CACHE_KEY"],
+                "prefixes": [env.get("SETUP_COOK_CACHE_RESTORE_PREFIX", "")],
             }
         )
     if env.get("INPUT_BUILD_CACHE", "").strip().lower() == "true":
