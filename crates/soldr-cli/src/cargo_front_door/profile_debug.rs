@@ -121,11 +121,35 @@ enum WarningDecision {
     Suppress,
 }
 
+/// True when the argv is `cargo chef cook ...` (the phase that compiles), as
+/// opposed to `cargo chef prepare` or `cargo chef recipe`, which only read
+/// manifests. `chef` is the subcommand at [`first_cargo_subcommand_index`], so
+/// its phase is the next non-flag token after it.
+fn chef_phase_is_cook(args: &[String]) -> bool {
+    let Some(index) = super::subcommand::first_cargo_subcommand_index(args) else {
+        return false;
+    };
+    args[index + 1..]
+        .iter()
+        .find(|arg| !arg.starts_with('-'))
+        .is_some_and(|phase| phase == "cook")
+}
+
 fn cargo_profile_debug_default_for_args(
     args: &[String],
     msvc_target: bool,
 ) -> Option<CargoProfileDebugDefault> {
-    let subcommand = first_cargo_subcommand(args)?;
+    // `soldr cook` drives `cargo chef cook`, which shells out to `cargo build`
+    // for whichever profile the cook targets. Without the same debug pin the
+    // front door applies to the builds that later restore the layer, the
+    // layer's fingerprints can never match and a HIT still recompiles every
+    // external crate (forge-ci/soldr#4106). `prepare`/`recipe` build nothing,
+    // so only the `cook` phase is treated as a build.
+    let subcommand = match first_cargo_subcommand(args)? {
+        "chef" if chef_phase_is_cook(args) => "build",
+        "chef" => return None,
+        other => other,
+    };
     let value = if msvc_target {
         // soldr#2148: zccache retains the PDB beside an MSVC image, but a PDB
         // produced with debug=false contains public symbols without source
@@ -702,6 +726,46 @@ mod tests {
         assert_eq!(default.profile, "dev");
         assert_eq!(default.env_var, "CARGO_PROFILE_DEV_DEBUG");
         assert_eq!(default.value, "false");
+    }
+
+    #[test]
+    fn chef_cook_receives_the_same_debug_pin_as_a_build() {
+        // forge-ci/soldr#4106: the layer cargo-chef builds must carry the pin
+        // the restoring lane's build uses, or a HIT still recompiles the world.
+        let default = cargo_profile_debug_default_for_args(&args(&["chef", "cook"]), false)
+            .expect("chef cook should receive the dev debug default");
+        assert_eq!(default.profile, "dev");
+        assert_eq!(default.env_var, "CARGO_PROFILE_DEV_DEBUG");
+        assert_eq!(default.value, "false");
+
+        let build = cargo_profile_debug_default_for_args(&args(&["build"]), false)
+            .expect("build receives a default");
+        assert_eq!(default.env_var, build.env_var);
+        assert_eq!(default.value, build.value);
+    }
+
+    #[test]
+    fn chef_cook_of_the_test_profile_pins_the_test_debug() {
+        let default = cargo_profile_debug_default_for_args(
+            &args(&["chef", "cook", "--profile", "test"]),
+            false,
+        )
+        .expect("cooking --profile test should pin profile.test.debug");
+        assert_eq!(default.profile, "test");
+        assert_eq!(default.env_var, "CARGO_PROFILE_TEST_DEBUG");
+    }
+
+    #[test]
+    fn chef_cook_release_and_chef_prepare_get_no_pin() {
+        assert!(
+            cargo_profile_debug_default_for_args(&args(&["chef", "cook", "--release"]), false)
+                .is_none(),
+            "release carries no debuginfo either way"
+        );
+        assert!(
+            cargo_profile_debug_default_for_args(&args(&["chef", "prepare"]), false).is_none(),
+            "prepare builds nothing"
+        );
     }
 
     #[test]
