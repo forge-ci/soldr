@@ -110,7 +110,7 @@ def test_queue_zccache_footprint_rebalance() -> None:
         for problem in guard.budget_problems(MANIFEST, old, entries)
     )
     assert guard.budget_problems(MANIFEST, manifest, entries) == []
-    assert budget["total_max_bytes"] == 8437 * 1024**2
+    assert budget["total_max_bytes"] == 8438 * 1024**2
     assert budget["fail_total_bytes"] == int(9.5 * 1024**3)
     # A single growing archive still trips the unchanged per-family guard.
     oversized = guard.normalize_entries([entry("zccache-unit-growth", 3054 * 1024**2)])

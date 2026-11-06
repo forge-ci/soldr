@@ -122,7 +122,7 @@ max-age-hours = 24
 # worst case is steady + the lockfile-change peak (no writer flow pre-prunes;
 # see [flow.main]) + [cache.pr].budget. The janitor's own target is
 # steady <= 8.5 GiB -- the old `total_max_bytes`.
-# They sum to 8437 MiB (8.24 GiB) after the 2026-11-05 compile/zccache-unit rebalance. Sized 2026-10-09 from the live listing
+# They sum to 8438 MiB (8.24 GiB) after the 2026-11-05 compile/zccache-unit rebalance. Sized 2026-10-09 from the live listing
 # (`gh api 'repos/zackees/soldr/actions/caches?per_page=100' --paginate`,
 # 93 entries, 7.39 GiB); re-measure before retuning.
 #
@@ -140,6 +140,10 @@ retired  = []
 pr       = { mode = "delta", families = ["compile"], max-per-pr = "128MB", budget = "1GB", trim = "on-close" }
 
 [cache.family]
+# Poison/skip markers wrap an inner cache key, whose live bytes remain owned
+# by its original family. Match only the outer namespace; never unwrap it.
+solo-tombstone = { prefix = "solo-tombstone-v1-", max = "1MB", evict = "lru" }
+
 # -- group attestation-evidence: ~450 B ci-attestation markers (GATE-010).
 att1                   = { prefix = "att1-",                               max = "16MB",   evict = "lru" }
 
