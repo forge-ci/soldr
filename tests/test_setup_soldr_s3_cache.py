@@ -487,7 +487,7 @@ def test_janitor_evicts_a_stale_cook_layer(s3) -> None:
     assert plan.after == 900 * 1024**2
 
 
-# --- GitHub -> S3 demotion plan ---------------------------------------------
+# --- level-1 deletion plan and placement -------------------------------------
 
 
 def _gh(s3, entries):
@@ -497,16 +497,36 @@ def _gh(s3, entries):
     ]
 
 
-def test_demotion_is_a_noop_under_budget(s3) -> None:
+def test_placement_prefers_github_when_it_fits(s3) -> None:
+    p = s3.choose_placement(size=400, gh_used=1024, gh_budget=4096)
+    assert (p.store, p.reason) == ("github", "fits the GitHub budget")
+
+
+def test_placement_falls_to_s3_when_github_would_overflow(s3) -> None:
+    p = s3.choose_placement(size=4096, gh_used=1024, gh_budget=4096)
+    assert p.store == "s3"
+    assert "exceeded" in p.reason
+
+
+def test_placement_can_be_forced_for_a_large_layer_class(s3) -> None:
+    # The measured cook layers: release 0.7-1.4 GB, dev ~20 MB. A release layer
+    # is placed on S3 even with room on GitHub, because one slot there is worth
+    # several dev layers.
+    p = s3.choose_placement(size=1358, gh_used=0, gh_budget=7168, prefer="s3")
+    assert p.store == "s3"
+    assert "preferred" in p.reason
+
+
+def test_deletion_is_a_noop_under_budget(s3) -> None:
     entries = _gh(s3, [(1, "cook-a", 400, NOW - timedelta(days=2))])
-    plan = s3.plan_demotion(
+    plan = s3.plan_deletion(
         entries, budget=1024, now=NOW, protected=set(), max_bytes=4096
     )
-    assert plan.to_demote == []
+    assert plan.to_delete == []
     assert plan.before == plan.after == 400
 
 
-def test_demotion_takes_the_least_recently_accessed_first(s3) -> None:
+def test_deletion_takes_the_least_recently_accessed_first(s3) -> None:
     entries = _gh(
         s3,
         [
@@ -515,15 +535,15 @@ def test_demotion_takes_the_least_recently_accessed_first(s3) -> None:
             (3, "cook-middle", 300, NOW - timedelta(days=5)),
         ],
     )
-    plan = s3.plan_demotion(
+    plan = s3.plan_deletion(
         entries, budget=600, now=NOW, protected=set(), max_bytes=4096
     )
     # 900 total against a 600 budget: one 300-byte demotion reaches the budget.
-    assert [e.key for e in plan.to_demote] == ["cook-oldest"]
+    assert [e.key for e in plan.to_delete] == ["cook-oldest"]
     assert plan.after == 600
 
 
-def test_demotion_respects_max_bytes(s3) -> None:
+def test_deletion_respects_max_bytes(s3) -> None:
     entries = _gh(
         s3,
         [
@@ -531,14 +551,13 @@ def test_demotion_respects_max_bytes(s3) -> None:
             (2, "cook-b", 400, NOW - timedelta(days=8)),
         ],
     )
-    plan = s3.plan_demotion(entries, budget=0, now=NOW, protected=set(), max_bytes=401)
-    assert [e.key for e in plan.to_demote] == ["cook-a"], (
-        "one sweep must stop at the byte cap; the rest waits for the next "
-        "merge-queue run rather than blowing the job timeout"
+    plan = s3.plan_deletion(entries, budget=0, now=NOW, protected=set(), max_bytes=401)
+    assert [e.key for e in plan.to_delete] == ["cook-a"], (
+        "one sweep must stop at the byte cap; the rest waits for the next sweep"
     )
 
 
-def test_demotion_skips_protected_and_recent_entries(s3) -> None:
+def test_deletion_skips_protected_and_recent_entries(s3) -> None:
     entries = _gh(
         s3,
         [
@@ -547,14 +566,14 @@ def test_demotion_skips_protected_and_recent_entries(s3) -> None:
             (3, "cook-evictable", 400, NOW - timedelta(days=9)),
         ],
     )
-    plan = s3.plan_demotion(
+    plan = s3.plan_deletion(
         entries,
         budget=0,
         now=NOW,
         protected={"cook-protected"},
         max_bytes=4096,
     )
-    assert [e.key for e in plan.to_demote] == ["cook-evictable"]
+    assert [e.key for e in plan.to_delete] == ["cook-evictable"]
 
 
 # --- CLI restore -> save round trip (fake transport, real tar+zstd) ----------

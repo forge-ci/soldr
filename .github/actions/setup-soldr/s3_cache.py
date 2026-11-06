@@ -410,7 +410,7 @@ def run_janitor(
     return plan
 
 
-# --- GitHub -> S3 demotion plan ----------------------------------------------
+# --- level-1 (GitHub) deletion plan and placement -----------------------------
 
 
 @dataclass(frozen=True)
@@ -429,13 +429,13 @@ class GhCacheEntry:
 
 
 @dataclass
-class DemotionPlan:
+class DeletionPlan:
     before: int
     after: int
-    to_demote: list["GhCacheEntry"] = field(default_factory=list)
+    to_delete: list["GhCacheEntry"] = field(default_factory=list)
 
 
-def plan_demotion(
+def plan_deletion(
     entries: list[GhCacheEntry],
     *,
     budget: int,
@@ -443,15 +443,17 @@ def plan_demotion(
     protected: set[str],
     max_bytes: int,
     min_age: timedelta = MIN_EVICT_AGE,
-) -> DemotionPlan:
-    """Which GitHub entries to move to S3, oldest access first.
+) -> DeletionPlan:
+    """Which GitHub entries to delete, oldest access first.
 
-    ``max_bytes`` bounds one sweep: demotion runs sequentially in the single
-    merge-queue run, so an unbounded plan would turn one bad budget into a
-    multi-gigabyte upload inside a job timeout.
+    ``max_bytes`` bounds one sweep. Nothing is transferred: a layer is placed in
+    exactly one store when it is saved, so the janitor's only job on the GitHub
+    side is deletion (the Actions cache service matches on key *and* a path-hash
+    version no REST endpoint exposes, which is why a later transfer cannot be
+    made reliable).
     """
     total = sum(e.size for e in entries)
-    plan = DemotionPlan(before=total, after=total)
+    plan = DeletionPlan(before=total, after=total)
     if total <= budget:
         return plan
     moved = 0
@@ -470,10 +472,42 @@ def plan_demotion(
         # so an entry that would cross it waits for the next merge-queue run.
         if max_bytes and moved + entry.size > max_bytes:
             break
-        plan.to_demote.append(entry)
+        plan.to_delete.append(entry)
         plan.after -= entry.size
         moved += entry.size
     return plan
+
+
+# --- placement ---------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Placement:
+    """Where one artifact is written. Exactly one store, decided once."""
+
+    store: str  # "github" | "s3"
+    reason: str
+
+
+def choose_placement(
+    *, size: int, gh_used: int, gh_budget: int, prefer: str = "github"
+) -> Placement:
+    """Pick the single home for an artifact of ``size`` bytes.
+
+    XOR by construction: the caller writes to exactly this store and nowhere
+    else, so no layer is ever uploaded twice and the janitor never has to move
+    anything between stores.
+
+    ``prefer="s3"`` forces the second tier -- used for layers whose size makes a
+    GitHub slot expensive (the release cook layers are 0.7--1.4 GB each, while
+    the dev ones are ~20 MB). A forced preference is still reported with the
+    budget arithmetic so the log explains itself.
+    """
+    if prefer == "s3":
+        return Placement("s3", "preferred tier for this artifact class")
+    if gh_used + size <= gh_budget:
+        return Placement("github", "fits the GitHub budget")
+    return Placement("s3", "GitHub budget would be exceeded")
 
 
 # --- save --------------------------------------------------------------------
