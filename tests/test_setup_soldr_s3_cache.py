@@ -434,6 +434,129 @@ def test_disabled_without_bucket_or_credentials(s3) -> None:
     assert "access_key='a'" not in repr(cfg)
 
 
+# --- cook family -------------------------------------------------------------
+
+
+def test_cook_is_a_janitor_family(s3) -> None:
+    # The janitor sweeps `FAMILIES`; a cook layer that is not listed there is
+    # never evicted and silently grows the bucket past its limit.
+    assert "cook" in s3.FAMILIES
+
+
+def test_cook_family_is_opt_in_and_carries_its_prefix(s3) -> None:
+    env = {
+        "INPUT_CACHE": "false",
+        "INPUT_BUILD_CACHE": "false",
+        "INPUT_COOK_CACHE": "true",
+        "SETUP_COOK_CACHE_ROOT": "/tmp/cook",
+        "SETUP_COOK_CACHE_KEY": "cook-cache-f9e7e4902-linux-host-release-v1",
+        "SETUP_COOK_CACHE_RESTORE_PREFIX": "cook-cache-f9e7e4902-linux-host-",
+    }
+    families = s3._families_from_env(env)
+    assert [f["family"] for f in families] == ["cook"]
+    assert families[0]["key"].startswith("cook-cache-f9e7e4902-")
+    assert families[0]["prefixes"] == ["cook-cache-f9e7e4902-linux-host-"]
+
+
+def test_cook_family_is_absent_when_not_requested(s3) -> None:
+    env = {
+        "INPUT_CACHE": "false",
+        "INPUT_BUILD_CACHE": "false",
+        "INPUT_COOK_CACHE": "false",
+    }
+    assert s3._families_from_env(env) == []
+
+
+def test_janitor_evicts_a_stale_cook_layer(s3) -> None:
+    now = NOW
+    stale = s3.S3Object(
+        name="cook/cook-cache-f1c7475cf-macos-arm64-dev-v1.tar.zst",
+        size=900 * 1024**2,
+        last_modified=now - timedelta(days=3),
+    )
+    fresh = s3.S3Object(
+        name="cook/cook-cache-f9e7e4902-linux-host-release-v1.tar.zst",
+        size=900 * 1024**2,
+        last_modified=now,
+    )
+    plan = s3.plan_eviction([stale, fresh], limit=1024**3, now=now, protected=set())
+    assert [o.name for o in plan.to_delete] == [stale.name], (
+        "only the aged cook layer should be evicted; the fresh one is inside "
+        "MIN_EVICT_AGE and must survive"
+    )
+    assert plan.after == 900 * 1024**2
+
+
+# --- GitHub -> S3 demotion plan ---------------------------------------------
+
+
+def _gh(s3, entries):
+    return [
+        s3.GhCacheEntry(id=i, key=k, size=sz, last_accessed=ts)
+        for i, k, sz, ts in entries
+    ]
+
+
+def test_demotion_is_a_noop_under_budget(s3) -> None:
+    entries = _gh(s3, [(1, "cook-a", 400, NOW - timedelta(days=2))])
+    plan = s3.plan_demotion(
+        entries, budget=1024, now=NOW, protected=set(), max_bytes=4096
+    )
+    assert plan.to_demote == []
+    assert plan.before == plan.after == 400
+
+
+def test_demotion_takes_the_least_recently_accessed_first(s3) -> None:
+    entries = _gh(
+        s3,
+        [
+            (1, "cook-newest", 300, NOW - timedelta(days=1)),
+            (2, "cook-oldest", 300, NOW - timedelta(days=9)),
+            (3, "cook-middle", 300, NOW - timedelta(days=5)),
+        ],
+    )
+    plan = s3.plan_demotion(
+        entries, budget=600, now=NOW, protected=set(), max_bytes=4096
+    )
+    # 900 total against a 600 budget: one 300-byte demotion reaches the budget.
+    assert [e.key for e in plan.to_demote] == ["cook-oldest"]
+    assert plan.after == 600
+
+
+def test_demotion_respects_max_bytes(s3) -> None:
+    entries = _gh(
+        s3,
+        [
+            (1, "cook-a", 400, NOW - timedelta(days=9)),
+            (2, "cook-b", 400, NOW - timedelta(days=8)),
+        ],
+    )
+    plan = s3.plan_demotion(entries, budget=0, now=NOW, protected=set(), max_bytes=401)
+    assert [e.key for e in plan.to_demote] == ["cook-a"], (
+        "one sweep must stop at the byte cap; the rest waits for the next "
+        "merge-queue run rather than blowing the job timeout"
+    )
+
+
+def test_demotion_skips_protected_and_recent_entries(s3) -> None:
+    entries = _gh(
+        s3,
+        [
+            (1, "cook-protected", 400, NOW - timedelta(days=9)),
+            (2, "cook-fresh", 400, NOW - timedelta(minutes=5)),
+            (3, "cook-evictable", 400, NOW - timedelta(days=9)),
+        ],
+    )
+    plan = s3.plan_demotion(
+        entries,
+        budget=0,
+        now=NOW,
+        protected={"cook-protected"},
+        max_bytes=4096,
+    )
+    assert [e.key for e in plan.to_demote] == ["cook-evictable"]
+
+
 # --- CLI restore -> save round trip (fake transport, real tar+zstd) ----------
 
 
