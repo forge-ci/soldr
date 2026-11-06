@@ -173,9 +173,11 @@ fn graceful_daemon_restart_serves_the_next_build_warm() {
     ));
     let warm_hits = u64_field(&warm, "hits");
     assert_eq!(
-        warm_hits, cold_misses,
+        warm_hits,
+        cold_misses,
         "restarted daemon must serve every cold-published unit warm: \
-         cold={cold:#?} warm={warm:#?}"
+         cold={cold:#?} warm={warm:#?}; journal={:#?}",
+        journal_lines(&journal),
     );
 
     // Stop again so the restarted generation's journal writes are flushed,
