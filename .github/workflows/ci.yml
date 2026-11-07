@@ -1388,16 +1388,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
 
-  # GEN-022 (forge-ci/ci.yml#405): every queue run and main push ends with the
-  # ci-lint cache janitor. It runs after every other job, even failed ones, so
-  # the repository stays under [cache].budget by our LRU order instead of
-  # GitHub's, which can evict a seed a required job restores. The queue
-  # serializes default-branch cache writes; it shares ci-pre's non-cancelling
+  # GEN-022 (forge-ci/ci.yml#405): a main push ends with the ci-lint cache
+  # janitor. It runs after every other job, even failed ones, so the repository
+  # stays under [cache].budget by our LRU order instead of GitHub's, which can
+  # evict a seed a required job restores. It shares ci-pre's non-cancelling
   # `cache-janitor` group, so only one sweep runs at a time across runs.
+  #
+  # A merge_group run must NOT enter that group. GitHub keeps one pending job
+  # per group, and `cancel-in-progress: false` protects only a running one, so
+  # the push that follows the merge cancelled this job while it was pending,
+  # and the queue run concluded `cancelled` beside a green `CI summary` (run
+  # 42312793051). cache-budget.yml's `queue-cache-sweep` sweeps once a queue
+  # run has completed, so a run's conclusion is only ever its CI verdict.
   queue-cache-janitor:
     name: End-of-queue cache janitor
     needs: [cancel-superseded, ci-pre, ci-mode, path-selection, lint-docs, lint, build-linux-x64, pep517-daemon-smoke, e2e-linux-x64, windows-e2e-policy, e2e-cross-bootstrap-soldr, e2e-linux-x64-gnu-build, e2e-linux-arm64-build, e2e-linux-arm64, e2e-linux-x64-musl-build, e2e-linux-x64-musl, e2e-linux-arm64-musl-build, e2e-linux-arm64-musl, e2e-macos-x64-build, e2e-macos-x64, e2e-macos-arm64-build, e2e-macos-arm64, e2e-windows-x64-build, e2e-windows-x64, e2e-windows-x64-gnu-build, e2e-windows-x64-gnu, e2e-windows-arm64-build, e2e-windows-arm64, wheel-cross-policy, wheel-cross-verify, reld-dogfood-proof-linux, reld-live-fetch-windows-x64, reld-live-fetch-macos-arm64, setup-soldr-action, cook-size-gate, macos-recovery-replay, full-coverage, ci-summary, cancel-on-bootstrap-failure, cancel-on-e2e-linux-x64-failure]
-    if: always() && github.event_name != 'pull_request' && github.event_name != 'workflow_dispatch' && github.event_name != 'schedule'
+    if: always() && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     concurrency:

@@ -528,6 +528,13 @@ in `ci.yml` `needs:` it. It has two independent jobs:
   tag) or for a static manifest breach, and warns about everything else; a push
   to a non-main branch warns; main, schedule and dispatch fail hard.
 
+A merge-queue run holds no job in the `cache-janitor` group. GitHub keeps one
+pending job per concurrency group, so a push after the merge used to cancel the
+queue run's pending sweep, and that run concluded `cancelled` beside a green
+`CI summary`. `cache-budget.yml`'s `End-of-queue cache sweep` runs `ci-lint
+cache janitor` when a queue run completes instead, so a queue run's conclusion
+is only ever its CI verdict.
+
 `cache-budget.yml` also runs on `pull_request: closed` (the one PR trigger a
 non-`ci.yml` workflow may declare) to delete that PR's entries at once.
 Every cache a PR-reachable workflow can save in PR context carries
