@@ -8,6 +8,9 @@
 # * push to any other branch -- the janitor runs on every push;
 # * the completion of a main CI run, which is when the new cache generation
 #   has been saved (soldr#3342);
+# * the completion of a merge-queue CI run, which sweeps here because a job in
+#   the queue run itself would let a scheduling artifact decide that run's
+#   conclusion (queue-cache-sweep below);
 # * the six-hourly schedule and workflow_dispatch;
 # * pull_request `closed` -- delete that PR's own entries immediately. This
 #   is the one pull_request type a non-ci.yml workflow may declare
@@ -32,7 +35,7 @@ on:
   workflow_run:
     workflows: [CI]
     types: [completed]
-    branches: [main]
+    branches: [main, 'gh-readonly-queue/main/**']
   schedule:
     - cron: '17 1,7,13,19 * * *'
   workflow_dispatch:
@@ -44,12 +47,47 @@ permissions:
 jobs:
   ci-pre:
     name: CI Pre
-    if: ${{ github.event_name != 'pull_request' }}
+    if: ${{ github.event_name != 'pull_request' && github.event.workflow_run.event != 'merge_group' }}
     uses: ./.github/workflows/ci-pre.yml
     permissions:
       contents: read
       actions: write
       pull-requests: read
+
+  # GEN-022's end-of-queue sweep, one hop after the queue run instead of inside
+  # it. A pending sweep can still be replaced by a newer request for the group,
+  # but that only cancels this Cache Budget run, and the newer sweep does the
+  # same work against newer state. workflow_run executes the default branch's
+  # reviewed workflow and code, never the queue candidate's. Dispatch runs it
+  # too, so the sweep can be exercised without waiting for queue traffic.
+  queue-cache-sweep:
+    name: End-of-queue cache sweep
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.event == 'merge_group' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency:
+      group: cache-janitor
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: zackees/ci.yml
+          ref: 9d6875b9b33c3ea54aa70cfcce8fcb1a2668747e
+          path: .ci-lint
+          persist-credentials: false
+          sparse-checkout: ci_lint
+      - name: Evict down to the cache budget
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PYTHONPATH: .ci-lint
+        run: python3 -m ci_lint cache janitor --repo .
 
   closed-pr-cleanup:
     name: Delete closed PR caches

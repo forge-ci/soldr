@@ -234,13 +234,16 @@ def test_cache_budget_yml_is_a_thin_caller_with_one_janitor() -> None:
     assert triggers["workflow_run"] == {
         "workflows": ["CI"],
         "types": ["completed"],
-        "branches": ["main"],
+        "branches": ["main", "gh-readonly-queue/main/**"],
     }
     assert triggers["pull_request"] == {"types": ["closed"]}
     assert "concurrency" not in document, "the janitor job owns concurrency"
     jobs = document["jobs"]
     assert jobs["ci-pre"]["uses"] == "./.github/workflows/ci-pre.yml"
-    assert jobs["ci-pre"]["if"] == "${{ github.event_name != 'pull_request' }}"
+    assert jobs["ci-pre"]["if"] == (
+        "${{ github.event_name != 'pull_request' "
+        "&& github.event.workflow_run.event != 'merge_group' }}"
+    )
     text = (WORKFLOWS / "cache-budget.yml").read_text(encoding="utf-8")
     assert "--prune" not in text, "sweeping lives only in ci-pre.yml"
 
@@ -291,9 +294,31 @@ def test_the_budget_script_is_stdlib_only_with_a_runtime_floor() -> None:
     assert "STDLIB_PYTHON_FLOOR = (3, 11)" in BUDGET_SCRIPT.read_text(encoding="utf-8")
 
 
-def test_ci_pre_janitor_yields_merge_group_to_end_of_queue_sweep() -> None:
-    """Two sweepers on merge_group cancel each other's pending job (run 41335680472)."""
-    pre = _load("ci-pre.yml")["jobs"]["cache-janitor"]["if"]
-    assert "github.event_name != 'merge_group'" in pre
-    queue = _load("ci.yml")["jobs"]["queue-cache-janitor"]["if"]
-    assert "merge_group" not in queue  # end-of-queue still sweeps merge_group
+def test_a_merge_group_run_holds_no_job_in_the_cache_janitor_group() -> None:
+    """A displaced pending sweep cancels its run (runs 41335680472, 42312793051)."""
+    assert (
+        "github.event_name != 'merge_group'"
+        in _load("ci-pre.yml")["jobs"]["cache-janitor"]["if"]
+    )
+    assert (
+        _load("ci.yml")["jobs"]["queue-cache-janitor"]["if"]
+        == "always() && github.event_name == 'push'"
+    )
+    # Exhaustive, so a new job in the group cannot reintroduce the artifact
+    # unnoticed: these two are the only holders reachable from a queue run.
+    holders = {
+        f"{name}/{job_id}"
+        for name in ("ci.yml", "ci-pre.yml")
+        for job_id, job in _load(name)["jobs"].items()
+        if (job.get("concurrency") or {}).get("group") == "cache-janitor"
+    }
+    assert holders == {"ci.yml/queue-cache-janitor", "ci-pre.yml/cache-janitor"}
+
+
+def test_queue_traffic_is_still_swept_after_the_run_completes() -> None:
+    job = _load("cache-budget.yml")["jobs"]["queue-cache-sweep"]
+    assert "github.event.workflow_run.event == 'merge_group'" in job["if"]
+    assert job["concurrency"] == {"group": "cache-janitor", "cancel-in-progress": False}
+    assert job["permissions"]["actions"] == "write"
+    step = next(s for s in job["steps"] if "run" in s)
+    assert step["run"] == "python3 -m ci_lint cache janitor --repo ."

@@ -9,8 +9,8 @@ GitHub Actions workflow definitions.
 - **ci-pre.yml** - "CI Pre" (zackees/ci.yml#6): the Actions-cache janitor and
   the budget verdict. Reusable only; stdlib `python3`, no installs, and no
   `ci.yml` job waits for it. `cache-budget.yml` calls it for non-main pushes,
-  the schedule and dispatch, and deletes a closed PR's caches on
-  `pull_request: closed`. See docs/CI_CACHE.md.
+  the schedule and dispatch, sweeps after each merge-queue run completes, and
+  deletes a closed PR's caches on `pull_request: closed`. See docs/CI_CACHE.md.
 - **_build-and-test.yml** - Reusable per-platform workspace build and test template.
 - **_bootstrap-e2e.yml** - Reusable bootstrap test that builds soldr, then uses that binary to build a third-party fixture.
 - **setup-soldr-action.yml** - Reusable dogfood smoke test for setup-soldr;
