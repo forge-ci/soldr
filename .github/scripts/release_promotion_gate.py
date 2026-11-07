@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Verify the run a release promotes its artifacts from (soldr#2469 4.1).
 
-A promotion publishes the exact artifacts an earlier ``auto-release.yml`` run
+A promotion publishes the exact artifacts an earlier ``release-auto.yml`` run
 built and smoked, instead of compiling them again. That is only sound when
 the source run is provably that candidate's: this gate requires it to be a
-``auto-release.yml`` ``workflow_dispatch`` run in this repository whose
+``release-auto.yml`` ``workflow_dispatch`` run in this repository whose
 run-name names the same ``candidate_sha``, with every production build and
 release-artifact smoke job successful. Anything else refuses the promotion;
 nothing is published from an unverified run.
@@ -20,7 +20,7 @@ import sys
 import urllib.request
 from dataclasses import dataclass
 
-WORKFLOW_PATH = ".github/workflows/auto-release.yml"
+WORKFLOW_PATH = ".github/workflows/release-auto.yml"
 SMOKE_PREFIX = "Smoke "
 # Only the release-artifact smokes: post-publish checks such as "Smoke
 # published Dylint" are skipped on a dry run, which is the run promoted.

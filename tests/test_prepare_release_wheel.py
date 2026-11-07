@@ -1,4 +1,4 @@
-"""Tests for release-wheel preparation extracted from auto-release.yml."""
+"""Tests for release-wheel preparation extracted from release-auto.yml."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from conftest import load_script_module
 
 REPO_ROOT = Path(__file__).parents[1]
 SCRIPTS = REPO_ROOT / ".github" / "scripts"
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "auto-release.yml"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-auto.yml"
 
 wheel = load_script_module(
     SCRIPTS / "prepare_release_wheel.py", "prepare_release_wheel"

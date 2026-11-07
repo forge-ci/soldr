@@ -2,7 +2,7 @@
 """Wait for a release's full wheel set to become visible on PyPI.
 
 The PyPI half of the release completeness gate, extracted from
-auto-release.yml (soldr#2469 step 2.2). PyPI's JSON index is
+release-auto.yml (soldr#2469 step 2.2). PyPI's JSON index is
 read-through-cached and lags an upload by seconds to minutes, so npm must not
 publish until the wheels are actually resolvable -- otherwise a user's first
 `pip install soldr==X.Y.Z` can miss its platform wheel and a resolver caches
