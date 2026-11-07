@@ -168,6 +168,24 @@ _AUDIT_OK = ("success", "skipped")
 _AUDIT_SUPERSEDABLE = {"CI Pre / Cache janitor": "cancelled"}
 
 
+def starved_nightly_probe(job: dict, event_name: str) -> bool:
+    """Only an explicitly unassigned, unexecuted nightly probe is infrastructure.
+
+    Missing API fields are not evidence. A started or failed macOS job must
+    retain the ordinary failure verdict; PR and queue gates never relax.
+    """
+    return (
+        event_name == "schedule"
+        and job.get("name") == "reld live fetch (macos arm64)"
+        and job.get("status") == "completed"
+        and job.get("conclusion") == "cancelled"
+        and "runner_name" in job
+        and job["runner_name"] in (None, "")
+        and job.get("runner_id") == 0
+        and job.get("steps") == []
+    )
+
+
 def run_attempt_failures(jobs: list[dict]) -> list[str]:
     """Fail on any job of this run attempt that did not succeed (obs gate_jobs).
 
@@ -390,6 +408,7 @@ def main() -> int:
         "trusted": os.environ.get("CI_TRUSTED", "") == "true",
         "skip_lint": os.environ.get("CI_SKIP_LINT", "") == "true",
     }
+    infrastructure_jobs = []
     selector_permission = inputs["author_permission"]
     current_event = None
     current_failures = []
@@ -441,13 +460,26 @@ def main() -> int:
         failures = summary_failures(adapter, full, needs, **inputs)
         failures += current_failures
         try:
+            attempt_jobs = settled_run_attempt_jobs(
+                os.environ.get("GITHUB_REPOSITORY", ""),
+                os.environ.get("GITHUB_RUN_ID", ""),
+                os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+                os.environ.get("GITHUB_TOKEN", ""),
+            )
+            infrastructure_jobs = [
+                job["name"]
+                for job in attempt_jobs
+                if starved_nightly_probe(job, inputs["event_name"])
+            ]
             failures += run_attempt_failures(
-                settled_run_attempt_jobs(
-                    os.environ.get("GITHUB_REPOSITORY", ""),
-                    os.environ.get("GITHUB_RUN_ID", ""),
-                    os.environ.get("GITHUB_RUN_ATTEMPT", ""),
-                    os.environ.get("GITHUB_TOKEN", ""),
-                )
+                [
+                    (
+                        {**job, "conclusion": "skipped"}
+                        if starved_nightly_probe(job, inputs["event_name"])
+                        else job
+                    )
+                    for job in attempt_jobs
+                ]
             )
         except (OSError, ValueError) as error:
             # Fail closed: an unauditable run is not a green run.
@@ -489,11 +521,19 @@ def main() -> int:
             for job in jobs
         },
         "failures": failures,
-        "success": not failures,
+        "infrastructure_jobs": infrastructure_jobs,
+        "success": not failures and not infrastructure_jobs,
     }
     args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     for failure in failures:
         print(f"::error::CI summary failed: {failure}")
+    if infrastructure_jobs and not failures:
+        print(
+            "::warning::Nightly infrastructure incomplete: macos-15 probe had "
+            "no runner and executed no steps; coverage is unvalidated. "
+            "Rerun failed jobs when runner capacity recovers."
+        )
+        return conclude_cancelled_attempt()
     return int(bool(failures))
 
 

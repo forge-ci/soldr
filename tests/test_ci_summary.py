@@ -641,3 +641,72 @@ def test_job_snapshot_retry_never_waits_on_ci_pre(monkeypatch, conclusion):
     assert SUMMARY.run_attempt_failures(snapshot) == (
         [] if conclusion == "success" else [f"job 'Lint' concluded {conclusion}"]
     )
+
+
+def starved_probe():
+    return {
+        **_job("reld live fetch (macos arm64)", "cancelled"),
+        "runner_id": 0,
+        "runner_name": "",
+        "steps": [],
+    }
+
+
+@pytest.mark.parametrize("runner_name", [None, ""])
+def test_starved_nightly_probe(runner_name):
+    assert SUMMARY.starved_nightly_probe(
+        {**starved_probe(), "runner_name": runner_name}, "schedule"
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"conclusion": "failure"},
+        {"status": "queued"},
+        {"runner_id": 123},
+        {"runner_name": "macos-runner"},
+        {"steps": [{"name": "Set up job"}]},
+        {"name": "Lint"},
+    ],
+)
+def test_started_or_failed_probe_is_never_infrastructure(change):
+    assert not SUMMARY.starved_nightly_probe({**starved_probe(), **change}, "schedule")
+
+
+@pytest.mark.parametrize("field", ["runner_id", "runner_name", "steps"])
+def test_incomplete_api_evidence_fails_closed(field):
+    job = starved_probe()
+    del job[field]
+    assert not SUMMARY.starved_nightly_probe(job, "schedule")
+
+
+@pytest.mark.parametrize(
+    "event", ["pull_request", "merge_group", "push", "workflow_dispatch"]
+)
+def test_starvation_exception_is_nightly_only(event):
+    assert not SUMMARY.starved_nightly_probe(starved_probe(), event)
+
+
+@pytest.mark.parametrize("other_failure", [False, True])
+def test_nightly_infrastructure_cancels_only_without_real_failures(
+    tmp_path, monkeypatch, other_failure
+):
+    report_path = cli_environment(tmp_path, monkeypatch)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "schedule")
+    monkeypatch.setenv("SELECTED_SHA", SHA)
+    jobs = [
+        starved_probe(),
+        _job("Linux musl", "failure" if other_failure else "success"),
+    ]
+    monkeypatch.setattr(SUMMARY, "list_run_attempt_jobs", lambda *_: jobs)
+    cancelled = []
+    monkeypatch.setattr(
+        SUMMARY, "conclude_cancelled_attempt", lambda: cancelled.append(True) or 97
+    )
+    assert SUMMARY.main() == (1 if other_failure else 97)
+    assert cancelled == ([] if other_failure else [True])
+    report = json.loads(report_path.read_text())
+    assert report["success"] is False
+    assert report["infrastructure_jobs"] == [starved_probe()["name"]]
+    assert bool(report["failures"]) == other_failure
