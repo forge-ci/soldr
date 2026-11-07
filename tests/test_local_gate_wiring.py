@@ -31,6 +31,9 @@ CI_LINT_PIN_SITES = (
     ".github/workflows/ci.yml",
     ".github/workflows/ci-pre.yml",
     ".github/workflows/_build-and-test.yml",
+    # cache-budget.yml checks out ci-lint for the end-of-queue sweep, which
+    # moved here from ci.yml so a queue run's conclusion is only its CI verdict.
+    ".github/workflows/cache-budget.yml",
 )
 
 
