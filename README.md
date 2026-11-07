@@ -1,3 +1,9 @@
+<p align="center">
+  <a href="https://github.com/zackees/soldr/releases/latest"><img src="docs/assets/install-windows.svg" alt="Install soldr on Windows" height="68"></a> &nbsp;&nbsp; <a href="https://github.com/zackees/soldr/releases/latest"><img src="docs/assets/install-macos.svg" alt="Install soldr on macOS" height="68"></a> &nbsp;&nbsp; <a href="https://github.com/zackees/soldr/releases/latest"><img src="docs/assets/install-linux.svg" alt="Install soldr on Linux" height="68"></a>
+</p>
+
+<p align="center"><sub><code>uv tool install --upgrade soldr</code> &nbsp;&#183;&nbsp; <a href="#quick-start">quick start</a></sub></p>
+
 # Soldr / Rust
 
 
