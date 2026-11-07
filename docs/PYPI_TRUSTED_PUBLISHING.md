@@ -6,7 +6,7 @@ It is intentionally PyPI-only. crates.io publication is not part of the current 
 
 ## Current State
 
-- `.github/workflows/auto-release.yml` is the only release workflow
+- `.github/workflows/release-auto.yml` is the only release workflow
 - that workflow always builds the hardened `soldr` wheel set as part of a real release
 - each platform job builds `soldr-cli` once, then packages that same target
   binary into both the GitHub Release archive and the PyPI wheel
@@ -22,12 +22,14 @@ The workflow receives a short-lived upload credential from PyPI using the GitHub
 
 For `soldr`, the trusted identity is:
 
-- owner: `zackees`
+- owner: `forge-ci`
 - repository: `soldr`
-- workflow: `auto-release.yml`
-- environment: blank
+- workflow: `release-auto.yml`
+- environment: `pypi`
 
-There is no environment gate in the unattended model.
+The publishing job declares environment `pypi`. After restoring the workflow
+filename, a maintainer must add this publisher before the next normal release;
+the existing `auto-release.yml` publisher will not match.
 
 ## Owner Setup On PyPI
 
@@ -35,12 +37,12 @@ These steps must be performed in the PyPI web UI by a maintainer of the `soldr` 
 
 1. Open https://pypi.org/manage/project/soldr/settings/publishing/.
 2. Add a new GitHub Actions publisher with:
-   - repository owner: `zackees`
+   - repository owner: `forge-ci`
    - repository name: `soldr`
-   - workflow filename: `auto-release.yml`
-   - environment name: leave blank
+   - workflow filename: `release-auto.yml`
+   - environment name: `pypi`
 
-Do not register a publisher for any other workflow filename. Only `auto-release.yml` is authorized to publish.
+Do not register a publisher for any other workflow filename. Only `release-auto.yml` is authorized to publish.
 
 ## Repo-Side Workflow Behavior
 

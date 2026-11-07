@@ -1,5 +1,9 @@
 name: Auto Release
 
+# Load-bearing filename: the last successful npm provenance names this file.
+# Changing it changes the OIDC identity; npm then failed with E404 on PUT.
+# Coordinate BOTH npm and PyPI publisher identities before any future rename.
+
 # canonical Windows GNU target uses the shipped Windows x64 host artifact;
 # it is a supported cross-build ABI, not a ninth host-distribution archive.
 
@@ -923,7 +927,7 @@ jobs:
       source_ref: ${{ needs.prepare.outputs.commit_sha }}
       # bootstrap_artifact_name omitted (optional, default ""): ci.yml's
       # value names an artifact produced by its own e2e-cross-bootstrap-soldr
-      # job earlier in the *same* workflow run. auto-release.yml has no such
+      # job earlier in the *same* workflow run. release-auto.yml has no such
       # job, and artifacts do not cross workflow runs, so this falls back to
       # `_ci-cross-build-linux.yml`'s own actions/cache-or-bootstrap path.
 
@@ -1146,7 +1150,7 @@ jobs:
       - smoke_macos_arm64
       - release_execution_contract
     # Fleet pattern (kernal-api, bosn, clud, running-process): the PyPI trusted
-    # publisher is registered against workflow `auto-release.yml` with
+    # publisher must be registered against workflow `release-auto.yml` with
     # environment `pypi`, and the OIDC token is minted for that environment.
     environment: pypi
     permissions:

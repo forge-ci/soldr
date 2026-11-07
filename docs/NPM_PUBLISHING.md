@@ -43,7 +43,7 @@ The npm postinstall picks the Linux artifact with `detectLibc()` in
    before staging and therefore also runs correctly on glibc hosts.
 
 `MIN_GLIBC_FOR_GNU` is currently `2.39`. It is kept in lockstep with the
-`--max-glibc` ceiling that `auto-release.yml` passes to the bundled-archive
+`--max-glibc` ceiling that `release-auto.yml` passes to the bundled-archive
 check (`verify_release_bundle.py --check glibc-baseline`) by an assertion in
 `scripts/test-npm-package.js`. It tracks the archive rather than soldr's own
 binary: `soldr` and `soldr-daemon` already need only glibc 2.17, but the
@@ -98,19 +98,22 @@ connected to GitHub Actions OIDC.
 
 1. Open the npm package settings for `@zackees/soldr`.
 2. In the package publishing settings, add this GitHub trusted publisher:
-   - repository owner: `zackees`
+   - repository owner: `forge-ci`
    - repository name: `soldr`
-   - workflow filename: `auto-release.yml`
+   - workflow filename: `release-auto.yml`
    - environment: `release`
-3. Keep the repository URL in `package.json` pointed at
-   `git+https://github.com/zackees/soldr.git`; npm checks that for trusted
-   publishing.
+3. Check package repository metadata against the publishing repository.
+   The immutable v0.9.52 source and its package test still name
+   `git+https://github.com/zackees/soldr.git`. If npm rejects that metadata
+   after the owner migration, record the error: a workflow filename fix
+   cannot change the immutable tag. Update the URL and its assertion for
+   future versions rather than rewriting the released tag.
 4. Optionally set the package to require 2FA and disallow tokens after the
    trusted publisher is configured.
 
 The workflow uses npm Trusted Publishing directly:
 
-- `.github/workflows/auto-release.yml`
+- `.github/workflows/release-auto.yml`
 - job: `publish-npm`
 - environment: `release`
 - permissions: `id-token: write`, `contents: read`
@@ -121,6 +124,46 @@ The workflow uses npm Trusted Publishing directly:
 
 Do not add `NODE_AUTH_TOKEN` for this job. npm exchanges the GitHub OIDC token
 for publish credentials when the trusted publisher configuration matches.
+
+### Filename and repository identity recovery
+
+The workflow filename is load-bearing. The public npm provenance for 0.9.41
+records `zackees/soldr`, `.github/workflows/release-auto.yml`, and release run
+[40057112303](https://github.com/forge-ci/soldr/actions/runs/40057112303).
+Commit `0e5820f4` renamed it to `auto-release.yml`; npm published no later version.
+[Run 42399456133](https://github.com/forge-ci/soldr/actions/runs/42399456133/job/128508894480)
+used `forge-ci/soldr` and the renamed file and failed with `E404` on the registry
+PUT for `@zackees/soldr@0.9.52`. Both the workflow filename and repository owner
+are part of npm's trusted-publisher identity. Public provenance establishes the
+last working identity; it does not expose today's private publisher settings.
+
+Keep `release-auto.yml` unless both registries are deliberately reconfigured.
+In npm's package Settings → Trusted publishing, verify GitHub Actions owner
+`forge-ci`, repository `soldr`, workflow `release-auto.yml`, environment `release`.
+If the publisher still names owner `zackees`, a maintainer must update it; the
+filename restoration alone cannot repair that mismatch. Before normal releases,
+add the matching PyPI publisher: owner `forge-ci`, repository `soldr`, workflow
+`release-auto.yml`, environment `pypi`. PyPI had been repaired for the renamed
+filename, so its configuration must move with this restoration.
+
+The fleet rename PRs forge-ci/soldr#3906 and forge-ci/zccache#1990 discuss PyPI
+but omit npm. Only soldr currently publishes to npm in fleet code search; do
+not propagate a rename to an npm publisher without migrating its identity.
+
+Recover only the existing immutable release, preserving exact-SHA full CI:
+
+```bash
+gh workflow run release-auto.yml --repo forge-ci/soldr \
+  --ref fix/npm-trusted-workflow \
+  -f npm_release_ref=v0.9.52 \
+  -f candidate_sha=d5811ba9827c14b4f81a4888bf90009d26263c6e \
+  -f full_ci_run_id=42394371171
+curl -s https://registry.npmjs.org/@zackees%2fsoldr | jq -r '."dist-tags".latest'
+```
+
+A successful dispatch is not proof of publication: verify `versions["0.9.52"]`
+in the registry and run `release_completeness.py --version 0.9.52`. Do not waive
+the completeness gate or change an existing run's conclusion.
 
 ## Release Order
 
