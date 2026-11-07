@@ -90,7 +90,7 @@ pub(super) fn dependency_closure(
                     .is_ok_and(|path| path == manifest)
             })
             .ok_or("declared Dylint library missing from cargo metadata")?;
-        collect(metadata, &package.id, &root, &mut records)?;
+        collect(metadata, &package.id, &mut records)?;
     }
     Ok(records.into_iter().collect::<Vec<_>>().join("\n"))
 }
@@ -98,7 +98,6 @@ pub(super) fn dependency_closure(
 fn collect(
     metadata: &Metadata,
     start: &str,
-    root: &Path,
     records: &mut BTreeSet<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let nodes: BTreeMap<_, _> = metadata
@@ -120,17 +119,13 @@ fn collect(
         }
         let package = packages.get(id).ok_or("missing resolved package")?;
         // Cargo's path IDs are file URLs (escaped spaces, platform-dependent
-        // drive syntax). Construct their equivalent identity from canonical
-        // manifests so different worktrees and Windows path spellings agree.
+        // drive syntax). A path package is identified by its name and version
+        // alone: the same crate materialises at a different depth in a subtree
+        // checkout (`sub/lint-dep` instead of `lint-dep`), and keying on that
+        // prefix made one lint set rebuild a whole store tree per layout. Cargo
+        // forbids two members sharing a name, so name+version is unambiguous.
         let id = if package.source.is_none() {
-            let manifest = package.manifest_path.canonicalize()?;
-            let relative = manifest.strip_prefix(root).unwrap_or(&manifest);
-            format!(
-                "path+{}#{}@{}",
-                relative.to_string_lossy().replace('\\', "/"),
-                package.name,
-                package.version
-            )
+            format!("path#{}@{}", package.name, package.version)
         } else {
             package.id.clone()
         };
