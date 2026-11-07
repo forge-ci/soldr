@@ -8,7 +8,7 @@
 //! Soldr now points `<target>/dylint/libraries` at
 //! `~/.soldr/dylint/libraries/<toolchain>-<key>/` with a directory link. The
 //! key hashes the toolchain and the dependency-shaping sources of every
-//! declared library (`Cargo.toml`, `Cargo.lock`, `rust-toolchain[.toml]`), so
+//! declared library (`Cargo.toml`, resolved dependency closure, `rust-toolchain[.toml]`), so
 //! worktrees whose lints share a dependency graph share one build. Edits to a
 //! lint's own `src/` deliberately stay out of the key: Cargo rebuilds just
 //! that small crate inside the shared tree instead of minting another 350 MB
@@ -23,12 +23,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 /// Files whose content decides what a lint library's build tree contains.
-const KEY_FILES: &[&str] = &[
-    "Cargo.toml",
-    "Cargo.lock",
-    "rust-toolchain",
-    "rust-toolchain.toml",
-];
+const KEY_FILES: &[&str] = &["Cargo.toml", "rust-toolchain", "rust-toolchain.toml"];
 
 /// The store directory for `workspace_root`'s declared libraries under
 /// `channel`, or `None` when the workspace declares no path libraries.
@@ -37,13 +32,31 @@ pub(crate) fn store_dir(
     workspace_root: &Path,
     channel: &str,
 ) -> Option<PathBuf> {
+    store_dir_for_target(
+        store_root,
+        workspace_root,
+        channel,
+        crate::pyo3_detect::host_triple(),
+    )
+}
+
+fn store_dir_for_target(
+    store_root: &Path,
+    workspace_root: &Path,
+    channel: &str,
+    triple: &str,
+) -> Option<PathBuf> {
     let libraries = crate::dylint_libraries::library_directories(workspace_root).ok()?;
     if libraries.is_empty() {
         return None;
     }
     let mut hasher = Sha256::new();
-    hasher.update(b"soldr-dylint-libraries-v1\0");
+    hasher.update(b"soldr-dylint-libraries-v2\0");
     hasher.update(channel.as_bytes());
+    hasher.update(b"\0target\0");
+    hasher.update(triple.as_bytes());
+    let closure = metadata::dependency_closure(workspace_root, &libraries).ok()?;
+    hasher.update(closure.as_bytes());
     for library in &libraries {
         // The key names the library by its directory name, not by its path
         // inside this checkout: a subtree worker roots the repository one
@@ -65,7 +78,7 @@ pub(crate) fn store_dir(
     }
     let digest = hasher.finalize();
     let key: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
-    Some(store_root.join(format!("{channel}-{key}")))
+    Some(store_root.join(format!("{channel}-{triple}-{key}")))
 }
 
 /// Link `<target_dir>/dylint/libraries` to `store`. A pre-existing real
@@ -104,22 +117,104 @@ pub(crate) fn share_library_build(
     workspace_root: &Path,
     target_dir: Option<&Path>,
     channel: &str,
+    args: &[String],
 ) {
     let Some(target_dir) = target_dir else {
         return;
     };
-    let store_root = paths.root.join("dylint").join("libraries");
-    let Some(store) = store_dir(&store_root, workspace_root, channel) else {
+    if crate::dylint_libraries::library_directories(workspace_root)
+        .is_ok_and(|libraries| libraries.is_empty())
+    {
         return;
-    };
-    if let Err(error) = link_libraries_dir(target_dir, &store) {
+    }
+    let store_root = paths.root.join("dylint").join("libraries");
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = gc::lock_store(&store_root)?;
+        let targets = invocation_targets(workspace_root, args)?;
+        for requested in std::iter::once(None).chain(targets.into_iter().map(Some)) {
+            let host = requested.is_none();
+            let triple = requested
+                .as_deref()
+                .unwrap_or(crate::pyo3_detect::host_triple());
+            let target = if host {
+                target_dir.to_path_buf()
+            } else {
+                target_dir.join(triple)
+            };
+            let store = if host {
+                store_dir(&store_root, workspace_root, channel)
+            } else {
+                store_dir_for_target(&store_root, workspace_root, channel, triple)
+            };
+            let Some(store) = store else { continue };
+            link_libraries_dir(&target, &store)?;
+            gc::register_link(&target, &store)?;
+        }
+        drop(_lock);
+        gc::prune(&store_root, 4, false)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
         eprintln!(
-            "soldr: could not share Dylint library builds via {} ({error}); \
-             building them in this worktree instead",
-            store.display()
+            "soldr: could not share Dylint library builds ({error}); building locally instead"
         );
     }
 }
+
+/// Cargo CLI targets override configuration; always retain the host build above.
+fn invocation_targets(
+    root: &Path,
+    args: &[String],
+) -> Result<Vec<String>, crate::core::SoldrError> {
+    // Reuse Dylint's parser, considering targets on either side of its separator.
+    let flattened: Vec<_> = args
+        .iter()
+        .filter(|arg| arg.as_str() != "--")
+        .cloned()
+        .collect();
+    let mut forwarded = vec!["--".to_string()];
+    forwarded.extend(flattened);
+    let explicit = crate::dylint_target::requested_targets(&forwarded)?;
+    if !explicit.is_empty() {
+        return Ok(explicit);
+    }
+    if let Ok(target) = std::env::var("CARGO_BUILD_TARGET") {
+        if !target.is_empty() {
+            return Ok(vec![target]);
+        }
+    }
+    for ancestor in root.ancestors() {
+        let config = ["config", "config.toml"]
+            .into_iter()
+            .map(|name| ancestor.join(".cargo").join(name))
+            .find(|path| path.is_file());
+        if let Some(config) = config {
+            let text = std::fs::read_to_string(&config)
+                .map_err(|e| crate::core::SoldrError::Other(e.to_string()))?;
+            let value: toml::Value =
+                toml::from_str(&text).map_err(|e| crate::core::SoldrError::Other(e.to_string()))?;
+            if let Some(target) = value.get("build").and_then(|v| v.get("target")) {
+                return Ok(if let Some(target) = target.as_str() {
+                    vec![target.to_string()]
+                } else {
+                    target
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                });
+            }
+        }
+    }
+    Ok(Vec::new())
+}
+
+#[path = "dylint_library_store_gc.rs"]
+mod gc;
+#[path = "dylint_library_store_metadata.rs"]
+mod metadata;
+pub(crate) use gc::run;
 
 #[cfg(test)]
 #[path = "dylint_library_store_tests.rs"]
