@@ -61,18 +61,22 @@ pub(super) fn dependency_closure(
     libraries: &[PathBuf],
 ) -> Result<String, Box<dyn std::error::Error>> {
     let root = root.canonicalize()?;
-    let workspace = load(&root)?;
+    // A virtual workspace may contain only excluded, standalone lint libraries.
+    // Cargo cannot describe an empty workspace; each library still has a graph.
+    let workspace = load(&root).ok();
     let mut records = BTreeSet::new();
     for library in libraries {
         let manifest = library.join("Cargo.toml").canonicalize()?;
         // Excluded Dylint libraries commonly declare their own [workspace].
         let standalone;
-        let metadata = if workspace
-            .packages
-            .iter()
-            .any(|p| p.manifest_path == manifest)
-        {
-            &workspace
+        let metadata = if let Some(workspace) = workspace.as_ref().filter(|workspace| {
+            workspace.packages.iter().any(|p| {
+                p.manifest_path
+                    .canonicalize()
+                    .is_ok_and(|path| path == manifest)
+            })
+        }) {
+            workspace
         } else {
             standalone = load(library)?;
             &standalone
@@ -80,7 +84,11 @@ pub(super) fn dependency_closure(
         let package = metadata
             .packages
             .iter()
-            .find(|p| p.manifest_path == manifest)
+            .find(|p| {
+                p.manifest_path
+                    .canonicalize()
+                    .is_ok_and(|path| path == manifest)
+            })
             .ok_or("declared Dylint library missing from cargo metadata")?;
         collect(metadata, &package.id, &root, &mut records)?;
     }
@@ -111,11 +119,21 @@ fn collect(
             continue;
         }
         let package = packages.get(id).ok_or("missing resolved package")?;
-        // Path IDs contain absolute checkout paths. Normalize only that prefix;
-        // registry/git IDs retain their source identity and exact revisions.
-        let id = package
-            .id
-            .replace(&root.to_string_lossy().replace('\\', "/"), "$WORKSPACE");
+        // Cargo's path IDs are file URLs (escaped spaces, platform-dependent
+        // drive syntax). Construct their equivalent identity from canonical
+        // manifests so different worktrees and Windows path spellings agree.
+        let id = if package.source.is_none() {
+            let manifest = package.manifest_path.canonicalize()?;
+            let relative = manifest.strip_prefix(root).unwrap_or(&manifest);
+            format!(
+                "path+{}#{}@{}",
+                relative.to_string_lossy().replace('\\', "/"),
+                package.name,
+                package.version
+            )
+        } else {
+            package.id.clone()
+        };
         records.insert(serde_json::to_string(&(
             id,
             &package.name,

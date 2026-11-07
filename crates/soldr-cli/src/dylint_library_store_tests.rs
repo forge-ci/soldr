@@ -34,7 +34,7 @@ fn workspace(root: &Path) {
 #[test]
 fn two_worktrees_with_the_same_lints_share_one_store_dir() {
     let tmp = tempfile::tempdir().unwrap();
-    let (a, b) = (tmp.path().join("wt-a"), tmp.path().join("wt-b"));
+    let (a, b) = (tmp.path().join("wt a"), tmp.path().join("wt b"));
     workspace(&a);
     workspace(&b);
     let store = tmp.path().join("store");
@@ -155,7 +155,7 @@ fn target_aware_sharing_links_host_and_each_triple() {
     ]
     .map(str::to_string);
     share_library_build(&paths, &root, Some(&target), "nightly", &args);
-    let store = paths.root.join("dylint/libraries");
+    let store = paths.root.join("dylint/libraries").canonicalize().unwrap();
     assert_eq!(
         target.join("dylint/libraries").canonicalize().unwrap(),
         store_dir(&store, &root, "nightly").unwrap()
@@ -196,7 +196,7 @@ fn config_targets_are_used_unless_cli_overrides_them() {
 #[test]
 fn gc_keeps_newest_and_protects_live_links() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join("store");
+    let root = tmp.path().canonicalize().unwrap().join("store");
     for index in 0..6 {
         let key = root.join(format!("key-{index}"));
         let target = tmp.path().join(format!("target-{index}"));
@@ -238,7 +238,7 @@ fn standalone_lint_workspace_is_resolved() {
 #[test]
 fn gc_reclaims_retargeted_and_deleted_targets_but_preserves_legacy_entries() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join("store");
+    let root = tmp.path().canonicalize().unwrap().join("store");
     let target = tmp.path().join("target");
     for name in ["old", "new"] {
         let key = root.join(name);
