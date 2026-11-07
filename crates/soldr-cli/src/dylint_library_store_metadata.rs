@@ -44,7 +44,7 @@ fn load(root: &Path) -> Result<Metadata, Box<dyn std::error::Error>> {
     {
         command.env("RUSTC", rustc);
     }
-    let output = command.output()?;
+    let output = crate::core::command_output_with_timeout(&mut command, "dylint store metadata")?;
     if !output.status.success() {
         return Err(format!(
             "Dylint store metadata for {}: {}",

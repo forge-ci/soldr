@@ -11,7 +11,7 @@ pub(super) fn lock_store(root: &Path) -> std::io::Result<std::fs::File> {
         .truncate(false)
         .write(true)
         .open(root.join(".lock"))?;
-    file.lock_exclusive()?;
+    crate::platform::wait::lock_exclusive_for(&file, crate::platform::wait::SHORT_LOCK)?;
     Ok(file)
 }
 
