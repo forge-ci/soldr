@@ -397,6 +397,8 @@ pub(crate) enum Commands {
         args: Vec<String>,
     },
     /// Prepare Dylint dependencies or run the Dylint extension
+    ///
+    /// Prune shared libraries: soldr dylint store gc [--keep N] [--dry-run]
     Dylint {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,

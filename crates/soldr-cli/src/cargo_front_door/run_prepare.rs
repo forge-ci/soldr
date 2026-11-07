@@ -289,6 +289,7 @@ async fn prepare_dylint_scope(
             &workspace_root,
             target_dir.as_deref(),
             &plan.channel,
+            args,
         );
         Some((bootstrap, plan))
     } else {
