@@ -105,7 +105,7 @@ fn parse(value: &toml::Value, host: &str) -> Result<(Vec<Work>, Vec<String>), So
     let targets: Vec<String> = targets
         .iter()
         .map(|target| {
-            crate::target_alias::resolve_soldr_target(target)
+            crate::target_alias::resolve_soldr_target_for_host(target, host)
                 .map(|v| v.rust_triple)
                 .map_err(|err| err.into_soldr_error(crate::target_alias::TargetSurface::Lint))
         })

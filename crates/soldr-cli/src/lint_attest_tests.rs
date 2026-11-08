@@ -5,6 +5,36 @@ fn fixture(body: &str) -> toml::Value {
 }
 
 #[test]
+fn parse_expands_aliases_without_tools_on_path() {
+    let empty = tempfile::tempdir().unwrap();
+    let _path = crate::EnvVarGuard::set("PATH", empty.path());
+    let mut value = fixture(
+        r#"schema = 1
+checks = [{ id = "rust/{target}/clippy", step = "clippy", targets = "cross" }]"#,
+    );
+    value["workspace"]["metadata"]["soldr"]["targets"] =
+        toml::Value::try_from(vec!["mac-arm64", "win-x64", "native", "host"]).unwrap();
+    // Both host spellings deliberately resolve to the supplied host; duplicates
+    // must still be rejected after expansion.
+    assert!(parse(&value, "x86_64-unknown-linux-gnu")
+        .unwrap_err()
+        .to_string()
+        .contains("duplicate"));
+    value["workspace"]["metadata"]["soldr"]["targets"] =
+        toml::Value::try_from(vec!["mac-arm64", "win-x64", "native"]).unwrap();
+    let (work, warnings) = parse(&value, "x86_64-unknown-linux-gnu").unwrap();
+    assert!(warnings.is_empty());
+    assert_eq!(
+        work.iter().map(|w| w.check.id.as_str()).collect::<Vec<_>>(),
+        [
+            "rust/aarch64-apple-darwin/clippy",
+            "rust/x86_64-pc-windows-msvc/clippy",
+            "rust/x86_64-unknown-linux-gnu/clippy",
+        ]
+    );
+}
+
+#[test]
 fn parses_and_expands_host_and_target_checks() {
     let value = fixture(
         r#"schema = 1
