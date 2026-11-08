@@ -117,9 +117,9 @@ pub fn builtin() -> Vec<Profile> {
     let mut nextest = row(
         "nextest",
         "nextest",
-        &["run"],
+        &["run", "--workspace"],
         &[],
-        &[],
+        &["--archive-file", "--config-file", "--tool-config-file"],
         &["**/*"],
         &["cargo nextest --version"],
         true,

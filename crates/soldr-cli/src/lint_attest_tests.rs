@@ -346,4 +346,22 @@ fn offline_attestation_refuses_missing_plugins_without_fetching() {
         assert!(message.contains("offline attestation"), "{message}");
         assert!(!paths.bin.exists());
     }
+    let pin = crate::fetch::known_tools::lookup_by_crate("cargo-nextest")
+        .unwrap()
+        .pinned_version
+        .unwrap();
+    let dir = paths.bin.join(format!("cargo-nextest-{pin}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let binary = dir.join(format!(
+        "cargo-nextest{}",
+        crate::core::TargetTriple::host().unwrap().binary_ext()
+    ));
+    std::fs::write(binary, "local installation").unwrap();
+    let outcome = runtime
+        .block_on(crate::cargo_front_door::ensure_known_subcommand_tool(
+            &["nextest".into(), "run".into()],
+            &paths,
+        ))
+        .unwrap();
+    assert!(outcome.bin_dirs.contains(&dir));
 }
