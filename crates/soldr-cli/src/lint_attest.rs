@@ -340,7 +340,7 @@ fn evidence_dir(root: &Path) -> Result<PathBuf, SoldrError> {
         .ancestors()
         .find(|path| path.exists())
         .ok_or_else(|| error("invalid evidence path"))?;
-    if git(existing, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|v| v == "true") {
+    if git(existing, &["rev-parse", "--absolute-git-dir"]).is_ok() {
         return Err(error("SOLDR_HOME/attest must be outside every repository"));
     }
     std::fs::create_dir_all(&dir).map_err(error)?;
