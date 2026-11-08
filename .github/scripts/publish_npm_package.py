@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 # Dependency-free capture also works when this script is invoked by absolute path.
@@ -34,44 +35,51 @@ def run_npm(
 OIDC_EXCHANGE_MARKERS = ("OIDC token exchange error", "ENEEDAUTH")
 
 
-def trusted_publisher_identity(package_name: str, environment: str) -> dict[str, str]:
+@dataclass(frozen=True)
+class TrustedPublisherIdentity:
+    package: str
+    organization: str
+    repository: str
+    repository_name: str
+    workflow_filename: str
+    environment: str
+
+
+def trusted_publisher_identity(
+    package_name: str, environment: str
+) -> TrustedPublisherIdentity:
     """Claims this job's GitHub OIDC token presents to npm's exchange."""
     repository = os.environ.get("GITHUB_REPOSITORY", "<unset GITHUB_REPOSITORY>")
     workflow_ref = os.environ.get("GITHUB_WORKFLOW_REF", "")
     workflow_path = workflow_ref.split("@", 1)[0].split("/", 2)[-1]
     workflow_file = Path(workflow_path).name or "<unset GITHUB_WORKFLOW_REF>"
     owner, _, repo = repository.partition("/")
-    return {
-        "package": package_name,
-        "organization": owner,
-        "repository": repository,
-        "repository name": repo,
-        "workflow filename": workflow_file,
-        "environment": environment,
-    }
+    return TrustedPublisherIdentity(
+        package=package_name,
+        organization=owner,
+        repository=repository,
+        repository_name=repo,
+        workflow_filename=workflow_file,
+        environment=environment,
+    )
 
 
-def mismatch_summary(identity: dict[str, str]) -> str:
+def mismatch_summary(identity: TrustedPublisherIdentity) -> str:
     return (
-        f"npm trusted publisher for {identity['package']} does not match "
-        f"{identity['repository']} {identity['workflow filename']} "
-        f"(environment: {identity['environment']})"
+        f"npm trusted publisher for {identity.package} does not match "
+        f"{identity.repository} {identity.workflow_filename} "
+        f"(environment: {identity.environment})"
     )
 
 
-def print_identity(identity: dict[str, str]) -> None:
+def print_identity(identity: TrustedPublisherIdentity) -> None:
     print("npm trusted publisher settings this job requires (npmjs.com ->")
-    print(
-        f"{identity['package']} -> Settings -> Trusted publishing -> GitHub Actions):"
-    )
-    for key in (
-        "package",
-        "organization",
-        "repository name",
-        "workflow filename",
-        "environment",
-    ):
-        print(f"  {key}: {identity[key]}")
+    print(f"{identity.package} -> Settings -> Trusted publishing -> GitHub Actions):")
+    print(f"  package: {identity.package}")
+    print(f"  organization: {identity.organization}")
+    print(f"  repository name: {identity.repository_name}")
+    print(f"  workflow filename: {identity.workflow_filename}")
+    print(f"  environment: {identity.environment}")
 
 
 def write_step_summary(text: str) -> None:
