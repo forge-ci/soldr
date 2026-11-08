@@ -423,6 +423,7 @@ fn execute(
         .args(["lint", "rust", "--check"])
         .current_dir(root)
         .env("CARGO_NET_OFFLINE", "true")
+        .env("SOLDR_ATTEST_OFFLINE", "1")
         .env("SOLDR_NO_AUTO_COMPONENT", "1")
         .env("RUSTUP_DIST_SERVER", "file:///soldr-offline")
         .env("RUSTUP_UPDATE_ROOT", "file:///soldr-offline")
@@ -450,6 +451,7 @@ fn execute(
         command
             .current_dir(root)
             .env("CARGO_NET_OFFLINE", "true")
+            .env("SOLDR_ATTEST_OFFLINE", "1")
             .env("SOLDR_NO_AUTO_COMPONENT", "1")
             .env("RUSTUP_DIST_SERVER", "file:///soldr-offline")
             .env("RUSTUP_UPDATE_ROOT", "file:///soldr-offline")

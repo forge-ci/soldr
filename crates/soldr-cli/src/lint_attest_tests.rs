@@ -221,10 +221,11 @@ fn nonexistent_destination_is_resolved_without_writing() {
     assert!(!path.exists());
 }
 
-#[cfg(unix)]
 #[test]
 fn execution_transports_verdict_keys_and_persists_each_outcome() {
-    use std::os::unix::fs::PermissionsExt;
+    if crate::platform::host::facts::os() == crate::platform::host::facts::HostOs::Windows {
+        return;
+    }
     let repo = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
     git_ok(repo.path(), &["init", "--quiet"]);
@@ -248,7 +249,7 @@ fn execution_transports_verdict_keys_and_persists_each_outcome() {
     for code in [0, 1, 75] {
         let script = format!("#!/bin/sh\nif [ \"$1\" = lint ]; then exit 0; fi\nprintf 'existing-verdict-key' > \"$SOLDR_ATTEST_KEY_FILE\"\nexit {code}\n");
         std::fs::write(&runner, script).unwrap();
-        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::platform::fs::permissions::make_executable(&runner).unwrap();
         let work = vec![
             Work {
                 check: ClientCheck {
@@ -289,5 +290,27 @@ fn execution_transports_verdict_keys_and_persists_each_outcome() {
         assert_eq!(json["results"][0]["key"], "existing-verdict-key");
         assert_eq!(json["results"][1]["exit_code"], 75);
         assert_eq!(json["autofixed"], serde_json::json!([]));
+    }
+}
+
+#[test]
+fn offline_attestation_refuses_missing_plugins_without_fetching() {
+    let _lock = crate::TEST_PROCESS_ENV_LOCK.lock();
+    let temp = tempfile::tempdir().unwrap();
+    let _path = crate::EnvVarGuard::set("PATH", temp.path());
+    let _offline = crate::EnvVarGuard::set("SOLDR_ATTEST_OFFLINE", "1");
+    let paths = SoldrPaths::with_root(temp.path().join("state"));
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    for sub in ["nextest", "dylint"] {
+        let outcome = runtime.block_on(crate::cargo_front_door::ensure_known_subcommand_tool(
+            &[sub.into(), "run".into()],
+            &paths,
+        ));
+        let message = match outcome {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("missing plugin accepted"),
+        };
+        assert!(message.contains("offline attestation"), "{message}");
+        assert!(!paths.bin.exists());
     }
 }

@@ -183,6 +183,11 @@ pub(crate) async fn ensure_known_subcommand_tool(
             });
     }
 
+    if crate::core::flag("SOLDR_ATTEST_OFFLINE") {
+        return Err(SoldrError::Other(format!(
+            "offline attestation requires cargo-{sub} already installed on PATH"
+        )));
+    }
     let version = managed_subcommand_version(spec);
 
     // Progress chatter for a human at a terminal only (soldr#3099): under
@@ -335,6 +340,14 @@ async fn dylint_link_bin_dir(paths: &SoldrPaths) -> Result<std::path::PathBuf, S
     let pinned_version = crate::fetch::known_tools::lookup_by_crate("dylint-link")
         .and_then(|spec| spec.pinned_version)
         .ok_or_else(|| SoldrError::Other("dylint-link must have a registry pin".into()))?;
+    if crate::core::flag("SOLDR_ATTEST_OFFLINE") {
+        let path = find_on_path("dylint-link").ok_or_else(|| SoldrError::Other(
+            "offline attestation requires dylint-link already installed on PATH".into()
+        ))?;
+        validate_dylint_path_binary(&path, "dylint-link", pinned_version)?;
+        return path.parent().map(std::path::Path::to_path_buf).ok_or_else(||
+            SoldrError::Other("dylint-link has no parent directory".into()));
+    }
     let version = VersionSpec::Exact(pinned_version.to_string());
     let chatty = std::io::IsTerminal::is_terminal(&std::io::stderr());
     if chatty {
