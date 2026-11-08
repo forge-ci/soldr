@@ -3,7 +3,7 @@
 Policy for the debug-symbol files (`.pdb`, `.dSYM/`, `.debug`) built for the
 released `soldr` binary. Established by issue #786; extended by soldr#3038
 to cover Linux and macOS. The staging implementation lives in
-`release-auto.yml` and `.github/scripts/{stage_release_binaries,
+`auto-release.yml` and `.github/scripts/{stage_release_binaries,
 release_manifest,package_release_archive}.py`; the sidecar-format classifier
 lives in `crates/soldr-cli/src/release_sidecar.rs`.
 
@@ -110,7 +110,7 @@ construction and GNU-option compatible — `--only-keep-debug`,
 `--strip-debug`, `--add-gnu-debuglink` and Mach-O `-x` all behave identically.
 They are found on `PATH` (soldr's managed LLVM is already first on PATH in
 the darwin lanes), then in soldr's managed layouts, then in rustup's
-`llvm-tools` component, which `release-auto.yml` installs on every non-Windows
+`llvm-tools` component, which `auto-release.yml` installs on every non-Windows
 lane so the aarch64-gnu lane has a deterministic source. A secondary fallback
 derives the managed cross toolchain's target-prefixed GNU binutils (e.g.
 `aarch64-conda-linux-gnu-objcopy`) from the `AR_<triple>` the bundle exports.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create the release tag and the draft GitHub Release, idempotently.
 
-The two mutating steps of the publish job, extracted from release-auto.yml
+The two mutating steps of the publish job, extracted from auto-release.yml
 (soldr#2469 step 2.2). Both were inline bash: check-then-act, with a
 `GITHUB_STEP_SUMMARY` block emitting copy-pasteable recovery commands when the
 token cannot perform the mutation (soldr#1252).

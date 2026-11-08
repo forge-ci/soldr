@@ -92,7 +92,7 @@ compiles with (`--profile`, `--release`, or the subcommand's default):
 | Anything else | Cargo's default |
 
 A caller-set `CARGO_PROFILE_<PROFILE>_CODEGEN_UNITS` always wins. The
-publishing lanes (`release-auto.yml`, `.github/scripts/native_release_build.py`)
+publishing lanes (`auto-release.yml`, `.github/scripts/native_release_build.py`)
 also set `CARGO_PROFILE_RELEASE_CODEGEN_UNITS` explicitly, so the published
 binary keeps one unit (MSVC targets keep their existing 16) even when cargo is
 not reached through soldr's front door.

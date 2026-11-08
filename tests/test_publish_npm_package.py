@@ -69,7 +69,7 @@ def test_oidc_mismatch_explains_required_settings(
     monkeypatch.setenv("GITHUB_REPOSITORY", "forge-ci/soldr")
     monkeypatch.setenv(
         "GITHUB_WORKFLOW_REF",
-        "forge-ci/soldr/.github/workflows/release-auto.yml@refs/heads/main",
+        "forge-ci/soldr/.github/workflows/auto-release.yml@refs/heads/main",
     )
 
     def run(arguments, _source_dir):
@@ -85,11 +85,11 @@ def test_oidc_mismatch_explains_required_settings(
     monkeypatch.setattr(publish_npm, "run_npm", run)
     expected = (
         "npm trusted publisher for @zackees/soldr does not match "
-        "forge-ci/soldr release-auto.yml (environment: release)"
+        "forge-ci/soldr auto-release.yml (environment: release)"
     )
     with pytest.raises(RuntimeError, match=r"does not match forge-ci/soldr"):
         publish_npm.publish(_package(tmp_path), "release")
     out = capsys.readouterr().out
-    assert "workflow filename: release-auto.yml" in out
+    assert "workflow filename: auto-release.yml" in out
     assert "organization: forge-ci" in out
     assert expected in summary.read_text(encoding="utf-8")

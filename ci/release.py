@@ -2,7 +2,7 @@
 """Release front door: start, resume and report one exact-SHA release (soldr#3343).
 
 A soldr release is two dispatches on one merged commit (RELEASE.md): full CI
-with ``candidate_sha``, then ``release-auto.yml`` with the same SHA and that
+with ``candidate_sha``, then ``auto-release.yml`` with the same SHA and that
 CI run's id. Doing them by hand meant copying run ids between pages and, after
 a failure, working out which step to repeat. This script owns the sequence and
 is idempotent, so **re-running ``start`` is the resume path**. It never bumps a
@@ -16,12 +16,12 @@ version and never touches a tag: the workflow mints the tag.
 1. refuse a SHA that is not a full 40-hex commit reachable from ``origin/main``;
 2. refuse when ``v<version>`` (from ``Cargo.toml`` at that SHA) already tags a
    *different* commit -- a conflicting identity is never moved;
-3. with a successful ``CI full <sha>`` run: dispatch ``release-auto.yml`` with
+3. with a successful ``CI full <sha>`` run: dispatch ``auto-release.yml`` with
    ``candidate_sha`` and ``full_ci_run_id``;
 4. with one still running: report it and stop (run ``start`` again later);
 5. otherwise: dispatch full CI for the SHA and stop.
 
-``release-auto.yml`` itself skips surfaces that are already complete, so a
+``auto-release.yml`` itself skips surfaces that are already complete, so a
 second release dispatch for the same SHA only retries what is missing.
 
 Every ``start`` also keeps the attempt's live control record: one open issue
@@ -50,7 +50,7 @@ from soldr._process import run_captured  # noqa: E402 -- source-relative bootstr
 
 REPO = "zackees/soldr"
 CI_WORKFLOW = "ci.yml"
-RELEASE_WORKFLOW = "release-auto.yml"
+RELEASE_WORKFLOW = "auto-release.yml"
 SHA = re.compile(r"[0-9a-f]{40}")
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess]

@@ -144,7 +144,7 @@ def test_polling_gives_up_at_the_wall_clock_deadline() -> None:
 
 
 def test_the_workflow_invokes_the_script_and_keeps_no_inline_wheel_count() -> None:
-    workflow = (REPO_ROOT / ".github" / "workflows" / "release-auto.yml").read_text(
+    workflow = (REPO_ROOT / ".github" / "workflows" / "auto-release.yml").read_text(
         encoding="utf-8"
     )
     assert "verify_pypi_wheels.py" in workflow

@@ -92,7 +92,7 @@
 //! `VersionedSymbolTooNewError` from the explicit-tag branch and the build
 //! fails with "Error ensuring manylinux_2_17 compliance" — it downgrades only
 //! when *no* tag was requested. `AuditWheelMode::Repair` is maturin's
-//! `#[default]`, so `release-auto.yml`'s explicit `--auditwheel repair`
+//! `#[default]`, so `auto-release.yml`'s explicit `--auditwheel repair`
 //! restates the default and its absence here changes nothing.
 
 use crate::core::SoldrError;
@@ -237,7 +237,7 @@ impl GlibcNotice {
 /// maturin's `--compatibility` value for a resolved Rust target triple.
 ///
 /// When the floor claim is backed this mirrors the release lane
-/// (`release-auto.yml`): linux-gnu wheels are tagged `manylinux_2_17`,
+/// (`auto-release.yml`): linux-gnu wheels are tagged `manylinux_2_17`,
 /// linux-musl wheels `musllinux_1_2`. Otherwise — and for every non-Linux
 /// target, which has no such floor to claim — soldr passes `pypi`, maturin's
 /// pseudo-option meaning "derive the platform tag from the bytes and validate

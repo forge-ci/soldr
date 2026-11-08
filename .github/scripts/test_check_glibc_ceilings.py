@@ -39,7 +39,7 @@ def _workflow(*ceilings: str) -> str:
 
 
 def _release_workflow(own: str, bundled: str) -> str:
-    """`release-auto.yml`'s two steps, which differ only in what they check.
+    """`auto-release.yml`'s two steps, which differ only in what they check.
 
     The invocation shape matters: the own-binary step names one built artifact,
     while the bundled step uses the shared dispatcher for fetched third-party
@@ -77,7 +77,7 @@ def _seed(
     # 2.39, still pinned by prebuilt crgx/cargo-chef, soldr#2170).
     if release is None:
         release = _release_workflow("2.17", "2.39")
-    (workflows / "release-auto.yml").write_text(release, encoding="utf-8")
+    (workflows / "auto-release.yml").write_text(release, encoding="utf-8")
 
 
 def test_agreeing_ceilings_pass(mod, tmp_path):

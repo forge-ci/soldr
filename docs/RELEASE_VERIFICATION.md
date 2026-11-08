@@ -24,14 +24,14 @@ For a normal `soldr` release:
 - a reviewed version bump is merged to `main` (not currently
   branch-protected — no required checks or rulesets; soldr#2469 tracks
   restoring protection)
-- `.github/workflows/release-auto.yml` derives the tag directly from `Cargo.toml` at that merged commit
+- `.github/workflows/auto-release.yml` derives the tag directly from `Cargo.toml` at that merged commit
 - the workflow does **not** currently re-run lint, build, test,
   integration, or e2e jobs for that commit before publishing; the only
   validation is what ran on the PR (target state: soldr#2469 Phase 1)
 - release archives are built from that exact commit
 - two publications declare an environment: **PyPI** runs in the `pypi`
   environment (the PyPI trusted publisher is registered against workflow
-  `release-auto.yml` plus that environment, matching the fleet pattern in
+  `auto-release.yml` plus that environment, matching the fleet pattern in
   kernal-api / bosn / clud / running-process) and **npm** runs in the
   `release` environment; the GitHub Release publication declares no
   environment. Neither environment has protection rules or a deployment
@@ -135,7 +135,7 @@ For stricter identity validation, also pin the signer workflow:
 ```bash
 gh attestation verify soldr-vX.Y.Z-x86_64-unknown-linux-gnu.tar.zst \
   --repo zackees/soldr \
-  --signer-workflow zackees/soldr/.github/workflows/release-auto.yml
+  --signer-workflow zackees/soldr/.github/workflows/auto-release.yml
 ```
 
 This validates that GitHub has a matching attestation for the artifact and that the attestation was produced by the expected repository and workflow.

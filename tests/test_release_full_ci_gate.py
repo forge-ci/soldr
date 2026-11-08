@@ -76,7 +76,7 @@ def test_nonmatching_or_incomplete_proof_is_rejected(mutation: str) -> None:
 
 def test_workflow_requires_gate_before_build_and_preserves_npm_recovery() -> None:
     workflow = yaml.safe_load(
-        (ROOT / ".github" / "workflows" / "release-auto.yml").read_text()
+        (ROOT / ".github" / "workflows" / "auto-release.yml").read_text()
     )
     assert "push" not in workflow.get("on", workflow.get(True, {}))
     jobs = workflow["jobs"]
@@ -89,7 +89,7 @@ def test_workflow_requires_gate_before_build_and_preserves_npm_recovery() -> Non
 
 def test_release_gate_scripts_use_pinned_uv_after_setup() -> None:
     workflow = yaml.safe_load(
-        (ROOT / ".github" / "workflows" / "release-auto.yml").read_text()
+        (ROOT / ".github" / "workflows" / "auto-release.yml").read_text()
     )
     for job_name in ("prepare", "full_ci_gate"):
         steps = workflow["jobs"][job_name]["steps"]
@@ -110,7 +110,7 @@ def test_release_gate_scripts_use_pinned_uv_after_setup() -> None:
 
 
 def test_npm_recovery_cannot_bypass_full_candidate_gate() -> None:
-    jobs = yaml.safe_load((ROOT / ".github/workflows/release-auto.yml").read_text())[
+    jobs = yaml.safe_load((ROOT / ".github/workflows/auto-release.yml").read_text())[
         "jobs"
     ]
     assert "full_ci_gate" in jobs["publish-npm"]["needs"]
@@ -145,7 +145,7 @@ def test_npm_recovery_cannot_bypass_full_candidate_gate() -> None:
     "result", ["", "skipped", "failure", "cancelled", "neutral", "success"]
 )
 def test_actual_recovery_publish_condition_requires_success(result: str) -> None:
-    jobs = yaml.safe_load((ROOT / ".github/workflows/release-auto.yml").read_text())[
+    jobs = yaml.safe_load((ROOT / ".github/workflows/auto-release.yml").read_text())[
         "jobs"
     ]
     expression = jobs["publish-npm"]["if"].replace("&&", " and ").replace("||", " or ")

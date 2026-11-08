@@ -18,7 +18,7 @@ import pytest
 from conftest import load_script_module
 
 REPO_ROOT = Path(__file__).parents[1]
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-auto.yml"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "auto-release.yml"
 SCRIPTS = REPO_ROOT / ".github" / "scripts"
 
 # release_detect imports its sibling release_completeness. Running the script
@@ -229,7 +229,7 @@ def test_every_output_the_workflow_consumes_is_produced() -> None:
     }
     missing = sorted(consumed - produced)
     assert not missing, (
-        f"release-auto.yml reads outputs the detector never writes: {missing}. "
+        f"auto-release.yml reads outputs the detector never writes: {missing}. "
         "An unwritten output is the empty string in Actions, which silently "
         "disables the job that gates on it."
     )
@@ -248,7 +248,7 @@ def test_a_dry_run_builds_everything_and_publishes_nothing() -> None:
 
 def test_a_dry_run_skips_every_post_publish_verifier() -> None:
     workflow = (
-        Path(__file__).parents[1] / ".github" / "workflows" / "release-auto.yml"
+        Path(__file__).parents[1] / ".github" / "workflows" / "auto-release.yml"
     ).read_text(encoding="utf-8")
     for job in (
         "verify_github_release",

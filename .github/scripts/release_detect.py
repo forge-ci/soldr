@@ -2,7 +2,7 @@
 """Release detection: what, if anything, this ref still needs published.
 
 soldr#2469 step 2.2, extracted from the 136-line ``Compare candidate version
-against PyPI`` block in ``release-auto.yml``. This is the decision the whole
+against PyPI`` block in ``auto-release.yml``. This is the decision the whole
 workflow hangs off — every downstream job is gated on ``should_release`` and
 the three per-surface flags — and until now it lived in inline bash that no
 test could exercise. The 0.9.0 incident ran straight through it.

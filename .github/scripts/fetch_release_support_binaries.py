@@ -6,7 +6,7 @@ The release archive contains more than the soldr executable.  `crgx` and
 target, checked against the catalogue's SHA-256, and staged beside soldr before
 `release_manifest.py` records their provenance.
 
-This was inline Python in `release-auto.yml`, where neither target mapping nor
+This was inline Python in `auto-release.yml`, where neither target mapping nor
 catalogue integrity behavior was unit-testable.  Keep release workflow YAML to
 orchestration: this script owns the fetch, verification, extraction, and
 staging logic.

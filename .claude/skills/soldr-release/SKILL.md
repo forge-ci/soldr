@@ -1,19 +1,19 @@
 ---
 name: soldr-release
-description: Release a new soldr version end to end — pick and bump the version (Cargo.toml, package.json, Cargo.lock), merge the bump PR, dispatch exact-SHA full CI, then dispatch release-auto.yml and verify GitHub Release, PyPI, and npm. Use whenever the user asks to release, publish, ship, cut, tag, or bump soldr, asks what the last released version is, or asks why a release run failed or how to recover one.
+description: Release a new soldr version end to end — pick and bump the version (Cargo.toml, package.json, Cargo.lock), merge the bump PR, dispatch exact-SHA full CI, then dispatch auto-release.yml and verify GitHub Release, PyPI, and npm. Use whenever the user asks to release, publish, ship, cut, tag, or bump soldr, asks what the last released version is, or asks why a release run failed or how to recover one.
 ---
 
 # soldr-release
 
 A release is **two `workflow_dispatch` runs on one exact merged commit**
 (soldr#3346). Merging a version bump releases nothing by itself —
-`release-auto.yml` has no push trigger. RELEASE.md is the long-form
+`auto-release.yml` has no push trigger. RELEASE.md is the long-form
 reference; this is the procedure.
 
 ```
 bump PR merged ─► CI dispatch (candidate_sha) ─► Full coverage green
                                                         │
-                   release-auto.yml dispatch (candidate_sha + full_ci_run_id)
+                   auto-release.yml dispatch (candidate_sha + full_ci_run_id)
                                                         │
       full_ci_gate ─► build ─► smokes ─► GitHub Release ─► verify ─► PyPI ─► npm ─► completeness
 ```
@@ -27,7 +27,7 @@ grep -m1 '^version' Cargo.toml; grep '"version"' package.json
 curl -s https://pypi.org/pypi/soldr/json | python3 -c "import json,sys;print(json.load(sys.stdin)['info']['version'])"
 npm view @zackees/soldr version
 gh release list --repo zackees/soldr --limit 3
-gh run list --repo zackees/soldr --workflow release-auto.yml --limit 5
+gh run list --repo zackees/soldr --workflow auto-release.yml --limit 5
 ```
 
 The last released version is the one present on **all three** surfaces
@@ -75,7 +75,7 @@ gh run list --repo zackees/soldr --workflow ci.yml --event workflow_dispatch --l
   A real fix means a new commit, a new SHA, and a new CI dispatch.
 
 ```bash
-gh workflow run release-auto.yml --repo zackees/soldr --ref main \
+gh workflow run auto-release.yml --repo zackees/soldr --ref main \
   -f candidate_sha=$SHA -f full_ci_run_id=<CI run ID>
 ```
 
