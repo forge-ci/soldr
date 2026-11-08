@@ -489,6 +489,12 @@ pub(crate) async fn run_lint(
     cache_enabled: bool,
     trust_inherited_soldr_env: bool,
 ) -> Result<i32, SoldrError> {
+    if args.first().is_some_and(|arg| arg == "plan") {
+        return crate::lint_attest::print_plan(&args[1..]);
+    }
+    if args.iter().any(|arg| arg == "--attest") {
+        return crate::lint_attest::run(args, cache_enabled, trust_inherited_soldr_env).await;
+    }
     let mut plan = LintPlan::parse(args)?;
     // soldr#4006: CI verifies formatting; it never rewrites the checkout.
     plan.fmt_fix = !plan.check_only && !crate::core::flag("CI");
@@ -579,7 +585,7 @@ fn run_dependency_steps(
         // directly under lines naming three child pids. Marked at the spawn
         // rather than on the exit code, matching soldr#2718.
         crate::exit_guard::mark_spoke();
-        // soldr#3098: spawns share, staged writes exclude. Held only across
+        // soldr#3098: spawns share, staged writes block. Held only across
         // the spawn call (dropped right after), and kept as a plain statement
         // so `tests/daemon/inherited_stdio_spawns_mark_spoke.rs` still finds
         // the exact child-start line it pins.

@@ -347,6 +347,7 @@ pub mod ld_cmd;
 pub mod linker;
 pub mod linker_project;
 pub mod linker_shim;
+mod lint_attest;
 /// soldr#2038 - extensible CI/build-surface policy engine (`soldr lint ci`).
 pub mod lint_ci;
 /// soldr#820 — `soldr logs` discoverable runtime-log surface.

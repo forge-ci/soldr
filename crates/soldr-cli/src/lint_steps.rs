@@ -98,8 +98,8 @@ fn resolve_tool(tool: &str, root: &Path) -> Option<PathBuf> {
     })
 }
 
-fn spawn_guarded(command: &mut Command) -> std::io::Result<Child> {
-    // Spawns share, staged writes exclude (soldr#3098); held across the spawn
+pub(crate) fn spawn_guarded(command: &mut Command) -> std::io::Result<Child> {
+    // Spawns share, staged writes block (soldr#3098); held across the spawn
     // call only.
     let guard = crate::core::spawn_exclusion::spawn_shared();
     let child = command.spawn();
@@ -195,7 +195,7 @@ pub(crate) fn run_porcelain(
 /// `target_lifecycle::prepare_cargo_invocation` — the same per-target C/asm
 /// toolchain env `soldr prepare --target` exports — and keeps that env scoped
 /// to this step instead of leaking into the next target's step.
-fn cargo_step_command(
+pub(crate) fn cargo_step_command(
     soldr: &Path,
     args: &[String],
     cache_enabled: bool,

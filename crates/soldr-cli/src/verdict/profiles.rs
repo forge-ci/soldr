@@ -117,6 +117,16 @@ pub fn builtin() -> Vec<Profile> {
     vec![
         clippy,
         fmt,
+        row(
+            "nextest",
+            "nextest",
+            &["run"],
+            &[],
+            &[],
+            &["**/nextest.toml"],
+            &[],
+            true,
+        ),
         // The dylint driver is built and resolved by soldr, so soldr's own
         // version is part of the tool identity.
         row(

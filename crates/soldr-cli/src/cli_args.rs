@@ -432,14 +432,18 @@ pub(crate) enum Commands {
     /// suites. With `SOLDR_PORCELAIN=1`, `lint rust` prints one JSON summary
     /// line on success; a failing step's output is printed in full.
     ///
+    /// `lint plan --format json` prints declared client work without compiling.
+    /// `lint rust --attest` verifies a clean committed workspace and writes
+    /// tree-bound evidence to stdout and `$SOLDR_HOME/attest/<tree>.json`.
+    ///
     /// soldr#4006: `rust`/`all` first reformat in place (`cargo fmt -- -l`) and
     /// report the rewritten files (`autofixed` in porcelain), so formatting
     /// alone never fails a lint. `--check`, or `CI` set, only verifies.
     Lint {
-        /// Suite selector (`rust`, `deps`, `ci`, or `all`). Rust/deps/all
+        /// Suite selector (`rust`, `deps`, `ci`, `all`, or `plan`). Rust/deps/all
         /// accept cargo scope flags; `ci` accepts only `--format json|human`.
         /// `rust`/`all` additionally accept `--target <triple>` (repeatable)
-        /// `--host-only`, `--cross-dylint`, and `--check`.
+        /// `--host-only`, `--cross-dylint`, and `--check`; `rust` accepts `--attest`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
