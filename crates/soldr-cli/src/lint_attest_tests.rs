@@ -70,8 +70,8 @@ checks = [{ id = "z/{host}", step = "test" }, { id = "a/{target}", step = "clipp
         r#"schema = 1
 checks = [{ step = "clippy", targets = "cross", id = "a/{target}" }, { step = "test", id = "z/{host}" }]"#,
     );
-    let a = client_work(&parse(&a, "host").unwrap().0);
-    let b = client_work(&parse(&b, "host").unwrap().0);
+    let a = client_work(&parse(&a, "host").unwrap().0).unwrap();
+    let b = client_work(&parse(&b, "host").unwrap().0).unwrap();
     let json = serde_json::to_value(&a).unwrap();
     assert_eq!(json["v"], 1);
     assert_eq!(json["kind"], "client-work");
@@ -150,14 +150,16 @@ fn failures_and_inapplicable_checks_have_distinct_exit_codes() {
 }
 
 #[test]
-fn target_tests_are_native_and_host_target_is_not_duplicated() {
+fn target_tests_are_native_and_declared_host_is_preserved() {
     let value = fixture(
         r#"schema = 1
 checks = [{ id = "rust/{target}/test", step = "test", targets = "cross" }]"#,
     );
     let (work, _) = parse(&value, "x86_64-unknown-linux-gnu").unwrap();
     assert_eq!(work[0].check.hosts, ["aarch64-apple-darwin"]);
-    assert!(parse(&value, "aarch64-apple-darwin").unwrap().0.is_empty());
+    let (native, _) = parse(&value, "aarch64-apple-darwin").unwrap();
+    assert_eq!(native.len(), 1);
+    assert_eq!(native[0].check.hosts, ["aarch64-apple-darwin"]);
 }
 
 #[test]
@@ -217,4 +219,75 @@ fn nonexistent_destination_is_resolved_without_writing() {
     let path = temp.path().join("missing/attest");
     assert_eq!(resolve_destination(&path).unwrap(), path);
     assert!(!path.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn execution_transports_verdict_keys_and_persists_each_outcome() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    git_ok(repo.path(), &["init", "--quiet"]);
+    std::fs::write(repo.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+    git_ok(repo.path(), &["add", "."]);
+    git_ok(
+        repo.path(),
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    );
+    let tree = clean_tree(repo.path()).unwrap().unwrap();
+    let runner = state.path().join("soldr");
+    for code in [0, 1, 75] {
+        let script = format!("#!/bin/sh\nif [ \"$1\" = lint ]; then exit 0; fi\nprintf 'existing-verdict-key' > \"$SOLDR_ATTEST_KEY_FILE\"\nexit {code}\n");
+        std::fs::write(&runner, script).unwrap();
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let work = vec![
+            Work {
+                check: ClientCheck {
+                    id: "applicable".into(),
+                    hosts: vec!["any".into()],
+                },
+                args: vec!["fmt".into()],
+            },
+            Work {
+                check: ClientCheck {
+                    id: "foreign".into(),
+                    hosts: vec!["foreign-host".into()],
+                },
+                args: vec!["nextest".into()],
+            },
+        ];
+        assert_eq!(
+            execute(
+                repo.path(),
+                work,
+                tree.clone(),
+                state.path(),
+                &runner,
+                true,
+                false
+            )
+            .unwrap(),
+            code
+        );
+        let json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(state.path().join(format!("{tree}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["tree"], tree);
+        assert_eq!(json["v"], 1);
+        assert_eq!(json["results"].as_array().unwrap().len(), 2);
+        assert_eq!(json["results"][0]["ok"], code == 0);
+        assert_eq!(json["results"][0]["key"], "existing-verdict-key");
+        assert_eq!(json["results"][1]["exit_code"], 75);
+        assert_eq!(json["autofixed"], serde_json::json!([]));
+    }
 }

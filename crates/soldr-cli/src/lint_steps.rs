@@ -263,6 +263,11 @@ pub(crate) async fn run_planned_steps(
 /// idempotent, a no-op for the host triple, and routes through soldr's managed
 /// rustup/cargo homes rather than a bare `rustup` on PATH.
 pub(crate) fn prepare_cargo_step(args: &[String]) -> Result<(), SoldrError> {
+    // Offline runs use preinstalled target standard libraries; Cargo reports
+    // a missing one without initiating a target download.
+    if crate::core::flag("CARGO_NET_OFFLINE") {
+        return Ok(());
+    }
     let dylint = cargo_front_door::first_cargo_subcommand(args) == Some("dylint");
     if !dylint {
         if let Some(target) = target_arg_value(args) {

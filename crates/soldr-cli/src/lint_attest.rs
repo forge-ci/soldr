@@ -151,11 +151,7 @@ fn parse(value: &toml::Value, host: &str) -> Result<(Vec<Work>, Vec<String>), So
             return Err(error(format!("unknown id placeholder in {:?}", check.id)));
         }
         let expansions: Vec<Option<&String>> = if target_id {
-            targets
-                .iter()
-                .filter(|target| target.as_str() != host)
-                .map(Some)
-                .collect()
+            targets.iter().map(Some).collect()
         } else {
             vec![None]
         };
@@ -168,12 +164,10 @@ fn parse(value: &toml::Value, host: &str) -> Result<(Vec<Work>, Vec<String>), So
                 return Err(error(format!("duplicate expanded check id {id:?}")));
             }
             // Cross compilation is possible anywhere; target tests require a native host.
-            let hosts = if check.step == "test" && target.is_some() {
-                vec![target.expect("target test").clone()]
-            } else if host_id {
-                vec![host.to_owned()]
-            } else {
-                vec!["any".into()]
+            let hosts = match (check.step.as_str(), target, host_id) {
+                ("test", Some(target), _) => vec![target.clone()],
+                (_, _, true) => vec![host.to_owned()],
+                _ => vec!["any".into()],
             };
             work.push(Work {
                 check: ClientCheck { id, hosts },
@@ -253,16 +247,16 @@ fn validate_contract(root: &Path, work: &[Work]) -> Result<(), SoldrError> {
     Ok(())
 }
 
-fn client_work(work: &[Work]) -> ClientWork {
+fn client_work(work: &[Work]) -> Result<ClientWork, SoldrError> {
     let checks: Vec<ClientCheck> = work.iter().map(|w| w.check.clone()).collect();
     // Canonical bytes: sorted by id, struct field order id/hosts, compact JSON.
-    let bytes = serde_json::to_vec(&checks).expect("serializable checks");
-    ClientWork {
+    let bytes = serde_json::to_vec(&checks).map_err(error)?;
+    Ok(ClientWork {
         v: 1,
         kind: "client-work",
         checks,
         digest: hex::encode(Sha256::digest(bytes)),
-    }
+    })
 }
 
 pub(crate) fn print_plan(args: &[String]) -> Result<i32, SoldrError> {
@@ -277,7 +271,7 @@ pub(crate) fn print_plan(args: &[String]) -> Result<i32, SoldrError> {
         Ok((_, work)) => {
             println!(
                 "{}",
-                serde_json::to_string(&client_work(&work)).map_err(error)?
+                serde_json::to_string(&client_work(&work)?).map_err(error)?
             );
             Ok(0)
         }
@@ -404,9 +398,21 @@ async fn run_at(cwd: &Path, cache: bool, trust: bool) -> Result<i32, SoldrError>
         }
     };
     let soldr = crate::current_soldr_binary()?;
+    execute(&root, work, tree, &dir, &soldr, cache, trust)
+}
+
+fn execute(
+    root: &Path,
+    work: Vec<Work>,
+    tree: String,
+    dir: &Path,
+    soldr: &Path,
+    cache: bool,
+    trust: bool,
+) -> Result<i32, SoldrError> {
     // Run the ordinary plan from the canonical root. Redirect all child output
     // to stderr so stdout contains only the evidence object, even on failure.
-    let mut normal = Command::new(&soldr);
+    let mut normal = Command::new(soldr);
     if !cache {
         normal.arg("--no-cache");
     }
@@ -415,8 +421,11 @@ async fn run_at(cwd: &Path, cache: bool, trust: bool) -> Result<i32, SoldrError>
     }
     normal
         .args(["lint", "rust", "--check"])
-        .current_dir(&root)
+        .current_dir(root)
         .env("CARGO_NET_OFFLINE", "true")
+        .env("SOLDR_NO_AUTO_COMPONENT", "1")
+        .env("RUSTUP_DIST_SERVER", "file:///soldr-offline")
+        .env("RUSTUP_UPDATE_ROOT", "file:///soldr-offline")
         .env_remove("SOLDR_PORCELAIN")
         .env_remove("SOLDR_ATTEST_KEY_FILE")
         .stdout(Stdio::inherit())
@@ -436,11 +445,14 @@ async fn run_at(cwd: &Path, cache: bool, trust: bool) -> Result<i32, SoldrError>
             });
             continue;
         }
-        let key_file = tempfile::NamedTempFile::new_in(&dir).map_err(error)?;
-        let mut command = crate::lint_steps::cargo_step_command(&soldr, &item.args, cache, trust);
+        let key_file = tempfile::NamedTempFile::new_in(dir).map_err(error)?;
+        let mut command = crate::lint_steps::cargo_step_command(soldr, &item.args, cache, trust);
         command
-            .current_dir(&root)
+            .current_dir(root)
             .env("CARGO_NET_OFFLINE", "true")
+            .env("SOLDR_NO_AUTO_COMPONENT", "1")
+            .env("RUSTUP_DIST_SERVER", "file:///soldr-offline")
+            .env("RUSTUP_UPDATE_ROOT", "file:///soldr-offline")
             .env("SOLDR_ATTEST_KEY_FILE", key_file.path())
             .stdout(Stdio::from(std::io::stderr()))
             .stderr(Stdio::inherit());
@@ -465,7 +477,7 @@ async fn run_at(cwd: &Path, cache: bool, trust: bool) -> Result<i32, SoldrError>
             exit_code: (code == 75).then_some(75),
         });
     }
-    if clean_tree(&root)?.as_deref() != Some(&tree) {
+    if clean_tree(root)?.as_deref() != Some(&tree) {
         eprintln!("soldr: tree changed during attestation");
         return Ok(3);
     }
@@ -479,7 +491,7 @@ async fn run_at(cwd: &Path, cache: bool, trust: bool) -> Result<i32, SoldrError>
         autofixed: Vec::new(),
     };
     let json = serde_json::to_string(&evidence).map_err(error)?;
-    let mut temp = tempfile::NamedTempFile::new_in(&dir).map_err(error)?;
+    let mut temp = tempfile::NamedTempFile::new_in(dir).map_err(error)?;
     use std::io::Write;
     writeln!(temp, "{json}").map_err(error)?;
     temp.persist(dir.join(format!("{tree}.json")))

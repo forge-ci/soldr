@@ -637,3 +637,18 @@ mod per_crate {
         assert_eq!(narrowing, vec!["fmt".to_string()]);
     }
 }
+
+#[test]
+fn nextest_adapter_accounts_for_runner_settings_and_workspace_scripts() {
+    let profiles = profiles::builtin();
+    let profile = profiles.iter().find(|p| p.name == "nextest").unwrap();
+    assert_eq!(profile.inputs, ["**/*"]);
+    assert_eq!(profile.env, ["NEXTEST_*"]);
+    assert_eq!(profile.identity, ["cargo nextest --version"]);
+    assert!(!profile.per_package);
+    assert_eq!(
+        matched("nextest run --workspace").as_deref(),
+        Some("nextest")
+    );
+    assert_eq!(matched("nextest list --workspace"), None);
+}
