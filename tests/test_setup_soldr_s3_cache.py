@@ -525,11 +525,12 @@ def test_placement_cli_writes_the_decision_to_github_output(
     assert "placement_size_bytes=2048" in written
 
 
-def test_placement_cli_falls_to_s3_when_usage_is_unknown(
+def test_placement_cli_stays_on_github_when_usage_is_unknown(
     s3, tmp_path, monkeypatch, capsys
 ) -> None:
-    # No token, no override: writing to an unmeasured GitHub cache risks
-    # evicting another family's layer, so the second tier wins.
+    # A failed usage lookup must not demote a hot artifact to the paid tier:
+    # measured on obs-rust/obs-studio a warm Linux restore (41 s) is slower than
+    # a cold cook (26 s), so GitHub's own LRU is the cheaper failure mode.
     root = tmp_path / "layer"
     root.mkdir()
     (root / "blob").write_bytes(b"z" * 1024)
@@ -542,8 +543,8 @@ def test_placement_cli_falls_to_s3_when_usage_is_unknown(
     monkeypatch.delenv("SOLDR_GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("SOLDR_GITHUB_REPOSITORY", raising=False)
     assert s3.cmd_placement(env) == 0
-    assert "placement=s3" in out.read_text()
-    # The reason is logged, not exported, and it must say why S3 won.
+    assert "placement=github" in out.read_text()
+    # The reason is logged, not exported, and it must say the lookup failed.
     assert "usage unavailable" in capsys.readouterr().out
 
 
@@ -561,6 +562,117 @@ def test_placement_cli_honours_a_forced_tier(s3, tmp_path) -> None:
     }
     assert s3.cmd_placement(env) == 0
     assert "placement=s3" in out.read_text()
+
+
+def test_gh_budget_default_is_the_level_one_budget_not_the_bucket_ceiling(
+    s3, tmp_path
+) -> None:
+    """An empty gh-cache-budget must not resolve to the 50 GiB S3 ceiling.
+
+    Shared with DEFAULT_LIMIT it did exactly that, so placement could never
+    choose the second tier no matter how full GitHub was.
+    """
+    assert s3.GH_CACHE_BUDGET_DEFAULT == "9G"
+    assert s3.resolve_limit("") == s3.parse_size("50G")
+    assert s3.resolve_limit(s3.GH_CACHE_BUDGET_DEFAULT) == 9 * 1024**3
+
+    root = tmp_path / "layer"
+    root.mkdir()
+    (root / "blob").write_bytes(b"z" * (1024 * 1024))
+    out = tmp_path / "out"
+    env = {
+        "INPUT_PLACEMENT_PATH": str(root),
+        "SOLDR_GH_CACHE_USED_BYTES": str(9 * 1024**3 - 512 * 1024),
+        "GITHUB_OUTPUT": str(out),
+    }
+    assert s3.cmd_placement(env) == 0
+    assert "placement=s3" in out.read_text()
+
+
+def test_prune_skips_cleanly_without_credentials(s3, capsys) -> None:
+    assert s3.cmd_prune({}) == 0
+    assert "skipped" in capsys.readouterr().out
+
+
+def test_prune_deletes_least_recently_used_until_under_budget(s3, monkeypatch) -> None:
+    import json as _json
+
+    now = datetime.now(timezone.utc)
+    listing = {
+        "actions_caches": [
+            {
+                "id": 1,
+                "key": "cook-old",
+                "size_in_bytes": 800,
+                "last_accessed_at": (now - timedelta(days=30))
+                .isoformat()
+                .replace("+00:00", "Z"),
+            },
+            {
+                "id": 2,
+                "key": "cook-mid",
+                "size_in_bytes": 800,
+                "last_accessed_at": (now - timedelta(days=10))
+                .isoformat()
+                .replace("+00:00", "Z"),
+            },
+            {
+                "id": 3,
+                "key": "cook-new",
+                "size_in_bytes": 800,
+                "last_accessed_at": now.isoformat().replace("+00:00", "Z"),
+            },
+        ]
+    }
+    calls = []
+
+    def fake_transport(method, url, headers, body):
+        calls.append((method, url.rsplit("/", 1)[-1]))
+        if method == "GET":
+            return 200, {}, _json.dumps(listing).encode()
+        return 204, {}, b""
+
+    monkeypatch.setattr(s3, "urllib_transport", fake_transport)
+    env = {
+        "SOLDR_GITHUB_REPOSITORY": "o/r",
+        "SOLDR_GITHUB_TOKEN": "t",
+        "INPUT_GH_CACHE_BUDGET": "1000",
+    }
+    assert s3.cmd_prune(env) == 0
+    deleted = [tail for method, tail in calls if method == "DELETE"]
+    # 2400 bytes against a 1000-byte budget: oldest two go, newest stays.
+    assert deleted == ["1", "2"]
+
+
+def test_prune_reports_a_failed_deletion(s3, monkeypatch) -> None:
+    import json as _json
+
+    now = datetime.now(timezone.utc)
+    listing = {
+        "actions_caches": [
+            {
+                "id": 7,
+                "key": "old",
+                "size_in_bytes": 2000,
+                "last_accessed_at": (now - timedelta(days=40))
+                .isoformat()
+                .replace("+00:00", "Z"),
+            }
+        ]
+    }
+
+    def fake_transport(method, url, headers, body):
+        if method == "GET":
+            return 200, {}, _json.dumps(listing).encode()
+        return 403, {}, b"{}"
+
+    monkeypatch.setattr(s3, "urllib_transport", fake_transport)
+    env = {
+        "SOLDR_GITHUB_REPOSITORY": "o/r",
+        "SOLDR_GITHUB_TOKEN": "t",
+        "INPUT_GH_CACHE_BUDGET": "1000",
+    }
+    assert s3.cmd_prune(env) == 1
 
 
 def test_placement_prefers_github_when_it_fits(s3) -> None:
