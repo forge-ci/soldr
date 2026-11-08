@@ -47,6 +47,11 @@ ACCESS_KEY_ENV = "SOLDR_S3_CACHE_ACCESS_KEY"
 SECRET_KEY_ENV = "SOLDR_S3_CACHE_SECRET_KEY"
 STATE_ENV = "SOLDR_S3_CACHE_STATE"
 DEFAULT_LIMIT = "50G"
+# Level-1 (Actions cache) budget. Distinct from DEFAULT_LIMIT, which is the
+# level-2 bucket ceiling: leaving these shared meant an empty
+# `gh-cache-budget` resolved to 50 GiB and placement always chose GitHub,
+# so the second tier was unreachable by construction.
+GH_CACHE_BUDGET_DEFAULT = "9G"
 MIN_EVICT_AGE = timedelta(minutes=30)
 FAMILIES = ("setup", "build", "cook")
 SINGLETON_EVENT = "merge_group"
@@ -840,13 +845,20 @@ def cmd_placement(env: dict) -> int:
     """Decide, and report, which single store an artifact belongs in."""
     root = Path(env.get("INPUT_PLACEMENT_PATH", "") or "")
     size = du_bytes(root)
-    budget = resolve_limit(env.get("INPUT_GH_CACHE_BUDGET", ""))
+    budget = resolve_limit(
+        env.get("INPUT_GH_CACHE_BUDGET", "") or GH_CACHE_BUDGET_DEFAULT
+    )
     prefer = env.get("INPUT_PLACEMENT_PREFER", "auto").strip().lower()
     used = gh_cache_used_bytes(env)
     if used is None:
-        # Unknown usage: the second tier is the safe home, because writing to a
-        # full GitHub cache evicts somebody else's layer.
-        placement = Placement("s3", "GitHub cache usage unavailable")
+        # Unknown usage: stay on GitHub. Measured on obs-rust/obs-studio, a
+        # level-2 restore is never faster than the level-1 one and a cold cook
+        # ties a warm restore on Linux (26 s vs 41 s for 1.39 GB), so pushing a
+        # hot artifact to the paid tier because a usage lookup failed trades a
+        # benign LRU eviction for a permanent slowdown. Say so in the log.
+        placement = Placement(
+            "github", "GitHub cache usage unavailable; assume level 1 is fine"
+        )
     else:
         placement = choose_placement(
             size=size,
@@ -869,15 +881,123 @@ def cmd_placement(env: dict) -> int:
     return 0
 
 
+def _gh_headers(env: dict) -> dict:
+    token = env.get("SOLDR_GITHUB_TOKEN", "").strip()
+    return {
+        "authorization": f"Bearer {token}",
+        "accept": "application/vnd.github+json",
+        "x-github-api-version": "2022-11-28",
+        "user-agent": "soldr-setup-s3-cache",
+    }
+
+
+def gh_cache_entries(env: dict) -> list[GhCacheEntry] | None:
+    """Every actions/cache entry the REST API reports, or None if unreadable."""
+    repository = env.get("SOLDR_GITHUB_REPOSITORY", "").strip()
+    token = env.get("SOLDR_GITHUB_TOKEN", "").strip()
+    if not (repository and token):
+        return None
+    entries: list[GhCacheEntry] = []
+    page = 1
+    while True:
+        url = (
+            f"https://api.github.com/repos/{repository}/actions/caches"
+            f"?per_page=100&page={page}"
+        )
+        status, _hdrs, body = urllib_transport("GET", url, _gh_headers(env), None)
+        if status != 200:
+            return None
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            return None
+        batch = payload.get("actions_caches", [])
+        for raw in batch:
+            accessed = raw.get("last_accessed_at") or raw.get("created_at")
+            stamp = datetime.fromisoformat(accessed.replace("Z", "+00:00"))
+            entries.append(
+                GhCacheEntry(
+                    id=int(raw["id"]),
+                    key=str(raw["key"]),
+                    size=int(raw["size_in_bytes"]),
+                    last_accessed=stamp,
+                )
+            )
+        if len(batch) < 100:
+            return entries
+        page += 1
+
+
+def gh_delete_cache(env: dict, cache_id: int) -> int:
+    repository = env.get("SOLDR_GITHUB_REPOSITORY", "").strip()
+    url = f"https://api.github.com/repos/{repository}/actions/caches/{cache_id}"
+    status, _hdrs, _body = urllib_transport("DELETE", url, _gh_headers(env), None)
+    return status
+
+
+def cmd_prune(env: dict) -> int:
+    """Delete level-1 entries down to the budget. Deletion only, never a move."""
+    entries = gh_cache_entries(env)
+    if entries is None:
+        print(
+            "s3-cache prune: skipped (no repository/token, or the cache listing "
+            "could not be read)"
+        )
+        return 0
+    budget = resolve_limit(
+        env.get("INPUT_GH_CACHE_BUDGET", "") or GH_CACHE_BUDGET_DEFAULT
+    )
+    raw_max = env.get("INPUT_GH_CACHE_PRUNE_MAX_BYTES", "").strip()
+    max_bytes = parse_size(raw_max) if raw_max else sum(e.size for e in entries)
+    protected = {
+        key.strip()
+        for key in env.get("INPUT_GH_CACHE_PROTECT", "").split(",")
+        if key.strip()
+    }
+    plan = plan_deletion(
+        entries,
+        budget=budget,
+        now=datetime.now(timezone.utc),
+        protected=protected,
+        max_bytes=max_bytes,
+    )
+    print(
+        f"s3-cache prune: before={plan.before} after={plan.after} budget={budget} "
+        f"delete={len(plan.to_delete)}"
+    )
+    if not plan.to_delete:
+        return 0
+    failed = 0
+    for entry in plan.to_delete:
+        status = gh_delete_cache(env, entry.id)
+        if status in (200, 204):
+            print(
+                f"s3-cache prune: deleted id={entry.id} size={entry.size} key={entry.key}"
+            )
+        else:
+            failed += 1
+            print(
+                f"s3-cache prune: delete failed id={entry.id} status={status} "
+                f"key={entry.key}"
+            )
+    if failed:
+        print(f"s3-cache prune: {failed} deletion(s) failed", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) != 2 or argv[1] not in ("restore", "save", "placement"):
-        print("usage: s3_cache.py restore|save|placement", file=sys.stderr)
+    verbs = ("restore", "save", "placement", "prune")
+    if len(argv) != 2 or argv[1] not in verbs:
+        print("usage: s3_cache.py restore|save|placement|prune", file=sys.stderr)
         return 2
     env = dict(os.environ)
     if argv[1] == "restore":
         return cmd_restore(env)
     if argv[1] == "placement":
         return cmd_placement(env)
+    if argv[1] == "prune":
+        return cmd_prune(env)
     return cmd_save(env)
 
 
