@@ -1316,7 +1316,7 @@ jobs:
           # Surface npm's OIDC trusted-publishing exchange in the log so a
           # failure discriminates registration problems from token problems.
           NPM_CONFIG_LOGLEVEL: verbose
-        run: uv run --no-project --python 3.13 ../release-control/.github/scripts/publish_npm_package.py --source-dir .
+        run: uv run --no-project --python 3.13 ../release-control/.github/scripts/publish_npm_package.py --source-dir . --environment release
 
   # soldr#2469 step 1.1: terminal truth check. Green must mean the whole
   # public surface (17 GitHub assets from the canonical-targets contract,

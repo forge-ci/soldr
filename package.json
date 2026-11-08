@@ -3,13 +3,13 @@
   "version": "0.9.52",
   "description": "Instant Rust tools and builds from one command.",
   "license": "BSD-3-Clause",
-  "homepage": "https://github.com/zackees/soldr",
+  "homepage": "https://github.com/forge-ci/soldr",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zackees/soldr.git"
+    "url": "git+https://github.com/forge-ci/soldr.git"
   },
   "bugs": {
-    "url": "https://github.com/zackees/soldr/issues"
+    "url": "https://github.com/forge-ci/soldr/issues"
   },
   "bin": {
     "soldr": "bin/soldr.js"

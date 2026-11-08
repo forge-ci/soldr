@@ -64,7 +64,7 @@ assert(
 assert.strictEqual(pkg.name, "@zackees/soldr");
 assert.strictEqual(pkg.license, "BSD-3-Clause");
 assert.strictEqual(pkg.bin.soldr, "bin/soldr.js");
-assert.strictEqual(pkg.repository.url, "git+https://github.com/zackees/soldr.git");
+assert.strictEqual(pkg.repository.url, "git+https://github.com/forge-ci/soldr.git");
 assert.deepStrictEqual(pkg.files, [
   "bin/soldr.js",
   "contracts/zccache-integration-guardrails.v1.json",
