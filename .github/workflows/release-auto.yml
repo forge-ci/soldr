@@ -1298,16 +1298,24 @@ jobs:
           --repository "$GITHUB_REPOSITORY"
           --release-ref "${{ inputs.npm_release_ref }}"
           --source-dir .
+      # No `registry-url`: with it, setup-node writes
+      # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into .npmrc and,
+      # with no token supplied, exports the dummy XXXXX-XXXXX-XXXXX-XXXXX.
+      # npm then sends that bogus bearer and the PUT fails with E404 instead
+      # of using OIDC trusted publishing. npm's default registry is npmjs.org.
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "24"
-          registry-url: https://registry.npmjs.org
       - name: Install npm CLI with trusted publishing support
         shell: bash
         run: npm install --global npm@11.12.1
       - name: Validate npm package
         run: node scripts/test-npm-package.js && npm pack --dry-run
       - name: Publish package to npm
+        env:
+          # Surface npm's OIDC trusted-publishing exchange in the log so a
+          # failure discriminates registration problems from token problems.
+          NPM_CONFIG_LOGLEVEL: verbose
         run: uv run --no-project --python 3.13 ../release-control/.github/scripts/publish_npm_package.py --source-dir .
 
   # soldr#2469 step 1.1: terminal truth check. Green must mean the whole
