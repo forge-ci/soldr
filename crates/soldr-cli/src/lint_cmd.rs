@@ -297,8 +297,16 @@ impl LintPlan {
         all_features: bool,
         cross_targets: &[String],
     ) -> Result<Vec<PlannedStep>, SoldrError> {
-        let (config, root) =
-            crate::cargo_metadata_soldr::lint_config_from(&self.manifest_scope_dir()?)?;
+        self.rust_plan_from(&self.manifest_scope_dir()?, all_features, cross_targets)
+    }
+
+    fn rust_plan_from(
+        &self,
+        start: &std::path::Path,
+        all_features: bool,
+        cross_targets: &[String],
+    ) -> Result<Vec<PlannedStep>, SoldrError> {
+        let (config, root) = crate::cargo_metadata_soldr::lint_config_from(start)?;
         let built_ins = self.rust_step_args(all_features, cross_targets)?;
         let mut plan = Vec::new();
         for kind in &config.steps {
@@ -482,6 +490,12 @@ fn add_all_features(scope: &mut Vec<String>) -> Result<(), SoldrError> {
         scope.push("--all-features".into());
     }
     Ok(())
+}
+
+pub(crate) fn attestation_plan(root: &std::path::Path) -> Result<Vec<PlannedStep>, SoldrError> {
+    let plan = LintPlan::parse(&["rust".into(), "--check".into()])?;
+    let targets = crate::cargo_metadata_soldr::declared_targets_from(root)?;
+    plan.rust_plan_from(root, false, &resolve_target_triples(&targets)?)
 }
 
 pub(crate) async fn run_lint(

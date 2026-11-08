@@ -107,7 +107,7 @@ pub(crate) fn spawn_guarded(command: &mut Command) -> std::io::Result<Child> {
     child
 }
 
-fn extra_command(extra: &ExtraCommand) -> Command {
+pub(crate) fn extra_command(extra: &ExtraCommand) -> Command {
     let mut command = Command::new(&extra.program);
     command.args(&extra.args).current_dir(&extra.cwd);
     command

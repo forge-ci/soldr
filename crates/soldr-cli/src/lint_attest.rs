@@ -397,42 +397,68 @@ async fn run_at(cwd: &Path, cache: bool, trust: bool) -> Result<i32, SoldrError>
             return Ok(2);
         }
     };
+    let normal_steps = match crate::lint_cmd::attestation_plan(&root) {
+        Ok(steps) => steps,
+        Err(err) => {
+            eprintln!("{err}");
+            return Ok(2);
+        }
+    };
     let soldr = crate::current_soldr_binary()?;
-    execute(&root, work, tree, &dir, &soldr, cache, trust)
+    execute(
+        &root,
+        normal_steps,
+        work,
+        tree,
+        &dir,
+        &soldr,
+        (cache, trust),
+    )
 }
 
-fn execute(
-    root: &Path,
-    work: Vec<Work>,
-    tree: String,
-    dir: &Path,
-    soldr: &Path,
-    cache: bool,
-    trust: bool,
-) -> Result<i32, SoldrError> {
-    // Run the ordinary plan from the canonical root. Redirect all child output
-    // to stderr so stdout contains only the evidence object, even on failure.
-    let mut normal = Command::new(soldr);
-    if !cache {
-        normal.arg("--no-cache");
-    }
-    if trust {
-        normal.arg("--trust-inherited-soldr-env");
-    }
-    normal
-        .args(["lint", "rust", "--check"])
-        .current_dir(root)
+fn offline_child(command: &mut Command) {
+    command
         .env("CARGO_NET_OFFLINE", "true")
         .env("SOLDR_ATTEST_OFFLINE", "1")
         .env("SOLDR_NO_AUTO_COMPONENT", "1")
         .env("RUSTUP_DIST_SERVER", "file:///soldr-offline")
         .env("RUSTUP_UPDATE_ROOT", "file:///soldr-offline")
-        .env_remove("SOLDR_PORCELAIN")
-        .env_remove("SOLDR_ATTEST_KEY_FILE")
-        .stdout(Stdio::inherit())
+        .stdout(Stdio::from(std::io::stderr()))
         .stderr(Stdio::inherit());
-    normal.stdout(Stdio::from(std::io::stderr()));
-    let normal_code = wait(&mut normal)?;
+}
+
+fn execute(
+    root: &Path,
+    normal_steps: Vec<crate::lint_steps::PlannedStep>,
+    work: Vec<Work>,
+    tree: String,
+    dir: &Path,
+    soldr: &Path,
+    flags: (bool, bool),
+) -> Result<i32, SoldrError> {
+    let (cache, trust) = flags;
+    // Reuse the ordinary plan without recursively entering the lint command.
+    // Every child uses stderr, leaving stdout for the single evidence object.
+    let mut normal_code = 0;
+    for step in normal_steps {
+        let mut command = match step {
+            crate::lint_steps::PlannedStep::Cargo { args, .. } => {
+                crate::lint_steps::cargo_step_command(soldr, &args, cache, trust)
+            }
+            crate::lint_steps::PlannedStep::Extra(extra) => {
+                crate::lint_steps::extra_command(&extra)
+            }
+        };
+        command
+            .current_dir(root)
+            .env_remove("SOLDR_ATTEST_KEY_FILE");
+        crate::cargo_front_door::porcelain_lint::scrub_child_env(&mut command);
+        offline_child(&mut command);
+        normal_code = wait(&mut command)?;
+        if normal_code != 0 {
+            break;
+        }
+    }
     let host = crate::pyo3_detect::host_triple();
     let mut results = Vec::new();
     for item in work {
@@ -450,14 +476,8 @@ fn execute(
         let mut command = crate::lint_steps::cargo_step_command(soldr, &item.args, cache, trust);
         command
             .current_dir(root)
-            .env("CARGO_NET_OFFLINE", "true")
-            .env("SOLDR_ATTEST_OFFLINE", "1")
-            .env("SOLDR_NO_AUTO_COMPONENT", "1")
-            .env("RUSTUP_DIST_SERVER", "file:///soldr-offline")
-            .env("RUSTUP_UPDATE_ROOT", "file:///soldr-offline")
-            .env("SOLDR_ATTEST_KEY_FILE", key_file.path())
-            .stdout(Stdio::from(std::io::stderr()))
-            .stderr(Stdio::inherit());
+            .env("SOLDR_ATTEST_KEY_FILE", key_file.path());
+        offline_child(&mut command);
         // No target installation here: offline evidence uses existing toolchains.
         let start = Instant::now();
         let code = wait(&mut command)?;

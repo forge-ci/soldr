@@ -247,7 +247,7 @@ fn execution_transports_verdict_keys_and_persists_each_outcome() {
     let tree = clean_tree(repo.path()).unwrap().unwrap();
     let runner = state.path().join("soldr");
     for code in [0, 1, 75] {
-        let script = format!("#!/bin/sh\nif [ \"$1\" = lint ]; then exit 0; fi\nprintf 'existing-verdict-key' > \"$SOLDR_ATTEST_KEY_FILE\"\nexit {code}\n");
+        let script = format!("#!/bin/sh\nif [ \"$1\" != cargo ]; then exit 99; fi\nif [ -z \"$SOLDR_ATTEST_KEY_FILE\" ]; then exit 0; fi\nprintf 'existing-verdict-key' > \"$SOLDR_ATTEST_KEY_FILE\"\nexit {code}\n");
         std::fs::write(&runner, script).unwrap();
         crate::platform::fs::permissions::make_executable(&runner).unwrap();
         let work = vec![
@@ -269,12 +269,15 @@ fn execution_transports_verdict_keys_and_persists_each_outcome() {
         assert_eq!(
             execute(
                 repo.path(),
+                vec![crate::lint_steps::PlannedStep::Cargo {
+                    label: "fmt".into(),
+                    args: vec!["fmt".into(), "--check".into()],
+                }],
                 work,
                 tree.clone(),
                 state.path(),
                 &runner,
-                true,
-                false
+                (true, false)
             )
             .unwrap(),
             code
