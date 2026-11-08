@@ -1,9 +1,9 @@
-"""soldr#2469 step 2.2: release-auto.yml inline logic shrinks monotonically.
+"""soldr#2469 step 2.2: auto-release.yml inline logic shrinks monotonically.
 
 The 0.9.0 incident chain ran through inline YAML no test could exercise.
 Step 2.2's end state is release decision/state logic living in unit-tested
 scripts; this ratchet is the enforcement half — every change to
-release-auto.yml may keep or shrink its inline ``run:`` block footprint,
+auto-release.yml may keep or shrink its inline ``run:`` block footprint,
 never grow it. Extraction PRs lower the baseline in the same reviewed diff.
 
 The metric is deliberately dumb: non-empty lines inside ``run: |`` / ``run: >``
@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "release-auto.yml"
+WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "auto-release.yml"
 
 # Measured 2026-08-17 (soldr#2469 step 2.2 ratchet start) at 187, then:
 #   160 — PyPI wheel-visibility poll -> `.github/scripts/verify_pypi_wheels.py`
@@ -53,7 +53,7 @@ def count_inline_run_lines(text: str) -> int:
 def test_release_workflow_inline_logic_only_shrinks() -> None:
     measured = count_inline_run_lines(WORKFLOW.read_text(encoding="utf-8"))
     assert measured <= INLINE_RUN_LINE_CEILING, (
-        f"release-auto.yml grew to {measured} inline run-block lines "
+        f"auto-release.yml grew to {measured} inline run-block lines "
         f"(ceiling {INLINE_RUN_LINE_CEILING}). Inline release logic is "
         "untestable (soldr#2469 step 2.2) — move the addition into a "
         "unit-tested ci/*.py or .github/scripts/*.py script and invoke it "
@@ -62,7 +62,7 @@ def test_release_workflow_inline_logic_only_shrinks() -> None:
     # The ratchet only bites if the pinned number tracks reality downward.
     slack = INLINE_RUN_LINE_CEILING - measured
     assert slack <= 50, (
-        f"release-auto.yml shrank to {measured} inline run-block lines but "
+        f"auto-release.yml shrank to {measured} inline run-block lines but "
         f"the ceiling still sits at {INLINE_RUN_LINE_CEILING}; lower "
         "INLINE_RUN_LINE_CEILING to match so the reclaimed headroom cannot "
         "silently grow back"

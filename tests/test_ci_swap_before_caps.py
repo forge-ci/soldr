@@ -20,7 +20,7 @@ CAP_KEYS = ("CARGO_BUILD_JOBS", "SOLDR_JOBS")
 
 JOBS = [
     ("cook-size-gate.yml", "cook-size-gate"),
-    ("release-auto.yml", "build"),
+    ("auto-release.yml", "build"),
 ]
 
 

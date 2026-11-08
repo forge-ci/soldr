@@ -37,7 +37,7 @@ from pathlib import Path
 # still exercises the code path is always preferred; see `ci-release`,
 # `ci-nextest`, and `ci-bootstrap` in the workspace Cargo.toml.
 ALLOWLIST: dict[str, str] = {
-    "release-auto.yml": "builds the binaries that are actually published",
+    "auto-release.yml": "builds the binaries that are actually published",
     # cross-compile-all-targets.yml no longer uses --release: it is now an
     # opt-in (workflow_dispatch) quick/debug cross-compile validation sweep,
     # so it needs no exemption and must not be a stale allowlist entry.
@@ -191,7 +191,7 @@ def unused_allowlist_entries(workflows_dir: Path) -> list[str]:
         # Follow delegation. soldr#2469 step 2.2 is moving release logic out of
         # YAML into `.github/scripts/*.py`, so an allowlisted workflow can stop
         # containing `--release` while still being the thing that builds the
-        # shipped binaries -- release-auto.yml did exactly that when its matrix
+        # shipped binaries -- auto-release.yml did exactly that when its matrix
         # build moved to `native_release_build.py`. Reading only the YAML would
         # report the entry stale and invite someone to delete a live exemption.
         sources = [text]

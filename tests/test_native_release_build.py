@@ -265,7 +265,7 @@ def test_prepare_is_skipped_when_github_env_is_absent(monkeypatch) -> None:
 
 def test_the_workflow_invokes_matrix_binary_and_keeps_the_profile_env() -> None:
     workflow = (
-        Path(__file__).parents[1] / ".github" / "workflows" / "release-auto.yml"
+        Path(__file__).parents[1] / ".github" / "workflows" / "auto-release.yml"
     ).read_text(encoding="utf-8")
     assert "native_release_build.py matrix-binary" in workflow
     # The profile values are matrix expressions and must stay in YAML --

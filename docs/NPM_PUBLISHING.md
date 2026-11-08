@@ -43,7 +43,7 @@ The npm postinstall picks the Linux artifact with `detectLibc()` in
    before staging and therefore also runs correctly on glibc hosts.
 
 `MIN_GLIBC_FOR_GNU` is currently `2.39`. It is kept in lockstep with the
-`--max-glibc` ceiling that `release-auto.yml` passes to the bundled-archive
+`--max-glibc` ceiling that `auto-release.yml` passes to the bundled-archive
 check (`verify_release_bundle.py --check glibc-baseline`) by an assertion in
 `scripts/test-npm-package.js`. It tracks the archive rather than soldr's own
 binary: `soldr` and `soldr-daemon` already need only glibc 2.17, but the
@@ -100,7 +100,7 @@ connected to GitHub Actions OIDC.
 2. In the package publishing settings, add this GitHub trusted publisher:
    - repository owner: `forge-ci`
    - repository name: `soldr`
-   - workflow filename: `release-auto.yml`
+   - workflow filename: `auto-release.yml`
    - environment: `release`
 3. Check package repository metadata against the publishing repository.
    The immutable v0.9.52 source and its package test still name
@@ -113,7 +113,7 @@ connected to GitHub Actions OIDC.
 
 The workflow uses npm Trusted Publishing directly:
 
-- `.github/workflows/release-auto.yml`
+- `.github/workflows/auto-release.yml`
 - job: `publish-npm`
 - environment: `release`
 - permissions: `id-token: write`, `contents: read`
@@ -127,34 +127,26 @@ for publish credentials when the trusted publisher configuration matches.
 
 ### Filename and repository identity recovery
 
-The workflow filename is load-bearing. The public npm provenance for 0.9.41
-records `zackees/soldr`, `.github/workflows/release-auto.yml`, and release run
-[40057112303](https://github.com/forge-ci/soldr/actions/runs/40057112303).
-Commit `0e5820f4` renamed it to `auto-release.yml`; npm published no later version.
-[Run 42399456133](https://github.com/forge-ci/soldr/actions/runs/42399456133/job/128508894480)
-used `forge-ci/soldr` and the renamed file and failed with `E404` on the registry
-PUT for `@zackees/soldr@0.9.52`. Both the workflow filename and repository owner
-are part of npm's trusted-publisher identity. Public provenance establishes the
-last working identity; it does not expose today's private publisher settings.
+The workflow filename is load-bearing: npm and PyPI trusted publishers both
+bind the exact owner, repository, workflow filename and environment. The fleet
+canonical filename is `auto-release.yml` (owner decision, 2026-11-08). The npm
+0.9.41 provenance records the older `zackees/soldr` +
+`.github/workflows/release-auto.yml` identity, and
+[run 42399456133](https://github.com/forge-ci/soldr/actions/runs/42399456133/job/128508894480)
+failed with `E404` on the registry PUT for `@zackees/soldr@0.9.52` because the
+npm publisher had not been migrated.
 
-Keep `release-auto.yml` unless both registries are deliberately reconfigured.
-In npm's package Settings → Trusted publishing, verify GitHub Actions owner
-`forge-ci`, repository `soldr`, workflow `release-auto.yml`, environment `release`.
-If the publisher still names owner `zackees`, a maintainer must update it; the
-filename restoration alone cannot repair that mismatch. Before normal releases,
-add the matching PyPI publisher: owner `forge-ci`, repository `soldr`, workflow
-`release-auto.yml`, environment `pypi`. PyPI had been repaired for the renamed
-filename, so its configuration must move with this restoration.
-
-The fleet rename PRs forge-ci/soldr#3906 and forge-ci/zccache#1990 discuss PyPI
-but omit npm. Only soldr currently publishes to npm in fleet code search; do
-not propagate a rename to an npm publisher without migrating its identity.
+In npm's package Settings -> Trusted publishing, configure GitHub Actions owner
+`forge-ci`, repository `soldr`, workflow `auto-release.yml`, environment
+`release`. PyPI's publisher is owner `forge-ci`, repository `soldr`, workflow
+`auto-release.yml`, environment `pypi`. Rename the workflow only after both
+registries are reconfigured.
 
 Recover only the existing immutable release, preserving exact-SHA full CI:
 
 ```bash
-gh workflow run release-auto.yml --repo forge-ci/soldr \
-  --ref fix/npm-trusted-workflow \
+gh workflow run auto-release.yml --repo forge-ci/soldr \
+  --ref main \
   -f npm_release_ref=v0.9.52 \
   -f candidate_sha=d5811ba9827c14b4f81a4888bf90009d26263c6e \
   -f full_ci_run_id=42394371171

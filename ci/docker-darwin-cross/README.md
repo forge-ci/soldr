@@ -1,6 +1,6 @@
 # Darwin cross-compile harness (issue: complete macOS sysroot for cargo)
 
-Reproduces the release-auto.yml `macOS x64` / `macOS ARM64` build lane
+Reproduces the auto-release.yml `macOS x64` / `macOS ARM64` build lane
 in a vanilla ubuntu-24.04 container. The goal is **not** "patch jemalloc"
 — it is to surface the **complete Apple SDK as the cross-compile
 sysroot** so that any C/C++ library in any Rust crate's dep tree
@@ -91,6 +91,6 @@ contract is satisfied.
 Extend `crates/soldr-cli/src/blessed_build.rs::prepare`'s apple-darwin
 arm (lines 156-172, currently only sets `SDKROOT`) to inject the env
 block above — mirror the Windows MSVC arm at lines 84-110. Then change
-`release-auto.yml:371` from `cargo zigbuild` to plain `cargo build`
+`auto-release.yml:371` from `cargo zigbuild` to plain `cargo build`
 (via `soldr build --target $T` which calls into blessed_build) and drop
 `continue-on-error` on the darwin lanes at line 176.

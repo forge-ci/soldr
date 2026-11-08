@@ -1,4 +1,4 @@
-# Simulate soldr's release-auto.yml Linux ARM64 (musl) build lane in a
+# Simulate soldr's auto-release.yml Linux ARM64 (musl) build lane in a
 # vanilla Ubuntu 24.04 container. Cross-compiles soldr to
 # `aarch64-unknown-linux-musl` from an x86_64 host using
 # `cargo zigbuild` (zig 0.13.0 bundles a hermetic musl toolchain — no
@@ -53,7 +53,7 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Minimum apt set — mirrors what release-auto.yml's Linux ARM64 (musl)
+# Minimum apt set — mirrors what auto-release.yml's Linux ARM64 (musl)
 # lane has access to today.
 #   curl + ca-certificates  → toolchain + rustup downloads
 #   git                     → cargo fetch from git deps

@@ -23,7 +23,7 @@ Speed comes from two layers:
 
 Dev profile on purpose: this is a recovery/test harness, so build time matters
 more than binary size. `--release` is there for the rare case where the shipped
-shape is what needs reproducing. Release wheels come from `release-auto.yml`.
+shape is what needs reproducing. Release wheels come from `auto-release.yml`.
 
 Options, all optional::
 

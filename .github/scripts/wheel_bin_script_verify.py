@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Verify a release wheel ships its bin script, extracted from
-release-auto.yml (soldr#2469 2.2).
+auto-release.yml (soldr#2469 2.2).
 
 Structural well-formedness of the single wheel in ``dist/``:
 

@@ -11,7 +11,7 @@
 # had produced zero green results in 25 consecutive CI runs while sitting at
 # the end of ci.yml's deepest chain, where a wedged guest set the run's wall
 # clock (34-40 min) and its colour. The release side already treats it as
-# advisory (release-auto.yml: `publish` does not depend on
+# advisory (auto-release.yml: `publish` does not depend on
 # `e2e_macos_x64_replay`, soldr#3088). Here it runs nightly against main, on
 # demand. Canonical ci.yml calls this reusable workflow when a pull request is
 # labelled `macos-replay`, so anyone working soldr#3087 / soldr#3088 can still
@@ -19,7 +19,7 @@
 #
 # `aarch64-apple-darwin` is unaffected: its cross-build lane stays in ci.yml
 # (release-included, no paired target-run). `smoke_macos_x64` in
-# release-auto.yml stays required: that is the real per-OS signal on the
+# auto-release.yml stays required: that is the real per-OS signal on the
 # shipped binary.
 name: macOS Recovery replay
 
@@ -54,7 +54,7 @@ jobs:
       # bootstrap_artifact_name omitted (optional, default ""): ci.yml's value
       # names an artifact produced by its own e2e-cross-bootstrap-soldr job in
       # the same run. This workflow has no such job, so the reusable workflow
-      # takes its own actions/cache-or-bootstrap path, as release-auto.yml does.
+      # takes its own actions/cache-or-bootstrap path, as auto-release.yml does.
 
   replay:
     name: target-run x86_64-apple-darwin

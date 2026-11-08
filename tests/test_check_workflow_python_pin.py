@@ -151,7 +151,7 @@ def test_release_scripts_require_setup_uv_and_no_project(guard, tmp_path):
     """
     write_workflow(
         tmp_path,
-        "release-auto.yml",
+        "auto-release.yml",
         f"""
 jobs:
   release:
@@ -169,8 +169,8 @@ jobs:
 """,
     )
     assert guard.unpinned_jobs(tmp_path) == {
-        guard.JobRef("release-auto.yml", "release"),
-        guard.JobRef("release-auto.yml", "missing-no-project"),
+        guard.JobRef("auto-release.yml", "release"),
+        guard.JobRef("auto-release.yml", "missing-no-project"),
     }
 
 
@@ -258,7 +258,7 @@ def test_release_flags_do_not_cross_shell_command_boundaries(
     """A release script must carry its own Python and isolation flags."""
     write_workflow(
         tmp_path,
-        "release-auto.yml",
+        "auto-release.yml",
         f"""
 jobs:
   compliant:
@@ -272,7 +272,7 @@ jobs:
 """,
     )
     assert guard.unpinned_jobs(tmp_path) == {
-        guard.JobRef("release-auto.yml", "inherited-flags")
+        guard.JobRef("auto-release.yml", "inherited-flags")
     }
 
 

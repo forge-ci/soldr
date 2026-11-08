@@ -73,7 +73,7 @@ def test_published_files_reads_every_release() -> None:
 
 
 def test_the_publish_job_preflights_before_uploading() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "release-auto.yml").read_text(
+    workflow = (ROOT / ".github" / "workflows" / "auto-release.yml").read_text(
         encoding="utf-8"
     )
     job = workflow[workflow.index("  publish-pypi:") :]

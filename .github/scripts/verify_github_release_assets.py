@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify a published GitHub Release has every contract-required asset.
 
-This is the release-side GitHub asset gate extracted from release-auto.yml
+This is the release-side GitHub asset gate extracted from auto-release.yml
 (soldr#2469 step 2.2). The data validation is deliberately pure so the
 workflow's release-state decisions can be exercised from fixtures.
 """

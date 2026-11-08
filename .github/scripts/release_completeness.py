@@ -37,7 +37,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONTRACT = REPO_ROOT / "ci" / "canonical-targets.json"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
-RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-auto.yml"
+RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "auto-release.yml"
 NPM_PACKAGE = "@zackees/soldr"
 PYPI_PROJECT = "soldr"
 GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY", "zackees/soldr")
@@ -255,7 +255,7 @@ class BuildMatrixRow:
 def build_matrix(contract_path: Path = CONTRACT) -> list[BuildMatrixRow]:
     """Contract-generated release build matrix (soldr#2469 step 2.1).
 
-    Returns the `strategy.matrix.include` list for release-auto.yml's build
+    Returns the `strategy.matrix.include` list for auto-release.yml's build
     job, derived from each included target's `release.build` block — the
     workflow's hand-inlined matrix this replaces is exactly what let PR
     #2455 shrink the matrix and the contract together with nothing failing.

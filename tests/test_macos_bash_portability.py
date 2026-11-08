@@ -151,8 +151,8 @@ def test_the_scan_still_sees_macos_workflows_and_command_lines() -> None:
     assert len(macos_workflows) >= 3, (
         f"expected several macOS workflows, got {macos_workflows}"
     )
-    assert "release-auto.yml" in macos_workflows, (
-        "release-auto.yml is the workflow this guard exists for -- if it is no "
+    assert "auto-release.yml" in macos_workflows, (
+        "auto-release.yml is the workflow this guard exists for -- if it is no "
         f"longer detected as macOS-capable the rule is not applying: {macos_workflows}"
     )
 

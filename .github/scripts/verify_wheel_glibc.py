@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the glibc floor of the binaries *inside* a manylinux wheel (soldr#1060).
 
-`release-auto.yml` already asserts that every linux-gnu wheel carries the
+`auto-release.yml` already asserts that every linux-gnu wheel carries the
 `manylinux_2_17` platform tag. That catches maturin quietly falling back to the
 runner's glibc and tagging `manylinux_2_39` -- a wheel that pip on an older
 host then skips.

@@ -27,9 +27,9 @@ The repository currently enforces several baseline controls:
 - No Cargo `git` dependencies are currently used; dependencies resolve from crates.io.
 - Third-party GitHub Actions in the repository workflows are pinned to full commit SHAs.
 - The e2e bootstrap fixture input is pinned to an exact Git commit in the workflow inputs.
-- Releases are promoted from reviewed version bumps on `main` through `.github/workflows/release-auto.yml`.
+- Releases are promoted from reviewed version bumps on `main` through `.github/workflows/auto-release.yml`.
 - The release workflow refuses to publish unless the workspace version is strictly greater than the latest version on PyPI.
-- PyPI publication uses OIDC Trusted Publishing bound to `release-auto.yml`; no long-lived PyPI tokens exist in the repo or in any environment.
+- PyPI publication uses OIDC Trusted Publishing bound to `auto-release.yml`; no long-lived PyPI tokens exist in the repo or in any environment.
 - Release assets are attested in GitHub Actions before publication.
 - Release tags are minted by the workflow's built-in `GITHUB_TOKEN`; no GitHub App or PAT is involved.
 - Immutable GitHub Releases are enabled.
@@ -77,13 +77,13 @@ When a pinned dependency, action, or external input is updated, the change shoul
 Current state:
 
 - releases are validated in GitHub Actions from the merged `main` commit that bumped the workspace version
-- `.github/workflows/release-auto.yml` is the single release path; it derives the version from `Cargo.toml` and only proceeds when that version is strictly greater than the latest version published on PyPI
+- `.github/workflows/auto-release.yml` is the single release path; it derives the version from `Cargo.toml` and only proceeds when that version is strictly greater than the latest version published on PyPI
 - the release workflow does **not** currently re-run lint, build, test,
   integration, or e2e checks before publishing; the only pre-publication
   validation is what ran on the version-bump PR (restoring release-time
   gates is tracked in soldr#2469)
 - release tags are minted with the workflow's built-in `GITHUB_TOKEN`; no GitHub App or PAT is involved
-- PyPI wheels are uploaded through OIDC Trusted Publishing bound to `release-auto.yml`
+- PyPI wheels are uploaded through OIDC Trusted Publishing bound to `auto-release.yml`
 - release assets are published to GitHub Releases with a generated checksum manifest
 - release assets are attested in GitHub Actions prior to publication
 - the intentional authorization step is the reviewed version-bump merge to `main` — note that `main` is not currently branch-protected (soldr#2469) and there is no environment approval gate at release time

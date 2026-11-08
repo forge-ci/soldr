@@ -927,7 +927,7 @@ jobs:
       source_ref: ${{ needs.prepare.outputs.commit_sha }}
       # bootstrap_artifact_name omitted (optional, default ""): ci.yml's
       # value names an artifact produced by its own e2e-cross-bootstrap-soldr
-      # job earlier in the *same* workflow run. release-auto.yml has no such
+      # job earlier in the *same* workflow run. auto-release.yml has no such
       # job, and artifacts do not cross workflow runs, so this falls back to
       # `_ci-cross-build-linux.yml`'s own actions/cache-or-bootstrap path.
 
@@ -1150,7 +1150,7 @@ jobs:
       - smoke_macos_arm64
       - release_execution_contract
     # Fleet pattern (kernal-api, bosn, clud, running-process): the PyPI trusted
-    # publisher must be registered against workflow `release-auto.yml` with
+    # publisher must be registered against workflow `auto-release.yml` with
     # environment `pypi`, and the OIDC token is minted for that environment.
     environment: pypi
     permissions:

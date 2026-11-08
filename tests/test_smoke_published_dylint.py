@@ -18,7 +18,7 @@ from conftest import (
 ROOT = Path(__file__).parents[1]
 SCRIPTS = ROOT / ".github" / "scripts"
 PUBLISHED_WORKFLOW = ROOT / ".github" / "workflows" / "published-dylint-smoke.yml"
-RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release-auto.yml"
+RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "auto-release.yml"
 load_script_module(SCRIPTS / "catalogue_http.py", "catalogue_http")
 load_script_module(SCRIPTS / "toolchain_asset_query.py", "toolchain_asset_query")
 load_script_module(

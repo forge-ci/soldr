@@ -20,7 +20,7 @@ from pathlib import Path
 import yaml
 
 REPO_ROOT = Path(__file__).parents[1]
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-auto.yml"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "auto-release.yml"
 
 SCRIPT_INVOCATION = re.compile(
     r"(?:python3?\s+|uv\s+run\b[^\n]*?\s)\S*(?:\.github/scripts|ci)/\S+\.py"
