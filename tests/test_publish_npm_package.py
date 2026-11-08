@@ -59,3 +59,37 @@ def test_publish_failure_is_fatal(monkeypatch, tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="oidc denied"):
         publish_npm.publish(_package(tmp_path))
+
+
+def test_oidc_mismatch_explains_required_settings(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("GITHUB_REPOSITORY", "forge-ci/soldr")
+    monkeypatch.setenv(
+        "GITHUB_WORKFLOW_REF",
+        "forge-ci/soldr/.github/workflows/release-auto.yml@refs/heads/main",
+    )
+
+    def run(arguments, _source_dir):
+        if arguments[0] == "view":
+            return SimpleNamespace(returncode=1, stdout="", stderr="not found")
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="npm verbose oidc Failed token exchange request with body message: "
+            "OIDC token exchange error - package not found\nnpm error code ENEEDAUTH",
+        )
+
+    monkeypatch.setattr(publish_npm, "run_npm", run)
+    expected = (
+        "npm trusted publisher for @zackees/soldr does not match "
+        "forge-ci/soldr release-auto.yml (environment: release)"
+    )
+    with pytest.raises(RuntimeError, match=r"does not match forge-ci/soldr"):
+        publish_npm.publish(_package(tmp_path), "release")
+    out = capsys.readouterr().out
+    assert "workflow filename: release-auto.yml" in out
+    assert "organization: forge-ci" in out
+    assert expected in summary.read_text(encoding="utf-8")
