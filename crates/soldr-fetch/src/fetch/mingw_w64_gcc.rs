@@ -210,6 +210,37 @@ pub fn bin_dir(bundle_root: &Path) -> PathBuf {
     bundle_root.join("bin")
 }
 
+/// GCC / MinGW-w64 runtime DLLs a win-gnu binary may import. They are not
+/// part of Windows, so they must sit next to the `.exe` (or on `PATH`) at
+/// run time.
+pub const MINGW_RUNTIME_DLLS: &[&str] = &[
+    "libgcc_s_seh-1.dll",
+    "libstdc++-6.dll",
+    "libwinpthread-1.dll",
+    "libatomic-1.dll",
+    "libgomp-1.dll",
+    "libquadmath-0.dll",
+    "libssp-0.dll",
+];
+
+/// The runtime DLLs a materialized win-gnu bundle ships, by absolute path.
+///
+/// The WinLibs (Windows-host) bundle keeps them in `bin/`; the conda-forge
+/// Linux cross bundle keeps them in `x86_64-w64-mingw32/{bin,lib}`. The
+/// first directory holding a given DLL wins, so each name appears once.
+pub fn runtime_dlls(bundle_root: &Path) -> Vec<PathBuf> {
+    let target = bundle_root.join(MINGW_W64_CROSS_PREFIX);
+    let dirs = [bin_dir(bundle_root), target.join("bin"), target.join("lib")];
+    MINGW_RUNTIME_DLLS
+        .iter()
+        .filter_map(|name| {
+            dirs.iter()
+                .map(|dir| dir.join(name))
+                .find(|path| path.is_file())
+        })
+        .collect()
+}
+
 /// Restore-completeness check for the managed win-gnu compiler bundle
 /// (soldr#2336 gap #3). A bundle that restored only `bin/gcc.exe` but is
 /// missing dlltool/windres or the sysroot import libs + headers reads as
@@ -284,6 +315,42 @@ pub fn path_with_mingw_bin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_dlls_are_found_in_both_bundle_layouts() {
+        // WinLibs layout: DLLs in bin/.
+        let winlibs = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(winlibs.path().join("bin")).unwrap();
+        for name in ["libstdc++-6.dll", "libwinpthread-1.dll", "gcc.exe"] {
+            std::fs::write(winlibs.path().join("bin").join(name), b"").unwrap();
+        }
+        let found = runtime_dlls(winlibs.path());
+        let names: Vec<_> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["libstdc++-6.dll", "libwinpthread-1.dll"]);
+        assert!(found.iter().all(|p| p.is_absolute() && p.is_file()));
+
+        // conda-forge cross layout: DLLs in x86_64-w64-mingw32/{lib,bin};
+        // a name present in both directories is reported once (bin wins).
+        let cross = tempfile::tempdir().unwrap();
+        let target = cross.path().join(MINGW_W64_CROSS_PREFIX);
+        std::fs::create_dir_all(target.join("lib")).unwrap();
+        std::fs::create_dir_all(target.join("bin")).unwrap();
+        std::fs::write(target.join("lib").join("libgcc_s_seh-1.dll"), b"").unwrap();
+        std::fs::write(target.join("lib").join("libstdc++-6.dll"), b"").unwrap();
+        std::fs::write(target.join("bin").join("libstdc++-6.dll"), b"").unwrap();
+        assert_eq!(
+            runtime_dlls(cross.path()),
+            [
+                target.join("lib").join("libgcc_s_seh-1.dll"),
+                target.join("bin").join("libstdc++-6.dll"),
+            ]
+        );
+
+        assert!(runtime_dlls(tempfile::tempdir().unwrap().path()).is_empty());
+    }
 
     #[test]
     fn asset_url_layout_matches_catalogue() {
