@@ -58,6 +58,14 @@ async fn dispatch_build_command(
         Commands::Cxx(args) => {
             exit_with(crate::cc_cmd::run(args, crate::cc_cmd::Language::Cxx).await)
         }
+        Commands::Clang(mut args) => {
+            args.clang = true;
+            exit_with(crate::cc_cmd::run(args, crate::cc_cmd::Language::C).await)
+        }
+        Commands::Clangxx(mut args) => {
+            args.clang = true;
+            exit_with(crate::cc_cmd::run(args, crate::cc_cmd::Language::Cxx).await)
+        }
         Commands::Ld(args) => exit_with(crate::ld_cmd::run_ld(args).await),
         Commands::Link(args) => exit_with(crate::ld_cmd::run_link(args).await),
         Commands::Wheel(args) => run_wheel_command(&args, flags, inherited_provenance).await,
@@ -195,6 +203,8 @@ async fn dispatch_state_command(command: Commands, flags: DispatchFlags) -> Resu
         | Commands::Blaze { .. }
         | Commands::Cc(_)
         | Commands::Cxx(_)
+        | Commands::Clang(_)
+        | Commands::Clangxx(_)
         | Commands::Ld(_)
         | Commands::Link(_)
         | Commands::Wheel(_)

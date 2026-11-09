@@ -352,6 +352,11 @@ pub(crate) enum Commands {
     /// Compile C++ source with a catalogue-backed target compiler (soldr#2335)
     #[command(name = "c++")]
     Cxx(crate::cc_cmd::CcArgs),
+    /// `soldr cc --clang`: compile C with the managed LLVM clang (soldr#4127)
+    Clang(crate::cc_cmd::CcArgs),
+    /// `soldr c++ --clang`: compile C++ with the managed LLVM clang (soldr#4127)
+    #[command(name = "clang++")]
+    Clangxx(crate::cc_cmd::CcArgs),
     /// Link with a target linker in GNU ld syntax (ELF, Mach-O, win-x64-gnu) (soldr#3806)
     Ld(crate::ld_cmd::LdArgs),
     /// Link with a target linker in MSVC link.exe syntax (win-* MSVC) (soldr#3806)
