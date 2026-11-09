@@ -102,6 +102,9 @@ pub(crate) const SOLDR_BUILTIN_VERBS: &[&str] = &[
     "lint",
     // soldr#3894 — verdict ledger inspection.
     "verdict",
+    // soldr#3924 — the machine-readable capability document a consumer
+    // (clud) negotiates the failure-first contract with.
+    "agent",
     "ci-test",
     // soldr#1059 — PATH-prepending escape hatch for cargo extensions.
     "exec",
