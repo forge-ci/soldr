@@ -363,3 +363,20 @@ fn zccache_mode_flag_is_global_and_rejects_unknown_modes() {
         "an unknown mode is a usage error"
     );
 }
+
+// soldr#3924: the capability document is a real verb, not an external tool
+// name. If `agent` ever falls back to `External` the consumer's negotiation
+// probe would try to fetch a crate called "agent" instead of reading a
+// capability document, so the parse must land on the variant.
+#[test]
+fn the_agent_capability_verb_parses_to_its_own_variant() {
+    let parsed = Cli::parse_from(["soldr", "agent", "capabilities", "--json"]);
+    match &parsed.command {
+        Commands::Agent { args } => assert_eq!(
+            args,
+            &["capabilities".to_string(), "--json".into()],
+            "the consumer's exact probe spelling must reach the handler"
+        ),
+        _ => panic!("expected Commands::Agent"),
+    }
+}

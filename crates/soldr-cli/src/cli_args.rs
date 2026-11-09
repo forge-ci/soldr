@@ -873,6 +873,21 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         subcommand: DefenderExclusionsSubcommand,
     },
+    /// Report the agent-facing capability/version document (soldr#3924)
+    ///
+    /// `soldr agent capabilities --json` prints one JSON object on one line
+    /// describing the opt-in, versioned machine-facing mode this build
+    /// supports: `failure_first` (the `--porcelain` / `SOLDR_PORCELAIN=1`
+    /// bounded result) and `artifact_continuation` (a durable `log_path` the
+    /// caller can read after the one-line result). A consumer must read the
+    /// document and fall back to the generic local diagnostic path when the
+    /// verb is missing, the document is malformed or oversized, or its
+    /// `schema_version` is not one the consumer understands. It must never
+    /// infer support from a version string. See `soldr agent capabilities`.
+    Agent {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Show version
     #[command(hide = true)]
     Version {
