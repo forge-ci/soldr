@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-11-09T11:33:15Z",
-  "git_sha": "8be376c47e041a38a748158fc5848cf73f0202c2",
+  "generated_at": "2026-11-10T11:14:43Z",
+  "git_sha": "613d08ba70fdf1b6fd2ed45ccec91fb38f7bf2c2",
   "branch": "benchmark-stats",
   "repository": "forge-ci/soldr",
   "artifacts": {
