@@ -151,7 +151,7 @@ url = "2"
 # Read-only access to cargo's `$CARGO_HOME/.global-cache` SQLite database
 # (issue #349). `bundled` compiles SQLite ourselves so neither the
 # managed wheel nor the cargo-install path needs a system libsqlite3.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 
 [patch.crates-io]
 # soldr#2406: use the vendored notify with bumped windows-sys (0.52→0.61)
