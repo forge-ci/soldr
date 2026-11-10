@@ -42,6 +42,12 @@ pub(crate) struct CcArgs {
     #[arg(long, group = "print_tool")]
     pub(crate) print_rc: bool,
 
+    /// Print the runtime DLLs a built binary needs next to it (one absolute
+    /// path per line; `x86_64-pc-windows-gnu` only) instead of invoking the
+    /// compiler. Copy them beside the `.exe` to run it on Windows.
+    #[arg(long, group = "print_tool")]
+    pub(crate) print_runtime_dlls: bool,
+
     /// Arguments forwarded verbatim to the selected compiler
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub(crate) args: Vec<String>,
@@ -65,6 +71,9 @@ pub(crate) struct NativeToolchain {
     pub(crate) compiler_args: Vec<String>,
     /// The Windows resource compiler, for MSVC targets (soldr#3810).
     pub(crate) rc: Option<PathBuf>,
+    /// Runtime DLLs a binary linked by this toolchain imports and that
+    /// Windows does not provide (MinGW `libstdc++-6.dll`, ...).
+    pub(crate) runtime_dlls: Vec<PathBuf>,
 }
 
 pub(crate) async fn run(args: CcArgs, language: Language) -> Result<i32, SoldrError> {
@@ -88,6 +97,19 @@ pub(crate) async fn run(args: CcArgs, language: Language) -> Result<i32, SoldrEr
             ))
         })?;
         println!("{}", rc.display());
+        return Ok(0);
+    }
+    if args.print_runtime_dlls {
+        if tools.runtime_dlls.is_empty() {
+            return Err(SoldrError::Other(format!(
+                "soldr {}: target {resolved_triple} ships no runtime DLLs to print \
+                 (only x86_64-pc-windows-gnu does)",
+                language.command_name()
+            )));
+        }
+        for dll in &tools.runtime_dlls {
+            println!("{}", dll.display());
+        }
         return Ok(0);
     }
     if args.print_sysroot {
@@ -134,6 +156,7 @@ fn requests_print(args: &CcArgs) -> bool {
         || args.print_linker
         || args.print_sysroot
         || args.print_rc
+        || args.print_runtime_dlls
 }
 
 /// Resolve a user-facing `--target` spelling and prepare the compiler
@@ -202,6 +225,7 @@ pub(crate) async fn prepare_native_toolchain(
             sysroot: Some(toolchain.sysroot.clone()),
             compiler_args: vec![format!("--sysroot={}", toolchain.sysroot.display())],
             rc: None,
+            runtime_dlls: Vec::new(),
         });
     }
 
@@ -219,12 +243,17 @@ pub(crate) async fn prepare_native_toolchain(
             sysroot: Some(toolchain.sysroot.clone()),
             compiler_args: vec![format!("--sysroot={}", toolchain.sysroot.display())],
             rc: None,
+            runtime_dlls: Vec::new(),
         });
     }
 
     if target == crate::fetch::mingw_w64_gcc::MINGW_W64_GCC_TARGET {
         let (bin_dir, env) =
             crate::fetch::mingw_w64_gcc::prepare_win_gnu_env(paths, target).await?;
+        let runtime_dlls = bin_dir
+            .parent()
+            .map(crate::fetch::mingw_w64_gcc::runtime_dlls)
+            .unwrap_or_default();
         let suffix = target.replace('-', "_");
         let upper = suffix.to_ascii_uppercase();
         return Ok(NativeToolchain {
@@ -236,6 +265,7 @@ pub(crate) async fn prepare_native_toolchain(
             sysroot: None,
             compiler_args: Vec::new(),
             rc: None,
+            runtime_dlls,
         });
     }
 
@@ -250,6 +280,7 @@ pub(crate) async fn prepare_native_toolchain(
             sysroot: Some(cross.sysroot),
             compiler_args: Vec::new(),
             rc: cross.rc,
+            runtime_dlls: Vec::new(),
         });
     }
 
@@ -324,6 +355,7 @@ mod tests {
             sysroot: None,
             compiler_args: Vec::new(),
             rc: None,
+            runtime_dlls: Vec::new(),
         };
         let args = CcArgs {
             target: "host".to_string(),
@@ -333,6 +365,7 @@ mod tests {
             print_linker: false,
             print_sysroot: false,
             print_rc: false,
+            print_runtime_dlls: false,
             args: Vec::new(),
         };
         assert_eq!(
@@ -371,6 +404,7 @@ mod tests {
             print_linker: false,
             print_sysroot: false,
             print_rc: false,
+            print_runtime_dlls: false,
             args: vec!["hello.c".to_string()],
         };
         assert!(requests_print(&args));
