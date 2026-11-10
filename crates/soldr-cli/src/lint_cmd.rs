@@ -297,8 +297,16 @@ impl LintPlan {
         all_features: bool,
         cross_targets: &[String],
     ) -> Result<Vec<PlannedStep>, SoldrError> {
-        let (config, root) =
-            crate::cargo_metadata_soldr::lint_config_from(&self.manifest_scope_dir()?)?;
+        self.rust_plan_from(&self.manifest_scope_dir()?, all_features, cross_targets)
+    }
+
+    fn rust_plan_from(
+        &self,
+        start: &std::path::Path,
+        all_features: bool,
+        cross_targets: &[String],
+    ) -> Result<Vec<PlannedStep>, SoldrError> {
+        let (config, root) = crate::cargo_metadata_soldr::lint_config_from(start)?;
         let built_ins = self.rust_step_args(all_features, cross_targets)?;
         let mut plan = Vec::new();
         for kind in &config.steps {
@@ -484,11 +492,23 @@ fn add_all_features(scope: &mut Vec<String>) -> Result<(), SoldrError> {
     Ok(())
 }
 
+pub(crate) fn attestation_plan(root: &std::path::Path) -> Result<Vec<PlannedStep>, SoldrError> {
+    let plan = LintPlan::parse(&["rust".into(), "--check".into()])?;
+    let targets = crate::cargo_metadata_soldr::declared_targets_from(root)?;
+    plan.rust_plan_from(root, false, &resolve_target_triples(&targets)?)
+}
+
 pub(crate) async fn run_lint(
     args: &[String],
     cache_enabled: bool,
     trust_inherited_soldr_env: bool,
 ) -> Result<i32, SoldrError> {
+    if args.first().is_some_and(|arg| arg == "plan") {
+        return crate::lint_attest::print_plan(&args[1..]);
+    }
+    if args.iter().any(|arg| arg == "--attest") {
+        return crate::lint_attest::run(args, cache_enabled, trust_inherited_soldr_env).await;
+    }
     let mut plan = LintPlan::parse(args)?;
     // soldr#4006: CI verifies formatting; it never rewrites the checkout.
     plan.fmt_fix = !plan.check_only && !crate::core::flag("CI");
@@ -579,7 +599,7 @@ fn run_dependency_steps(
         // directly under lines naming three child pids. Marked at the spawn
         // rather than on the exit code, matching soldr#2718.
         crate::exit_guard::mark_spoke();
-        // soldr#3098: spawns share, staged writes exclude. Held only across
+        // soldr#3098: spawns share, staged writes block. Held only across
         // the spawn call (dropped right after), and kept as a plain statement
         // so `tests/daemon/inherited_stdio_spawns_mark_spoke.rs` still finds
         // the exact child-start line it pins.

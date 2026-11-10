@@ -263,7 +263,14 @@ fn cargo_dylint_still_ensures_the_managed_dylint_link() {
     let with_cargo_dylint = tmp.path().join("path-with-cargo-dylint");
     std::fs::create_dir_all(&with_cargo_dylint).expect("mkdir tool bin");
     let fake = with_cargo_dylint.join("cargo-dylint");
-    std::fs::write(&fake, "#!/bin/sh\nexit 0\n").expect("write fake cargo-dylint");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\necho cargo-dylint {}\n",
+            pinned_dylint_link_version()
+        ),
+    )
+    .expect("write fake cargo-dylint");
     crate::platform::fs::permissions::make_executable(&fake).expect("chmod fake cargo-dylint");
     let _path = EnvVarGuard::set("PATH", &with_cargo_dylint);
     let _cargo_home = EnvVarGuard::set("CARGO_HOME", tmp.path().join("cargo-home"));

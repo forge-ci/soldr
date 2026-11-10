@@ -229,6 +229,17 @@ pub fn run() -> std::process::ExitCode {
     }
     startup_trace::phase(startup_trace::phase::MULTICALL_DISPATCH);
 
+    // Client-work discovery is pure: preserve the entry guard, then avoid
+    // image staging, global version probes, broker setup and the async runtime.
+    // An explicit version pin still takes the ordinary trampoline route.
+    if raw_args.get(1).is_some_and(|arg| arg == "lint")
+        && raw_args.get(2).is_some_and(|arg| arg == "plan")
+        && soldr_as_env_pin().is_none()
+    {
+        let code = crate::lint_attest::print_plan(&raw_args[3..]).unwrap_or_else(report_and_exit);
+        exit_guard::mark_spoke();
+        guarded_exit(code);
+    }
     guarded_exit(run_main(raw_args, &inherited_provenance, compiler_callback));
 }
 

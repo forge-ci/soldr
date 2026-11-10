@@ -14,9 +14,7 @@ pub(crate) const FORCE_MANAGED_CARGO_SUBCOMMANDS_ENV_VAR: &str =
 
 fn force_managed_cargo_subcommands() -> bool {
     match std::env::var(FORCE_MANAGED_CARGO_SUBCOMMANDS_ENV_VAR) {
-        Ok(value) => {
-            crate::core::flag_value(&value)
-        }
+        Ok(value) => crate::core::flag_value(&value),
         Err(_) => false,
     }
 }
@@ -147,40 +145,40 @@ pub(crate) async fn ensure_known_subcommand_tool(
     });
     if let Some(path) = deferred {
         let exe_name = format!("cargo-{sub}");
-            if sub == "dylint" {
-                let version = spec.pinned_version.unwrap_or("unknown");
-                validate_dylint_path_binary(&path, "cargo-dylint", version)?;
-                if let Some(link) = find_on_path("dylint-link") {
-                    validate_dylint_path_binary(&link, "dylint-link", version)?;
-                }
+        if sub == "dylint" {
+            let version = spec.pinned_version.unwrap_or("unknown");
+            validate_dylint_path_binary(&path, "cargo-dylint", version)?;
+            if let Some(link) = find_on_path("dylint-link") {
+                validate_dylint_path_binary(&link, "dylint-link", version)?;
             }
-            // Informational; on GitHub Actions it repeats once per nested
-            // invocation (a Dylint cook runs dozens) and the override it
-            // advertises is a workflow-level decision, not a per-line one.
-            if !foreign_env_flag("GITHUB_ACTIONS") {
-                eprintln!(
+        }
+        // Informational; on GitHub Actions it repeats once per nested
+        // invocation (a Dylint cook runs dozens) and the override it
+        // advertises is a workflow-level decision, not a per-line one.
+        if !foreign_env_flag("GITHUB_ACTIONS") {
+            eprintln!(
                     "soldr: deferring to {exe_name} on PATH at {} (set SOLDR_FORCE_MANAGED_CARGO_SUBCOMMANDS=1 to override)",
                     path.display()
                 );
-            }
-            // Even when cargo-zigbuild is provided by the host, it
-            // still shells out to `zig`. Run the transitive bootstrap
-            // before returning so the deferred-on-PATH branch doesn't
-            // silently regress.
-            append_subcommand_transitive_bin_dirs(
-                sub,
-                args,
-                paths,
-                &mut extra_bin_dirs,
-                &mut extra_env,
-                &mut extra_cargo_args,
-            )
-            .await?;
-            return Ok(SubcommandToolBootstrap {
-                bin_dirs: extra_bin_dirs,
-                env: extra_env,
-                cargo_args: extra_cargo_args,
-            });
+        }
+        // Even when cargo-zigbuild is provided by the host, it
+        // still shells out to `zig`. Run the transitive bootstrap
+        // before returning so the deferred-on-PATH branch doesn't
+        // silently regress.
+        append_subcommand_transitive_bin_dirs(
+            sub,
+            args,
+            paths,
+            &mut extra_bin_dirs,
+            &mut extra_env,
+            &mut extra_cargo_args,
+        )
+        .await?;
+        return Ok(SubcommandToolBootstrap {
+            bin_dirs: extra_bin_dirs,
+            env: extra_env,
+            cargo_args: extra_cargo_args,
+        });
     }
 
     let version = managed_subcommand_version(spec);
@@ -194,22 +192,20 @@ pub(crate) async fn ensure_known_subcommand_tool(
     if chatty {
         eprintln!("soldr: fetching {}...", spec.crate_name);
     }
-    let result = match crate::fetch::fetch_tool_for_host_with_paths(
-        spec.crate_name,
-        &version,
-        paths,
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(error) if sub == "dylint" => {
-            return Err(dylint_unavailable_error(
-                "cargo-dylint",
-                spec.pinned_version.unwrap_or("unknown"),
-                &error,
-            ));
+    let result = if crate::core::flag("SOLDR_ATTEST_OFFLINE") {
+        offline_cached_tool(spec.crate_name, paths)?
+    } else {
+        match crate::fetch::fetch_tool_for_host_with_paths(spec.crate_name, &version, paths).await {
+            Ok(result) => result,
+            Err(error) if sub == "dylint" => {
+                return Err(dylint_unavailable_error(
+                    "cargo-dylint",
+                    spec.pinned_version.unwrap_or("unknown"),
+                    &error,
+                ));
+            }
+            Err(error) => return Err(error),
         }
-        Err(error) => return Err(error),
     };
 
     if result.cached {
@@ -247,6 +243,34 @@ pub(crate) async fn ensure_known_subcommand_tool(
         bin_dirs: extra_bin_dirs,
         env: extra_env,
         cargo_args: extra_cargo_args,
+    })
+}
+
+// Read the existing pinned tool installation layout without calling a fetcher.
+fn offline_cached_tool(
+    name: &str,
+    paths: &SoldrPaths,
+) -> Result<crate::fetch::FetchResult, SoldrError> {
+    let spec = crate::fetch::known_tools::lookup_by_crate(name)
+        .ok_or_else(|| SoldrError::Other(format!("unknown offline tool {name}")))?;
+    let missing = || {
+        SoldrError::Other(format!(
+        "offline attestation requires {name} already installed on PATH or in the pinned tool store"
+    ))
+    };
+    let version = spec.pinned_version.ok_or_else(missing)?;
+    let binary_path = paths.bin.join(format!("{name}-{version}")).join(format!(
+        "{}{}",
+        spec.binary_name,
+        crate::core::TargetTriple::host()?.binary_ext()
+    ));
+    if !binary_path.is_file() {
+        return Err(missing());
+    }
+    Ok(crate::fetch::FetchResult {
+        binary_path,
+        version: version.to_owned(),
+        cached: true,
     })
 }
 
@@ -335,6 +359,17 @@ async fn dylint_link_bin_dir(paths: &SoldrPaths) -> Result<std::path::PathBuf, S
     let pinned_version = crate::fetch::known_tools::lookup_by_crate("dylint-link")
         .and_then(|spec| spec.pinned_version)
         .ok_or_else(|| SoldrError::Other("dylint-link must have a registry pin".into()))?;
+    if crate::core::flag("SOLDR_ATTEST_OFFLINE") {
+        let path = match find_on_path("dylint-link") {
+            Some(path) => path,
+            None => offline_cached_tool("dylint-link", paths)?.binary_path,
+        };
+        validate_dylint_path_binary(&path, "dylint-link", pinned_version)?;
+        return path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .ok_or_else(|| SoldrError::Other("dylint-link has no parent directory".into()));
+    }
     let version = VersionSpec::Exact(pinned_version.to_string());
     let chatty = std::io::IsTerminal::is_terminal(&std::io::stderr());
     if chatty {
@@ -496,7 +531,10 @@ fn validate_dylint_link_path_binary(
     host: &crate::core::TargetTriple,
 ) -> Result<(), SoldrError> {
     let mut failures = Vec::new();
-    for argument in ["--version", crate::fetch::smoke_help_argument("dylint-link")] {
+    for argument in [
+        "--version",
+        crate::fetch::smoke_help_argument("dylint-link"),
+    ] {
         let mut command = std::process::Command::new(binary);
         command.arg(argument);
         if let Some(toolchain) = crate::fetch::smoke_rustup_toolchain("dylint-link", host) {

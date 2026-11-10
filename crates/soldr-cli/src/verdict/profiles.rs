@@ -114,9 +114,22 @@ pub fn builtin() -> Vec<Profile> {
         true,
     );
     fmt.per_package = true;
+    let mut nextest = row(
+        "nextest",
+        "nextest",
+        &["run", "--workspace"],
+        &[],
+        &["--archive-file", "--config-file", "--tool-config-file"],
+        &["**/*"],
+        &["cargo nextest --version"],
+        true,
+    );
+    // Test runners, profiles, wrappers and fixture scripts all affect a pass.
+    nextest.env.push("NEXTEST_*".into());
     vec![
         clippy,
         fmt,
+        nextest,
         // The dylint driver is built and resolved by soldr, so soldr's own
         // version is part of the tool identity.
         row(

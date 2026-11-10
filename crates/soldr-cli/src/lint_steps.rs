@@ -98,8 +98,8 @@ fn resolve_tool(tool: &str, root: &Path) -> Option<PathBuf> {
     })
 }
 
-fn spawn_guarded(command: &mut Command) -> std::io::Result<Child> {
-    // Spawns share, staged writes exclude (soldr#3098); held across the spawn
+pub(crate) fn spawn_guarded(command: &mut Command) -> std::io::Result<Child> {
+    // Spawns share, staged writes block (soldr#3098); held across the spawn
     // call only.
     let guard = crate::core::spawn_exclusion::spawn_shared();
     let child = command.spawn();
@@ -107,7 +107,7 @@ fn spawn_guarded(command: &mut Command) -> std::io::Result<Child> {
     child
 }
 
-fn extra_command(extra: &ExtraCommand) -> Command {
+pub(crate) fn extra_command(extra: &ExtraCommand) -> Command {
     let mut command = Command::new(&extra.program);
     command.args(&extra.args).current_dir(&extra.cwd);
     command
@@ -195,7 +195,7 @@ pub(crate) fn run_porcelain(
 /// `target_lifecycle::prepare_cargo_invocation` — the same per-target C/asm
 /// toolchain env `soldr prepare --target` exports — and keeps that env scoped
 /// to this step instead of leaking into the next target's step.
-fn cargo_step_command(
+pub(crate) fn cargo_step_command(
     soldr: &Path,
     args: &[String],
     cache_enabled: bool,
@@ -263,6 +263,11 @@ pub(crate) async fn run_planned_steps(
 /// idempotent, a no-op for the host triple, and routes through soldr's managed
 /// rustup/cargo homes rather than a bare `rustup` on PATH.
 pub(crate) fn prepare_cargo_step(args: &[String]) -> Result<(), SoldrError> {
+    // Offline runs use preinstalled target standard libraries; Cargo reports
+    // a missing one without initiating a target download.
+    if crate::core::flag("CARGO_NET_OFFLINE") {
+        return Ok(());
+    }
     let dylint = cargo_front_door::first_cargo_subcommand(args) == Some("dylint");
     if !dylint {
         if let Some(target) = target_arg_value(args) {
