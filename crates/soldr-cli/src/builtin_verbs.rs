@@ -89,6 +89,9 @@ pub(crate) const SOLDR_BUILTIN_VERBS: &[&str] = &[
     "build",
     "cc",
     "c++",
+    // soldr#4127 -- the managed LLVM clang (`soldr cc --clang`).
+    "clang",
+    "clang++",
     // soldr#3806 -- standalone target linkers (GNU ld / MSVC link.exe syntax).
     "ld",
     "link",

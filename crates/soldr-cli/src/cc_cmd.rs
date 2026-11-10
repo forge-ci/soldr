@@ -48,6 +48,13 @@ pub(crate) struct CcArgs {
     #[arg(long, group = "print_tool")]
     pub(crate) print_runtime_dlls: bool,
 
+    /// Use the managed LLVM clang (and `ld.lld`) instead of the catalogue GCC
+    /// (soldr#4127). On the host Linux target the driver links against the
+    /// host libraries: no conda sysroot or `-L` flags are injected.
+    /// `soldr clang` / `soldr clang++` imply it.
+    #[arg(long)]
+    pub(crate) clang: bool,
+
     /// Arguments forwarded verbatim to the selected compiler
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub(crate) args: Vec<String>,
@@ -85,7 +92,11 @@ pub(crate) async fn run(args: CcArgs, language: Language) -> Result<i32, SoldrEr
     }
 
     let paths = SoldrPaths::new()?;
-    let (rust_triple, tools) = prepare_for_target(&paths, &args.target, language).await?;
+    let (rust_triple, tools) = if args.clang {
+        prepare_clang_for_target(&paths, &args.target, language).await?
+    } else {
+        prepare_for_target(&paths, &args.target, language).await?
+    };
     let resolved_triple = rust_triple.as_str();
 
     if args.print_rc {
@@ -172,6 +183,55 @@ pub(crate) async fn prepare_for_target(
         .map_err(|error| error.into_soldr_error(language.target_surface()))?;
     let tools = prepare_native_toolchain(paths, &resolved.rust_triple).await?;
     Ok((resolved.rust_triple, tools))
+}
+
+/// `soldr cc --clang` / `soldr clang` (soldr#4127): the managed LLVM bundle
+/// as the compiler. Apple and MSVC targets already use it; the host Linux
+/// target gets the bare bundle drivers with no sysroot, so it behaves like a
+/// system clang + lld whose shared-library deps ship inside the bundle.
+pub(crate) async fn prepare_clang_for_target(
+    paths: &SoldrPaths,
+    target: &str,
+    language: Language,
+) -> Result<(String, NativeToolchain), SoldrError> {
+    let target = normalize_driver_target(target);
+    let resolved = crate::target_alias::resolve_soldr_target(&target)
+        .map_err(|error| error.into_soldr_error(language.target_surface()))?;
+    let triple = resolved.rust_triple;
+    if crate::cc_clang_cross::handles_target(&triple) {
+        let tools = prepare_native_toolchain(paths, &triple).await?;
+        return Ok((triple, tools));
+    }
+    if !clang_host_target(&triple, crate::platform::host::facts::triple()) {
+        return Err(SoldrError::UnsupportedPlatform(format!(
+            "soldr {} --clang: target `{triple}` is not supported; clang mode covers \
+             the host Linux target plus Apple Darwin and MSVC Windows targets",
+            language.command_name()
+        )));
+    }
+    let bin_dir = crate::fetch::ensure_llvm_toolchain(paths).await?;
+    Ok((triple, host_clang_toolchain(&bin_dir)))
+}
+
+/// Clang mode drives the host linker environment, so only the host's own
+/// GNU/Linux triple qualifies.
+fn clang_host_target(triple: &str, host: &str) -> bool {
+    triple.ends_with("-unknown-linux-gnu") && triple == host
+}
+
+fn host_clang_toolchain(bin_dir: &Path) -> NativeToolchain {
+    let tool = |name: &str| bin_dir.join(crate::platform::executable::name::native(name));
+    NativeToolchain {
+        cc: tool("clang"),
+        cxx: tool("clang++"),
+        ar: tool("llvm-ar"),
+        linker: tool("ld.lld"),
+        bin_dir: bin_dir.to_path_buf(),
+        sysroot: None,
+        compiler_args: Vec::new(),
+        rc: None,
+        runtime_dlls: Vec::new(),
+    }
 }
 
 impl Language {
@@ -366,12 +426,41 @@ mod tests {
             print_sysroot: false,
             print_rc: false,
             print_runtime_dlls: false,
+            clang: false,
             args: Vec::new(),
         };
         assert_eq!(
             selected_print_path(&args, &tools),
             Some(Path::new("/sdk/c++"))
         );
+    }
+
+    #[test]
+    fn host_clang_toolchain_uses_bundle_tools_without_a_sysroot() {
+        let bin = PathBuf::from("/llvm/bin");
+        let tools = host_clang_toolchain(&bin);
+        let exe = |n: &str| bin.join(crate::platform::executable::name::native(n));
+        assert_eq!(tools.cc, exe("clang"));
+        assert_eq!(tools.cxx, exe("clang++"));
+        assert_eq!(tools.linker, exe("ld.lld"));
+        assert_eq!(tools.ar, exe("llvm-ar"));
+        assert!(tools.sysroot.is_none());
+        assert!(
+            tools.compiler_args.is_empty(),
+            "no conda --sysroot / -L in clang mode"
+        );
+    }
+
+    #[test]
+    fn clang_mode_accepts_only_the_host_gnu_linux_triple() {
+        let host = "x86_64-unknown-linux-gnu";
+        assert!(clang_host_target(host, host));
+        assert!(!clang_host_target("aarch64-unknown-linux-gnu", host));
+        assert!(!clang_host_target(
+            "x86_64-unknown-linux-musl",
+            "x86_64-unknown-linux-musl"
+        ));
+        assert!(!clang_host_target("x86_64-pc-windows-gnu", host));
     }
 
     #[test]
@@ -405,6 +494,7 @@ mod tests {
             print_sysroot: false,
             print_rc: false,
             print_runtime_dlls: false,
+            clang: false,
             args: vec!["hello.c".to_string()],
         };
         assert!(requests_print(&args));
