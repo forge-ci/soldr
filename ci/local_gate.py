@@ -601,8 +601,11 @@ def checks() -> list[Check]:
         # asserting on a workflow #1982 deleted, two lints that scanned nothing
         # and reported clean (#2008), and a manifest-coupled assertion (#2004).
         # A deletion PR cannot learn it orphaned a test; a lint cannot learn it
-        # stopped scanning. 281 tests, ~15s, and no Rust toolchain needed — so it
-        # runs here, before the expensive setup below.
+        # stopped scanning. No Rust toolchain needed, so it runs here, before
+        # the expensive setup below. It has since grown to ~2,550 tests and
+        # ~140s serially, the longest check in the guards lane (and so the
+        # whole gate for a CI-only change), so pytest-xdist spreads it over
+        # up to 8 workers (~45s); `auto` sizes it to a 4-core runner.
         # `.github/scripts/` is included deliberately: six test files live
         # beside the scripts they cover (target-run summary, the Windows
         # e2e/MSVC-cache policies, catalogued-asset download, nextest fetch,
@@ -617,12 +620,18 @@ def checks() -> list[Check]:
                 "pytest",
                 "--with",
                 "pyyaml",
+                "--with",
+                "pytest-xdist",
                 "python",
                 "-m",
                 "pytest",
                 "tests/",
                 ".github/scripts/",
                 "-q",
+                "-n",
+                "auto",
+                "--maxprocesses",
+                "8",
             ),
             "guards",
             slow=True,
