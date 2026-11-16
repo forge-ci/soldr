@@ -1,17 +1,23 @@
 //! Toolchain-catalogue first asset resolver.
 //!
 //! Before consulting `api.github.com/repos/<owner>/<repo>/releases/...`
-//! the release-asset resolver consults the v1 catalogue published by
-//! `zackees/soldr-toolchain` and served over GitHub Pages:
+//! the release-asset resolver consults the catalogue published by
+//! `zackees/soldr-toolchain` and served over GitHub Pages, for example:
 //!
 //! ```text
-//! https://zackees.github.io/soldr-toolchain/catalogue.v1.json
+//! https://forge-ci.github.io/soldr-toolchain/catalogue.v2.json
+//! https://zackees.github.io/soldr-toolchain/catalogue.v2.json
 //! ```
 //!
+//! The origin is not a single constant: `toolchain_origin` resolves
+//! an ordered origin list from the redirect manifest (with an on-disk cache
+//! and a built-in fallback list), and a catalogue fetch fails over to the
+//! next origin on a network error, timeout, HTTP 404 or 5xx. Content and
+//! integrity errors never fail over.
+//!
 //! Migration (soldr#988): the legacy manifest-branch origin and its
-//! nightly job were retired in Phase 5.
-//! There is no fallback to a second URL — a catalogue miss degrades
-//! straight to the live GitHub Releases API. Use the catalogue's own
+//! nightly job were retired in Phase 5. A catalogue miss on every origin
+//! degrades straight to the live GitHub Releases API. Use the catalogue's own
 //! producer (`scripts/build_catalogue_v1.py` on `zackees/soldr-toolchain`)
 //! to publish new entries.
 //!
@@ -44,13 +50,20 @@
 //!
 //! ## Env-var seams
 //!
-//! * `SOLDR_TOOLCHAIN_ORIGIN` — override the catalogue origin (the
-//!   resolver builds `{origin}/catalogue.v1.json`). See Phase 2.
-//! * `SOLDR_TOOLCHAIN_CATALOGUE_URL` — override the full URL (testing
+//! * `SOLDR_TOOLCHAIN_ORIGIN` — use exactly this catalogue origin (the
+//!   resolver builds `{origin}/catalogue.v2.json`); skips the redirect
+//!   manifest.
+//! * `SOLDR_TOOLCHAIN_CATALOGUE_URL` — override the full v1 URL (testing
 //!   + air-gapped mirrors). When set takes precedence over
-//!     `SOLDR_TOOLCHAIN_ORIGIN`.
-//! * `SOLDR_MANIFEST_DISABLE=1` — skip the catalogue lookup entirely;
-//!   the resolver falls through to the live GitHub Releases API.
+//!     `SOLDR_TOOLCHAIN_ORIGIN` and skips the redirect manifest.
+//! * `SOLDR_TOOLCHAIN_CATALOGUE_V2_URL` — override the full v2 URL; the v1
+//!   fallback uses `SOLDR_TOOLCHAIN_ORIGIN` or the built-in origins, never
+//!   the redirect manifest.
+//! * `SOLDR_TOOLCHAIN_REDIRECT_URL` / `SOLDR_TOOLCHAIN_REDIRECT=0` — see
+//!   `toolchain_origin`.
+//! * `SOLDR_MANIFEST_DISABLE=1` — skip the catalogue lookup entirely (and
+//!   with it the redirect manifest); the resolver falls through to the live
+//!   GitHub Releases API.
 //!
 //! ## Why a separate file from per-tool manifests?
 //!
@@ -70,23 +83,15 @@ use super::catalogue_model::{
 use super::catalogue_transport::{
     cache_busted_url, materialize_catalogue_entry, verify_catalogue_asset_sha256,
 };
+use super::toolchain_origin::{
+    fetch_from_origins, status_fails_over, trimmed_env, OriginError, OriginPlan, ResolvedOrigins,
+};
 use crate::core::{SoldrError, SoldrPaths};
 use crate::platform::sync::Mutex;
 
-/// soldr#988 Phase 2 — default origin of the v1 catalogue document
-/// published by `zackees/soldr-toolchain`. The full URL we fetch is
-/// `{origin}/catalogue.v1.json`. Overridable via
-/// [`TOOLCHAIN_ORIGIN_ENV_VAR`].
-pub const DEFAULT_TOOLCHAIN_ORIGIN: &str = "https://zackees.github.io/soldr-toolchain";
-
-/// soldr#988 Phase 2 — env var that overrides
-/// [`DEFAULT_TOOLCHAIN_ORIGIN`]. Set to an `https://` URL (no
-/// trailing slash). Test seam + air-gapped-mirror seam.
-pub const TOOLCHAIN_ORIGIN_ENV_VAR: &str = "SOLDR_TOOLCHAIN_ORIGIN";
-
 /// soldr#988 Phase 5 — full-URL override for the catalogue endpoint.
-/// When set takes precedence over [`TOOLCHAIN_ORIGIN_ENV_VAR`]'s
-/// origin+filename composition. Test seam — lets integration tests
+/// When set takes precedence over the origin+filename composition
+/// (including `SOLDR_TOOLCHAIN_ORIGIN` and the redirect manifest). Test seam — lets integration tests
 /// point at a one-shot HTTP listener whose path doesn't match the
 /// canonical `/catalogue.v1.json`.
 pub const TOOLCHAIN_CATALOGUE_URL_ENV_VAR: &str = "SOLDR_TOOLCHAIN_CATALOGUE_URL";
@@ -135,7 +140,8 @@ pub async fn fetch_verified_catalogue_asset(
     // than the one that supplied the pin being re-checked, which defeats the
     // generation binding this verification exists to enforce.
     let config = CatalogueConfig::snapshot();
-    let index = get_or_fetch_for(&config).await;
+    let fetched = get_or_fetch_for(&config).await;
+    let index = &fetched.index;
     let entry = index
         .lookup(owner, repo, tag, asset)
         .cloned()
@@ -153,27 +159,22 @@ pub async fn fetch_verified_catalogue_asset(
     // but CDN edges can briefly serve generations from opposite sides of that
     // commit. Refetch both objects once with cache-busters and require the new
     // catalogue digest; unverified bytes are never returned.
-    let refreshed = match (index.source, &config) {
-        // Once a v2 generation supplied the pin, only a refreshed v2
-        // generation may replace it.  Never turn a CDN mismatch into a v1
-        // request, which could mix publication generations.
-        (CatalogueSource::CanonicalV2, CatalogueConfig::CanonicalV2 { v2_url, .. }) => {
-            fetch_v2_index_from(&cache_busted_url(v2_url)).await?
+    //
+    // The refresh is bound to the exact document URL that supplied the pin --
+    // same origin, same schema. It never fails over to another origin and
+    // never turns a v2 pin into a v1 request, either of which could mix
+    // publication generations.
+    let refreshed = match (index.source, fetched.served_url.as_deref()) {
+        (CatalogueSource::CanonicalV2, Some(url)) => {
+            fetch_v2_index_from(&cache_busted_url(url)).await?
         }
-        (CatalogueSource::LegacyV1, CatalogueConfig::LegacyV1 { url }) => {
+        (CatalogueSource::LegacyV1, Some(url)) => {
             fetch_v1_index_from(&cache_busted_url(url)).await?
         }
-        // A v2 request that fell back on 404/410 is served by this snapshot's
-        // own v1 URL, resolved at snapshot time precisely so the fallback
-        // cannot come from a later environment state.
-        (CatalogueSource::LegacyV1, CatalogueConfig::CanonicalV2 { v1_url, .. }) => {
-            fetch_v1_index_from(&cache_busted_url(v1_url)).await?
-        }
         // A pin can only have come from a document this configuration itself
-        // fetched, so the remaining pairs mean the index and the snapshot
-        // disagree. Refusing beats guessing which endpoint to dial.
-        (_, CatalogueConfig::Disabled)
-        | (CatalogueSource::CanonicalV2, CatalogueConfig::LegacyV1 { .. }) => {
+        // fetched, so a pin without a serving URL means the index and the
+        // snapshot disagree. Refusing beats guessing which endpoint to dial.
+        (_, None) => {
             return Err(SoldrError::Other(format!(
                 "catalogue pin for {owner}/{repo} {tag}/{asset} did not verify, and the \
                  resolved catalogue configuration cannot refresh the publication \
@@ -212,22 +213,29 @@ enum CatalogueConfig {
     /// explicit air-gapped/test URL must never be reinterpreted as a v2
     /// document.
     LegacyV1 { url: String },
-    /// The canonical path: try v2, fall back to v1 on 404/410.
-    CanonicalV2 { v2_url: String, v1_url: String },
+    /// The canonical path: for each origin in turn, try v2 and fall back to
+    /// that origin's v1 on 404/410. `v2_override` is
+    /// [`TOOLCHAIN_CATALOGUE_V2_URL_ENV_VAR`]; when set it replaces every
+    /// origin's v2 document and the plan never fetches the redirect manifest.
+    CanonicalV2 {
+        v2_override: Option<String>,
+        origins: OriginPlan,
+    },
 }
 
 impl CatalogueConfig {
     /// Read each catalogue environment variable exactly once and resolve the
     /// configuration they describe.
     ///
-    /// Precedence is the historical one, unchanged: disable beats everything;
-    /// otherwise an explicit [`TOOLCHAIN_CATALOGUE_URL_ENV_VAR`] beats the
-    /// origin composition; otherwise the origin composes both documents.
+    /// Precedence is the historical one, unchanged: disable beats everything
+    /// (and so never reaches the redirect manifest); otherwise an explicit
+    /// [`TOOLCHAIN_CATALOGUE_URL_ENV_VAR`] beats the origin composition;
+    /// otherwise the origin plan composes both documents.
     ///
-    /// `v1_url` is resolved eagerly on the [`CatalogueConfig::CanonicalV2`]
-    /// arm even though only a 404/410 fallback uses it. That is the point --
-    /// the fallback endpoint must come from the same snapshot as the primary,
-    /// not from an environment read taken after the v2 response arrived.
+    /// The origin *plan* is part of the snapshot, so the fallback endpoints
+    /// come from the same environment read as the primary. Resolving the plan
+    /// into origins (the redirect manifest fetch) happens inside the
+    /// single-flight fetch, at most once per configuration.
     fn snapshot() -> Self {
         if disabled_via_env() {
             return Self::Disabled;
@@ -235,27 +243,16 @@ impl CatalogueConfig {
         if let Some(url) = trimmed_env(TOOLCHAIN_CATALOGUE_URL_ENV_VAR) {
             return Self::LegacyV1 { url };
         }
-        let origin = resolve_toolchain_origin();
+        let v2_override = trimmed_env(TOOLCHAIN_CATALOGUE_V2_URL_ENV_VAR);
+        let origins = OriginPlan::from_env();
         Self::CanonicalV2 {
-            v2_url: trimmed_env(TOOLCHAIN_CATALOGUE_V2_URL_ENV_VAR)
-                .unwrap_or_else(|| format!("{origin}/{CATALOGUE_V2_DOC_NAME}")),
-            v1_url: format!("{origin}/{CATALOGUE_DOC_NAME}"),
+            origins: if v2_override.is_some() {
+                origins.without_redirect()
+            } else {
+                origins
+            },
+            v2_override,
         }
-    }
-}
-
-/// The trimmed value of `name`, or `None` when it is unset or blank.
-///
-/// One helper rather than a chain repeated per variable, so "set but blank
-/// counts as unset" is decided in exactly one place for every catalogue
-/// endpoint override (soldr#2740).
-fn trimmed_env(name: &str) -> Option<String> {
-    let value = std::env::var(name).ok()?;
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
     }
 }
 
@@ -294,7 +291,35 @@ pub const MAX_CACHED_CONFIGS: usize = 8;
 type CatalogueEntries = Vec<(CatalogueConfig, CatalogueSlot)>;
 
 /// One configuration's catalogue, fetched at most once per residency.
-type CatalogueSlot = Arc<tokio::sync::OnceCell<Arc<ManifestIndex>>>;
+type CatalogueSlot = Arc<tokio::sync::OnceCell<Arc<FetchedCatalogue>>>;
+
+/// A parsed catalogue and the exact document URL that served it.
+///
+/// The URL matters once the origin is a list: a pin that fails to verify is
+/// re-checked against a cache-busted copy of the *same* document, never a
+/// different origin's (see [`fetch_verified_catalogue_asset`]).
+#[derive(Debug)]
+struct FetchedCatalogue {
+    index: Arc<ManifestIndex>,
+    served_url: Option<String>,
+}
+
+impl FetchedCatalogue {
+    /// An index no document supplied: disabled, degraded, or fail-closed.
+    fn unserved(index: ManifestIndex) -> Self {
+        Self {
+            index: Arc::new(index),
+            served_url: None,
+        }
+    }
+
+    fn served(index: ManifestIndex, url: &str) -> Self {
+        Self {
+            index: Arc::new(index),
+            served_url: Some(url.to_string()),
+        }
+    }
+}
 
 fn promote_cached<V: Clone>(
     entries: &mut Vec<(CatalogueConfig, V)>,
@@ -342,37 +367,6 @@ fn disabled_from_value(value: Option<&str>) -> bool {
     value.is_some_and(crate::core::flag_value)
 }
 
-/// soldr#988 Phase 2 — resolve the catalogue origin, honoring
-/// [`TOOLCHAIN_ORIGIN_ENV_VAR`]. Trailing slash is stripped so the
-/// caller can append `/catalogue.v1.json` unconditionally.
-pub fn resolve_toolchain_origin() -> String {
-    trimmed_env(TOOLCHAIN_ORIGIN_ENV_VAR)
-        .unwrap_or_else(|| DEFAULT_TOOLCHAIN_ORIGIN.to_string())
-        .trim_end_matches('/')
-        .to_string()
-}
-
-/// soldr#988 — full URL of the catalogue document.
-/// [`TOOLCHAIN_CATALOGUE_URL_ENV_VAR`] takes precedence (test seam +
-/// air-gapped-mirror seam); otherwise we compose
-/// `{resolve_toolchain_origin()}/catalogue.v1.json`.
-///
-/// Retained for the one-shot `soldr toolchain catalogue` verb and for
-/// callers outside this module. The fetch path resolves its endpoints
-/// through the module-private `CatalogueConfig::snapshot` instead, so
-/// identity and fetch cannot disagree (soldr#2951).
-pub fn resolve_catalogue_url() -> String {
-    trimmed_env(TOOLCHAIN_CATALOGUE_URL_ENV_VAR)
-        .unwrap_or_else(|| format!("{}/{}", resolve_toolchain_origin(), CATALOGUE_DOC_NAME))
-}
-
-/// The canonical v2 endpoint; unlike the legacy override this must not
-/// reinterpret an explicit v1 URL as a v2 document.
-pub fn resolve_catalogue_v2_url() -> String {
-    trimmed_env(TOOLCHAIN_CATALOGUE_V2_URL_ENV_VAR)
-        .unwrap_or_else(|| format!("{}/{}", resolve_toolchain_origin(), CATALOGUE_V2_DOC_NAME))
-}
-
 /// Fetch the catalogue body once per resolved configuration, caching the
 /// parsed index in the module-private, bounded, single-flight catalogue cache.
 /// On any error (disable env var, HTTP failure, network failure, timeout,
@@ -388,13 +382,13 @@ pub async fn get_or_fetch() -> Arc<ManifestIndex> {
     // Identity and fetch are the same value, so no mutation between them can
     // bind one configuration's key to another configuration's bytes.
     let config = CatalogueConfig::snapshot();
-    get_or_fetch_for(&config).await
+    Arc::clone(&get_or_fetch_for(&config).await.index)
 }
 
 /// [`get_or_fetch`] against a configuration the caller has already
 /// snapshotted, so a caller needing the configuration for its own decisions
 /// cannot end up with a second, different one.
-async fn get_or_fetch_for(config: &CatalogueConfig) -> Arc<ManifestIndex> {
+async fn get_or_fetch_for(config: &CatalogueConfig) -> Arc<FetchedCatalogue> {
     // Move-to-front on a hit: with `MAX_CACHED_CONFIGS` this small, recency
     // is the only eviction signal worth keeping. The guard drops at the end
     // of this block, before any await (see [`CatalogueEntries`]).
@@ -406,10 +400,10 @@ async fn get_or_fetch_for(config: &CatalogueConfig) -> Arc<ManifestIndex> {
             slot
         })
     };
-    let index = slot
+    let fetched = slot
         .get_or_init(|| async { Arc::new(fetch_for(config).await) })
         .await;
-    Arc::clone(index)
+    Arc::clone(fetched)
 }
 
 /// Fetch the catalogue this configuration names, degrading to an empty index.
@@ -417,18 +411,24 @@ async fn get_or_fetch_for(config: &CatalogueConfig) -> Arc<ManifestIndex> {
 /// Contains no environment reads at all: the snapshot is the only input, so
 /// what is fetched cannot drift from what the cache entry is keyed on
 /// (soldr#2951).
-async fn fetch_for(config: &CatalogueConfig) -> ManifestIndex {
-    if matches!(config, CatalogueConfig::Disabled) {
-        return ManifestIndex::empty();
-    }
+async fn fetch_for(config: &CatalogueConfig) -> FetchedCatalogue {
+    let origins = match config {
+        // Disabled is the offline switch: no catalogue request and no
+        // redirect manifest request either.
+        CatalogueConfig::Disabled => return FetchedCatalogue::unserved(ManifestIndex::empty()),
+        CatalogueConfig::LegacyV1 { .. } => Vec::new(),
+        // Resolved once, outside the retry wrapper: the redirect manifest has
+        // its own short budget and its own fallbacks, and never fails.
+        CatalogueConfig::CanonicalV2 { origins, .. } => origins.resolve().await.origins,
+    };
     // soldr#2132: retry before giving up. Falling back to an empty index
     // is a *permanent* decision for this configuration -- it drops the sha256
     // pins and makes every later syslib lookup report "not yet ingested" -- so
     // a single truncated response body must not be enough to trigger it.
     // That is what failed two lanes of the v0.8.30 release build.
-    let attempt = || fetch_configured_once(config);
+    let attempt = || fetch_configured_once(config, &origins);
     match super::retry::with_backoff("the soldr-toolchain catalogue", attempt).await {
-        Ok(index) => index,
+        Ok(fetched) => fetched,
         Err(err) => {
             // soldr#2132 item 4. This used to be `.unwrap_or_else(|_|
             // empty())` -- the error was discarded and the process carried
@@ -448,7 +448,7 @@ async fn fetch_for(config: &CatalogueConfig) -> ManifestIndex {
                  and tools will not resolve -- which can surface later as an \
                  apparently unrelated compile error."
             );
-            ManifestIndex::empty()
+            FetchedCatalogue::unserved(ManifestIndex::empty())
         }
     }
 }
@@ -456,49 +456,141 @@ async fn fetch_for(config: &CatalogueConfig) -> ManifestIndex {
 /// One attempt at the configured catalogue, used by [`fetch_for`] under the
 /// retry wrapper. soldr#988 Phase 5: the legacy `manifest`-branch fallback was
 /// removed along with its origin and refresh workflow.
-async fn fetch_configured_once(config: &CatalogueConfig) -> Result<ManifestIndex, SoldrError> {
+async fn fetch_configured_once(
+    config: &CatalogueConfig,
+    origins: &[String],
+) -> Result<FetchedCatalogue, SoldrError> {
     match config {
         // Unreachable -- [`fetch_for`] short-circuits before the retry wrapper
         // so a disabled catalogue costs no attempt and no backoff. Spelled out
         // rather than `unreachable!()` because degrading is the module's
         // universal failure posture and a panic here would be the one place
         // it does not hold.
-        CatalogueConfig::Disabled => Ok(ManifestIndex::empty()),
+        CatalogueConfig::Disabled => Ok(FetchedCatalogue::unserved(ManifestIndex::empty())),
         // This override is intentionally *only* a v1 override.  Existing
         // air-gapped and test callers must not have their explicit URL
         // reinterpreted as a v2 endpoint.
-        CatalogueConfig::LegacyV1 { url } => fetch_v1_index_from(url).await,
-        CatalogueConfig::CanonicalV2 { v2_url, v1_url } => {
-            let safe_v2_url = super::stream_download::safe_asset_url(v2_url);
-            let client =
-                super::stream_download::control_http_client("the soldr-toolchain catalogue")?;
-            let resp = super::stream_download::send_control_request_with_timeout(
-                super::stream_download::get_request(&client, v2_url),
-                &safe_v2_url,
-                MANIFEST_FETCH_TIMEOUT,
-            )
-            .await?;
-            match resp.status().as_u16() {
-                status if should_fallback_to_v1(status) => fetch_v1_index_from(v1_url).await,
-                status if (200..300).contains(&status) => {
-                    let body = super::stream_download::read_control_text(
-                        resp,
-                        &safe_v2_url,
-                        MANIFEST_FETCH_TIMEOUT,
-                    )
-                    .await?;
-                    // A present v2 response is authoritative: malformed,
-                    // unknown, or semantically invalid data must never
-                    // silently revive v1/live API.
-                    let parsed = ManifestIndex::from_v2_json(&body);
-                    let state_bound =
-                        parsed.is_some() && bind_v2_publication_state(&body).await.is_ok();
-                    Ok(authoritative_v2_index(parsed, state_bound))
-                }
-                _ => Ok(fail_closed_v2_index()),
-            }
+        CatalogueConfig::LegacyV1 { url } => Ok(FetchedCatalogue::served(
+            fetch_v1_index_from(url).await?,
+            url,
+        )),
+        CatalogueConfig::CanonicalV2 { v2_override, .. } => {
+            fetch_canonical(v2_override.as_deref(), origins).await
         }
     }
+}
+
+/// Fetch the canonical catalogue from an ordered origin list.
+///
+/// Per origin: v2 first; a 404/410 falls back to the *same* origin's v1. An
+/// origin that is unreachable, times out, or answers 404 (on both documents)
+/// or 5xx hands over to the next origin. A v2 document that answers is
+/// authoritative -- malformed, unknown or unbound content fails closed and
+/// never fails over, exactly as with a single origin.
+async fn fetch_canonical(
+    v2_override: Option<&str>,
+    origins: &[String],
+) -> Result<FetchedCatalogue, SoldrError> {
+    if let Some(v2_url) = v2_override {
+        // An explicit v2 endpoint is a single place, so it keeps its old
+        // single-origin semantics; only its v1 fallback walks the origins.
+        match fetch_v2_at(v2_url, true).await {
+            Ok(V2Outcome::Present(fetched)) => return Ok(fetched),
+            Ok(V2Outcome::Missing) => {}
+            Err(error) => return Err(error.into_inner()),
+        }
+        return fetch_from_origins(
+            origins,
+            "the soldr-toolchain catalogue",
+            |origin, _| async move { fetch_v1_at(&format!("{origin}/{CATALOGUE_DOC_NAME}")).await },
+        )
+        .await;
+    }
+    fetch_from_origins(
+        origins,
+        "the soldr-toolchain catalogue",
+        |origin, is_last| async move {
+            let v2_url = format!("{origin}/{CATALOGUE_V2_DOC_NAME}");
+            match fetch_v2_at(&v2_url, is_last).await? {
+                V2Outcome::Present(fetched) => Ok(fetched),
+                V2Outcome::Missing => fetch_v1_at(&format!("{origin}/{CATALOGUE_DOC_NAME}")).await,
+            }
+        },
+    )
+    .await
+}
+
+/// Test seam: fetch the canonical catalogue from an explicit origin list,
+/// bypassing the environment and the process-wide cache. Lets integration
+/// tests prove failover against loopback origins, which a redirect manifest
+/// (https-only) cannot name.
+#[doc(hidden)]
+pub async fn fetch_catalogue_from_origins(
+    origins: &[String],
+) -> Result<(Arc<ManifestIndex>, Option<String>), SoldrError> {
+    let fetched = fetch_canonical(None, origins).await?;
+    Ok((fetched.index, fetched.served_url))
+}
+
+/// What one origin's v2 endpoint said.
+enum V2Outcome {
+    /// An authoritative answer: a bound index, or a fail-closed one.
+    Present(FetchedCatalogue),
+    /// 404/410: this origin publishes no v2 document; try its v1.
+    Missing,
+}
+
+/// GET one v2 document. `fail_closed_on_server_error` is set for the last
+/// origin (and an explicit v2 endpoint): with nowhere left to fail over to, a
+/// 5xx keeps its historical fail-closed meaning instead of degrading.
+async fn fetch_v2_at(
+    v2_url: &str,
+    fail_closed_on_server_error: bool,
+) -> Result<V2Outcome, OriginError> {
+    let safe_v2_url = super::stream_download::safe_asset_url(v2_url);
+    let client = super::stream_download::control_http_client("the soldr-toolchain catalogue")
+        .map_err(OriginError::Fatal)?;
+    let resp = super::stream_download::send_control_request_with_timeout(
+        super::stream_download::get_request(&client, v2_url),
+        &safe_v2_url,
+        MANIFEST_FETCH_TIMEOUT,
+    )
+    .await
+    .map_err(OriginError::Unavailable)?;
+    let status = resp.status().as_u16();
+    if should_fallback_to_v1(status) {
+        return Ok(V2Outcome::Missing);
+    }
+    if (200..300).contains(&status) {
+        let body =
+            super::stream_download::read_control_text(resp, &safe_v2_url, MANIFEST_FETCH_TIMEOUT)
+                .await
+                .map_err(OriginError::Unavailable)?;
+        // A present v2 response is authoritative: malformed, unknown, or
+        // semantically invalid data must never silently revive v1/live API.
+        let parsed = ManifestIndex::from_v2_json(&body);
+        let state_bound = parsed.is_some() && bind_v2_publication_state(&body).await.is_ok();
+        let index = authoritative_v2_index(parsed, state_bound);
+        return Ok(V2Outcome::Present(if index.fail_closed {
+            FetchedCatalogue::unserved(index)
+        } else {
+            FetchedCatalogue::served(index, v2_url)
+        }));
+    }
+    if status_fails_over(status) && !fail_closed_on_server_error {
+        return Err(OriginError::Unavailable(SoldrError::Network(format!(
+            "catalogue fetch {safe_v2_url} returned HTTP {status}"
+        ))));
+    }
+    Ok(V2Outcome::Present(FetchedCatalogue::unserved(
+        fail_closed_v2_index(),
+    )))
+}
+
+/// [`fetch_v1_index_from`] with the failure classified for origin failover.
+async fn fetch_v1_at(url: &str) -> Result<FetchedCatalogue, OriginError> {
+    let index = fetch_v1_classified(url).await?;
+    Ok(FetchedCatalogue::served(index, url))
 }
 
 pub(super) fn should_fallback_to_v1(status: u16) -> bool {
@@ -511,24 +603,40 @@ pub(super) fn should_fallback_to_v1(status: u16) -> bool {
 /// (e.g. v1's `schema_version`, `generated_at`, `origin`), so the
 /// same struct cleanly absorbs both shapes.
 async fn fetch_v1_index_from(url: &str) -> Result<ManifestIndex, SoldrError> {
+    fetch_v1_classified(url)
+        .await
+        .map_err(OriginError::into_inner)
+}
+
+async fn fetch_v1_classified(url: &str) -> Result<ManifestIndex, OriginError> {
     let safe_url = super::stream_download::safe_asset_url(url);
-    let client = super::stream_download::control_http_client("the soldr-toolchain catalogue")?;
+    let client = super::stream_download::control_http_client("the soldr-toolchain catalogue")
+        .map_err(OriginError::Fatal)?;
     let resp = super::stream_download::send_control_request_with_timeout(
         super::stream_download::get_request(&client, url),
         &safe_url,
         MANIFEST_FETCH_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(OriginError::Unavailable)?;
     if !resp.status().is_success() {
-        return Err(SoldrError::Network(format!(
-            "manifest fetch {safe_url} returned HTTP {}",
-            resp.status()
-        )));
+        let status = resp.status().as_u16();
+        return Err(OriginError::from_status(
+            status,
+            SoldrError::Network(format!(
+                "manifest fetch {safe_url} returned HTTP {}",
+                resp.status()
+            )),
+        ));
     }
-    let body =
-        super::stream_download::read_control_text(resp, &safe_url, MANIFEST_FETCH_TIMEOUT).await?;
-    ManifestIndex::from_v1_json(&body)
-        .ok_or_else(|| SoldrError::Other(format!("manifest {safe_url} did not parse as JSON")))
+    let body = super::stream_download::read_control_text(resp, &safe_url, MANIFEST_FETCH_TIMEOUT)
+        .await
+        .map_err(OriginError::Unavailable)?;
+    ManifestIndex::from_v1_json(&body).ok_or_else(|| {
+        OriginError::Fatal(SoldrError::Other(format!(
+            "manifest {safe_url} did not parse as JSON"
+        )))
+    })
 }
 
 /// Fetch a canonical v2 document.  This never falls through to v1: it is
@@ -558,112 +666,188 @@ async fn fetch_v2_index_from(url: &str) -> Result<ManifestIndex, SoldrError> {
     Ok(index)
 }
 
-/// soldr#988 Phase 2 — `soldr toolchain catalogue` verb. Fetches
-/// the catalogue's HEAD-equivalent metadata (one cheap GET, body
-/// streamed only as needed for the entry count) and prints either a
-/// human-readable summary or the stable JSON form.
+/// soldr#988 Phase 2 — `soldr toolchain catalogue` verb. Resolves the
+/// origin list (redirect manifest, cache, built-ins), GETs the v1 catalogue
+/// from the first origin that serves it, and prints either a human-readable
+/// summary or the stable JSON form.
 pub async fn run_toolchain_catalogue(json: bool) -> Result<i32, SoldrError> {
-    let url = resolve_catalogue_url();
-    let safe_url = super::stream_download::safe_asset_url(&url);
+    let mut plan = OriginPlan::from_env();
+    let explicit_url = trimmed_env(TOOLCHAIN_CATALOGUE_URL_ENV_VAR);
+    if explicit_url.is_some() || disabled_via_env() {
+        // An explicit endpoint, or the offline switch, never fetches the
+        // redirect manifest.
+        plan = plan.without_redirect();
+    }
+    let resolved = plan.resolve().await;
+    let candidates: Vec<(String, String)> = match explicit_url {
+        Some(url) => vec![(resolved.origins.first().cloned().unwrap_or_default(), url)],
+        None => resolved
+            .origins
+            .iter()
+            .map(|origin| (origin.clone(), format!("{origin}/{CATALOGUE_DOC_NAME}")))
+            .collect(),
+    };
     let client = super::stream_download::control_http_client("the soldr-toolchain catalogue")?;
-    let resp_result = super::stream_download::send_control_request_with_timeout(
-        super::stream_download::get_request(&client, &url),
+    let last = candidates.len().saturating_sub(1);
+    for (position, (origin, url)) in candidates.iter().enumerate() {
+        let probe = probe_catalogue(&client, url).await;
+        let fails_over = match &probe {
+            Err(_) => true,
+            Ok(probe) => status_fails_over(probe.status),
+        };
+        if fails_over && position < last {
+            eprintln!(
+                "soldr toolchain catalogue: {} unavailable; trying the next origin",
+                super::stream_download::safe_asset_url(url)
+            );
+            continue;
+        }
+        let report = CatalogueReport {
+            origin,
+            url: &super::stream_download::safe_asset_url(url),
+            resolved: &resolved,
+            json,
+        };
+        return Ok(report.print(probe));
+    }
+    Err(SoldrError::Other(
+        "no soldr-toolchain catalogue origin is configured".into(),
+    ))
+}
+
+/// One GET of a catalogue document, with the response metadata the verb
+/// reports. `Err` is a transport failure (no HTTP status).
+struct CatalogueProbe {
+    status: u16,
+    content_length: Option<u64>,
+    etag: Option<String>,
+    last_modified: Option<String>,
+    body: Option<Result<String, SoldrError>>,
+}
+
+async fn probe_catalogue(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<CatalogueProbe, SoldrError> {
+    let safe_url = super::stream_download::safe_asset_url(url);
+    let resp = super::stream_download::send_control_request_with_timeout(
+        super::stream_download::get_request(client, url),
         &safe_url,
         MANIFEST_FETCH_TIMEOUT,
     )
-    .await;
-
-    match resp_result {
-        Err(e) => {
-            print_catalogue_error(&safe_url, &format!("network error: {e}"), json);
-            Ok(1)
-        }
-        Ok(resp) => {
-            let status = resp.status();
-            let etag = resp
-                .headers()
-                .get("etag")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            let last_modified = resp
-                .headers()
-                .get("last-modified")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            let content_length = resp
-                .headers()
-                .get("content-length")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok());
-            if !status.is_success() {
-                print_catalogue_error(
-                    &safe_url,
-                    &format!(
-                        "HTTP {} (the catalogue file may not be published yet)",
-                        status
-                    ),
-                    json,
-                );
-                return Ok(1);
-            }
-            let body = match super::stream_download::read_control_text(
-                resp,
-                &safe_url,
-                MANIFEST_FETCH_TIMEOUT,
-            )
-            .await
-            {
-                Ok(b) => b,
-                Err(e) => {
-                    print_catalogue_error(&safe_url, &format!("body read error: {e}"), json);
-                    return Ok(1);
-                }
-            };
-            let parsed = ManifestIndex::from_json(&body);
-            let n_entries = parsed.as_ref().map(|i| i.entries.len()).unwrap_or(0);
-            if json {
-                let payload = serde_json::json!({
-                    "schema_version": 1,
-                    "origin": super::stream_download::safe_asset_url(&resolve_toolchain_origin()),
-                    "url": safe_url,
-                    "http_status": status.as_u16(),
-                    "content_length": content_length,
-                    "etag": etag,
-                    "last_modified": last_modified,
-                    "entries": n_entries,
-                });
-                println!("{}", serde_json::to_string(&payload).unwrap_or_default());
-            } else {
-                println!("soldr-toolchain catalogue:");
-                println!("  url:            {safe_url}");
-                println!("  http status:    {}", status.as_u16());
-                if let Some(len) = content_length {
-                    println!("  content-length: {len}");
-                }
-                if let Some(etag) = etag {
-                    println!("  etag:           {etag}");
-                }
-                if let Some(lm) = last_modified {
-                    println!("  last-modified:  {lm}");
-                }
-                println!("  entries:        {n_entries}");
-            }
-            Ok(0)
-        }
-    }
+    .await?;
+    let header = |name: &str| {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    };
+    let etag = header("etag");
+    let last_modified = header("last-modified");
+    let content_length = header("content-length").and_then(|s| s.parse::<u64>().ok());
+    let status = resp.status().as_u16();
+    let body = if resp.status().is_success() {
+        Some(
+            super::stream_download::read_control_text(resp, &safe_url, MANIFEST_FETCH_TIMEOUT)
+                .await,
+        )
+    } else {
+        None
+    };
+    Ok(CatalogueProbe {
+        status,
+        content_length,
+        etag,
+        last_modified,
+        body,
+    })
 }
 
-fn print_catalogue_error(url: &str, reason: &str, json: bool) {
-    if json {
-        let payload = serde_json::json!({
+struct CatalogueReport<'a> {
+    origin: &'a str,
+    url: &'a str,
+    resolved: &'a ResolvedOrigins,
+    json: bool,
+}
+
+impl CatalogueReport<'_> {
+    /// Print the probe result; returns the verb's exit code.
+    fn print(&self, probe: Result<CatalogueProbe, SoldrError>) -> i32 {
+        let probe = match probe {
+            Ok(probe) => probe,
+            Err(e) => return self.error(&format!("network error: {e}")),
+        };
+        let body = match probe.body {
+            None => {
+                return self.error(&format!(
+                    "HTTP {} (the catalogue file may not be published yet)",
+                    probe.status
+                ))
+            }
+            Some(Err(e)) => return self.error(&format!("body read error: {e}")),
+            Some(Ok(body)) => body,
+        };
+        let n_entries = ManifestIndex::from_json(&body)
+            .map(|i| i.entries.len())
+            .unwrap_or(0);
+        if self.json {
+            let mut payload = self.base_payload();
+            payload["http_status"] = probe.status.into();
+            payload["content_length"] = probe.content_length.into();
+            payload["etag"] = probe.etag.into();
+            payload["last_modified"] = probe.last_modified.into();
+            payload["entries"] = n_entries.into();
+            println!("{}", serde_json::to_string(&payload).unwrap_or_default());
+        } else {
+            println!("soldr-toolchain catalogue:");
+            println!("  url:            {}", self.url);
+            println!(
+                "  origins:        {} ({})",
+                self.safe_origins().join(", "),
+                self.resolved.source.as_str()
+            );
+            println!("  http status:    {}", probe.status);
+            if let Some(len) = probe.content_length {
+                println!("  content-length: {len}");
+            }
+            if let Some(etag) = probe.etag {
+                println!("  etag:           {etag}");
+            }
+            if let Some(lm) = probe.last_modified {
+                println!("  last-modified:  {lm}");
+            }
+            println!("  entries:        {n_entries}");
+        }
+        0
+    }
+
+    fn safe_origins(&self) -> Vec<String> {
+        self.resolved
+            .origins
+            .iter()
+            .map(|origin| super::stream_download::safe_asset_url(origin))
+            .collect()
+    }
+
+    fn base_payload(&self) -> serde_json::Value {
+        serde_json::json!({
             "schema_version": 1,
-            "origin": super::stream_download::safe_asset_url(&resolve_toolchain_origin()),
-            "url": url,
-            "error": reason,
-        });
-        eprintln!("{}", serde_json::to_string(&payload).unwrap_or_default());
-    } else {
-        eprintln!("soldr toolchain catalogue: {url} — {reason}");
+            "origin": super::stream_download::safe_asset_url(self.origin),
+            "origins": self.safe_origins(),
+            "origins_source": self.resolved.source.as_str(),
+            "url": self.url,
+        })
+    }
+
+    fn error(&self, reason: &str) -> i32 {
+        if self.json {
+            let mut payload = self.base_payload();
+            payload["error"] = reason.into();
+            eprintln!("{}", serde_json::to_string(&payload).unwrap_or_default());
+        } else {
+            eprintln!("soldr toolchain catalogue: {} — {reason}", self.url);
+        }
+        1
     }
 }
 

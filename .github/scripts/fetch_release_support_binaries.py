@@ -38,7 +38,13 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from urllib.parse import urljoin
 
-from catalogue_http import display_url, open_url, validate_https_url
+from catalogue_http import (
+    display_url,
+    open_url,
+    toolchain_origins,
+    validate_https_url,
+    with_origin_failover,
+)
 from release_artifacts import binary_suffix
 
 
@@ -78,7 +84,6 @@ class ToolCatalog:
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_ORIGIN = "https://zackees.github.io/soldr-toolchain"
 DEFAULT_ISSUE_URL = "https://github.com/zackees/soldr-toolchain/issues/47"
 CRGX_VERSION = PinnedConstant(
     "crates/soldr-fetch/src/fetch/mod.rs", "MANAGED_CRGX_VERSION"
@@ -457,17 +462,38 @@ def fetch_tool(
         print(f"staged {destination} from {matches[0]}")
 
 
-def stage_support_binaries(args: argparse.Namespace) -> None:
-    origin = args.origin.rstrip("/")
-    output_dir: Path = args.package_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
+@dataclass(frozen=True)
+class ToolchainIndex:
+    """A soldr-toolchain root index and the origin that served it."""
+
+    origin: str
+    document: dict
+
+
+def load_toolchain_index(origin: str) -> ToolchainIndex:
+    """Fetch ``<origin>/manifest.json`` from one origin."""
+    origin = origin.rstrip("/")
     index_url = f"{origin}/manifest.json"
     try:
-        index = json.loads(read_url(index_url, timeout=60).decode("utf-8"))
+        document = json.loads(read_url(index_url, timeout=60).decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise SupportBinaryError(
             f"invalid toolchain index at {display_url(index_url)}: {error}"
         ) from error
+    return ToolchainIndex(origin, document)
+
+
+def stage_support_binaries(args: argparse.Namespace) -> None:
+    output_dir: Path = args.package_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    # Every later fetch (per-tool catalogues, relative descriptor URLs) stays
+    # on the origin that served the index, so one run reads one publication.
+    loaded = with_origin_failover(
+        toolchain_origins(args.origin),
+        load_toolchain_index,
+        label="soldr-toolchain index",
+    )
+    origin, index = loaded.origin, loaded.document
 
     versions = {
         "crgx": read_pinned_version(args.repo_root, CRGX_VERSION),
@@ -493,7 +519,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--driver", type=Path, required=True)
     parser.add_argument("--package-dir", type=Path, default=Path("dist/package"))
     parser.add_argument(
-        "--origin", default=os.environ.get("SOLDR_TOOLCHAIN_ORIGIN", DEFAULT_ORIGIN)
+        "--origin",
+        default=None,
+        help=(
+            "soldr-toolchain origin. Default: SOLDR_TOOLCHAIN_ORIGIN, else the "
+            "redirect manifest's origins then the built-ins, with failover."
+        ),
     )
     parser.add_argument("--issue-url", default=DEFAULT_ISSUE_URL)
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)

@@ -7,6 +7,7 @@ import hashlib
 import json
 import unittest
 import urllib.error
+from email.message import Message
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -271,6 +272,64 @@ class ToolchainAssetQueryTests(unittest.TestCase):
         ):
             taq.fetch_json(url)
         self.assertNotIn(secret, str(raised.exception))
+
+    def test_default_origin_fails_over_on_404_but_not_on_bad_content(self) -> None:
+        origins = ["https://a.example/t", "https://b.example/t"]
+        loaded = taq.LoadedManifest(
+            "https://b.example/t/demo.json", parsed(sample_manifest())
+        )
+        calls: list[str] = []
+
+        def unavailable_then_ok(origin: str, _tool: str) -> Any:
+            calls.append(origin)
+            if origin == origins[0]:
+                raise taq.NetworkFetchError("HTTP 404", failover=True)
+            return loaded
+
+        with (
+            mock.patch.object(
+                taq, "toolchain_origins", return_value=origins
+            ) as resolve,
+            mock.patch.object(
+                taq, "load_tool_manifest", side_effect=unavailable_then_ok
+            ),
+            mock.patch("sys.stderr"),
+        ):
+            result = taq._load_manifest(  # pylint: disable=protected-access
+                tool="demo", origin=None, tool_manifest_url_override=None
+            )
+        resolve.assert_called_once_with(None)
+        self.assertIs(result, loaded)
+        self.assertEqual(calls, origins)
+
+        calls.clear()
+
+        def corrupt(origin: str, _tool: str) -> Any:
+            calls.append(origin)
+            raise SystemExit("catalogue descriptor sha256 mismatch for demo")
+
+        with (
+            mock.patch.object(taq, "toolchain_origins", return_value=origins),
+            mock.patch.object(taq, "load_tool_manifest", side_effect=corrupt),
+            self.assertRaisesRegex(SystemExit, "sha256 mismatch"),
+        ):
+            taq._load_manifest(  # pylint: disable=protected-access
+                tool="demo", origin=None, tool_manifest_url_override=None
+            )
+        self.assertEqual(calls, origins[:1])
+
+    def test_http_errors_classify_failover(self) -> None:
+        for code, failover in ((404, True), (503, True), (403, False)):
+            error = urllib.error.HTTPError(
+                "https://example.test/m", code, "x", Message(), None
+            )
+            with (
+                mock.patch.object(taq, "open_url", side_effect=error),
+                mock.patch.object(taq.time, "sleep"),
+                self.assertRaises(taq.NetworkFetchError) as raised,
+            ):
+                taq.fetch_bytes("https://example.test/manifest.json")
+            self.assertEqual(raised.exception.failover, failover, code)
 
 
 if __name__ == "__main__":

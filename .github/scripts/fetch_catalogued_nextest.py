@@ -64,7 +64,9 @@ def canonical_catalogue_version(version: str) -> str:
     return version.removeprefix(CARGO_NEXTEST_RELEASE_PREFIX).removeprefix("v")
 
 
-def resolve_catalogued_metadata(*, target: str, version: str, origin: str) -> dict:
+def resolve_catalogued_metadata(
+    *, target: str, version: str, origin: str | None
+) -> dict:
     query = query_for_target(target)
     return resolve_metadata(
         tool="cargo-nextest",
@@ -143,7 +145,14 @@ def main() -> int:
     parser.add_argument("--target", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--origin", default="https://zackees.github.io/soldr-toolchain")
+    parser.add_argument(
+        "--origin",
+        default=None,
+        help=(
+            "soldr-toolchain origin. Default: SOLDR_TOOLCHAIN_ORIGIN, else the "
+            "redirect manifest's origins then the built-ins, with failover."
+        ),
+    )
     args = parser.parse_args()
 
     metadata = resolve_catalogued_metadata(

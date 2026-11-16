@@ -62,8 +62,8 @@ from dataclasses import dataclass
 # divergent copy could accept a row the runtime rejects, which would make this
 # guard worse than nothing. Resolvable because Python puts a script's own
 # directory on sys.path, which is how the sibling scripts here import it too.
+from catalogue_http import toolchain_origins
 from toolchain_asset_query import (
-    DEFAULT_ORIGIN,
     NetworkFetchError,
     decode_json,
     fetch_bytes,
@@ -408,16 +408,22 @@ def missing_drivers(
     return failures
 
 
-def load_catalogue(origin: str) -> LoadedCatalogue:
+def load_catalogue(origin: str | None) -> LoadedCatalogue:
     """Fetch the published catalogue, preferring v2 exactly as the runtime does.
 
-    Raises `CatalogueUnavailable` when neither document can be resolved; the
-    caller turns that into a skip, never a failure. See the network policy in
-    this module's docstring.
+    Tries each soldr-toolchain origin in turn (``origin`` when given, else the
+    redirect manifest's origins then the built-ins). Raises
+    `CatalogueUnavailable` when no origin resolves either document; the caller
+    turns that into a skip, never a failure. See the network policy in this
+    module's docstring.
     """
     reasons = []
-    for name in CATALOGUE_DOCUMENTS:
-        url = f"{origin.rstrip('/')}/{name}"
+    for base, name in (
+        (base, name)
+        for base in toolchain_origins(origin)
+        for name in CATALOGUE_DOCUMENTS
+    ):
+        url = f"{base.rstrip('/')}/{name}"
         try:
             payload = decode_json(fetch_bytes(url), url)
         except (OSError, NetworkFetchError) as exc:
@@ -478,7 +484,7 @@ def failure_report(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=pathlib.Path, default=REPO_ROOT)
-    parser.add_argument("--origin", default=DEFAULT_ORIGIN)
+    parser.add_argument("--origin", default=None)
     args = parser.parse_args(argv)
 
     repo_root: pathlib.Path = args.repo_root

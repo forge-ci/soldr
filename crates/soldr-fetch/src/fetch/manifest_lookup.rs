@@ -1,7 +1,8 @@
 //! Public compatibility facade for the toolchain catalogue lookup API.
 //!
 //! The implementation is split by concern: model/binding validation,
-//! multipart transport and cache materialization, and network lookup.
+//! multipart transport and cache materialization, network lookup, and the
+//! toolchain origin list (redirect manifest + failover).
 
 #[path = "catalogue_json.rs"]
 mod catalogue_json;
@@ -11,6 +12,8 @@ mod catalogue_lookup;
 mod catalogue_model;
 #[path = "catalogue_transport.rs"]
 mod catalogue_transport;
+#[path = "toolchain_origin.rs"]
+mod toolchain_origin;
 
 // Historical test paths remain crate-private while implementation concerns
 // live in their own sibling modules.
@@ -19,6 +22,7 @@ pub(crate) use super::{retry, segmented_download, stream_download, trust};
 pub use catalogue_lookup::*;
 pub use catalogue_model::*;
 pub(crate) use catalogue_transport::materialize_catalogue_entry;
+pub use toolchain_origin::*;
 
 /// Return the URL Soldr will actually request for this catalogue entry.
 ///

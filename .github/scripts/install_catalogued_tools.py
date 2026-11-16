@@ -21,7 +21,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator, TypeGuard, TypeVar
 from urllib.parse import urlsplit
 
-from catalogue_http import display_url, open_url, validate_https_url
+from catalogue_http import (
+    OriginFetchError,
+    display_url,
+    is_failover_error,
+    open_url,
+    toolchain_origins,
+    validate_https_url,
+    with_origin_failover,
+)
 
 # Use regular-file capture without an installed Python dependency.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -30,7 +38,8 @@ from soldr._process import (  # noqa: E402 -- source-relative bootstrap precedes
     run_captured,
 )
 
-DEFAULT_CATALOGUE_URL = "https://zackees.github.io/soldr-toolchain/catalogue.v2.json"
+CATALOGUE_V2_DOC_NAME = "catalogue.v2.json"
+CATALOGUE_V2_URL_ENV_VAR = "SOLDR_TOOLCHAIN_CATALOGUE_V2_URL"
 SUPPORTED_TARGETS = {
     "x86_64-pc-windows-msvc",
     "aarch64-pc-windows-msvc",
@@ -112,8 +121,9 @@ def retry_network(action: Callable[[], T], *, label: str) -> T:
             http.client.IncompleteRead,
         ) as error:
             if attempt == DOWNLOAD_ATTEMPTS:
-                raise SystemExit(
-                    f"{label} failed after {DOWNLOAD_ATTEMPTS} attempts: {type(error).__name__}"
+                raise OriginFetchError(
+                    f"{label} failed after {DOWNLOAD_ATTEMPTS} attempts: {type(error).__name__}",
+                    failover=is_failover_error(error),
                 ) from None
             time.sleep(RETRY_BASE_DELAY_SECS * (2 ** (attempt - 1)))
     raise AssertionError("retry loop exhausted without returning or raising")
@@ -938,17 +948,43 @@ def install_tools(
     return installed
 
 
+def fetch_default_catalogue(catalogue_url: str | None) -> JsonObject:
+    """Fetch the canonical catalogue from an explicit URL or the origin list.
+
+    ``--catalogue-url`` or ``SOLDR_TOOLCHAIN_CATALOGUE_V2_URL`` is a single
+    explicit endpoint. Otherwise each soldr-toolchain origin is tried in turn
+    (redirect manifest, then built-ins), failing over only when an origin is
+    unavailable; a catalogue that answers but does not validate stays fatal.
+    """
+    explicit = catalogue_url or os.environ.get(CATALOGUE_V2_URL_ENV_VAR, "").strip()
+    if explicit:
+        return fetch_catalogue(explicit)
+    return with_origin_failover(
+        toolchain_origins(),
+        lambda origin: fetch_catalogue(f"{origin}/{CATALOGUE_V2_DOC_NAME}"),
+        label="soldr-toolchain catalogue",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tools", nargs="+")
     parser.add_argument("--target", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--catalogue-url", default=DEFAULT_CATALOGUE_URL)
+    parser.add_argument(
+        "--catalogue-url",
+        default=None,
+        help=(
+            "Explicit catalogue.v2.json URL. Default: "
+            "SOLDR_TOOLCHAIN_CATALOGUE_V2_URL, else every soldr-toolchain origin "
+            "in turn."
+        ),
+    )
     args = parser.parse_args()
 
     result = install_tools(
-        catalogue=fetch_catalogue(args.catalogue_url),
+        catalogue=fetch_default_catalogue(args.catalogue_url),
         tools=args.tools,
         version=args.version,
         target=args.target,

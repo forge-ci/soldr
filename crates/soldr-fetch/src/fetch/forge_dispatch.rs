@@ -1,7 +1,7 @@
-//! soldr#988 Phase 4 — on-demand builds via `zackees/forge`.
+//! soldr#988 Phase 4 — on-demand builds via `forge-ci/forge`.
 //!
 //! When the toolchain catalogue lookup misses (`fetch_catalogue` returns
-//! 404 or the requested entry is absent), soldr can ask `zackees/forge`
+//! 404 or the requested entry is absent), soldr can ask `forge-ci/forge`
 //! to build the missing asset by POST-ing a `workflow_dispatch` event
 //! and polling the resulting run until success or timeout.
 //!
@@ -92,8 +92,8 @@ pub enum ForgeError {
     /// catalogue. Hint includes the recipe-template URL.
     #[error(
         "forge has no recipe for `{recipe}@{version}` on target `{target}`. \
-         Open a PR on zackees/forge with a recipe for this dep, or pick a different \
-         version. forge recipe catalogue: https://github.com/zackees/forge"
+         Open a PR on forge-ci/forge with a recipe for this dep, or pick a different \
+         version. forge recipe catalogue: https://github.com/forge-ci/forge"
     )]
     RecipeNotFound {
         recipe: String,
@@ -505,7 +505,7 @@ mod tests {
             target: "x86_64-pc-windows-msvc".into(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("https://github.com/zackees/forge"));
+        assert!(msg.contains("https://github.com/forge-ci/forge"));
         assert!(msg.contains("foo@1.2.3"));
         assert!(msg.contains("x86_64-pc-windows-msvc"));
     }
@@ -518,7 +518,7 @@ mod tests {
             elapsed_secs: 1801,
             ceiling_secs: 1800,
             last_status: "in_progress".into(),
-            run_url: "https://github.com/zackees/forge/actions/runs/42".into(),
+            run_url: "https://github.com/forge-ci/forge/actions/runs/42".into(),
         };
         let msg = err.to_string();
         assert!(msg.contains("1800"));

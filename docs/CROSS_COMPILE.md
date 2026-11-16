@@ -227,8 +227,11 @@ soldr build --target aarch64-apple-darwin --release -p soldr-cli
 ```
 
 The available `(version, shape)` rows live in the soldr-toolchain
-catalogue at `https://zackees.github.io/soldr-toolchain/catalogue.v1.json`
-under the URL pattern `/apple-sdk/<version>/<shape-slug>/`. The historical
+catalogue (`<origin>/catalogue.v1.json`, where the origin list comes from
+the redirect manifest `https://forge-ci.github.io/soldr-redirect.v1.json`
+followed by `https://forge-ci.github.io/soldr-toolchain` and
+`https://zackees.github.io/soldr-toolchain`; see `SOLDR_TOOLCHAIN_REDIRECT_URL`
+in [API.md](API.md)) under the URL pattern `/apple-sdk/<version>/<shape-slug>/`. The historical
 11.3 row keeps its legacy `/apple-sdk/MacOSX11.3/darwin-universal2/` layout;
 modern rows use the bare version plus shape slug.
 

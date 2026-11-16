@@ -51,7 +51,7 @@ pub use rustup_init::{
 
 pub mod apple_sdk;
 pub mod archive;
-/// soldr#988 Phase 4 — on-demand builds via `zackees/forge` when the
+/// soldr#988 Phase 4 — on-demand builds via `forge-ci/forge` when the
 /// toolchain catalogue lookup misses. See module doc for the env-var
 /// contract and failure surface.
 pub mod forge_dispatch;
