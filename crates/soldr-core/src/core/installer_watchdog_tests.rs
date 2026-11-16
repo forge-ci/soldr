@@ -67,7 +67,7 @@ fn steady_progress_command() -> Command {
         command.args(["-NoProfile", "-NonInteractive", "-Command", "1..8 | ForEach-Object { Write-Output stdout-progress; [Console]::Error.WriteLine('stderr-progress'); Start-Sleep -Milliseconds 250 }"]);
         command
     } else {
-        unix_shell("i=0; while [ $i -lt 16 ]; do printf '%s\\n' stdout-progress; printf '%s\\n' stderr-progress >&2; sleep 0.15; i=$((i + 1)); done")
+        unix_shell("i=0; while [ $i -lt 24 ]; do printf '%s\\n' stdout-progress; printf '%s\\n' stderr-progress >&2; sleep 0.25; i=$((i + 1)); done")
     }
 }
 fn chatty_capture_command() -> Command {
@@ -207,12 +207,22 @@ fn wait_for_test_child<P: ProgressProbe>(
 
 #[test]
 fn steady_progress_can_outlast_the_old_deadline() {
+    // The fixture writes every 250 ms for 6 s, so it outlasts this stall
+    // budget three times over and passes only if each write resets it. The
+    // budget is 8x the write interval: under a loaded gate host a 500 ms
+    // budget (3x a 150 ms interval) let one scheduling hiccup between two
+    // writes kill a healthy installer.
+    let stall = if is_windows_test_host() {
+        test_stall_timeout()
+    } else {
+        Duration::from_secs(2)
+    };
     let mut command = steady_progress_command();
     assert!(run_installer_command(
         &mut command,
         "test installer",
         "test",
-        InstallerWatchdogConfig::for_test(test_stall_timeout(), test_safety_timeout())
+        InstallerWatchdogConfig::for_test(stall, test_safety_timeout())
     )
     .unwrap()
     .success());
