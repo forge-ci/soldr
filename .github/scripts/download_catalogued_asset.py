@@ -196,7 +196,14 @@ def download_verified(metadata: dict, output: Path) -> dict:  # noqa: C901
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tool")
-    parser.add_argument("--origin", default="https://zackees.github.io/soldr-toolchain")
+    parser.add_argument(
+        "--origin",
+        default=None,
+        help=(
+            "soldr-toolchain origin. Default: SOLDR_TOOLCHAIN_ORIGIN, else the "
+            "redirect manifest's origins then the built-ins, with failover."
+        ),
+    )
     parser.add_argument("--platform", required=True)
     parser.add_argument("--arch", required=True)
     parser.add_argument("--extra", default=None)

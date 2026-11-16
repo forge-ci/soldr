@@ -7,9 +7,11 @@ query script exposed:
     python3 .github/scripts/toolchain_asset_query.py \
         --platform linux --arch x86 --extra gnu cargo-zigbuild
 
-It reads ``https://zackees.github.io/soldr-toolchain/manifest.json``, follows
-and verifies the selected tool descriptor, then selects a release/platform
-entry. With ``--json`` it emits
+It reads ``<origin>/manifest.json`` from the first soldr-toolchain origin
+that serves it (``--origin`` / ``SOLDR_TOOLCHAIN_ORIGIN``, else the redirect
+manifest's origins followed by the built-in list: the forge-ci mirror, then
+``https://zackees.github.io/soldr-toolchain``), follows and verifies the
+selected tool descriptor, then selects a release/platform entry. With ``--json`` it emits
 transport-polymorphic metadata (``urls`` XOR ``parts``) used by deterministic
 CI packaging.
 Exit status is non-zero when the requested tool/version/platform is absent.
@@ -29,14 +31,21 @@ from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urljoin
 
-from catalogue_http import display_url, open_url, validate_https_url
+from catalogue_http import (
+    OriginFetchError,
+    display_url,
+    open_url,
+    status_fails_over,
+    toolchain_origins,
+    validate_https_url,
+    with_origin_failover,
+)
 
-DEFAULT_ORIGIN = "https://zackees.github.io/soldr-toolchain"
 FETCH_ATTEMPTS = 3
 RETRY_BASE_DELAY_SECS = 0.5
 
 
-class NetworkFetchError(SystemExit):
+class NetworkFetchError(OriginFetchError):
     """A catalogue fetch exhausted retries without receiving bytes."""
 
 
@@ -303,7 +312,8 @@ def fetch_bytes(url: str) -> bytes:
         except urllib.error.HTTPError as exc:
             if attempt == FETCH_ATTEMPTS:
                 raise NetworkFetchError(
-                    f"HTTP {exc.code} fetching {shown_url}"
+                    f"HTTP {exc.code} fetching {shown_url}",
+                    failover=status_fails_over(exc.code),
                 ) from None
             time.sleep(RETRY_BASE_DELAY_SECS * (2 ** (attempt - 1)))
         except (
@@ -314,7 +324,8 @@ def fetch_bytes(url: str) -> bytes:
         ) as exc:
             if attempt == FETCH_ATTEMPTS:
                 raise NetworkFetchError(
-                    f"network error fetching {shown_url}: {type(exc).__name__}"
+                    f"network error fetching {shown_url}: {type(exc).__name__}",
+                    failover=True,
                 ) from None
             time.sleep(RETRY_BASE_DELAY_SECS * (2 ** (attempt - 1)))
     raise AssertionError("retry loop exhausted without returning or raising")
@@ -590,18 +601,22 @@ def find_asset(
 
 
 def _load_manifest(
-    *, tool: str, origin: str, tool_manifest_url_override: str | None
+    *, tool: str, origin: str | None, tool_manifest_url_override: str | None
 ) -> LoadedManifest:
     if tool_manifest_url_override:
         url = tool_manifest_url_override
         return LoadedManifest(url, parse_manifest(fetch_json(url), display_url(url)))
-    return load_tool_manifest(origin, tool)
+    return with_origin_failover(
+        toolchain_origins(origin),
+        lambda chosen: load_tool_manifest(chosen, tool),
+        label=f"soldr-toolchain manifest for {tool}",
+    )
 
 
 def resolve_url(
     *,
     tool: str,
-    origin: str,
+    origin: str | None,
     tool_manifest_url_override: str | None,
     platform: str,
     arch: str,
@@ -623,7 +638,7 @@ def resolve_url(
 def resolve_tool_metadata(
     *,
     tool: str,
-    origin: str,
+    origin: str | None,
     tool_manifest_url_override: str | None,
     platform: str,
     arch: str,
@@ -652,7 +667,7 @@ def resolve_tool_metadata(
 def resolve_metadata(
     *,
     tool: str,
-    origin: str,
+    origin: str | None,
     tool_manifest_url_override: str | None,
     platform: str,
     arch: str,
@@ -676,8 +691,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("tool", help="Tool name under the soldr-toolchain origin.")
     parser.add_argument(
         "--origin",
-        default=DEFAULT_ORIGIN,
-        help=f"Catalogue origin (default: {DEFAULT_ORIGIN})",
+        default=None,
+        help=(
+            "Catalogue origin. Default: SOLDR_TOOLCHAIN_ORIGIN, else the "
+            "redirect manifest's origins then the built-ins, with failover."
+        ),
     )
     parser.add_argument(
         "--tool-manifest-url",

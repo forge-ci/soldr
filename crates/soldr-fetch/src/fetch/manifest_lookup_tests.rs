@@ -3,6 +3,7 @@ use crate::fetch::manifest_lookup::catalogue_lookup::*;
 use crate::fetch::manifest_lookup::catalogue_model::*;
 use crate::fetch::manifest_lookup::catalogue_transport::*;
 use crate::fetch::manifest_lookup::resolved_download_label;
+use crate::fetch::manifest_lookup::toolchain_origin::DEFAULT_TOOLCHAIN_ORIGIN;
 use sha2::Digest;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -238,7 +239,7 @@ fn catalogue_url_defaults_to_pages_origin() {
     let url = format!("{}/{}", DEFAULT_TOOLCHAIN_ORIGIN, CATALOGUE_DOC_NAME);
     assert_eq!(
         url,
-        "https://zackees.github.io/soldr-toolchain/catalogue.v1.json"
+        "https://forge-ci.github.io/soldr-toolchain/catalogue.v1.json"
     );
 }
 
@@ -1083,17 +1084,6 @@ fn flat_schema_v5_still_parses_for_back_compat() {
     assert!(
         super::super::manifest_v6::ManifestV6::from_json(flat).is_none(),
         "v6 parser must reject the flat-array shape"
-    );
-}
-
-#[test]
-fn default_toolchain_origin_is_pages() {
-    // soldr#988 Phase 5: legacy manifest-branch URL constant is
-    // gone. The default catalogue origin is the soldr-toolchain
-    // Pages site.
-    assert_eq!(
-        DEFAULT_TOOLCHAIN_ORIGIN,
-        "https://zackees.github.io/soldr-toolchain"
     );
 }
 

@@ -20,3 +20,4 @@ mod fetch_crgx;
 mod manifest_lookup;
 mod manifest_lookup_disable;
 mod manifest_lookup_url_override;
+mod toolchain_redirect;

@@ -180,10 +180,15 @@ pub(crate) enum ToolchainSubcommand {
         json: bool,
     },
     /// soldr#988 Phase 2 — print the resolved soldr-toolchain
-    /// catalogue origin and a one-line response summary (HTTP
-    /// status, content-length, etag, last-modified). Honors
-    /// `SOLDR_TOOLCHAIN_ORIGIN` (default
-    /// `https://zackees.github.io/soldr-toolchain`).
+    /// catalogue origins and a one-line response summary (HTTP
+    /// status, content-length, etag, last-modified). Origins come from
+    /// `SOLDR_TOOLCHAIN_ORIGIN` when set; otherwise from the redirect
+    /// manifest (`https://forge-ci.github.io/soldr-redirect.v1.json`,
+    /// `SOLDR_TOOLCHAIN_REDIRECT_URL`, `SOLDR_TOOLCHAIN_REDIRECT=0` to
+    /// skip) followed by the built-ins
+    /// `https://forge-ci.github.io/soldr-toolchain` and
+    /// `https://zackees.github.io/soldr-toolchain`, with failover on
+    /// network errors, 404 and 5xx.
     Catalogue {
         /// Emit the stable machine-facing JSON form
         /// (`schema_version: 1`) for tooling. Same shape conventions
