@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+import yaml
 from conftest import load_script_module
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -78,6 +79,23 @@ def test_lint_job_runs_only_the_lint_lane() -> None:
         "run: uv run --no-project --python 3.13 python ci/local_gate.py --lane lint"
         in workflow
     )
+
+
+def test_merge_queue_trust_has_api_credentials() -> None:
+    """ci-lint's merge_group trust (merge_queue_trust) reads the queue commit
+    and the queued PR over the GitHub API. Without GITHUB_TOKEN on the verify
+    step it sent an empty bearer, got HTTP 401, and failed closed on every
+    queue entry (`queue-unreadable`), so attested PRs reran Lint + Linux x64
+    in the queue."""
+    workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    )
+    job = workflow["jobs"]["ci-mode"]
+    assert job["permissions"]["pull-requests"] == "read"
+    assert job["permissions"]["contents"] == "read"
+    (step,) = [s for s in job["steps"] if s.get("id") == "gate"]
+    assert "local-gate verify" in step["run"]
+    assert step["env"]["GITHUB_TOKEN"] == "${{ github.token }}"
 
 
 def test_attested_skip_is_declared_and_wired() -> None:

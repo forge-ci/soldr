@@ -118,6 +118,11 @@ jobs:
     name: CI mode
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    # The merge_group trust check (ci-lint merge_queue_trust) reads the queue
+    # commit, the compare to the base, and the queued PR over the API.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       mode: ${{ steps.mode.outputs.mode }}
       checkout_sha: ${{ steps.mode.outputs.checkout_sha }}
@@ -164,6 +169,12 @@ jobs:
           sparse-checkout: ci_lint
       - name: Local gate attestation
         id: gate
+        # Without a token ci-lint sends an empty bearer, every merge_group
+        # API read returns 401, and queue trust fails closed
+        # (`queue-unreadable`): each queue entry reran Lint + Linux x64
+        # (~17 min) even when it is the exact tree the PR attested.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: PYTHONPATH=.ci-lint python3 -m ci_lint local-gate verify --repo . --trust --github-output
       - name: Select mode and verify checkout
         id: mode
