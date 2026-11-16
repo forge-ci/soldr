@@ -320,15 +320,25 @@ fn quiet_cpu_active_work_resets_the_watchdog() {
     if crate::platform::host::facts::os() != crate::platform::host::facts::HostOs::Linux {
         return;
     }
-    let mut command = unix_shell("yes >/dev/null & worker=$!; sleep 0.2; kill \"$worker\"; wait \"$worker\" 2>/dev/null || true");
-    assert!(run_installer_command(
+    // Silent CPU work that outlasts the stall timeout several times over, so
+    // the test passes only if CPU progress resets the watchdog. It used to run
+    // `yes` for 0.2s against a 0.5s stall timeout: the child exited before a
+    // stall could fire, so the assertion held with the CPU probe disabled,
+    // and the work was killed mid-run, leaving a tail in which the tree's
+    // ticks dropped and the shell, descheduled on a loaded host, sat idle past
+    // 500ms and was reported as a stall. `exec awk` makes the busy loop the
+    // whole tree and lets it end on its own: no idle tail. The 1s stall
+    // timeout absorbs scheduling gaps; the loop spins for 2-3s (`systime`
+    // has 1s resolution).
+    let mut command =
+        unix_shell("exec awk 'BEGIN { end = systime() + 3; while (systime() < end) {} }'");
+    let result = run_installer_command(
         &mut command,
         "quiet compiler simulation",
         "compile",
-        InstallerWatchdogConfig::for_test(test_stall_timeout(), test_safety_timeout())
-    )
-    .unwrap()
-    .success());
+        InstallerWatchdogConfig::for_test(Duration::from_secs(1), test_safety_timeout()),
+    );
+    assert!(result.unwrap().success());
 }
 #[test]
 fn watchdog_terminates_the_installer_process_group() {
