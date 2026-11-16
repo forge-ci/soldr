@@ -168,3 +168,59 @@ fn a_just_renewed_route_is_not_collected_from_a_stale_live_snapshot() {
     assert_eq!(report.stores_removed, 0);
     assert!(store.join("artifact").exists());
 }
+
+/// soldr#4148 regression: a non-live route whose route directory the
+/// retention policy keeps (inside `keep_idle_routes` and under `idle_ttl`)
+/// keeps its cache too. Only a route the policy reclaims loses its store.
+/// The local gate's tests lane stops the installed soldr's daemon and then
+/// starts a source-built broker; that broker used to empty the installed
+/// generation's store on its first pass, so every gate cold-compiled it.
+#[test]
+fn a_cache_follows_its_route_retention_not_route_liveness() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("soldr-root");
+    let paths = SoldrPaths::with_root(root.clone());
+    let services = temp.path().join("services");
+    let routes = temp.path().join("routes");
+    fs::create_dir_all(&services).unwrap();
+    fs::create_dir_all(&routes).unwrap();
+    let now = SystemTime::now();
+    let kept = "soldr-daemon-dddddddddddddddddddddddddddddddd";
+    let expired = "soldr-daemon-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let policy = crate::broker_daemon_disk::DaemonDiskPolicy::default();
+    let mut stores = Vec::new();
+    for (service, idle) in [
+        (kept, policy.protection + Duration::from_secs(60)),
+        (expired, policy.idle_ttl + Duration::from_secs(60)),
+    ] {
+        register(&services, service, &root, now);
+        let route = routes.join(service);
+        fs::create_dir_all(&route).unwrap();
+        set_file_mtime(&route, FileTime::from_system_time(now - idle)).unwrap();
+        let store = paths
+            .cache
+            .join("zccache/daemon-state")
+            .join(format!("embedded-v1-{service}"))
+            .join(zccache::core::config::versioned_subdir());
+        fs::create_dir_all(&store).unwrap();
+        fs::write(store.join("artifact"), b"payload").unwrap();
+        stores.push(store);
+    }
+
+    let report = crate::broker_daemon_disk::sweep_daemon_disk(
+        &routes,
+        &services,
+        &BTreeSet::new(),
+        now,
+        policy,
+    );
+
+    assert!(
+        stores[0].join("artifact").exists(),
+        "a retained route's cache was swept: {report:?}"
+    );
+    assert!(routes.join(kept).exists());
+    assert_eq!(report.cache_stores_removed, 1, "{report:?}");
+    assert!(!stores[1].exists());
+    assert!(!routes.join(expired).exists());
+}

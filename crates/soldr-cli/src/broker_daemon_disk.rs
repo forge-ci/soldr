@@ -140,16 +140,9 @@ pub(crate) fn sweep_daemon_disk_with(
 ) -> DaemonDiskReport {
     let mut report = DaemonDiskReport::default();
 
-    // A route's service definition persists the selected Soldr root. Sweep
-    // its private cache before removing that registration; a live writer lock
-    // keeps the store intact and the next broker pass retries it.
-    let cache = crate::broker_daemon_cache::sweep_retired_route_caches(services_root, live, now);
-    report.cache_stores_removed = cache.stores_removed;
-    report.cache_bytes_reclaimed = cache.bytes_reclaimed;
-    report.cache_stores_live = cache.stores_live;
-    report.failed += cache.failed;
-
+    // Decide which idle routes this pass reclaims before touching any cache.
     let mut idle_routes = Vec::new();
+    let mut retained_routes = BTreeSet::new();
     for (service, path) in daemon_entries(routes_root, live, route_service) {
         let Ok(metadata) = fs::symlink_metadata(&path) else {
             continue;
@@ -161,14 +154,44 @@ pub(crate) fn sweep_daemon_disk_with(
         let idle_for = idle_duration(now, route_last_active(&path, &metadata));
         if idle_for >= policy.protection {
             idle_routes.push((idle_for, service, path));
+        } else {
+            retained_routes.insert(service);
         }
     }
     // Least idle first, so the routes kept warm are the most recently used.
     idle_routes.sort();
-    for (index, (idle_for, _, path)) in idle_routes.into_iter().enumerate() {
+    let mut doomed_routes = Vec::new();
+    for (index, (idle_for, service, path)) in idle_routes.into_iter().enumerate() {
         if index < policy.keep_idle_routes && idle_for < policy.idle_ttl {
-            continue;
+            retained_routes.insert(service);
+        } else {
+            doomed_routes.push(path);
         }
+    }
+
+    // A route's service definition persists the selected Soldr root. Sweep
+    // its private cache before removing that registration; a live writer lock
+    // keeps the store intact and the next broker pass retries it.
+    //
+    // A route the policy above keeps also keeps its cache. The cache is the
+    // expensive half of a route to rebuild: sweeping it as soon as the route
+    // went idle emptied the store of every soldr generation that was not
+    // running at that instant, so two soldr versions alternating on one root
+    // (an installed soldr and a source build, as the local gate's tests lane
+    // does) cold-compiled every time.
+    let mut cache_protected = live.clone();
+    cache_protected.extend(retained_routes);
+    let cache = crate::broker_daemon_cache::sweep_retired_route_caches(
+        services_root,
+        &cache_protected,
+        now,
+    );
+    report.cache_stores_removed = cache.stores_removed;
+    report.cache_bytes_reclaimed = cache.bytes_reclaimed;
+    report.cache_stores_live = cache.stores_live;
+    report.failed += cache.failed;
+
+    for path in doomed_routes {
         let bytes = crate::cache_lib::target_registry::directory_size(&path);
         match remove(&path) {
             Ok(()) => {
