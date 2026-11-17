@@ -31,6 +31,19 @@ ROOT = Path(__file__).resolve().parent.parent
 # tables, and build scripts branching on CARGO_CFG_TARGET_*.
 TARGET_SENSITIVE_FILES = ("Cargo.toml", "build.rs")
 PLATFORM_CRATE = "soldr-platform"
+# Paths no Rust compile reads: workflows and their scripts, docs, the Python
+# test suite (crate fixtures live inside each crate), root Markdown and the
+# ci-lint pin. A change there cannot alter any target's Dylint result, so it
+# neither blocks a skip nor forces a run. Repo-root `src/` is NOT here: it is
+# include_str!'d into soldr-cli (wheel_bundle.rs).
+NON_COMPILE_PREFIXES = (".github/", "docs/", "tests/")
+NON_COMPILE_ROOT_FILES = ("ci.toml",)
+
+
+def _non_compile(path: str) -> bool:
+    if path.startswith(NON_COMPILE_PREFIXES):
+        return True
+    return "/" not in path and (path.endswith(".md") or path in NON_COMPILE_ROOT_FILES)
 
 
 def skip_reason(root: Path, changed: list[str] | None) -> str | None:
@@ -43,12 +56,19 @@ def skip_reason(root: Path, changed: list[str] | None) -> str | None:
         return None
     touched: set[str] = set()
     for path in changed:
+        if _non_compile(path):
+            continue
         parts = path.split("/")
         if len(parts) < 3 or parts[0] != "crates" or parts[1] not in crates:
             return None
         if parts[1] == PLATFORM_CRATE or parts[-1] in TARGET_SENSITIVE_FILES:
             return None
         touched.add(parts[1])
+    if not touched:
+        return (
+            "cross dylint: SKIPPED (soldr#3787) -- no change reaches a Rust compile "
+            "(workflows, docs, Python tests or the ci-lint pin only)"
+        )
     return (
         f"cross dylint: SKIPPED (soldr#3787) -- changes touch only {sorted(touched)}; "
         "the platform-cfg boundary keeps them target-independent, "
