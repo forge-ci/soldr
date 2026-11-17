@@ -110,6 +110,26 @@ pub(crate) fn local_build_fallback_applies(verdict: DriverProbeVerdict) -> bool 
     }
 }
 
+/// Overrides the Dylint driver `-V` probe deadline, in whole seconds (> 0).
+pub(crate) const DYLINT_PROBE_TIMEOUT_ENV_VAR: &str = "SOLDR_DYLINT_PROBE_TIMEOUT_SECS";
+
+/// The first probe's deadline. It was 2 s, which a cold HDD-backed
+/// self-hosted runner missed while reading the driver's rustc libraries.
+const DEFAULT_PROBE_DEADLINE: Duration = Duration::from_secs(10);
+
+/// One timeout is retried at twice the deadline before the driver counts as hung.
+const PROBE_ATTEMPTS: u32 = 2;
+
+/// The first probe attempt's deadline: [`DYLINT_PROBE_TIMEOUT_ENV_VAR`] when it
+/// holds a positive integer, else [`DEFAULT_PROBE_DEADLINE`].
+pub(crate) fn probe_deadline() -> Duration {
+    std::env::var(DYLINT_PROBE_TIMEOUT_ENV_VAR)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map_or(DEFAULT_PROBE_DEADLINE, Duration::from_secs)
+}
+
 /// Refuse to launch cargo-dylint unless its exact toolchain driver already
 /// exists and answers the bounded version probe. Upstream cargo-dylint builds
 /// this driver automatically when it is absent or stale; preflighting the same
@@ -149,49 +169,7 @@ pub(crate) fn probe_prebuilt_driver(
         .stderr(Stdio::piped());
     apply_driver_runtime_environment(&mut command, plan).map_err(unusable)?;
     suppress_windows_console_window(&mut command);
-    // soldr#3098: spawns share, staged writes exclude.
-    let spawned = {
-        let _spawn = crate::core::spawn_exclusion::spawn_shared();
-        command.spawn()
-    };
-    let mut child = spawned.map_err(|error| {
-        unusable(unavailable_driver_error(
-            plan,
-            &driver_dir,
-            &format!("version probe could not start: {error}"),
-        ))
-    })?;
-    // Both non-`Ok(Some(_))` arms below terminate a *running* driver, which
-    // is what makes them `ProbeTimedOut` rather than "no driver": the
-    // binary is present and was executing, so nothing soldr could fetch or
-    // build would change the outcome.
-    let status = match child.wait_timeout(Duration::from_secs(2)) {
-        Err(error) => {
-            let _ = child.kill();
-            let _ = crate::platform::wait::wait_for(&mut child, crate::platform::wait::PROBE);
-            return Err((
-                DriverProbeVerdict::ProbeTimedOut,
-                unavailable_driver_error(
-                    plan,
-                    &driver_dir,
-                    &format!("version probe failed: {error}"),
-                ),
-            ));
-        }
-        Ok(Some(status)) => status,
-        Ok(None) => {
-            let _ = child.kill();
-            let _ = crate::platform::wait::wait_for(&mut child, crate::platform::wait::PROBE);
-            return Err((
-                DriverProbeVerdict::ProbeTimedOut,
-                unavailable_driver_error(
-                    plan,
-                    &driver_dir,
-                    "version probe exceeded the 2-second deadline",
-                ),
-            ));
-        }
-    };
+    let (mut child, status) = run_version_probe(&mut command, plan, &driver_dir)?;
     let mut stdout = String::new();
     if let Some(mut pipe) = child.stdout.take() {
         pipe.read_to_string(&mut stdout).map_err(|error| {
@@ -225,6 +203,85 @@ pub(crate) fn probe_prebuilt_driver(
         )));
     }
     Ok(driver)
+}
+
+/// Spawn the driver's `-V` probe and wait for it under [`probe_deadline`].
+///
+/// A cold page cache can make the first `-V` slow: the driver links
+/// librustc_driver (~150 MB), and an HDD-backed self-hosted runner reads
+/// it at ~100 MB/s. So the deadline is configurable, and one timeout is
+/// retried at twice the deadline before the probe is declared hung; the
+/// retry runs against the cache the first attempt warmed.
+fn run_version_probe(
+    command: &mut std::process::Command,
+    plan: &DylintToolchainPlan,
+    driver_dir: &Path,
+) -> Result<(std::process::Child, std::process::ExitStatus), (DriverProbeVerdict, SoldrError)> {
+    let unusable = |error: SoldrError| (DriverProbeVerdict::NoUsableDriver, error);
+    let deadline = probe_deadline();
+    let mut attempt_deadline = deadline;
+    let mut attempt = 1;
+    loop {
+        // soldr#3098: spawns share, staged writes exclude.
+        let spawned = {
+            let _spawn = crate::core::spawn_exclusion::spawn_shared();
+            command.spawn()
+        };
+        let mut child = spawned.map_err(|error| {
+            unusable(unavailable_driver_error(
+                plan,
+                driver_dir,
+                &format!("version probe could not start: {error}"),
+            ))
+        })?;
+        // Both non-`Ok(Some(_))` arms below terminate a *running* driver,
+        // which is what makes them `ProbeTimedOut` rather than "no driver":
+        // the binary is present and was executing, so nothing soldr could
+        // fetch or build would change the outcome.
+        match child.wait_timeout(attempt_deadline) {
+            Err(error) => {
+                let _ = child.kill();
+                let _ = crate::platform::wait::wait_for(&mut child, crate::platform::wait::PROBE);
+                return Err((
+                    DriverProbeVerdict::ProbeTimedOut,
+                    unavailable_driver_error(
+                        plan,
+                        driver_dir,
+                        &format!("version probe failed: {error}"),
+                    ),
+                ));
+            }
+            Ok(Some(status)) => return Ok((child, status)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = crate::platform::wait::wait_for(&mut child, crate::platform::wait::PROBE);
+                if attempt < PROBE_ATTEMPTS {
+                    eprintln!(
+                        "soldr: Dylint driver version probe exceeded {}s (cold page cache?); \
+                         retrying with {}s",
+                        attempt_deadline.as_secs(),
+                        (attempt_deadline * 2).as_secs()
+                    );
+                    attempt += 1;
+                    attempt_deadline *= 2;
+                    continue;
+                }
+                return Err((
+                    DriverProbeVerdict::ProbeTimedOut,
+                    unavailable_driver_error(
+                        plan,
+                        driver_dir,
+                        &format!(
+                            "version probe exceeded the {}-second deadline and the {}-second \
+                             retry (set {DYLINT_PROBE_TIMEOUT_ENV_VAR} to raise it on slow hosts)",
+                            deadline.as_secs(),
+                            attempt_deadline.as_secs()
+                        ),
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 /// Where cargo-dylint keeps its per-toolchain drivers. An explicit

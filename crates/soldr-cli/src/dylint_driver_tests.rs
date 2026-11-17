@@ -548,7 +548,13 @@ fn probe_fixture(script: &str) -> ProbeFixture {
     let driver = driver_dir.join("dylint-driver");
     std::fs::write(&driver, script).unwrap();
     crate::platform::fs::permissions::make_executable(&driver).expect("chmod fixture driver");
-    ProbeFixture { temp, paths, plan, _unset: unset, _rustc: rustc }
+    ProbeFixture {
+        temp,
+        paths,
+        plan,
+        _unset: unset,
+        _rustc: rustc,
+    }
 }
 
 fn is_windows() -> bool {
@@ -565,7 +571,14 @@ fn probe_deadline_defaults_to_ten_seconds() {
 #[test]
 fn probe_deadline_honours_a_positive_override_and_ignores_the_rest() {
     let _g = ENV_LOCK.lock();
-    for (value, expected) in [("30", 30), (" 7 ", 7), ("0", 10), ("-3", 10), ("soon", 10), ("", 10)] {
+    for (value, expected) in [
+        ("30", 30),
+        (" 7 ", 7),
+        ("0", 10),
+        ("-3", 10),
+        ("soon", 10),
+        ("", 10),
+    ] {
         let _set = crate::EnvVarGuard::set(DYLINT_PROBE_TIMEOUT_ENV_VAR, value);
         assert_eq!(
             probe_deadline(),
