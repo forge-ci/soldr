@@ -1,4 +1,4 @@
-//! tar + zstd:19 packer for cross-repo `soldr cook` artifacts (issue
+//! tar + zstd:9 packer for cross-repo `soldr cook` artifacts (issue
 //! #577, meta #579).
 //!
 //! Layout of `~/.soldr/cache/cook/`:
@@ -11,9 +11,11 @@
 //! This module is **purely a packer**. It is unrelated to the
 //! `cache_lib::save` archive transport — `save.rs` keeps its
 //! `DEFAULT_ZSTD_LEVEL = 3` for the short-lived save/load round-trip,
-//! while cook artifacts use level 19 + `--long=27` because they are
-//! compressed once and decompressed many times (every fork or CI
-//! runner that shares the same recipe hash).
+//! while cook artifacts default to level 9. Level 19 + `--long=27` packed a
+//! real obs-studio closure (266 MB) in 26.1 s for 38 MiB; level 9 takes
+//! 1.24 s for 53 MiB, and every cook pays the pack while the extra bytes
+//! cost a few seconds of upload at most (soldr#4162). `SOLDR_ZSTD_LEVEL`
+//! overrides it; the long window applies from level 10 up.
 //!
 //! The packer never reads or writes `cook_index_v1` itself — PR 3's
 //! pre-flight hydrate is what looks up entries via the daemon, and
@@ -26,12 +28,12 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-/// zstd level used for cross-repo cook artifacts. Slow once
-/// (compress per cook run) in exchange for fast many (every fork or
-/// CI runner that hits the same recipe hash decompresses). Do NOT
-/// reuse for the save/load transport — that path stays at
+/// Default zstd level for cross-repo cook artifacts (`SOLDR_ZSTD_LEVEL`
+/// overrides it). Was 19 + the long window: 20x slower to pack for 30%
+/// smaller artifacts, and decompression speed barely depends on the
+/// level. Do NOT reuse for the save/load transport — that path stays at
 /// `crate::cache_lib::save::DEFAULT_ZSTD_LEVEL = 3`.
-pub const COOK_ZSTD_LEVEL: i32 = 19;
+pub const COOK_ZSTD_LEVEL: i32 = 9;
 
 /// `--long=27` window log enables zstd long-distance matching on the
 /// 128 MiB window — large enough that a typical trimmed `target/`
@@ -139,7 +141,7 @@ pub fn pack_cook_archive_at_level(
     }
     // Multi-threaded compression — `zstdmt` feature already enabled
     // in workspace deps. Using `num_cpus` would add a dep we do not
-    // want; the OS-determined thread count works well for level 19.
+    // want; the OS-determined thread count works well at every level.
     if let Ok(n) = std::thread::available_parallelism() {
         let _ = encoder.multithread(n.get() as u32);
     }
