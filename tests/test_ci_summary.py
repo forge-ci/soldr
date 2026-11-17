@@ -710,3 +710,29 @@ def test_nightly_infrastructure_cancels_only_without_real_failures(
     assert report["success"] is False
     assert report["infrastructure_jobs"] == [starved_probe()["name"]]
     assert bool(report["failures"]) == other_failure
+
+
+def test_trusted_merge_queue_entry_is_accepted_without_an_author_permission():
+    """ci-mode trusts a queue entry whose tree equals an attested PR head
+    (forge-ci/ci.yml#538); merge_group carries no author, so the permission is
+    "unknown". Rejecting it ejected every trusted entry from the queue (#4154).
+    """
+    needs = {
+        job: {"result": "success"}
+        for job in ["ci-mode", "path-selection", "lint", "host"]
+    }
+    assert (
+        check(
+            needs,
+            mode="minimal",
+            author_permission="unknown",
+            event_name="merge_group",
+            trusted=True,
+        )
+        == []
+    )
+    # Trust never downgrades a run that must be full.
+    for event in ("push", "workflow_dispatch", "schedule"):
+        assert "attested skip is limited to a writer's minimal PR" in check(
+            needs, mode="minimal", event_name=event, trusted=True
+        ), event

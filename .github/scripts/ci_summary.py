@@ -127,11 +127,17 @@ def summary_failures(
         failures.append("push to main requires full CI")
     if event_name == "merge_group" and mode not in ("minimal", "full"):
         failures.append("merge queue requires the linux host lane or full CI")
-    if trusted and (
-        event_name != "pull_request"
-        or mode != "minimal"
-        or author_permission not in ("write", "maintain", "admin")
-    ):
+    # A trusted merge_group entry is ci-mode's merge-queue credit
+    # (forge-ci/ci.yml#538): the queue tree equals an attested PR head tree.
+    # Only writers can enqueue, and the event carries no PR author, so its
+    # permission is always "unknown" there and is not consulted.
+    trusted_queue = event_name == "merge_group" and mode == "minimal"
+    trusted_pr = (
+        event_name == "pull_request"
+        and mode == "minimal"
+        and author_permission in ("write", "maintain", "admin")
+    )
+    if trusted and not (trusted_pr or trusted_queue):
         failures.append("attested skip is limited to a writer's minimal PR")
     # This bit comes from reviewed ci-mode's attestation verifier. It is not
     # evidence furnished by a PR artifact, and never replaces test/full cells.
