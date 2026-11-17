@@ -29,6 +29,7 @@ pub mod state_store;
 pub mod strip_target;
 pub mod target_registry;
 pub mod trash_gc;
+pub mod zstd_level;
 
 /// Directory for the auto-GC structured log (`~/.soldr/logs/auto-gc.log`).
 pub fn auto_gc_log_path(paths: &SoldrPaths) -> PathBuf {

@@ -38,6 +38,28 @@ pub const COOK_ZSTD_LEVEL: i32 = 19;
 /// tree compresses to a small fraction of its raw size.
 pub const COOK_ZSTD_LONG_WINDOW: u32 = 27;
 
+/// RED stub.
+pub const COOK_LONG_WINDOW_MIN_LEVEL: i32 = 10;
+
+/// RED stub.
+pub fn cook_zstd_level_from(_env: Option<i32>) -> i32 {
+    COOK_ZSTD_LEVEL
+}
+
+/// RED stub.
+pub fn cook_uses_long_window(_level: i32) -> bool {
+    true
+}
+
+/// RED stub.
+pub fn pack_cook_archive_at_level(
+    source_dir: &Path,
+    cook_dir: &Path,
+    _level: i32,
+) -> Result<PackedCookArchive, RegistryError> {
+    pack_cook_archive(source_dir, cook_dir)
+}
+
 /// Result of [`pack_cook_archive`]: the on-disk path and digest of
 /// the new `<sha256>.tar.zst` artifact, together with the byte size
 /// of the compressed file.
@@ -651,6 +673,41 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::TempDir;
+
+    #[test]
+    fn cook_level_defaults_to_19_and_follows_soldr_zstd_level() {
+        assert_eq!(cook_zstd_level_from(None), COOK_ZSTD_LEVEL);
+        assert_eq!(cook_zstd_level_from(Some(1)), 1);
+        assert_eq!(cook_zstd_level_from(Some(-3)), -3);
+    }
+
+    #[test]
+    fn long_window_only_at_high_levels() {
+        assert!(cook_uses_long_window(COOK_ZSTD_LEVEL));
+        assert!(cook_uses_long_window(COOK_LONG_WINDOW_MIN_LEVEL));
+        assert!(!cook_uses_long_window(COOK_LONG_WINDOW_MIN_LEVEL - 1));
+        assert!(!cook_uses_long_window(1));
+        assert!(!cook_uses_long_window(-5));
+    }
+
+    #[test]
+    fn fast_level_archive_round_trips() {
+        let dir = TempDir::new().expect("tempdir");
+        let source = dir.path().join("debug");
+        write_file(&source.join("deps/libfoo.rlib"), &[7u8; 4096]);
+        let cook = dir.path().join("cook");
+        let fast = pack_cook_archive_at_level(&source, &cook, -1).expect("pack -1");
+        let slow = pack_cook_archive_at_level(&source, &dir.path().join("cook19"), 19).expect("pack 19");
+        assert_ne!(fast.sha256, slow.sha256, "the level must reach the encoder");
+        let decoder = zstd::Decoder::new(File::open(&fast.path).expect("open")).expect("decoder");
+        let mut archive = tar::Archive::new(decoder);
+        let names: Vec<String> = archive
+            .entries()
+            .expect("entries")
+            .map(|e| e.expect("entry").path().expect("path").display().to_string())
+            .collect();
+        assert!(names.iter().any(|n| n == "debug/deps/libfoo.rlib"), "{names:?}");
+    }
 
     fn write_file(p: &Path, bytes: &[u8]) {
         if let Some(parent) = p.parent() {
