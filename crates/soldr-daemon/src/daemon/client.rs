@@ -284,6 +284,27 @@ pub fn status_direct(sock_path: &Path) -> Result<StatusInfo, ClientError> {
     }
 }
 
+/// Ask the daemon at its private control endpoint to shut down gracefully.
+///
+/// The broker-side counterpart of [`status_direct`]: the broker owns the
+/// daemon's private endpoint, so it never goes through the broker tunnel.
+/// The daemon acks before draining, then flushes its compile cache (the
+/// zccache depgraph included) on the ordinary exit path. A SIGTERM would
+/// take the fast-exit path instead (soldr#3059), which skips that flush.
+pub fn shutdown_direct(sock_path: &Path) -> Result<ShutdownAck, ClientError> {
+    match submit_direct_request_for_version(
+        sock_path,
+        &Request::Shutdown,
+        crate::daemon::protocol::PROTOCOL_VERSION,
+    )? {
+        Response::ShuttingDown(ack) => Ok(ack),
+        Response::Error(msg) => Err(ClientError::Protocol(msg)),
+        other => Err(ClientError::Protocol(format!(
+            "unexpected response: {other:?}"
+        ))),
+    }
+}
+
 pub fn status(sock_path: &Path) -> Result<StatusInfo, ClientError> {
     match submit_request(sock_path, &Request::Status)? {
         Response::Status(info) => Ok(info),

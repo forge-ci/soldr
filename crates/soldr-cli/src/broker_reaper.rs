@@ -508,12 +508,29 @@ fn probe_daemon_load(
     }
 }
 
+/// Stop one idle daemon so it keeps its compile cache (soldr#4153).
+///
+/// A graceful `Shutdown` request lets the daemon flush the zccache depgraph
+/// on its ordinary exit path. SIGTERM takes the fast-exit path (soldr#3059),
+/// which skips that flush, so a reaped daemon used to drop every compile
+/// context recorded since zccache's last periodic (300 s) save, and the next
+/// build missed every unit with `context_not_found`. The daemon is idle here
+/// (busy routes were deferred above), so the drain is cheap. SIGTERM remains
+/// the fallback when the request cannot be delivered.
+pub(crate) fn stop_idle_daemon(pid: u32, endpoint: &str, terminate: impl FnOnce(u32)) -> bool {
+    if crate::daemon::client::shutdown_direct(std::path::Path::new(endpoint)).is_ok() {
+        return true;
+    }
+    terminate(pid);
+    false
+}
+
 /// Stop the daemons of routes whose requesters have all exited.
 ///
 /// Returns the service names reaped, for the log line and for tests.
 /// Termination is graceful first: a daemon asked to stop flushes its
-/// caches, and a force-kill that skipped that step would trade a leaked
-/// process for a corrupted one.
+/// caches ([`stop_idle_daemon`]), and only a daemon that cannot take the
+/// request is signalled.
 pub(crate) fn reap_orphaned_routes(
     route_owners: &Mutex<RouteOwnership>,
     registry: &std::sync::Mutex<BackendRegistry>,
@@ -539,15 +556,24 @@ pub(crate) fn reap_orphaned_routes(
         // Read the daemon pid under the registry lock, then release it
         // before signalling: the signal is a syscall on another process
         // and must not be holding the lock every route request needs.
-        let daemon_pid: Option<u32> = {
+        let daemon: Option<(u32, String)> = {
             let registry = lock_registry(registry);
             let found = registry.iter().find_map(|(key, handle)| {
-                (key.service_name == service_name).then_some(handle.daemon_process.pid)
+                (key.service_name == service_name).then(|| {
+                    (
+                        handle.daemon_process.pid,
+                        crate::daemon::session_endpoint::private_control_endpoint_from_session(
+                            &handle.daemon_process.ipc_endpoint.path,
+                        ),
+                    )
+                })
             });
             found
         };
-        if let Some(pid) = daemon_pid {
-            let _ = signal_terminate(pid);
+        if let Some((pid, endpoint)) = daemon {
+            stop_idle_daemon(pid, &endpoint, |pid| {
+                let _ = signal_terminate(pid);
+            });
         }
         // Forget the route either way. With no live requester and no
         // registry entry there is nothing left to tear down, and keeping

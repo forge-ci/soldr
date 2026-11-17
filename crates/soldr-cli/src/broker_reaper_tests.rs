@@ -563,3 +563,52 @@ fn maintenance_probe_defers_reaping_then_reaps_after_an_idle_window() {
         route()
     );
 }
+
+/// soldr#4153: the reaper stops an idle daemon with a graceful `Shutdown`
+/// request, which flushes its compile cache, and never signals it when the
+/// request is taken. A SIGTERM takes the fast-exit path (soldr#3059), which
+/// skips that flush, so every reaped session lost its compile contexts.
+#[test]
+fn an_idle_daemon_that_takes_the_shutdown_request_is_not_signalled() {
+    use crate::daemon::protocol::{Request, Response, ShutdownAck};
+    use interprocess::local_socket::traits::tokio::Listener as _;
+
+    let temp = tempfile::tempdir().unwrap();
+    let endpoint = temp.path().join("control.sock").display().to_string();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(async { crate::daemon::session_endpoint::bind_session_listener(&endpoint) })
+        .unwrap();
+    let server = runtime.spawn(async move {
+        let mut stream = listener.accept().await.unwrap();
+        let request: Request = crate::daemon::ipc::read_frame_async(&mut stream)
+            .await
+            .unwrap();
+        let ack = Response::ShuttingDown(ShutdownAck {
+            pid: 4242,
+            generation: 7,
+        });
+        crate::daemon::ipc::write_frame_async(&mut stream, &ack)
+            .await
+            .unwrap();
+        request
+    });
+
+    let mut signalled = false;
+    let graceful = stop_idle_daemon(4242, &endpoint, |_| signalled = true);
+
+    assert!(graceful, "the daemon acked the shutdown request");
+    assert!(!signalled, "an acked daemon must not also be signalled");
+    let request = runtime.block_on(server).unwrap();
+    assert!(matches!(request, Request::Shutdown), "{request:?}");
+}
+
+#[test]
+fn a_daemon_that_cannot_take_the_shutdown_request_is_signalled() {
+    let temp = tempfile::tempdir().unwrap();
+    let endpoint = temp.path().join("absent.sock").display().to_string();
+    let mut signalled = None;
+    let graceful = stop_idle_daemon(4242, &endpoint, |pid| signalled = Some(pid));
+    assert!(!graceful);
+    assert_eq!(signalled, Some(4242));
+}
