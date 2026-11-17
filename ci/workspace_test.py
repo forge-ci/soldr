@@ -151,8 +151,23 @@ def workspace_test_plan(
     ``packages`` narrows both test stages (soldr#3731); None is --workspace.
     """
     scope = " ".join(f"-p {p}" for p in packages) if packages else "--workspace"
-    source = target / "debug" / "soldr"
+    built = target / "debug"
+    # The source route runs from a snapshot of the built image, never from
+    # target/debug itself: nextest's integration-test build relinks
+    # target/debug/soldr (and its soldr-daemon sibling) in place mid-run. A
+    # teardown through the relinked binary computed a different daemon route,
+    # so it never stopped the daemon it started; that orphan kept its store's
+    # writer lock, the next run's daemon could not adopt the store, and every
+    # gate after a soldr source change built the test profile at 0 hits.
+    source = target / "gate-source" / "soldr"
     source_text = container_path(source)
+    snapshot = (
+        f'mkdir -p "{container_path(source.parent)}"'
+        f' && cp -f "{container_path(built / "soldr")}" "{source_text}"'
+        f' && if [ -f "{container_path(built / "soldr-daemon")}" ]; then'
+        f' cp -f "{container_path(built / "soldr-daemon")}"'
+        f' "{container_path(source.parent / "soldr-daemon")}"; fi'
+    )
     wrapper_text = container_path(target / "debug" / "soldr-nextest-wrapper")
     base_env = (EnvVar("CARGO_TARGET_DIR", container_path(target)),)
     source_unset = ("CARGO_BUILD_JOBS", "SOLDR_JOBS")
@@ -175,6 +190,7 @@ def workspace_test_plan(
                 ],
                 base_env,
             ),
+            Step(["sh", "-c", snapshot], ()),
             # soldr#3454: the black-box suites of the Nextest run-wrapper (the
             # only implementation is the native binary built above). The env
             # var is always set here, so the suites really run instead of

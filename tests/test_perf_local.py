@@ -73,6 +73,14 @@ def test_bosn_workspace_test_hands_off_from_bootstrap_to_source() -> None:
             "soldr-nextest-wrapper",
         ],
         [
+            "sh",
+            "-c",
+            'mkdir -p "/target/gate-source"'
+            ' && cp -f "/target/debug/soldr" "/target/gate-source/soldr"'
+            ' && if [ -f "/target/debug/soldr-daemon" ]; then'
+            ' cp -f "/target/debug/soldr-daemon" "/target/gate-source/soldr-daemon"; fi',
+        ],
+        [
             "uv",
             "run",
             "--no-project",
@@ -93,24 +101,24 @@ def test_bosn_workspace_test_hands_off_from_bootstrap_to_source() -> None:
             "30",
         ],
         ["/opt/soldr-bootstrap/bin/soldr", "broker", "remove"],
-        ["/target/debug/soldr", "daemon", "start"],
+        ["/target/gate-source/soldr", "daemon", "start"],
         [
             "sh",
             "-c",
-            '"/target/debug/soldr" cargo test --workspace --doc'
-            ' && "/target/debug/soldr" cargo nextest run --no-fail-fast --workspace'
+            '"/target/gate-source/soldr" cargo test --workspace --doc'
+            ' && "/target/gate-source/soldr" cargo nextest run --no-fail-fast --workspace'
             " --lib --tests",
         ],
         [
-            "/target/debug/soldr",
+            "/target/gate-source/soldr",
             "cache",
             "shutdown",
             "--shutdown-timeout-seconds",
             "30",
         ],
-        ["/target/debug/soldr", "broker", "remove"],
+        ["/target/gate-source/soldr", "broker", "remove"],
     ]
-    parity = plan.setup[1]
+    parity = plan.setup[2]
     assert [(v.name, v.value) for v in parity.env] == [
         (
             "SOLDR_NEXTEST_WRAPPER_UNDER_TEST",
@@ -119,7 +127,7 @@ def test_bosn_workspace_test_hands_off_from_bootstrap_to_source() -> None:
     ]
     # No daemon is needed, so the wrapper black-box step precedes the daemon start.
     assert plan.steps.index(parity) < [s.argv for s in plan.steps].index(
-        ["/target/debug/soldr", "daemon", "start"]
+        ["/target/gate-source/soldr", "daemon", "start"]
     )
     validation = plan.validation
     assert [(v.name, v.value) for v in validation.env] == [
@@ -590,3 +598,27 @@ def test_source_handoff_removes_image_caps_before_daemon_and_cargo(
     assert "SOLDR_JOBS" not in child_env
     assert not any(name.startswith("CARGO_PROFILE_") for name in child_env)
     assert child_env["BUILD_UNRELATED_SETTING"] == "preserved"
+
+
+def test_the_source_route_never_runs_the_image_nextest_relinks() -> None:
+    """Every source-route step runs the snapshot, not target/debug/soldr.
+
+    nextest's integration-test build relinks target/debug/soldr in place. A
+    teardown through the relinked binary targeted another daemon route, left
+    the started daemon running with its store locked, and the next run built
+    the test profile at 0 cache hits.
+    """
+    handoff = load_script_module(
+        Path(__file__).parents[1] / "ci" / "workspace_test.py",
+        "bosn_workspace_test_snapshot",
+    )
+    plan = handoff.workspace_test_plan(target=Path("/target"), bootstrap=Path("/b"))
+    source_steps = (plan.source_start, plan.validation, *plan.teardown)
+    for step in source_steps:
+        text = " ".join(step.argv)
+        assert '/target/debug/soldr"' not in text and step.argv[0] != (
+            "/target/debug/soldr"
+        ), text
+        assert "/target/gate-source/soldr" in text, text
+    snapshot = [s for s in plan.setup if s.argv[:2] == ["sh", "-c"]]
+    assert len(snapshot) == 1 and plan.setup.index(snapshot[0]) == 1
