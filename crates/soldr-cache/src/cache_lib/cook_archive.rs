@@ -698,7 +698,10 @@ mod tests {
 
     #[test]
     fn config_default_matches_the_cook_level() {
-        assert_eq!(crate::core::CookConfig::default_zstd_level(), COOK_ZSTD_LEVEL);
+        assert_eq!(
+            crate::core::CookConfig::default_zstd_level(),
+            COOK_ZSTD_LEVEL
+        );
     }
 
     #[test]
