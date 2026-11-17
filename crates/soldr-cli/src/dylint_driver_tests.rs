@@ -523,36 +523,72 @@ fn absent_driver_probes_as_no_usable_driver() {
     );
 }
 
+/// A probe fixture: `script` installed as the plan's driver, with the
+/// plan's rustc pointed at a stand-in so the probe itself -- not toolchain
+/// resolution -- is what the test measures. The guards stay alive with it.
+struct ProbeFixture {
+    temp: tempfile::TempDir,
+    paths: SoldrPaths,
+    plan: DylintToolchainPlan,
+    _unset: crate::EnvVarGuard,
+    _rustc: crate::EnvVarGuard,
+}
+
+fn probe_fixture(script: &str) -> ProbeFixture {
+    let unset = crate::EnvVarGuard::remove("DYLINT_DRIVER_PATH");
+    let temp = tempfile::tempdir().unwrap();
+    let paths = SoldrPaths::with_root(temp.path().join("soldr"));
+    let plan = sample_plan();
+    let fake_rustc = temp.path().join("toolchain").join("bin").join("rustc");
+    std::fs::create_dir_all(fake_rustc.parent().unwrap()).unwrap();
+    std::fs::write(&fake_rustc, b"").unwrap();
+    let rustc = crate::EnvVarGuard::set(crate::TEST_RUSTC_BIN_ENV_VAR, &fake_rustc);
+    let driver_dir = sample_driver_dir(&paths, &plan);
+    std::fs::create_dir_all(&driver_dir).unwrap();
+    let driver = driver_dir.join("dylint-driver");
+    std::fs::write(&driver, script).unwrap();
+    crate::platform::fs::permissions::make_executable(&driver).expect("chmod fixture driver");
+    ProbeFixture { temp, paths, plan, _unset: unset, _rustc: rustc }
+}
+
+fn is_windows() -> bool {
+    crate::platform::host::facts::os() == crate::platform::host::facts::HostOs::Windows
+}
+
+#[test]
+fn probe_deadline_defaults_to_ten_seconds() {
+    let _g = ENV_LOCK.lock();
+    let _unset = crate::EnvVarGuard::remove(DYLINT_PROBE_TIMEOUT_ENV_VAR);
+    assert_eq!(probe_deadline(), std::time::Duration::from_secs(10));
+}
+
+#[test]
+fn probe_deadline_honours_a_positive_override_and_ignores_the_rest() {
+    let _g = ENV_LOCK.lock();
+    for (value, expected) in [("30", 30), (" 7 ", 7), ("0", 10), ("-3", 10), ("soon", 10), ("", 10)] {
+        let _set = crate::EnvVarGuard::set(DYLINT_PROBE_TIMEOUT_ENV_VAR, value);
+        assert_eq!(
+            probe_deadline(),
+            std::time::Duration::from_secs(expected),
+            "{DYLINT_PROBE_TIMEOUT_ENV_VAR}={value:?}"
+        );
+    }
+}
+
 #[test]
 fn hanging_driver_probes_as_timed_out_and_stays_bounded() {
     // The fixture is a `sleep` shell script, so this is Unix-only; the
     // Windows probe path is covered by the shared verdict tests above.
-    if crate::platform::host::facts::os() == crate::platform::host::facts::HostOs::Windows {
+    if is_windows() {
         return;
     }
     let _g = ENV_LOCK.lock();
-    let _unset = crate::EnvVarGuard::remove("DYLINT_DRIVER_PATH");
-    let temp = tempfile::tempdir().unwrap();
-    let paths = SoldrPaths::with_root(temp.path().join("soldr"));
-    let plan = sample_plan();
-
-    // `apply_driver_runtime_environment` resolves the plan's rustc to
-    // derive the driver's loader path; point it at a stand-in so the probe
-    // itself -- not toolchain resolution -- is what this test measures.
-    let fake_rustc = temp.path().join("toolchain").join("bin").join("rustc");
-    std::fs::create_dir_all(fake_rustc.parent().unwrap()).unwrap();
-    std::fs::write(&fake_rustc, b"").unwrap();
-    let _rustc = crate::EnvVarGuard::set(crate::TEST_RUSTC_BIN_ENV_VAR, &fake_rustc);
-
-    let driver_dir = sample_driver_dir(&paths, &plan);
-    std::fs::create_dir_all(&driver_dir).unwrap();
-    let driver = driver_dir.join("dylint-driver");
-    std::fs::write(&driver, b"#!/bin/sh\nsleep 60\n").unwrap();
-    crate::platform::fs::permissions::make_executable(&driver).expect("chmod hung driver");
+    let _deadline = crate::EnvVarGuard::set(DYLINT_PROBE_TIMEOUT_ENV_VAR, "1");
+    let fixture = probe_fixture("#!/bin/sh\nsleep 60\n");
 
     let started = std::time::Instant::now();
-    let (verdict, error) =
-        probe_prebuilt_driver(&plan, &paths).expect_err("a hung driver must not probe clean");
+    let (verdict, error) = probe_prebuilt_driver(&fixture.plan, &fixture.paths)
+        .expect_err("a hung driver must not probe clean");
     let elapsed = started.elapsed();
 
     assert_eq!(verdict, DriverProbeVerdict::ProbeTimedOut);
@@ -563,15 +599,45 @@ fn hanging_driver_probes_as_timed_out_and_stays_bounded() {
     assert!(
         error
             .to_string()
-            .contains("version probe exceeded the 2-second deadline"),
+            .contains("version probe exceeded the 1-second deadline and the 2-second retry"),
         "unexpected probe error: {error}"
     );
-    // The probe deadline is 2s; 30s leaves a wide scheduler margin while
-    // still proving the classification did not wait out the 60s sleep.
+    // 1 s, then the 2 s retry: the hung verdict waits out both attempts...
+    assert!(
+        elapsed >= std::time::Duration::from_secs(3),
+        "a timed-out probe must be retried before it counts as hung, took {elapsed:?}"
+    );
+    // ...and 30 s leaves a wide scheduler margin while still proving the
+    // classification did not wait out the 60 s sleep.
     assert!(
         elapsed < std::time::Duration::from_secs(30),
         "probe classification must stay bounded, took {elapsed:?}"
     );
+}
+
+#[test]
+fn slow_first_probe_is_retried_and_the_driver_is_usable() {
+    // A cold page cache makes only the first `-V` slow: the fixture sleeps
+    // past the 1 s deadline once, then answers at once (#4954's Dell runner).
+    if is_windows() {
+        return;
+    }
+    let _g = ENV_LOCK.lock();
+    let _deadline = crate::EnvVarGuard::set(DYLINT_PROBE_TIMEOUT_ENV_VAR, "1");
+    let version = crate::fetch::known_tools::lookup_by_crate("cargo-dylint")
+        .and_then(|spec| spec.pinned_version)
+        .expect("cargo-dylint registry pin");
+    let warm = tempfile::tempdir().unwrap();
+    let marker = warm.path().join("warm");
+    let fixture = probe_fixture(&format!(
+        "#!/bin/sh\nif [ -e '{m}' ]; then echo 'dylint-driver {version}'; exit 0; fi\n: > '{m}'\nexec sleep 5\n",
+        m = marker.display()
+    ));
+
+    let driver = probe_prebuilt_driver(&fixture.plan, &fixture.paths)
+        .expect("the retry must find the warmed driver usable");
+    assert!(driver.starts_with(fixture.temp.path()));
+    assert!(marker.exists(), "the first attempt must have run");
 }
 
 // ---------------------------------------------------------------------

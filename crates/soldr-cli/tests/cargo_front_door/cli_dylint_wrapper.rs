@@ -487,7 +487,7 @@ fn missing_prebuilt_driver_fails_before_cargo_dylint_launch() {
 }
 
 /// soldr#2436 phase 1 (A3): a driver whose version probe hangs must be
-/// killed AND reaped within the probe's 2-second deadline — bounded
+/// killed AND reaped within the probe's deadline and its one retry — bounded
 /// failure, no orphaned child, no compiler process spawned.
 #[test]
 fn hanging_driver_probe_is_killed_and_reaped() {
@@ -500,6 +500,8 @@ fn hanging_driver_probe_is_killed_and_reaped() {
     let root = unique_temp_dir("dylint-hang-probe");
     let _broker = crate::common::BrokerHomeGuard::new(&root.join("cache"), &root.join("home"));
     let mut command = dylint_command(&root);
+    // 1 s, then the 2 s retry, keeps the bounded-failure check fast.
+    command.env("SOLDR_DYLINT_PROBE_TIMEOUT_SECS", "1");
     let channel = format!(
         "nightly-2026-05-26-{}",
         soldr_cli::pyo3_detect::host_triple()
@@ -515,7 +517,7 @@ fn hanging_driver_probe_is_killed_and_reaped() {
     let elapsed = started.elapsed();
 
     assert_eq!(output.status.code(), Some(1));
-    // Probe deadline is 2s; 30s leaves a 15x scheduler margin while
+    // 1 s plus the 2 s retry; 30 s leaves a 10x scheduler margin while
     // still proving the failure is bounded, not a hang.
     assert!(
         elapsed < std::time::Duration::from_secs(30),
@@ -523,7 +525,7 @@ fn hanging_driver_probe_is_killed_and_reaped() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("version probe exceeded the 2-second deadline"),
+        stderr.contains("version probe exceeded the 1-second deadline and the 2-second retry"),
         "unexpected stderr: {stderr}"
     );
     assert!(
