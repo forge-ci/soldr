@@ -11,7 +11,7 @@
 # `local-gate.toml`, and declaring both is a GATE-001 violation.
 schema  = 3
 profile = "rust-pypi-app"
-linter  = "zackees/ci.yml@f9f371b07fe9e79528a902b9e0a96033f51881a3"
+linter  = "zackees/ci.yml@635fb1262b59702b9293a145e7201410612104e5"
 
 # ── Platforms ────────────────────────────────────────────────────────────────
 # Cross-compiled from a Linux host (soldr cross), executed on its own runner.
