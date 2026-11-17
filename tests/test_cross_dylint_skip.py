@@ -57,3 +57,33 @@ def test_command_is_the_gates_prior_command() -> None:
         "soldr", "cargo", "dylint", "--all", "--",
         "--workspace", "--all-targets", "--target", "t",
     ]  # fmt: skip
+
+
+def test_non_compile_paths_neither_block_a_skip_nor_force_a_run() -> None:
+    # A ci-lint pin bump or a workflow edit reaches no Rust compile.
+    reason = CROSS.skip_reason(
+        ROOT,
+        ["ci.toml", ".github/workflows/ci.yml", ".github/scripts/x.py", "docs/a.md",
+         "tests/test_x.py", "README.md"],
+    )  # fmt: skip
+    assert reason is not None and "no change reaches a Rust compile" in reason
+    # Mixed with a non-platform crate change, the crate rule decides.
+    reason = CROSS.skip_reason(ROOT, ["docs/a.md", "crates/soldr-cli/src/lib.rs"])
+    assert reason is not None and "soldr-cli" in reason
+    assert (
+        CROSS.skip_reason(ROOT, ["docs/a.md", "crates/soldr-platform/src/x.rs"]) is None
+    )
+
+
+def test_compiled_or_gate_inputs_outside_crates_still_run() -> None:
+    # Repo-root src/ is include_str!'d into soldr-cli; ci/ and the gate config
+    # define what runs; Markdown below the root is not exempt.
+    for path in (
+        "src/soldr/_process.py",
+        "ci/cross_dylint.py",
+        "local-gate.toml",
+        "dylints/x/src/lib.rs",
+        ".cargo/config.toml",
+        "examples/x/README.md",
+    ):
+        assert CROSS.skip_reason(ROOT, [path]) is None, path  # fmt: skip
