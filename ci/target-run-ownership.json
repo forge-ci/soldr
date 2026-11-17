@@ -286,6 +286,13 @@
       "reason": "The Unix-only embedded-cache tests exercise links, permissions, executable probes, and child processes."
     },
     {
+      "id": "daemon-zccache-rustc-argfile-target-replay",
+      "package": "soldr-daemon",
+      "binary": "zccache_rustc_argfile",
+      "disposition": "target-replay",
+      "reason": "zccache spills a long rustc argv to a response file only on Windows (soldr#4163); the spill round-trip must run on the Windows targets."
+    },
+    {
       "id": "nextest-wrapper-linux-once",
       "package": "soldr-nextest-wrapper",
       "binary": "wrapper",
@@ -884,6 +891,17 @@
         "aarch64-pc-windows-msvc"
       ],
       "reason": "Validate Windows named-pipe peer identity on each Windows target."
+    },
+    {
+      "id": "zccache-rustc-argfile-windows",
+      "source_id": "daemon-zccache-rustc-argfile-target-replay",
+      "test_prefix": "rustc_",
+      "targets": [
+        "x86_64-pc-windows-msvc",
+        "x86_64-pc-windows-gnu",
+        "aarch64-pc-windows-msvc"
+      ],
+      "reason": "Round-trip a long rustc argv through zccache's Windows spill response file and rustc's one-argument-per-line reader (soldr#4163)."
     },
     {
       "id": "embedded-cache-unix",
