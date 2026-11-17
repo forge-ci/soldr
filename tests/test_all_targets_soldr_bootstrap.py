@@ -14,12 +14,12 @@ WORKFLOW = ROOT / ".github/workflows/cross-compile-all-targets.yml"
 BANNER = ROOT / ".github/scripts/print_build_banner.sh"
 
 
-def banner_path(tmp_path, *front):
+def banner_path(scratch, *front):
     """A PATH with no real soldr or rustc: `front` dirs, then only the tools
     the banner runs, linked from wherever this host keeps them. A hard-coded
     /usr/bin:/bin lacks bash and coreutils on hosts without an FHS layout
     (NixOS), and on others it can carry a real rustc or soldr."""
-    tools = tmp_path / "banner-tools"
+    tools = scratch / "banner-tools"
     tools.mkdir()
     for name in ("bash", "uname", "date"):
         found = shutil.which(name)
