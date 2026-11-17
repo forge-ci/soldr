@@ -681,15 +681,27 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn cook_level_defaults_to_19_and_follows_soldr_zstd_level() {
-        assert_eq!(cook_zstd_level_from(None), COOK_ZSTD_LEVEL);
+    fn cook_level_defaults_to_9_and_follows_soldr_zstd_level() {
+        // 9 packs a real obs-studio closure in 1.2 s at 53 MiB; 19 with the
+        // long window took 26 s for 38 MiB (soldr#4162).
+        assert_eq!(cook_zstd_level_from(None), 9);
         assert_eq!(cook_zstd_level_from(Some(1)), 1);
         assert_eq!(cook_zstd_level_from(Some(-3)), -3);
     }
 
     #[test]
+    fn default_cook_archive_skips_the_long_window() {
+        assert!(!cook_uses_long_window(cook_zstd_level_from(None)));
+    }
+
+    #[test]
+    fn config_default_matches_the_cook_level() {
+        assert_eq!(crate::core::CookConfig::default_zstd_level(), COOK_ZSTD_LEVEL);
+    }
+
+    #[test]
     fn long_window_only_at_high_levels() {
-        assert!(cook_uses_long_window(COOK_ZSTD_LEVEL));
+        assert!(cook_uses_long_window(19));
         assert!(cook_uses_long_window(COOK_LONG_WINDOW_MIN_LEVEL));
         assert!(!cook_uses_long_window(COOK_LONG_WINDOW_MIN_LEVEL - 1));
         assert!(!cook_uses_long_window(1));
