@@ -38,26 +38,19 @@ pub const COOK_ZSTD_LEVEL: i32 = 19;
 /// tree compresses to a small fraction of its raw size.
 pub const COOK_ZSTD_LONG_WINDOW: u32 = 27;
 
-/// RED stub.
+/// The long window (`COOK_ZSTD_LONG_WINDOW`) only pays at slow, high
+/// levels; below this a fast level stays fast.
 pub const COOK_LONG_WINDOW_MIN_LEVEL: i32 = 10;
 
-/// RED stub.
-pub fn cook_zstd_level_from(_env: Option<i32>) -> i32 {
-    COOK_ZSTD_LEVEL
+/// The cook packer's level: `SOLDR_ZSTD_LEVEL` when set, else
+/// [`COOK_ZSTD_LEVEL`].
+pub fn cook_zstd_level_from(env: Option<i32>) -> i32 {
+    crate::cache_lib::zstd_level::resolve_zstd_level(None, env, COOK_ZSTD_LEVEL)
 }
 
-/// RED stub.
-pub fn cook_uses_long_window(_level: i32) -> bool {
-    true
-}
-
-/// RED stub.
-pub fn pack_cook_archive_at_level(
-    source_dir: &Path,
-    cook_dir: &Path,
-    _level: i32,
-) -> Result<PackedCookArchive, RegistryError> {
-    pack_cook_archive(source_dir, cook_dir)
+/// Whether a cook archive at `level` uses the long window.
+pub fn cook_uses_long_window(level: i32) -> bool {
+    level >= COOK_LONG_WINDOW_MIN_LEVEL
 }
 
 /// Result of [`pack_cook_archive`]: the on-disk path and digest of
@@ -110,6 +103,17 @@ pub fn pack_cook_archive(
     source_dir: &Path,
     cook_dir: &Path,
 ) -> Result<PackedCookArchive, RegistryError> {
+    let level = cook_zstd_level_from(crate::cache_lib::zstd_level::env_zstd_level());
+    pack_cook_archive_at_level(source_dir, cook_dir, level)
+}
+
+/// [`pack_cook_archive`] at an explicit zstd `level`; the long window is
+/// used only when [`cook_uses_long_window`].
+pub fn pack_cook_archive_at_level(
+    source_dir: &Path,
+    cook_dir: &Path,
+    level: i32,
+) -> Result<PackedCookArchive, RegistryError> {
     if !source_dir.is_dir() {
         return Err(RegistryError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -128,9 +132,11 @@ pub fn pack_cook_archive(
     let temp_path = tmp_dir.join(format!("cook-{pid}-{nanos}.tar.zst.tmp"));
 
     let temp_file = File::create(&temp_path)?;
-    let mut encoder = zstd::Encoder::new(temp_file, COOK_ZSTD_LEVEL).map_err(io_err)?;
-    encoder.long_distance_matching(true).map_err(io_err)?;
-    encoder.window_log(COOK_ZSTD_LONG_WINDOW).map_err(io_err)?;
+    let mut encoder = zstd::Encoder::new(temp_file, level).map_err(io_err)?;
+    if cook_uses_long_window(level) {
+        encoder.long_distance_matching(true).map_err(io_err)?;
+        encoder.window_log(COOK_ZSTD_LONG_WINDOW).map_err(io_err)?;
+    }
     // Multi-threaded compression — `zstdmt` feature already enabled
     // in workspace deps. Using `num_cpus` would add a dep we do not
     // want; the OS-determined thread count works well for level 19.
@@ -697,16 +703,26 @@ mod tests {
         write_file(&source.join("deps/libfoo.rlib"), &[7u8; 4096]);
         let cook = dir.path().join("cook");
         let fast = pack_cook_archive_at_level(&source, &cook, -1).expect("pack -1");
-        let slow = pack_cook_archive_at_level(&source, &dir.path().join("cook19"), 19).expect("pack 19");
+        let slow =
+            pack_cook_archive_at_level(&source, &dir.path().join("cook19"), 19).expect("pack 19");
         assert_ne!(fast.sha256, slow.sha256, "the level must reach the encoder");
         let decoder = zstd::Decoder::new(File::open(&fast.path).expect("open")).expect("decoder");
         let mut archive = tar::Archive::new(decoder);
         let names: Vec<String> = archive
             .entries()
             .expect("entries")
-            .map(|e| e.expect("entry").path().expect("path").display().to_string())
+            .map(|e| {
+                e.expect("entry")
+                    .path()
+                    .expect("path")
+                    .display()
+                    .to_string()
+            })
             .collect();
-        assert!(names.iter().any(|n| n == "debug/deps/libfoo.rlib"), "{names:?}");
+        assert!(
+            names.iter().any(|n| n == "debug/deps/libfoo.rlib"),
+            "{names:?}"
+        );
     }
 
     fn write_file(p: &Path, bytes: &[u8]) {

@@ -15,6 +15,7 @@ use crate::cache_lib::save::{
     save_with_projection, write_manifest_file, LoadOptions, SaveDeltaOptions, SaveOptions,
     SaveProfile, DEFAULT_ZSTD_LEVEL, SAVE_PROFILE_ENV,
 };
+use crate::cache_lib::zstd_level::{env_zstd_level, parse_zstd_level, resolve_zstd_level};
 use clap::Args;
 
 #[path = "save_load_snapshot.rs"]
@@ -38,10 +39,16 @@ pub struct SaveArgs {
     #[arg(long, value_name = "FILE")]
     pub out: PathBuf,
 
-    /// zstd compression level (1..=22). Default 3 — higher levels hurt
-    /// wall-clock far more than they shrink transfer.
-    #[arg(long, default_value_t = DEFAULT_ZSTD_LEVEL, value_name = "N")]
-    pub zstd_level: i32,
+    /// zstd compression level: 1..=22, a negative "fast" level, or `none`
+    /// (= 1). Default: `SOLDR_ZSTD_LEVEL` when set, else 3 — higher levels
+    /// hurt wall-clock far more than they shrink transfer.
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = parse_zstd_level,
+        allow_negative_numbers = true
+    )]
+    pub zstd_level: Option<i32>,
 
     /// Thread count for parallel hashing + zstd. Default uses all
     /// available cores.
@@ -283,7 +290,7 @@ pub fn run_save(args: SaveArgs) -> i32 {
             cache_dir,
             base_manifest: &base_manifest,
             out: &args.out,
-            zstd_level: args.zstd_level,
+            zstd_level: resolve_zstd_level(args.zstd_level, env_zstd_level(), DEFAULT_ZSTD_LEVEL),
             threads: args.threads,
             profile,
         };
@@ -327,7 +334,7 @@ pub fn run_save(args: SaveArgs) -> i32 {
         workspace: args.workspace.as_deref(),
         cache_dir: args.cache_dir.as_deref(),
         out: &args.out,
-        zstd_level: args.zstd_level,
+        zstd_level: resolve_zstd_level(args.zstd_level, env_zstd_level(), DEFAULT_ZSTD_LEVEL),
         threads: args.threads,
         mtimes_only: args.mtimes_only,
         profile,
@@ -542,7 +549,7 @@ mod private_session_default_tests {
             cache_dir: None,
             workspace: None,
             out: PathBuf::from("/out.tar.zst"),
-            zstd_level: DEFAULT_ZSTD_LEVEL,
+            zstd_level: None,
             threads: None,
             json: false,
             ci: false,
