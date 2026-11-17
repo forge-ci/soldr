@@ -1,6 +1,7 @@
 """Unit tests for ci/reclaim_runner_disk.py."""
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from unittest import mock
@@ -27,7 +28,13 @@ def test_refuses_self_hosted():
 
 def _run(tmp_path, free_after_gib):
     usage = mock.Mock(free=int(free_after_gib * reclaim.GIB))
-    env = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
+    # Keep PATH: main() runs `du`, and a cleared environment falls back to
+    # os.defpath (/bin:/usr/bin), which has no du on non-FHS hosts (NixOS).
+    env = {
+        "GITHUB_ACTIONS": "true",
+        "RUNNER_ENVIRONMENT": "github-hosted",
+        "PATH": os.environ.get("PATH", os.defpath),
+    }
     with (
         mock.patch.dict(reclaim.os.environ, env, clear=True),
         mock.patch.object(reclaim.sys, "platform", "linux"),
