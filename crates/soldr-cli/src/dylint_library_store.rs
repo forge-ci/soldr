@@ -46,39 +46,60 @@ fn store_dir_for_target(
     channel: &str,
     triple: &str,
 ) -> Option<PathBuf> {
-    let libraries = crate::dylint_libraries::library_directories(workspace_root).ok()?;
-    if libraries.is_empty() {
-        return None;
+    let inputs = StoreInputs::resolve(workspace_root)?;
+    Some(inputs.store_dir(store_root, channel, triple))
+}
+
+/// The target-independent half of a store key: the lint libraries and
+/// their resolved dependency closure. Resolving the closure runs `cargo
+/// metadata` once for the workspace and once per standalone library, so a
+/// run that keys several targets resolves it once and reuses it.
+struct StoreInputs {
+    libraries: Vec<PathBuf>,
+    closure: String,
+}
+
+impl StoreInputs {
+    fn resolve(workspace_root: &Path) -> Option<Self> {
+        let libraries = crate::dylint_libraries::library_directories(workspace_root).ok()?;
+        if libraries.is_empty() {
+            return None;
+        }
+        let closure = metadata::dependency_closure(workspace_root, &libraries).ok()?;
+        Some(Self { libraries, closure })
     }
-    let mut hasher = Sha256::new();
-    hasher.update(b"soldr-dylint-libraries-v2\0");
-    hasher.update(channel.as_bytes());
-    hasher.update(b"\0target\0");
-    hasher.update(triple.as_bytes());
-    let closure = metadata::dependency_closure(workspace_root, &libraries).ok()?;
-    hasher.update(closure.as_bytes());
-    for library in &libraries {
-        // The key names the library by its directory name, not by its path
-        // inside this checkout: a subtree worker roots the repository one
-        // level down (`sub/dylints/one` instead of `dylints/one`), and the
-        // bytes are identical, so keying on the path made it rebuild the
-        // whole 350 MB tree for a layout difference alone. Two libraries in
-        // one workspace can never share a directory name.
-        let name = library.file_name().unwrap_or_else(|| library.as_os_str());
-        hasher.update(b"\0lib\0");
-        hasher.update(name.to_string_lossy().replace('\\', "/").as_bytes());
-        for name in KEY_FILES {
-            hasher.update(b"\0file\0");
-            hasher.update(name.as_bytes());
-            if let Ok(bytes) = std::fs::read(library.join(name)) {
-                hasher.update(b"\0present\0");
-                hasher.update(&bytes);
+
+    fn store_dir(&self, store_root: &Path, channel: &str, triple: &str) -> PathBuf {
+        let Self { libraries, closure } = self;
+        let mut hasher = Sha256::new();
+        hasher.update(b"soldr-dylint-libraries-v2\0");
+        hasher.update(channel.as_bytes());
+        hasher.update(b"\0target\0");
+        hasher.update(triple.as_bytes());
+        hasher.update(closure.as_bytes());
+        for library in libraries {
+            // The key names the library by its directory name, not by its path
+            // inside this checkout: a subtree worker roots the repository one
+            // level down (`sub/dylints/one` instead of `dylints/one`), and the
+            // bytes are identical, so keying on the path made it rebuild the
+            // whole 350 MB tree for a layout difference alone. Two libraries in
+            // one workspace can never share a directory name.
+            let name = library.file_name().unwrap_or_else(|| library.as_os_str());
+            hasher.update(b"\0lib\0");
+            hasher.update(name.to_string_lossy().replace('\\', "/").as_bytes());
+            for name in KEY_FILES {
+                hasher.update(b"\0file\0");
+                hasher.update(name.as_bytes());
+                if let Ok(bytes) = std::fs::read(library.join(name)) {
+                    hasher.update(b"\0present\0");
+                    hasher.update(&bytes);
+                }
             }
         }
+        let digest = hasher.finalize();
+        let key: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+        store_root.join(format!("{channel}-{triple}-{key}"))
     }
-    let digest = hasher.finalize();
-    let key: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
-    Some(store_root.join(format!("{channel}-{triple}-{key}")))
 }
 
 /// Link `<target_dir>/dylint/libraries` to `store`. A pre-existing real
@@ -131,6 +152,9 @@ pub(crate) fn share_library_build(
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let _lock = gc::lock_store(&store_root)?;
         let targets = invocation_targets(workspace_root, args)?;
+        let Some(inputs) = StoreInputs::resolve(workspace_root) else {
+            return Ok(());
+        };
         for requested in std::iter::once(None).chain(targets.into_iter().map(Some)) {
             let host = requested.is_none();
             let triple = requested
@@ -141,12 +165,7 @@ pub(crate) fn share_library_build(
             } else {
                 target_dir.join(triple)
             };
-            let store = if host {
-                store_dir(&store_root, workspace_root, channel)
-            } else {
-                store_dir_for_target(&store_root, workspace_root, channel, triple)
-            };
-            let Some(store) = store else { continue };
+            let store = inputs.store_dir(&store_root, channel, triple);
             link_libraries_dir(&target, &store)?;
             gc::register_link(&target, &store)?;
         }
