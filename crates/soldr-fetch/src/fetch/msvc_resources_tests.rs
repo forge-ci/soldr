@@ -68,7 +68,7 @@ async fn overlay_keeps_headers_and_other_targets_and_reuses_published_tree() {
     let temp = tempfile::tempdir().unwrap();
     let (paths, original, index) = seed(temp.path(), true);
     let resource = ensure_from_index(&paths, &original, &index).await.unwrap();
-    assert!(resource.starts_with(paths.root.join("sdk")));
+    assert!(resource.starts_with(paths.root.join("sdk").canonicalize().unwrap()));
     assert_eq!(
         std::fs::read_to_string(resource.join("include/intrin.h")).unwrap(),
         "original headers"
