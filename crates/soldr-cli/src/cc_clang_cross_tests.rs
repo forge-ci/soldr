@@ -158,7 +158,8 @@ fn msvc_driver_switches_to_real_cl_arguments_and_publishes_clang_cl() {
     let xwin = tmp.path().join("sdk with spaces");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(xwin.join("crt/include")).unwrap();
-    for tool in ["clang", "clang++"] {
+    std::fs::create_dir_all(xwin.join("crt/lib/x86_64")).unwrap();
+    for tool in ["clang", "clang++", "lld-link"] {
         let path = bin.join(tool);
         std::fs::write(&path, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
         crate::platform::fs::permissions::make_executable(&path).unwrap();
@@ -183,6 +184,15 @@ fn msvc_driver_switches_to_real_cl_arguments_and_publishes_clang_cl() {
         .unwrap()
         .join("x86_64-pc-windows-msvc-clang-cl")
         .is_file());
+    let linker = std::process::Command::new(cc.parent().unwrap().join("lld-link"))
+        .args(["/dll", "probe.obj"])
+        .output()
+        .unwrap();
+    assert!(linker.status.success());
+    let linker_args = String::from_utf8(linker.stdout).unwrap();
+    assert!(linker_args.contains("/LIBPATH:"));
+    assert!(linker_args.contains("lib/windows/clang_rt.builtins-x86_64.lib"));
+    assert!(linker_args.contains("probe.obj"));
 }
 
 #[test]

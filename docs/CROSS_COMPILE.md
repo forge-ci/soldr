@@ -315,7 +315,11 @@ soldr cc --target win-x64 --driver-mode=cl /O2 /std:c11 /c probe.c /Foprobe.obj
 ```
 
 The second command prints a targeted `clang-cl` driver suitable for CMake's
-`CMAKE_C_COMPILER`. The GNU-style driver also accepts `--driver-mode=cl`.
+`CMAKE_C_COMPILER`. Its sibling `lld-link` carries the same SDK library
+paths and builtins for CMake's separate MSVC link stage. Select it as
+`CMAKE_LINKER` when overriding CMake's linker detection. Use a Release
+configuration and `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL` with the
+release CRT SDK. The GNU-style driver also accepts `--driver-mode=cl`.
 Both select the same managed LLVM and xwin SDK, put Clang resource headers
 before xwin headers, preserve the case-insensitive header VFS, and use the
 dynamic MSVC CRT by default. CL mode injects `/imsvc`, frontend VFS options,

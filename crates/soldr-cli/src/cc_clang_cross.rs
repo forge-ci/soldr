@@ -59,6 +59,7 @@ pub(crate) struct DriverSpec {
 pub(crate) struct ClSpec {
     pub common: Vec<String>,
     pub config_lines: Vec<String>,
+    pub linker_args: Vec<String>,
 }
 
 pub(crate) async fn prepare(paths: &SoldrPaths, target: &str) -> Result<ClangCross, SoldrError> {
@@ -143,11 +144,18 @@ pub(crate) fn msvc_spec(target: &str, xwin: &Path, resource: &Path) -> DriverSpe
     }
     let mut config_lines = vec!["-fuse-ld=lld".to_string()];
     let mut cl_config = vec!["/clang:-fuse-ld=lld".into()];
+    let mut linker_args = Vec::new();
     if target == "x86_64-pc-windows-msvc" {
         config_lines.push("--rtlib=compiler-rt".into());
         cl_config.push("-rtlib=compiler-rt".into());
         // CMake's Windows-Clang GNU link rule uses -nostdlib, suppressing
         // Clang's implicit rtlib. Keep the required C builtins in that link too.
+        linker_args.push(
+            resource
+                .join("lib/windows/clang_rt.builtins-x86_64.lib")
+                .display()
+                .to_string(),
+        );
         let builtins = config_quote(&format!(
             "${}",
             resource
@@ -161,6 +169,7 @@ pub(crate) fn msvc_spec(target: &str, xwin: &Path, resource: &Path) -> DriverSpe
     // Both tokens need the link-only prefix: CL otherwise counts a linker
     // input during /c and rejects /Fo as a multiple-source invocation.
     for lib in crate::blessed_build::xwin_lib_dirs(xwin, target) {
+        linker_args.push(format!("/LIBPATH:{}", lib.display()));
         config_lines.push(config_quote(&format!("-L{}", lib.display())));
         cl_config.extend([
             "$-Xlinker".into(),
@@ -184,6 +193,7 @@ pub(crate) fn msvc_spec(target: &str, xwin: &Path, resource: &Path) -> DriverSpe
         cl: Some(ClSpec {
             common: cl_common,
             config_lines: cl_config,
+            linker_args,
         }),
         common,
         cxx_extra: Vec::new(),
@@ -270,8 +280,8 @@ fn write_drivers(
         )?;
         written.push(path);
     }
-    if spec.cl.is_some() {
-        write_msvc_tools(staged, &cc, target)?;
+    if let Some(cl) = &spec.cl {
+        write_msvc_tools(bin_dir, staged, &cc, target, &cl.linker_args)?;
     }
     std::fs::write(staged.join(".complete"), &digest)?;
     crate::platform::fs::permissions::restore_mode(staged, Some(0o755))?;
@@ -281,7 +291,13 @@ fn write_drivers(
     Ok((cc, cxx))
 }
 
-fn write_msvc_tools(staged: &Path, cc: &Path, target: &str) -> Result<(), SoldrError> {
+fn write_msvc_tools(
+    bin: &Path,
+    staged: &Path,
+    cc: &Path,
+    target: &str,
+    linker_args: &[String],
+) -> Result<(), SoldrError> {
     let suffix = crate::platform::executable::name::script_suffix();
     let body = std::fs::read_to_string(staged.join(cc.file_name().unwrap()))?;
     crate::linker_shim::write_content_addressed_shim(
@@ -292,6 +308,15 @@ fn write_msvc_tools(staged: &Path, cc: &Path, target: &str) -> Result<(), SoldrE
         staged.join("windows-runtime.json"),
         msvc_runtime_policy(target),
     )?;
+    // CMake's MSVC frontend invokes a linker directly. Give that separate
+    // stage the same SDK and builtins without relying on an ambient LIB.
+    let lld = bin.join(crate::platform::executable::name::native("lld-link"));
+    if lld.is_file() {
+        crate::linker_shim::write_content_addressed_shim(
+            &staged.join(format!("lld-link{suffix}")),
+            &render_driver(&lld, linker_args)?,
+        )?;
+    }
     Ok(())
 }
 
