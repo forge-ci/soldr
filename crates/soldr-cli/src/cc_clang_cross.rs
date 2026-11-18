@@ -147,11 +147,13 @@ pub(crate) fn msvc_spec(target: &str, xwin: &Path, resource: &Path) -> DriverSpe
         config_lines.push("--rtlib=compiler-rt".into());
         cl_config.push("-rtlib=compiler-rt".into());
     }
+    // Both tokens need the link-only prefix: CL otherwise counts a linker
+    // input during /c and rejects /Fo as a multiple-source invocation.
     for lib in crate::blessed_build::xwin_lib_dirs(xwin, target) {
         config_lines.push(config_quote(&format!("-L{}", lib.display())));
         cl_config.extend([
-            "/clang:-Xlinker".into(),
-            config_quote(&format!("/clang:/LIBPATH:{}", lib.display())),
+            "$-Xlinker".into(),
+            config_quote(&format!("$/LIBPATH:{}", lib.display())),
         ]);
     }
     // soldr#3415: resolve any `#include` casing against the case-folded SDK.

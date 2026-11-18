@@ -217,7 +217,11 @@ fn msvc_resource_headers_precede_sdk_in_both_modes_and_keep_overlay() {
         .config_lines
         .iter()
         .any(|a| a.contains("-Xclang -ivfsoverlay -Xclang")));
-    assert!(cl.config_lines.iter().any(|a| a.contains("/LIBPATH:")));
+    assert!(cl.config_lines.iter().any(|a| a == "$-Xlinker"));
+    assert!(cl
+        .config_lines
+        .iter()
+        .any(|a| a.starts_with("\"$/LIBPATH:")));
     assert!(cl.config_lines.contains(&"-rtlib=compiler-rt".to_string()));
     assert!(!cl.common.iter().any(|a| a == "-isystem"));
     assert!(!cl.config_lines.iter().any(|a| a.starts_with("-L")));
@@ -228,4 +232,75 @@ fn msvc_resource_headers_precede_sdk_in_both_modes_and_keep_overlay() {
         policy["redistributed_microsoft_dlls"],
         serde_json::json!([])
     );
+}
+
+/// Refs #4167: the CL parser counts even forwarded linker inputs before /Fo.
+/// A real driver plan catches this without downloading an SDK or linking.
+#[test]
+fn real_clang_cl_config_keeps_libpaths_out_of_compile_only_inputs() {
+    let clang = std::env::var_os("SOLDR_TEST_CLANG")
+        .map(PathBuf::from)
+        .or_else(|| {
+            crate::exec_cmd::find_on_path("clang", &std::env::var_os("PATH").unwrap_or_default())
+        });
+    let Some(clang) = clang else {
+        eprintln!("skip: real CL parser regression needs Clang 21+");
+        return;
+    };
+    let version = std::process::Command::new(&clang)
+        .arg("--version")
+        .output()
+        .unwrap();
+    let version = String::from_utf8_lossy(&version.stdout);
+    let major = version
+        .split("clang version ")
+        .nth(1)
+        .and_then(|s| s.split('.').next())
+        .and_then(|s| s.parse::<u32>().ok());
+    if major.is_none_or(|v| v < 21) {
+        eprintln!("skip: real CL parser regression needs Clang 21+, found {version}");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let sdk = temp.path().join("SDK with spaces");
+    std::fs::create_dir_all(sdk.join("crt/lib/x86_64")).unwrap();
+    let spec = msvc_spec("x86_64-pc-windows-msvc", &sdk, temp.path());
+    let cl = spec.cl.unwrap();
+    let config = temp.path().join("cl.cfg");
+    std::fs::write(&config, cl.config_lines.join("\n")).unwrap();
+    let mut args = cl.common;
+    args.push(format!("--config={}", config.display()));
+    let suffix = crate::platform::executable::name::script_suffix();
+    let driver = temp.path().join(format!("clang-cl{suffix}"));
+    crate::linker_shim::write_content_addressed_shim(
+        &driver,
+        &render_msvc_driver(&clang, &spec.common, &args).unwrap(),
+    )
+    .unwrap();
+    let input = temp.path().join("probe.c");
+    std::fs::write(&input, "int probe(void) { return 42; }\n").unwrap();
+    let compile = std::process::Command::new(&driver)
+        .args(["-###", "/c", "/Foprobe.obj"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let link = std::process::Command::new(&driver)
+        .args(["-###", "/LD"])
+        .arg(input)
+        .output()
+        .unwrap();
+    assert!(
+        link.status.success(),
+        "{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    assert!(String::from_utf8_lossy(&link.stderr).contains(&format!(
+        "/LIBPATH:{}",
+        sdk.join("crt/lib/x86_64").display()
+    )));
 }
