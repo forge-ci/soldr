@@ -1,6 +1,7 @@
 """The all-targets workflow and its banner use the managed toolchain."""
 
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -11,12 +12,14 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/cross-compile-all-targets.yml"
 BANNER = ROOT / ".github/scripts/print_build_banner.sh"
+BASH = shutil.which("bash")
 
 
 def run_banner(env):
+    assert BASH is not None, "the Linux workflow banner requires bash"
     with tempfile.TemporaryFile(mode="w+") as output:
         subprocess.run(
-            ["bash", str(BANNER), "demo", "debug", "target", "soldr cargo"],
+            [BASH, str(BANNER), "demo", "debug", "target", "soldr cargo"],
             env=env,
             stdout=output,
             text=True,
