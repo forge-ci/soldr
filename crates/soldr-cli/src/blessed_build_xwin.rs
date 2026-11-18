@@ -44,6 +44,15 @@ fn xwin_msvc_cflags(cache_dir: &std::path::Path) -> String {
     flags
 }
 
+/// Keep the Cargo/cc-rs route's intrinsic headers in the same order as the
+/// standalone driver. The composed resource tree includes the matching builtins.
+fn xwin_msvc_resource_cflags(cache_dir: &std::path::Path, resource: &std::path::Path) -> String {
+    format!(
+        "/clang:-resource-dir={} /imsvc{} {}",
+        resource.display(), resource.join("include").display(), xwin_msvc_cflags(cache_dir)
+    )
+}
+
 /// The xwin bundle's C/C++ include directories that exist on disk, in search
 /// order. Shared by the cargo path above and `soldr cc` (soldr#3806) so the
 /// two cannot disagree about which SDK headers a target sees.

@@ -103,7 +103,6 @@ impl BlessedPrep {
 ///
 /// Caller is responsible for applying `prep.env` and prepending
 /// `prep.shim_path_dir` to `PATH` on the child cargo invocation.
-#[expect(clippy::cognitive_complexity, reason = "baseline, zackees/ci.yml#229")]
 #[expect(clippy::too_many_lines, reason = "baseline, zackees/ci.yml#229")]
 pub async fn prepare(
     paths: &SoldrPaths,
@@ -163,52 +162,24 @@ pub async fn prepare(
             crate::fetch::xwin_cache::ensure_xwin_cache(paths, target_triple)
         );
 
+        let resource = crate::fetch::msvc_resources::ensure(
+            paths,
+            llvm_result
+                .as_ref()
+                .map_err(|e| SoldrError::Other(e.to_string()))?,
+            target_triple,
+        )
+        .await?;
         let _ = apply_llvm_toolchain_result(&mut prep, target_triple, llvm_result);
 
-        match xwin_result {
-            Ok(cache_dir) => {
-                prep.xwin_cache_dir = Some(cache_dir.clone());
-                prep.env.push((
-                    crate::fetch::xwin_cache::XWIN_CACHE_DIR_ENV_VAR.to_string(),
-                    cache_dir.to_string_lossy().into_owned(),
-                ));
-
-                // Native cflags + rustflags injection (soldr#1036).
-                // cc-rs reads `CFLAGS_<target>` / `CXXFLAGS_<target>`
-                // and forwards them to the compiler invocation. The
-                // `CC_<target>=clang-cl` env above makes clang-cl parse
-                // `/imsvc<path>` MSVC-style include flags correctly.
-                let cflags = xwin_msvc_cflags(&cache_dir);
-                if !cflags.is_empty() {
-                    prep.env
-                        .push((format!("CFLAGS_{target_u}"), cflags.clone()));
-                    prep.env.push((format!("CXXFLAGS_{target_u}"), cflags));
-                }
-
-                // Linker args via cargo's per-target RUSTFLAGS env var.
-                // Each /LIBPATH: entry becomes a `-C link-arg=...` so
-                // rustc passes it through to lld-link. Whitespace-
-                // separated rustflags is cargo's documented contract.
-                // soldr#2794: read the CRT policy off the caller here, at
-                // dispatch, rather than baking dynamic into preparation.
-                let linkage = requested_crt_linkage(target_triple);
-                let link_args = xwin_msvc_link_args(&cache_dir, target_triple, linkage);
-                if !link_args.is_empty() {
-                    prep.env.push((
-                        format!("CARGO_TARGET_{target_u_upper}_RUSTFLAGS"),
-                        link_args,
-                    ));
-                }
-            }
-            Err(e) => {
-                eprintln!("soldr build: catalogue xwin-cache unavailable for {target_triple}: {e}");
-                eprintln!(
-                    "soldr build: continuing without XWIN_CACHE_DIR — \
-                     cargo-xwin's live download will produce the SDK \
-                     (clang shim is still active for ring's compile fix)"
-                );
-            }
-        }
+        configure_msvc_sdk(
+            &mut prep,
+            target_triple,
+            &target_u,
+            &target_u_upper,
+            xwin_result,
+            &resource,
+        );
     }
 
     // --------------------------- Windows GNU GCC ----------------------------
@@ -385,6 +356,59 @@ pub async fn prepare(
     inject_cmake_tooling(paths, &mut prep).await;
 
     Ok(prep)
+}
+
+fn configure_msvc_sdk(
+    prep: &mut BlessedPrep,
+    target_triple: &str,
+    target_u: &str,
+    target_u_upper: &str,
+    xwin_result: Result<PathBuf, SoldrError>,
+    resource: &std::path::Path,
+) {
+    match xwin_result {
+        Ok(cache_dir) => {
+            prep.xwin_cache_dir = Some(cache_dir.clone());
+            prep.env.push((
+                crate::fetch::xwin_cache::XWIN_CACHE_DIR_ENV_VAR.to_string(),
+                cache_dir.to_string_lossy().into_owned(),
+            ));
+
+            // cc-rs forwards these flags to the target's clang-cl (soldr#1036).
+            let cflags = xwin_msvc_resource_cflags(&cache_dir, resource);
+            if !cflags.is_empty() {
+                prep.env
+                    .push((format!("CFLAGS_{target_u}"), cflags.clone()));
+                prep.env.push((format!("CXXFLAGS_{target_u}"), cflags));
+            }
+
+            // Read the caller's CRT policy at dispatch (soldr#2794).
+            let linkage = requested_crt_linkage(target_triple);
+            let mut link_args = xwin_msvc_link_args(&cache_dir, target_triple, linkage);
+            if target_triple == "x86_64-pc-windows-msvc" {
+                link_args.push_str(&format!(
+                    " -C link-arg={}",
+                    resource
+                        .join("lib/windows/clang_rt.builtins-x86_64.lib")
+                        .display()
+                ));
+            }
+            if !link_args.is_empty() {
+                prep.env.push((
+                    format!("CARGO_TARGET_{target_u_upper}_RUSTFLAGS"),
+                    link_args,
+                ));
+            }
+        }
+        Err(e) => {
+            eprintln!("soldr build: catalogue xwin-cache unavailable for {target_triple}: {e}");
+            eprintln!(
+                "soldr build: continuing without XWIN_CACHE_DIR — \
+                     cargo-xwin's live download will produce the SDK \
+                     (clang shim is still active for ring's compile fix)"
+            );
+        }
+    }
 }
 
 fn add_msvc_tool_env(prep: &mut BlessedPrep, target_u: &str, target_u_upper: &str) {
