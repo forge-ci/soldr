@@ -15,6 +15,8 @@ operational and integration details.
   rollout notes for `zackees/setup-soldr@v0` in external CI.
 - `CONTRIBUTING_TESTS.md` — portable and native platform test conventions,
   including how archived tests reach target runners.
+- `LINUX_DARWIN_SWIFT.md` — managed Swift/SDK/compiler-rt provisioning and
+  CMake/native Darwin cross-build paths on Linux.
 - `NATIVE_SQLITE_BENCHMARK.md` — cross-platform validation of the
   default-on native C/C++ compiler cache (#310, #312).
 - `NPM_PUBLISHING.md`, `PYPI_TRUSTED_PUBLISHING.md` — release plumbing.

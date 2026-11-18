@@ -51,6 +51,7 @@ pub use rustup_init::{
 
 pub mod apple_sdk;
 pub mod archive;
+pub mod darwin_toolchain;
 /// soldr#988 Phase 4 — on-demand builds via `forge-ci/forge` when the
 /// toolchain catalogue lookup misses. See module doc for the env-var
 /// contract and failure surface.
@@ -59,8 +60,7 @@ pub mod github;
 pub mod llvm;
 pub mod llvm_background;
 /// soldr#997 Phase A — LLVM-tools bundle from soldr-toolchain
-/// `recipes/llvm-tools-linux-x64/`. See module doc for why this is
-/// distinct from [`llvm`].
+/// `recipes/llvm-tools-linux-x64/`; see module docs for why this differs from [`llvm`].
 pub mod llvm_host_libs;
 pub mod llvm_tools_bundle;
 pub mod manifest_lookup;

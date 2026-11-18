@@ -103,6 +103,19 @@ pub(crate) enum ToolchainSubcommand {
     /// (exit 0 with a note) when the manifest is missing or omits
     /// `channel`.
     Install,
+    /// Provision the pinned Linux x64 Swift/LLVM/SDK closure for Darwin.
+    Darwin {
+        #[arg(long, default_value = crate::fetch::darwin_toolchain::TARGET)]
+        target: String,
+        #[arg(long, default_value = crate::fetch::darwin_toolchain::SDK_VERSION)]
+        sdk_version: String,
+        /// Use the SDK containing both Darwin architectures.
+        #[arg(long)]
+        universal_sdk: bool,
+        /// Emit paths, content identity and compiler argument arrays as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Hardlink every file of the caller's and the managed rustup homes'
     /// toolchains into one content-addressed store, so the same toolchain
     /// stored twice takes the disk space of one (soldr#4027).

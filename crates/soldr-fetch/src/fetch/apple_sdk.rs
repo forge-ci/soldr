@@ -49,7 +49,7 @@ pub const APPLE_SDK_VERSION_ENV_VAR: &str = "SOLDR_APPLE_SDK_VERSION";
 pub const APPLE_SDK_SHAPE_ENV_VAR: &str = "SOLDR_APPLE_SDK_SHAPE";
 
 /// Versions soldr knows how to request from the toolchain catalogue.
-pub const SUPPORTED_APPLE_SDK_VERSIONS: &[&str] = &["11.3", "13.3", "14.5", "15.2"];
+pub const SUPPORTED_APPLE_SDK_VERSIONS: &[&str] = &["11.3", "13.3", "14.5", "15.2", "26.5"];
 
 /// Apple SDK packaging shapes a consumer can ask for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
