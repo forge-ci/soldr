@@ -356,9 +356,17 @@ fn stamp_contents(host_libs: bool) -> String {
     format!("{MANAGED_LLVM_VERSION}\n{STAMP_EXEC_MARKER}\n{libs}\n")
 }
 
-/// Write the `.complete` stamp.
+/// Write the `.complete` stamp by replacing the file, never by rewriting it
+/// in place: a host may hardlink identical files across soldr roots
+/// (forge-ci/gh-runner#23), and an in-place write would mark every root that
+/// shares the inode complete, so those roots would skip their own repair.
 fn write_stamp(stamp: &Path, host_libs: bool) -> Result<(), SoldrError> {
-    std::fs::write(stamp, stamp_contents(host_libs))?;
+    let dir = stamp.parent().unwrap_or_else(|| Path::new("."));
+    let mut staged = tempfile::NamedTempFile::new_in(dir)?;
+    std::io::Write::write_all(&mut staged, stamp_contents(host_libs).as_bytes())?;
+    staged
+        .persist(stamp)
+        .map_err(|error| SoldrError::Io(error.error))?;
     Ok(())
 }
 
