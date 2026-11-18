@@ -15,6 +15,20 @@ BANNER = ROOT / ".github/scripts/print_build_banner.sh"
 BASH = shutil.which("bash")
 
 
+def banner_path(scratch, *front):
+    """A PATH with no real soldr or rustc: `front` dirs, then only the tools
+    the banner runs, linked from wherever this host keeps them. A hard-coded
+    /usr/bin:/bin lacks bash and coreutils on hosts without an FHS layout
+    (NixOS), and on others it can carry a real rustc or soldr."""
+    tools = scratch / "banner-tools"
+    tools.mkdir()
+    for name in ("bash", "uname", "date"):
+        found = shutil.which(name)
+        assert found, f"{name} not on PATH"
+        (tools / name).symlink_to(found)
+    return os.pathsep.join([*(str(d) for d in front), str(tools)])
+
+
 def run_banner(env):
     assert BASH is not None, "the Linux workflow banner requires bash"
     with tempfile.TemporaryFile(mode="w+") as output:
@@ -61,7 +75,7 @@ def test_banner_queries_soldr_and_handles_probe_failure(tmp_path, capfd):
     forbidden = tmp_path / "rustc"
     forbidden.write_text("#!/bin/sh\necho WRONG-RUSTC\n")
     forbidden.chmod(0o755)
-    env = dict(os.environ, PATH=f"{tmp_path}:/usr/bin:/bin")
+    env = dict(os.environ, PATH=banner_path(tmp_path, tmp_path))
     output = run_banner(env)
     assert "WRONG-RUSTC" not in output
     assert "soldr rustc unavailable" in output
@@ -72,8 +86,8 @@ def test_banner_queries_soldr_and_handles_probe_failure(tmp_path, capfd):
 @pytest.mark.skipif(
     os.name == "nt", reason="the workflow and its shell banner run on Linux"
 )
-def test_banner_reports_missing_soldr_without_using_rustc():
-    env = dict(os.environ, PATH="/usr/bin:/bin")
+def test_banner_reports_missing_soldr_without_using_rustc(tmp_path):
+    env = dict(os.environ, PATH=banner_path(tmp_path))
     output = run_banner(env)
     assert "soldr rustc unavailable" in output
     assert "soldr not on PATH yet" in output
@@ -89,7 +103,7 @@ def test_banner_uses_soldr_compiler_probe(tmp_path):
         'else echo "soldr 0.9"; fi\n'
     )
     fake.chmod(0o755)
-    env = dict(os.environ, PATH=f"{tmp_path}:/usr/bin:/bin")
+    env = dict(os.environ, PATH=banner_path(tmp_path, tmp_path))
     output = run_banner(env)
     assert "rustc      : rustc 1.98.1" in output
     assert "soldr      : soldr 0.9" in output
