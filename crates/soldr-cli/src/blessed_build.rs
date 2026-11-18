@@ -375,11 +375,7 @@ fn configure_msvc_sdk(
                 cache_dir.to_string_lossy().into_owned(),
             ));
 
-            // Native cflags + rustflags injection (soldr#1036).
-            // cc-rs reads `CFLAGS_<target>` / `CXXFLAGS_<target>`
-            // and forwards them to the compiler invocation. The
-            // `CC_<target>=clang-cl` env above makes clang-cl parse
-            // `/imsvc<path>` MSVC-style include flags correctly.
+            // cc-rs forwards these flags to the target's clang-cl (soldr#1036).
             let cflags = xwin_msvc_resource_cflags(&cache_dir, &resource);
             if !cflags.is_empty() {
                 prep.env
@@ -387,12 +383,7 @@ fn configure_msvc_sdk(
                 prep.env.push((format!("CXXFLAGS_{target_u}"), cflags));
             }
 
-            // Linker args via cargo's per-target RUSTFLAGS env var.
-            // Each /LIBPATH: entry becomes a `-C link-arg=...` so
-            // rustc passes it through to lld-link. Whitespace-
-            // separated rustflags is cargo's documented contract.
-            // soldr#2794: read the CRT policy off the caller here, at
-            // dispatch, rather than baking dynamic into preparation.
+            // Read the caller's CRT policy at dispatch (soldr#2794).
             let linkage = requested_crt_linkage(target_triple);
             let mut link_args = xwin_msvc_link_args(&cache_dir, target_triple, linkage);
             if target_triple == "x86_64-pc-windows-msvc" {
