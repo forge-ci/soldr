@@ -146,6 +146,17 @@ pub(crate) fn msvc_spec(target: &str, xwin: &Path, resource: &Path) -> DriverSpe
     if target == "x86_64-pc-windows-msvc" {
         config_lines.push("--rtlib=compiler-rt".into());
         cl_config.push("-rtlib=compiler-rt".into());
+        // CMake's Windows-Clang GNU link rule uses -nostdlib, suppressing
+        // Clang's implicit rtlib. Keep the required C builtins in that link too.
+        let builtins = config_quote(&format!(
+            "${}",
+            resource
+                .join("lib/windows/clang_rt.builtins-x86_64.lib")
+                .display()
+        ));
+        for config in [&mut config_lines, &mut cl_config] {
+            config.extend(["$-Xlinker".into(), builtins.clone()]);
+        }
     }
     // Both tokens need the link-only prefix: CL otherwise counts a linker
     // input during /c and rejects /Fo as a multiple-source invocation.

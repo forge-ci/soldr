@@ -290,7 +290,7 @@ fn real_clang_cl_config_keeps_libpaths_out_of_compile_only_inputs() {
         String::from_utf8_lossy(&compile.stderr)
     );
     let link = std::process::Command::new(&driver)
-        .args(["-###", "/LD"])
+        .args(["-###", "/LD", "/clang:-nostdlib"])
         .arg(input)
         .output()
         .unwrap();
@@ -303,4 +303,7 @@ fn real_clang_cl_config_keeps_libpaths_out_of_compile_only_inputs() {
         "/LIBPATH:{}",
         sdk.join("crt/lib/x86_64").display()
     )));
+    assert!(
+        String::from_utf8_lossy(&link.stderr).contains("lib/windows/clang_rt.builtins-x86_64.lib")
+    );
 }
