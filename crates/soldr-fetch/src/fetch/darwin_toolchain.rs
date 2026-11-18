@@ -274,6 +274,8 @@ async fn ensure_from_index(
 fn extract_unit(archive: &Path, dest: &Path, resources_only: bool) -> Result<(), SoldrError> {
     let decoder = zstd::stream::read::Decoder::new(std::fs::File::open(archive)?)?;
     super::tar_extract::unpack_tar_filtered(&mut tar::Archive::new(decoder), dest, |path| {
+        // GNU tar producer bundles preserve a leading `./` component.
+        let path = path.strip_prefix(".").unwrap_or(path);
         Ok(resources_only && !path.starts_with("package/lib/clang/21"))
     })
 }

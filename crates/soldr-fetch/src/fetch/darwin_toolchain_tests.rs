@@ -132,8 +132,13 @@ fn archive(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut header = tar::Header::new_gnu();
         header.set_size(bytes.len() as u64);
         header.set_mode(0o755);
+        // Match published GNU tar bundles. append_data/set_path normalize `./`,
+        // so preserve the raw name to exercise the overlay filter's boundary.
+        let name = format!("./{name}");
+        assert!(name.len() < 100);
+        header.as_mut_bytes()[..name.len()].copy_from_slice(name.as_bytes());
         header.set_cksum();
-        tar.append_data(&mut header, name, *bytes).unwrap();
+        tar.append(&header, *bytes).unwrap();
     }
     tar.into_inner().unwrap().finish().unwrap()
 }
