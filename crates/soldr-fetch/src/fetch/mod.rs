@@ -59,8 +59,7 @@ pub mod forge_dispatch;
 pub mod github;
 pub mod llvm;
 pub mod llvm_background;
-/// soldr#997 Phase A — LLVM-tools bundle from soldr-toolchain
-/// `recipes/llvm-tools-linux-x64/`; see module docs for why this differs from [`llvm`].
+/// soldr#997 — `llvm-tools-linux-x64` bundle; see module docs for the distinction from [`llvm`].
 pub mod llvm_host_libs;
 pub mod llvm_tools_bundle;
 pub mod manifest_lookup;

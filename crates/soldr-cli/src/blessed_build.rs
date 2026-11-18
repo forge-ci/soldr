@@ -376,7 +376,7 @@ fn configure_msvc_sdk(
             ));
 
             // cc-rs forwards these flags to the target's clang-cl (soldr#1036).
-            let cflags = xwin_msvc_resource_cflags(&cache_dir, &resource);
+            let cflags = xwin_msvc_resource_cflags(&cache_dir, resource);
             if !cflags.is_empty() {
                 prep.env
                     .push((format!("CFLAGS_{target_u}"), cflags.clone()));
