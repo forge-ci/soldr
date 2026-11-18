@@ -16,7 +16,7 @@ pub(super) fn render_msvc_driver(
     let cl = super::render_driver(clang, cl_args)?;
     if crate::platform::host::facts::os() == crate::platform::host::facts::HostOs::Windows {
         return Ok(format!(
-            "@echo off\r\nif \"%~n0\"==\"x86_64-pc-windows-msvc-clang-cl\" goto clang_cl\r\nif \"%~n0\"==\"aarch64-pc-windows-msvc-clang-cl\" goto clang_cl\r\nfor %%a in (%*) do if \"%%~a\"==\"--driver-mode=cl\" goto clang_cl\r\n{gnu}exit /b %errorlevel%\r\n:clang_cl\r\n{cl}"
+            "@echo off\r\nif /I \"%~n0\"==\"clang-cl\" goto clang_cl\r\nif /I \"%~n0\"==\"x86_64-pc-windows-msvc-clang-cl\" goto clang_cl\r\nif /I \"%~n0\"==\"aarch64-pc-windows-msvc-clang-cl\" goto clang_cl\r\nfor %%a in (%*) do if \"%%~a\"==\"--driver-mode=cl\" goto clang_cl\r\n{gnu}exit /b %errorlevel%\r\n:clang_cl\r\n{cl}"
         ));
     }
     Ok(format!(
