@@ -103,7 +103,6 @@ impl BlessedPrep {
 ///
 /// Caller is responsible for applying `prep.env` and prepending
 /// `prep.shim_path_dir` to `PATH` on the child cargo invocation.
-#[expect(clippy::cognitive_complexity, reason = "baseline, zackees/ci.yml#229")]
 #[expect(clippy::too_many_lines, reason = "baseline, zackees/ci.yml#229")]
 pub async fn prepare(
     paths: &SoldrPaths,
