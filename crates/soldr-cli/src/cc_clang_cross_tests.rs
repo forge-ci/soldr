@@ -248,13 +248,11 @@ fn msvc_resource_headers_precede_sdk_in_both_modes_and_keep_overlay() {
 /// A real driver plan catches this without downloading an SDK or linking.
 #[test]
 fn real_clang_cl_config_keeps_libpaths_out_of_compile_only_inputs() {
-    let clang = std::env::var_os("SOLDR_TEST_CLANG")
-        .map(PathBuf::from)
-        .or_else(|| {
-            crate::exec_cmd::find_on_path("clang", &std::env::var_os("PATH").unwrap_or_default())
-        });
+    // A host compiler wrapper (notably Nix cc-wrapper) can inject GNU flags
+    // independently of Soldr. Exercise the managed, unwrapped LLVM executable.
+    let clang = std::env::var_os("SOLDR_TEST_CLANG").map(PathBuf::from);
     let Some(clang) = clang else {
-        eprintln!("skip: real CL parser regression needs Clang 21+");
+        eprintln!("skip: set SOLDR_TEST_CLANG to the managed, unwrapped Clang 21+ executable");
         return;
     };
     let version = std::process::Command::new(&clang)
