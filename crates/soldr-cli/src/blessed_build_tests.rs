@@ -115,8 +115,7 @@ fn msvc_tool_env_uses_clang_cl_for_cc_rs() {
 
     add_msvc_tool_env(
         &mut prep,
-        "x86_64_pc_windows_msvc",
-        "X86_64_PC_WINDOWS_MSVC",
+        "x86_64-pc-windows-msvc",
         Path::new("/managed/target-clang-cl"),
     );
 
@@ -151,8 +150,7 @@ fn msvc_tool_env_preserves_explicit_target_compilers() {
             let mut prep = BlessedPrep::default();
             add_msvc_tool_env(
                 &mut prep,
-                "x86_64_pc_windows_msvc",
-                "X86_64_PC_WINDOWS_MSVC",
+                "x86_64-pc-windows-msvc",
                 Path::new("/managed/target-clang-cl"),
             );
             match previous {

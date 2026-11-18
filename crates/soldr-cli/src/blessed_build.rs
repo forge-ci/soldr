@@ -171,7 +171,7 @@ pub async fn prepare(
             "{target_triple}-clang-cl{}",
             crate::platform::executable::name::script_suffix()
         ));
-        add_msvc_tool_env(&mut prep, &target_u, &target_u_upper, &driver);
+        add_msvc_tool_env(&mut prep, target_triple, &driver);
     }
 
     // --------------------------- Windows GNU GCC ----------------------------
@@ -404,12 +404,14 @@ fn configure_msvc_sdk(
     Ok(())
 }
 
-fn add_msvc_tool_env(prep: &mut BlessedPrep, target_u: &str, target_u_upper: &str, driver: &Path) {
+fn add_msvc_tool_env(prep: &mut BlessedPrep, target: &str, driver: &Path) {
+    let target_u = target.replace('-', "_");
+    let target_u_upper = target_u.to_uppercase();
     // cc-rs checks the dashed spelling before the underscored spelling.
     // Inherit either explicit setting, including non-UTF-8 executable paths.
     for prefix in ["CC", "CXX"] {
         let key = format!("{prefix}_{target_u}");
-        let dashed = format!("{prefix}_{}", target_u.replace('_', "-"));
+        let dashed = format!("{prefix}_{target}");
         if std::env::var_os(&key).is_none() && std::env::var_os(&dashed).is_none() {
             prep.env.push((key, driver.to_string_lossy().into_owned()));
         }
