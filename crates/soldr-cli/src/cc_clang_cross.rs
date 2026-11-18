@@ -271,15 +271,7 @@ fn write_drivers(
         written.push(path);
     }
     if spec.cl.is_some() {
-        let body = std::fs::read_to_string(staged.join(cc.file_name().unwrap()))?;
-        crate::linker_shim::write_content_addressed_shim(
-            &staged.join(format!("{target}-clang-cl{suffix}")),
-            &body,
-        )?;
-        std::fs::write(
-            staged.join("windows-runtime.json"),
-            msvc_runtime_policy(target),
-        )?;
+        write_msvc_tools(staged, &cc, target)?;
     }
     std::fs::write(staged.join(".complete"), &digest)?;
     crate::platform::fs::permissions::restore_mode(staged, Some(0o755))?;
@@ -287,6 +279,20 @@ fn write_drivers(
     let cxx = written.pop().expect("two drivers written");
     let cc = written.pop().expect("two drivers written");
     Ok((cc, cxx))
+}
+
+fn write_msvc_tools(staged: &Path, cc: &Path, target: &str) -> Result<(), SoldrError> {
+    let suffix = crate::platform::executable::name::script_suffix();
+    let body = std::fs::read_to_string(staged.join(cc.file_name().unwrap()))?;
+    crate::linker_shim::write_content_addressed_shim(
+        &staged.join(format!("{target}-clang-cl{suffix}")),
+        &body,
+    )?;
+    std::fs::write(
+        staged.join("windows-runtime.json"),
+        msvc_runtime_policy(target),
+    )?;
+    Ok(())
 }
 
 /// LLVM binutils linked next to the drivers. CMake looks for `llvm-ar` /
