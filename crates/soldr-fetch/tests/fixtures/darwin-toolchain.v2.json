@@ -1,0 +1,110 @@
+{
+  "schema_version": 2,
+  "generation": "darwin-fixture",
+  "publication_state": {
+    "generation": "darwin-fixture",
+    "url": "https://example.invalid/generations/darwin-fixture/publish-state.v1.json"
+  },
+  "entries": [
+    {
+      "owner": "zackees",
+      "repo": "soldr-toolchain",
+      "tag": "assets",
+      "asset": "llvm-tools/21.1.5/linux-x64-gnu/bundle.tar.zst",
+      "source_path": "llvm-tools/21.1.5/linux-x64-gnu/bundle.tar.zst",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "size_bytes": 1,
+      "min_client_version": 2,
+      "parts": [
+        {
+          "number": 1,
+          "size_bytes": 1,
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "urls": [
+            "https://example.invalid/llvm-tools/21.1.5/linux-x64-gnu/bundle.tar.zst"
+          ]
+        }
+      ]
+    },
+    {
+      "owner": "zackees",
+      "repo": "soldr-toolchain",
+      "tag": "assets",
+      "asset": "compiler-rt/21.1.5/darwin-arm64/bundle.tar.zst",
+      "source_path": "compiler-rt/21.1.5/darwin-arm64/bundle.tar.zst",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "size_bytes": 1,
+      "min_client_version": 2,
+      "parts": [
+        {
+          "number": 1,
+          "size_bytes": 1,
+          "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "urls": [
+            "https://example.invalid/compiler-rt/21.1.5/darwin-arm64/bundle.tar.zst"
+          ]
+        }
+      ]
+    },
+    {
+      "owner": "zackees",
+      "repo": "soldr-toolchain",
+      "tag": "assets",
+      "asset": "swift/6.3.2/linux-x64-gnu/bundle.tar.zst",
+      "source_path": "swift/6.3.2/linux-x64-gnu/bundle.tar.zst",
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "size_bytes": 1,
+      "min_client_version": 2,
+      "parts": [
+        {
+          "number": 1,
+          "size_bytes": 1,
+          "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "urls": [
+            "https://example.invalid/swift/6.3.2/linux-x64-gnu/bundle.tar.zst"
+          ]
+        }
+      ]
+    },
+    {
+      "owner": "zackees",
+      "repo": "soldr-toolchain",
+      "tag": "assets",
+      "asset": "apple-sdk/26.5/darwin-aarch64/sdk.tar.zst",
+      "source_path": "apple-sdk/26.5/darwin-aarch64/sdk.tar.zst",
+      "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "size_bytes": 1,
+      "min_client_version": 2,
+      "parts": [
+        {
+          "number": 1,
+          "size_bytes": 1,
+          "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+          "urls": [
+            "https://example.invalid/apple-sdk/26.5/darwin-aarch64/sdk.tar.zst"
+          ]
+        }
+      ]
+    },
+    {
+      "owner": "zackees",
+      "repo": "soldr-toolchain",
+      "tag": "assets",
+      "asset": "apple-sdk/26.5/darwin-universal2/sdk.tar.zst",
+      "source_path": "apple-sdk/26.5/darwin-universal2/sdk.tar.zst",
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "size_bytes": 1,
+      "min_client_version": 2,
+      "parts": [
+        {
+          "number": 1,
+          "size_bytes": 1,
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "urls": [
+            "https://example.invalid/apple-sdk/26.5/darwin-universal2/sdk.tar.zst"
+          ]
+        }
+      ]
+    }
+  ]
+}

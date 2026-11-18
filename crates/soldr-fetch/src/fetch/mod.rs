@@ -51,6 +51,7 @@ pub use rustup_init::{
 
 pub mod apple_sdk;
 pub mod archive;
+pub mod darwin_toolchain;
 /// soldr#988 Phase 4 — on-demand builds via `forge-ci/forge` when the
 /// toolchain catalogue lookup misses. See module doc for the env-var
 /// contract and failure surface.

@@ -40,6 +40,19 @@ fn run_shims_command(json: bool) -> Result<(), SoldrError> {
 
 async fn run_toolchain_subcommand(subcommand: ToolchainSubcommand) -> Result<(), SoldrError> {
     match subcommand {
+        ToolchainSubcommand::Darwin { target, sdk_version, universal_sdk, json } => {
+            let paths = SoldrPaths::new()?;
+            let prepared = crate::fetch::darwin_toolchain::ensure_darwin_toolchain(
+                &paths, &target, &sdk_version, universal_sdk,
+            ).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&prepared)?);
+            } else {
+                println!("Darwin toolchain: {}", prepared.root.display());
+                println!("{}", serde_json::to_string_pretty(&prepared)?);
+            }
+            Ok(())
+        }
         ToolchainSubcommand::Install => exit_with(toolchain::run_toolchain_install()),
         ToolchainSubcommand::Dedupe { json } => {
             exit_with(crate::toolchain_store::run_toolchain_dedupe(json))
