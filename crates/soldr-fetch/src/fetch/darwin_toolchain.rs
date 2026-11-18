@@ -215,9 +215,11 @@ async fn ensure_from_index(
     let parent = paths.root.join("sdk/darwin").join(TARGET).join(format!(
         "llvm-{LLVM_VERSION}-swift-{SWIFT_VERSION}-sdk-{sdk}"
     ));
+    let _lock = super::syslib_common::acquire_install_lock(&parent, &identity)?;
+    // Consumers run from other working directories; always export absolute paths.
+    let parent = parent.canonicalize()?;
     let root = parent.join(&identity);
     let result = DarwinToolchain::at(root.clone(), identity.clone(), &units);
-    let _lock = super::syslib_common::acquire_install_lock(&parent, &identity)?;
     if root.exists() {
         if std::fs::read_to_string(root.join(".complete"))
             .ok()
@@ -257,7 +259,8 @@ async fn ensure_from_index(
     std::fs::write(staging.path().join("darwin.cmake"), cmake_file(&result))?;
     std::fs::write(
         staging.path().join("toolchain.json"),
-        serde_json::to_vec_pretty(&result)?,
+        serde_json::to_vec_pretty(&result)
+            .map_err(|e| SoldrError::Other(format!("Darwin toolchain JSON: {e}")))?,
     )?;
     // The locked content identity is never replaced: six runner slots can keep
     // using an older closure while a new catalogue identity is being prepared.
@@ -328,7 +331,8 @@ fn validate_layout(root: &Path, sdk_version: &str) -> Result<(), SoldrError> {
     }
     let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(
         root.join("apple/package/sdk/SDKSettings.json"),
-    )?)?;
+    )?)
+    .map_err(|e| SoldrError::Other(format!("Apple SDKSettings.json: {e}")))?;
     if settings["Version"].as_str() != Some(sdk_version) {
         return Err(SoldrError::Other(format!(
             "Apple SDK version mismatch: requested {sdk_version}, SDKSettings.json reports {}",

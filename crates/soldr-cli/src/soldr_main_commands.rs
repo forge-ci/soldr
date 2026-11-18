@@ -45,12 +45,12 @@ async fn run_toolchain_subcommand(subcommand: ToolchainSubcommand) -> Result<(),
             let prepared = crate::fetch::darwin_toolchain::ensure_darwin_toolchain(
                 &paths, &target, &sdk_version, universal_sdk,
             ).await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&prepared)?);
-            } else {
+            let payload = serde_json::to_string_pretty(&prepared)
+                .map_err(|e| SoldrError::Other(format!("Darwin toolchain JSON: {e}")))?;
+            if !json {
                 println!("Darwin toolchain: {}", prepared.root.display());
-                println!("{}", serde_json::to_string_pretty(&prepared)?);
             }
+            println!("{payload}");
             Ok(())
         }
         ToolchainSubcommand::Install => exit_with(toolchain::run_toolchain_install()),
