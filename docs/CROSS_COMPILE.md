@@ -306,6 +306,40 @@ Legacy fallback (explicitly bypasses the blessed surface):
 soldr cargo xwin build --release --target x86_64-pc-windows-msvc
 ```
 
+### Standalone clang and clang-cl on Linux (Refs #4167)
+
+```sh
+soldr cc --target win-x64 --print-cc
+soldr cc --target win-x64 --driver-mode=cl --print-cc
+soldr cc --target win-x64 --driver-mode=cl /O2 /std:c11 /c probe.c /Foprobe.obj
+```
+
+The second command prints a targeted `clang-cl` driver suitable for CMake's
+`CMAKE_C_COMPILER`. The GNU-style driver also accepts `--driver-mode=cl`.
+Both select the same managed LLVM and xwin SDK, put Clang resource headers
+before xwin headers, preserve the case-insensitive header VFS, and use the
+dynamic MSVC CRT by default. CL mode injects `/imsvc`, frontend VFS options,
+and linker `/LIBPATH` arguments; GNU mode retains its GNU-style arguments.
+For x64, the matching verified `compiler-rt/21.1.5/windows-x64` catalogue unit
+supplies builtins such as `__udivti3`. Composed resources and drivers publish
+by staging plus rename under the Soldr root's `sdk/` and `bin/`; existing
+Linux/Darwin resources and concurrent users remain valid.
+
+The driver directory contains `windows-runtime.json`, an explicit test-host
+runtime policy. The supported OS baseline is Windows 10+/Server 2016+,
+including the OS UCRT and API sets. Under the maintainer-approved hosted-runner
+exception, VC++ runtime DLLs (including `vcruntime140.dll`) may resolve from the
+execution host's System32. The consumer must verify the required DLLs'
+architecture and bytes there, audit normal **and delay imports recursively**,
+and fail for unresolved imports. Other non-OS DLLs must be staged with
+provenance beside the tests. Soldr does not fetch, stage, or redistribute
+Microsoft runtime DLLs; xwin's import libraries are not deployable DLLs.
+Outside this explicitly approved host baseline, consumers must arrange an
+authorized runtime installation or distribution route themselves.
+
+A Linux PE link proves compilation and linking. Qualification still requires
+the original C reference and selected CTests to execute on native Windows.
+
 ### MSVC EULA
 
 `cargo-xwin` auto-downloads the MSVC CRT and Windows SDK from Microsoft's

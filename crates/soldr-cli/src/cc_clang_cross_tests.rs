@@ -45,17 +45,21 @@ fn msvc_spec_lists_existing_sdk_dirs_only() {
     ] {
         std::fs::create_dir_all(xwin.join(dir)).unwrap();
     }
-    let spec = msvc_spec("aarch64-pc-windows-msvc", xwin);
+    let spec = msvc_spec(
+        "aarch64-pc-windows-msvc",
+        xwin,
+        Path::new("/llvm/lib/clang/21"),
+    );
     assert!(spec
         .common
         .contains(&"--target=aarch64-pc-windows-msvc".to_string()));
     let isystems = spec.common.iter().filter(|a| *a == "-isystem").count();
-    assert_eq!(isystems, 2, "{:?}", spec.common);
+    assert_eq!(isystems, 3, "{:?}", spec.common);
     assert!(!spec.common.iter().any(|a| a.contains("winrt")));
     let libs: Vec<_> = spec
         .config_lines
         .iter()
-        .filter(|l| l.starts_with("-L"))
+        .filter(|l| l.trim_start_matches('"').starts_with("-L"))
         .collect();
     assert_eq!(libs.len(), 2, "{:?}", spec.config_lines);
     assert!(spec.config_lines.contains(&"-fuse-ld=lld".to_string()));
@@ -133,8 +137,95 @@ fn drivers_sit_beside_the_llvm_binutils_cmake_needs() {
 #[test]
 fn msvc_objects_name_the_crt_and_link_only_flags_stay_in_the_config() {
     let tmp = tempfile::tempdir().unwrap();
-    let spec = msvc_spec("x86_64-pc-windows-msvc", tmp.path());
+    let spec = msvc_spec(
+        "x86_64-pc-windows-msvc",
+        tmp.path(),
+        Path::new("/llvm/lib/clang/21"),
+    );
     assert!(spec.common.contains(&"-fms-runtime-lib=dll".to_string()));
     assert!(!spec.common.iter().any(|arg| arg.contains("vfsoverlay")));
     assert!(!spec.common.iter().any(|arg| arg.contains("fuse-ld")));
+}
+
+#[test]
+fn msvc_driver_switches_to_real_cl_arguments_and_publishes_clang_cl() {
+    if crate::platform::host::facts::os() == crate::platform::host::facts::HostOs::Windows {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = SoldrPaths::with_root(tmp.path().join("root"));
+    let bin = tmp.path().join("llvm/bin");
+    let xwin = tmp.path().join("sdk with spaces");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(xwin.join("crt/include")).unwrap();
+    for tool in ["clang", "clang++"] {
+        let path = bin.join(tool);
+        std::fs::write(&path, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+        crate::platform::fs::permissions::make_executable(&path).unwrap();
+    }
+    let spec = msvc_spec(
+        "x86_64-pc-windows-msvc",
+        &xwin,
+        Path::new("/llvm/lib/clang/21"),
+    );
+    let (cc, _) = write_drivers(&paths, "x86_64-pc-windows-msvc", &bin, &spec).unwrap();
+    let output = std::process::Command::new(&cc)
+        .args(["--driver-mode=cl", "/c", "probe.c", "/Foprobe.obj"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let args = String::from_utf8(output.stdout).unwrap();
+    assert!(args.contains("/imsvc"), "{args}");
+    assert!(!args.contains("-isystem"), "{args}");
+    assert!(!args.contains("-fms-runtime-lib"), "{args}");
+    assert!(cc
+        .parent()
+        .unwrap()
+        .join("x86_64-pc-windows-msvc-clang-cl")
+        .is_file());
+}
+
+#[test]
+fn msvc_resource_headers_precede_sdk_in_both_modes_and_keep_overlay() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sdk = tmp.path().join("SDK with spaces");
+    std::fs::create_dir_all(sdk.join("crt/include")).unwrap();
+    std::fs::write(sdk.join("crt/include/intrin.h"), "#pragma once\n").unwrap();
+    std::fs::create_dir_all(sdk.join("crt/lib/x86_64")).unwrap();
+    let resource = Path::new("/LLVM with spaces/lib/clang/21");
+    let spec = msvc_spec("x86_64-pc-windows-msvc", &sdk, resource);
+    let at = spec.common.iter().position(|a| a == "-isystem").unwrap();
+    assert_eq!(
+        spec.common[at + 1],
+        resource.join("include").display().to_string()
+    );
+    let cl = spec.cl.as_ref().unwrap();
+    let includes: Vec<_> = cl
+        .common
+        .iter()
+        .filter(|a| a.starts_with("/imsvc"))
+        .collect();
+    assert_eq!(
+        includes[0],
+        &format!("/imsvc{}", resource.join("include").display())
+    );
+    assert_eq!(
+        includes[1],
+        &format!("/imsvc{}", sdk.join("crt/include").display())
+    );
+    assert!(cl
+        .config_lines
+        .iter()
+        .any(|a| a.contains("-Xclang -ivfsoverlay -Xclang")));
+    assert!(cl.config_lines.iter().any(|a| a.contains("/LIBPATH:")));
+    assert!(cl.config_lines.contains(&"-rtlib=compiler-rt".to_string()));
+    assert!(!cl.common.iter().any(|a| a == "-isystem"));
+    assert!(!cl.config_lines.iter().any(|a| a.starts_with("-L")));
+    let policy: serde_json::Value =
+        serde_json::from_str(&msvc_runtime_policy("x86_64-pc-windows-msvc")).unwrap();
+    assert_eq!(policy["vc_runtime"], "hosted-runner-System32");
+    assert_eq!(
+        policy["redistributed_microsoft_dlls"],
+        serde_json::json!([])
+    );
 }

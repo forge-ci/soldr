@@ -65,6 +65,7 @@ pub mod llvm_host_libs;
 pub mod llvm_tools_bundle;
 pub mod manifest_lookup;
 pub mod manifest_v6;
+pub mod msvc_resources;
 /// soldr#997 Phase A — Node.js node.lib bundle for Windows MSVC cross (#944).
 pub mod nodelib;
 /// soldr#3246 — managed static, source-built OpenSSL sysroot for every

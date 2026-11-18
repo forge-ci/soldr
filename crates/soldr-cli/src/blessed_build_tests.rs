@@ -405,6 +405,18 @@ fn xwin_cflags_empty_for_empty_cache() {
 }
 
 #[test]
+fn xwin_resource_headers_are_first_for_cc_rs() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("crt/include")).unwrap();
+    std::fs::write(temp.path().join("crt/include/intrin.h"), "#pragma once\n").unwrap();
+    let flags = xwin_msvc_resource_cflags(temp.path(), std::path::Path::new("/llvm/lib/clang/21"));
+    assert!(flags
+        .starts_with("/clang:-resource-dir=/llvm/lib/clang/21 /imsvc/llvm/lib/clang/21/include "));
+    assert!(flags.find("/imsvc/llvm/").unwrap() < flags.find("/crt/include").unwrap());
+    assert!(flags.contains("-vfsoverlay"));
+}
+
+#[test]
 fn xwin_link_args_picks_correct_arch_subdir() {
     // Confirm aarch64-pc-windows-msvc looks under `arm64/`,
     // x86_64-pc-windows-msvc looks under `x64/`. This is the

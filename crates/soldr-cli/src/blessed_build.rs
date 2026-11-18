@@ -163,6 +163,14 @@ pub async fn prepare(
             crate::fetch::xwin_cache::ensure_xwin_cache(paths, target_triple)
         );
 
+        let resource = crate::fetch::msvc_resources::ensure(
+            paths,
+            llvm_result
+                .as_ref()
+                .map_err(|e| SoldrError::Other(e.to_string()))?,
+            target_triple,
+        )
+        .await?;
         let _ = apply_llvm_toolchain_result(&mut prep, target_triple, llvm_result);
 
         match xwin_result {
@@ -178,7 +186,7 @@ pub async fn prepare(
                 // and forwards them to the compiler invocation. The
                 // `CC_<target>=clang-cl` env above makes clang-cl parse
                 // `/imsvc<path>` MSVC-style include flags correctly.
-                let cflags = xwin_msvc_cflags(&cache_dir);
+                let cflags = xwin_msvc_resource_cflags(&cache_dir, &resource);
                 if !cflags.is_empty() {
                     prep.env
                         .push((format!("CFLAGS_{target_u}"), cflags.clone()));
@@ -192,7 +200,15 @@ pub async fn prepare(
                 // soldr#2794: read the CRT policy off the caller here, at
                 // dispatch, rather than baking dynamic into preparation.
                 let linkage = requested_crt_linkage(target_triple);
-                let link_args = xwin_msvc_link_args(&cache_dir, target_triple, linkage);
+                let mut link_args = xwin_msvc_link_args(&cache_dir, target_triple, linkage);
+                if target_triple == "x86_64-pc-windows-msvc" {
+                    link_args.push_str(&format!(
+                        " -C link-arg={}",
+                        resource
+                            .join("lib/windows/clang_rt.builtins-x86_64.lib")
+                            .display()
+                    ));
+                }
                 if !link_args.is_empty() {
                     prep.env.push((
                         format!("CARGO_TARGET_{target_u_upper}_RUSTFLAGS"),
