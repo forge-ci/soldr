@@ -133,6 +133,27 @@ fn msvc_tool_env_uses_clang_cl_for_cc_rs() {
 }
 
 #[test]
+fn msvc_tool_env_preserves_explicit_target_compilers() {
+    let _guard = ENV_MUTEX.lock();
+    for prefix in ["CC", "CXX"] {
+        let key = format!("{prefix}_x86_64_pc_windows_msvc");
+        let previous = std::env::var_os(&key);
+        std::env::set_var(&key, "/selected SDK/target-clang-cl");
+        let mut prep = BlessedPrep::default();
+        add_msvc_tool_env(&mut prep, "x86_64_pc_windows_msvc", "X86_64_PC_WINDOWS_MSVC");
+        match previous {
+            Some(value) => std::env::set_var(&key, value),
+            None => std::env::remove_var(&key),
+        }
+        assert!(
+            !prep.env.iter().any(|(name, _)| name == &key),
+            "must inherit the explicitly selected compiler: {:?}",
+            prep.env
+        );
+    }
+}
+
+#[test]
 fn path_prefix_keeps_clang_shim_ahead_of_managed_tools() {
     let shim = PathBuf::from("/soldr/clang-shim");
     let llvm = PathBuf::from("/soldr/llvm/bin");

@@ -148,6 +148,20 @@ fn msvc_objects_name_the_crt_and_link_only_flags_stay_in_the_config() {
 }
 
 #[test]
+fn msvc_defaultlib_case_overlay_reaches_both_drivers_and_direct_linker() {
+    let tmp = tempfile::tempdir().unwrap();
+    let libs = tmp.path().join("crt/lib/x86_64");
+    std::fs::create_dir_all(&libs).unwrap();
+    std::fs::write(libs.join("msvcrt.lib"), "archive").unwrap();
+    std::fs::write(libs.join("oldnames.lib"), "archive").unwrap();
+    let spec = msvc_spec("x86_64-pc-windows-msvc", tmp.path(), tmp.path());
+    let cl = spec.cl.unwrap();
+    for args in [&spec.config_lines, &cl.config_lines, &cl.linker_args] {
+        assert!(args.iter().any(|arg| arg.contains("/vfsoverlay:")), "{args:?}");
+    }
+}
+
+#[test]
 fn msvc_driver_switches_to_real_cl_arguments_and_publishes_clang_cl() {
     if crate::platform::host::facts::os() == crate::platform::host::facts::HostOs::Windows {
         return;
