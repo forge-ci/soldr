@@ -71,7 +71,7 @@ pub(crate) async fn prepare(paths: &SoldrPaths, target: &str) -> Result<ClangCro
     } else {
         let xwin = crate::fetch::xwin_cache::ensure_xwin_cache(paths, target).await?;
         let resource = crate::fetch::msvc_resources::ensure(paths, &bin_dir, target).await?;
-        let spec = msvc_spec(target, &xwin, &resource);
+        let spec = msvc_spec(target, &xwin, &resource)?;
         (xwin, spec, "llvm-lib")
     };
     let (cc, cxx) = write_drivers(paths, target, &bin_dir, &spec)?;
@@ -112,7 +112,11 @@ pub(crate) fn apple_spec(target: &str, sdk: &Path) -> DriverSpec {
     }
 }
 
-pub(crate) fn msvc_spec(target: &str, xwin: &Path, resource: &Path) -> DriverSpec {
+pub(crate) fn msvc_spec(
+    target: &str,
+    xwin: &Path,
+    resource: &Path,
+) -> Result<DriverSpec, SoldrError> {
     // The include/lib directory lists are shared with the cargo path
     // (`blessed_build_xwin.rs`) and `soldr link`, so the three cannot drift.
     let include_roots = crate::blessed_build::xwin_include_dirs(xwin);
@@ -145,6 +149,14 @@ pub(crate) fn msvc_spec(target: &str, xwin: &Path, resource: &Path) -> DriverSpe
     let mut config_lines = vec!["-fuse-ld=lld".to_string()];
     let mut cl_config = vec!["/clang:-fuse-ld=lld".into()];
     let mut linker_args = Vec::new();
+    let lib_dirs = crate::blessed_build::xwin_lib_dirs(xwin, target);
+    if let Some(overlay) = crate::fetch::xwin_case_overlay::ensure_case_overlay(xwin, &lib_dirs)? {
+        let flag = format!("/vfsoverlay:{}", overlay.display());
+        linker_args.push(flag.clone());
+        for config in [&mut config_lines, &mut cl_config] {
+            config.extend(["$-Xlinker".into(), config_quote(&format!("${flag}"))]);
+        }
+    }
     if target == "x86_64-pc-windows-msvc" {
         config_lines.push("--rtlib=compiler-rt".into());
         cl_config.push("-rtlib=compiler-rt".into());
@@ -168,7 +180,7 @@ pub(crate) fn msvc_spec(target: &str, xwin: &Path, resource: &Path) -> DriverSpe
     }
     // Both tokens need the link-only prefix: CL otherwise counts a linker
     // input during /c and rejects /Fo as a multiple-source invocation.
-    for lib in crate::blessed_build::xwin_lib_dirs(xwin, target) {
+    for lib in lib_dirs {
         linker_args.push(format!("/LIBPATH:{}", lib.display()));
         config_lines.push(config_quote(&format!("-L{}", lib.display())));
         cl_config.extend([
@@ -189,7 +201,7 @@ pub(crate) fn msvc_spec(target: &str, xwin: &Path, resource: &Path) -> DriverSpe
             config_quote(&overlay.display().to_string())
         ));
     }
-    DriverSpec {
+    Ok(DriverSpec {
         cl: Some(ClSpec {
             common: cl_common,
             config_lines: cl_config,
@@ -198,7 +210,7 @@ pub(crate) fn msvc_spec(target: &str, xwin: &Path, resource: &Path) -> DriverSpe
         common,
         cxx_extra: Vec::new(),
         config_lines,
-    }
+    })
 }
 
 fn write_drivers(

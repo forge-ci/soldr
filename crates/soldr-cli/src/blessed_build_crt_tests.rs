@@ -221,7 +221,8 @@ fn a_config_preference_cannot_change_the_decision() {
 #[test]
 fn static_linkage_emits_the_static_archives_and_excludes_the_import_libraries() {
     let tmp = xwin_cache();
-    let out = xwin_msvc_link_args(tmp.path(), "x86_64-pc-windows-msvc", CrtLinkage::Static);
+    let out =
+        xwin_msvc_link_args(tmp.path(), "x86_64-pc-windows-msvc", CrtLinkage::Static).unwrap();
 
     for expected in [
         "link-arg=/DEFAULTLIB:libucrt.lib",
@@ -254,7 +255,8 @@ fn static_linkage_emits_the_static_archives_and_excludes_the_import_libraries() 
 #[test]
 fn static_linkage_covers_vcruntime_not_just_ucrt() {
     let tmp = xwin_cache();
-    let out = xwin_msvc_link_args(tmp.path(), "x86_64-pc-windows-msvc", CrtLinkage::Static);
+    let out =
+        xwin_msvc_link_args(tmp.path(), "x86_64-pc-windows-msvc", CrtLinkage::Static).unwrap();
     assert!(
         out.contains("link-arg=/NODEFAULTLIB:vcruntime.lib")
             && out.contains("link-arg=/DEFAULTLIB:libvcruntime.lib"),
@@ -266,7 +268,8 @@ fn static_linkage_covers_vcruntime_not_just_ucrt() {
 #[test]
 fn dynamic_linkage_is_unchanged_from_before_the_fix() {
     let tmp = xwin_cache();
-    let out = xwin_msvc_link_args(tmp.path(), "x86_64-pc-windows-msvc", CrtLinkage::Dynamic);
+    let out =
+        xwin_msvc_link_args(tmp.path(), "x86_64-pc-windows-msvc", CrtLinkage::Dynamic).unwrap();
     assert!(out.contains("link-arg=/NODEFAULTLIB:libucrt.lib"), "{out}");
     assert!(out.contains("link-arg=/DEFAULTLIB:ucrt.lib"), "{out}");
     assert!(out.contains("link-arg=/DEFAULTLIB:vcruntime.lib"), "{out}");
@@ -281,8 +284,10 @@ fn dynamic_linkage_is_unchanged_from_before_the_fix() {
 #[test]
 fn linkage_changes_only_the_crt_flags() {
     let tmp = xwin_cache();
-    let dynamic = xwin_msvc_link_args(tmp.path(), "x86_64-pc-windows-msvc", CrtLinkage::Dynamic);
-    let static_ = xwin_msvc_link_args(tmp.path(), "x86_64-pc-windows-msvc", CrtLinkage::Static);
+    let dynamic =
+        xwin_msvc_link_args(tmp.path(), "x86_64-pc-windows-msvc", CrtLinkage::Dynamic).unwrap();
+    let static_ =
+        xwin_msvc_link_args(tmp.path(), "x86_64-pc-windows-msvc", CrtLinkage::Static).unwrap();
 
     for out in [&dynamic, &static_] {
         assert!(out.contains("linker-flavor=lld-link"), "{out}");
@@ -307,7 +312,8 @@ fn linkage_changes_only_the_crt_flags() {
 #[test]
 fn static_crt_flags_are_each_prefixed_with_dash_c() {
     let tmp = xwin_cache();
-    let out = xwin_msvc_link_args(tmp.path(), "x86_64-pc-windows-msvc", CrtLinkage::Static);
+    let out =
+        xwin_msvc_link_args(tmp.path(), "x86_64-pc-windows-msvc", CrtLinkage::Static).unwrap();
     let tokens: Vec<_> = out.split_whitespace().collect();
     let crt_indexes: Vec<_> = tokens
         .iter()
@@ -329,7 +335,8 @@ fn static_crt_flags_are_each_prefixed_with_dash_c() {
 #[test]
 fn static_linkage_applies_to_aarch64_too() {
     let tmp = xwin_cache();
-    let out = xwin_msvc_link_args(tmp.path(), "aarch64-pc-windows-msvc", CrtLinkage::Static);
+    let out =
+        xwin_msvc_link_args(tmp.path(), "aarch64-pc-windows-msvc", CrtLinkage::Static).unwrap();
     assert!(out.contains("link-arg=/DEFAULTLIB:libucrt.lib"), "{out}");
     assert!(
         out.contains("link-arg=/DEFAULTLIB:libvcruntime.lib"),
@@ -341,7 +348,7 @@ fn static_linkage_applies_to_aarch64_too() {
 fn non_msvc_targets_get_no_crt_flags_whichever_linkage() {
     let tmp = xwin_cache();
     for linkage in [CrtLinkage::Dynamic, CrtLinkage::Static] {
-        let out = xwin_msvc_link_args(tmp.path(), "x86_64-unknown-linux-gnu", linkage);
+        let out = xwin_msvc_link_args(tmp.path(), "x86_64-unknown-linux-gnu", linkage).unwrap();
         assert!(out.is_empty(), "non-msvc triple must stay empty: {out:?}");
     }
 }

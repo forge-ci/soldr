@@ -124,27 +124,13 @@ pub async fn prepare(
 
     // ----------------------------- Windows MSVC ------------------------------
     if should_prepare_xwin_for_target(target_triple) {
-        // Install the clang shim + set cc-rs env vars FIRST,
-        // independent of xwin-cache state. `CC_<target>=clang-cl` is
-        // what fixes cc-rs/ring MSVC `/imsvc...` flag handling; the
-        // shim remains on PATH for literal `clang --target=...-msvc`
-        // invocations that bypass CC/CXX env:
-        // xwin-cache supplies the headers/libs used by the native
-        // blessed cargo path, and also lets the cargo-xwin fallback
-        // short-circuit its live MSVC download. The shim remains useful
-        // independently because ring invokes `clang` directly.
+        // Keep the shim for ring's literal `clang` calls. cc-rs gets the
+        // SDK-configured, targeted clang-cl driver after provisioning.
         let target_u = target_triple.replace('-', "_");
         let target_u_upper = target_u.to_uppercase();
 
         let shim_dir = install_clang_shim(paths)?;
         prep.shim_path_dir = Some(shim_dir);
-
-        // Put the managed LLVM binutils (clang-cl / lld-link / llvm-lib,
-        // from zackees/clang-tool-chain-bins) on PATH so the AR /
-        // linker picks below resolve without a host `apt install llvm`.
-        let _ = ensure_llvm_on_path(paths, &mut prep, target_triple).await;
-
-        add_msvc_tool_env(&mut prep, &target_u, &target_u_upper);
 
         // Now try to materialize xwin-cache too. If the catalogue row
         // for this arch is ingested, we set XWIN_CACHE_DIR so cargo-
@@ -179,7 +165,13 @@ pub async fn prepare(
             &target_u_upper,
             xwin_result,
             &resource,
-        );
+        )?;
+        let tools = crate::cc_clang_cross::prepare(paths, target_triple).await?;
+        let driver = tools.cc.with_file_name(format!(
+            "{target_triple}-clang-cl{}",
+            crate::platform::executable::name::script_suffix()
+        ));
+        add_msvc_tool_env(&mut prep, &target_u, &target_u_upper, &driver);
     }
 
     // --------------------------- Windows GNU GCC ----------------------------
@@ -365,7 +357,7 @@ fn configure_msvc_sdk(
     target_u_upper: &str,
     xwin_result: Result<PathBuf, SoldrError>,
     resource: &std::path::Path,
-) {
+) -> Result<(), SoldrError> {
     match xwin_result {
         Ok(cache_dir) => {
             prep.xwin_cache_dir = Some(cache_dir.clone());
@@ -384,7 +376,7 @@ fn configure_msvc_sdk(
 
             // Read the caller's CRT policy at dispatch (soldr#2794).
             let linkage = requested_crt_linkage(target_triple);
-            let mut link_args = xwin_msvc_link_args(&cache_dir, target_triple, linkage);
+            let mut link_args = xwin_msvc_link_args(&cache_dir, target_triple, linkage)?;
             if target_triple == "x86_64-pc-windows-msvc" {
                 link_args.push_str(&format!(
                     " -C link-arg={}",
@@ -409,13 +401,19 @@ fn configure_msvc_sdk(
             );
         }
     }
+    Ok(())
 }
 
-fn add_msvc_tool_env(prep: &mut BlessedPrep, target_u: &str, target_u_upper: &str) {
-    prep.env
-        .push((format!("CC_{target_u}"), "clang-cl".to_string()));
-    prep.env
-        .push((format!("CXX_{target_u}"), "clang-cl".to_string()));
+fn add_msvc_tool_env(prep: &mut BlessedPrep, target_u: &str, target_u_upper: &str, driver: &Path) {
+    // cc-rs checks the dashed spelling before the underscored spelling.
+    // Inherit either explicit setting, including non-UTF-8 executable paths.
+    for prefix in ["CC", "CXX"] {
+        let key = format!("{prefix}_{target_u}");
+        let dashed = format!("{prefix}_{}", target_u.replace('_', "-"));
+        if std::env::var_os(&key).is_none() && std::env::var_os(&dashed).is_none() {
+            prep.env.push((key, driver.to_string_lossy().into_owned()));
+        }
+    }
     prep.env
         .push((format!("AR_{target_u}"), "llvm-lib".to_string()));
     prep.env.push((

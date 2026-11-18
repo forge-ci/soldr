@@ -49,7 +49,8 @@ fn msvc_spec_lists_existing_sdk_dirs_only() {
         "aarch64-pc-windows-msvc",
         xwin,
         Path::new("/llvm/lib/clang/21"),
-    );
+    )
+    .unwrap();
     assert!(spec
         .common
         .contains(&"--target=aarch64-pc-windows-msvc".to_string()));
@@ -141,7 +142,8 @@ fn msvc_objects_name_the_crt_and_link_only_flags_stay_in_the_config() {
         "x86_64-pc-windows-msvc",
         tmp.path(),
         Path::new("/llvm/lib/clang/21"),
-    );
+    )
+    .unwrap();
     assert!(spec.common.contains(&"-fms-runtime-lib=dll".to_string()));
     assert!(!spec.common.iter().any(|arg| arg.contains("vfsoverlay")));
     assert!(!spec.common.iter().any(|arg| arg.contains("fuse-ld")));
@@ -154,10 +156,13 @@ fn msvc_defaultlib_case_overlay_reaches_both_drivers_and_direct_linker() {
     std::fs::create_dir_all(&libs).unwrap();
     std::fs::write(libs.join("msvcrt.lib"), "archive").unwrap();
     std::fs::write(libs.join("oldnames.lib"), "archive").unwrap();
-    let spec = msvc_spec("x86_64-pc-windows-msvc", tmp.path(), tmp.path());
+    let spec = msvc_spec("x86_64-pc-windows-msvc", tmp.path(), tmp.path()).unwrap();
     let cl = spec.cl.unwrap();
     for args in [&spec.config_lines, &cl.config_lines, &cl.linker_args] {
-        assert!(args.iter().any(|arg| arg.contains("/vfsoverlay:")), "{args:?}");
+        assert!(
+            args.iter().any(|arg| arg.contains("/vfsoverlay:")),
+            "{args:?}"
+        );
     }
 }
 
@@ -182,7 +187,8 @@ fn msvc_driver_switches_to_real_cl_arguments_and_publishes_clang_cl() {
         "x86_64-pc-windows-msvc",
         &xwin,
         Path::new("/llvm/lib/clang/21"),
-    );
+    )
+    .unwrap();
     let (cc, _) = write_drivers(&paths, "x86_64-pc-windows-msvc", &bin, &spec).unwrap();
     let output = std::process::Command::new(&cc)
         .args(["--driver-mode=cl", "/c", "probe.c", "/Foprobe.obj"])
@@ -217,7 +223,7 @@ fn msvc_resource_headers_precede_sdk_in_both_modes_and_keep_overlay() {
     std::fs::write(sdk.join("crt/include/intrin.h"), "#pragma once\n").unwrap();
     std::fs::create_dir_all(sdk.join("crt/lib/x86_64")).unwrap();
     let resource = Path::new("/LLVM with spaces/lib/clang/21");
-    let spec = msvc_spec("x86_64-pc-windows-msvc", &sdk, resource);
+    let spec = msvc_spec("x86_64-pc-windows-msvc", &sdk, resource).unwrap();
     let at = spec.common.iter().position(|a| a == "-isystem").unwrap();
     assert_eq!(
         spec.common[at + 1],
@@ -286,7 +292,7 @@ fn real_clang_cl_config_keeps_libpaths_out_of_compile_only_inputs() {
     let temp = tempfile::tempdir().unwrap();
     let sdk = temp.path().join("SDK with spaces");
     std::fs::create_dir_all(sdk.join("crt/lib/x86_64")).unwrap();
-    let spec = msvc_spec("x86_64-pc-windows-msvc", &sdk, temp.path());
+    let spec = msvc_spec("x86_64-pc-windows-msvc", &sdk, temp.path()).unwrap();
     let cl = spec.cl.unwrap();
     let config = temp.path().join("cl.cfg");
     std::fs::write(&config, cl.config_lines.join("\n")).unwrap();
