@@ -36,9 +36,6 @@
 //! the documentation in `crate::main` for where the routing decision
 //! is made.
 
-use std::collections::HashMap;
-use std::sync::OnceLock;
-
 /// Canonical alias → Rust target triple table. 9 entries; matches
 /// `crate::core::canonical_targets::CANONICAL_TARGETS` 1:1.
 pub const CANONICAL_ALIASES: &[(&str, &str)] = &[
@@ -378,6 +375,18 @@ impl AliasError {
 ///    Jaro-Winkler best-match suggestion (via the shared kernal-api
 ///    facade, `kernal_api::text::name_similarity`).
 pub fn resolve_soldr_target(input: &str) -> Result<ResolvedTarget, AliasError> {
+    resolve_target(input, None)
+}
+
+/// Resolve without host probes or locks, using the caller's already resolved host.
+pub(crate) fn resolve_soldr_target_for_host(
+    input: &str,
+    host: &str,
+) -> Result<ResolvedTarget, AliasError> {
+    resolve_target(input, Some(host))
+}
+
+fn resolve_target(input: &str, host: Option<&str>) -> Result<ResolvedTarget, AliasError> {
     let raw = input.trim();
     let lower = raw.to_ascii_lowercase();
 
@@ -408,7 +417,7 @@ pub fn resolve_soldr_target(input: &str) -> Result<ResolvedTarget, AliasError> {
     // `x86_64-unknown-linux-gnu.2.17`. Rewrite it to that triple form and
     // resolve again, so both spellings share one floor gate and one result.
     if let Some(versioned) = alias_with_glibc_floor_as_triple(raw)? {
-        let mut resolved = resolve_soldr_target(&versioned)?;
+        let mut resolved = resolve_target(&versioned, host)?;
         resolved.input = raw.to_string();
         resolved.via_alias = true;
         return Ok(resolved);
@@ -419,7 +428,7 @@ pub fn resolve_soldr_target(input: &str) -> Result<ResolvedTarget, AliasError> {
     // `rust_triple` stays rustc-legal, so no caller can pass the suffixed
     // spelling to a tool that has never heard of it.
     if let Some((base, floor)) = split_glibc_floor(raw) {
-        let mut resolved = resolve_soldr_target(base)?;
+        let mut resolved = resolve_target(base, host)?;
         resolved.input = raw.to_string();
         resolved.glibc_floor = Some(floor.to_string());
         return Ok(resolved);
@@ -429,7 +438,7 @@ pub fn resolve_soldr_target(input: &str) -> Result<ResolvedTarget, AliasError> {
     if lower == "native" || lower == "host" {
         return Ok(ResolvedTarget {
             input: raw.to_string(),
-            rust_triple: host_triple().to_string(),
+            rust_triple: host.unwrap_or_else(|| host_triple()).to_string(),
             via_alias: true,
             glibc_floor: None,
         });
@@ -479,22 +488,16 @@ pub fn resolve_soldr_target(input: &str) -> Result<ResolvedTarget, AliasError> {
 
 // ---- internal helpers -----------------------------------------
 
-fn canonical_map() -> &'static HashMap<&'static str, &'static str> {
-    static MAP: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
-    MAP.get_or_init(|| CANONICAL_ALIASES.iter().copied().collect())
-}
-
-fn synonym_map() -> &'static HashMap<&'static str, &'static str> {
-    static MAP: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
-    MAP.get_or_init(|| SYNONYMS.iter().copied().collect())
-}
-
 fn canonical_lookup(input: &str) -> Option<&'static str> {
-    canonical_map().get(input).copied()
+    CANONICAL_ALIASES
+        .iter()
+        .find_map(|&(alias, triple)| (alias == input).then_some(triple))
 }
 
 fn synonym_lookup(input: &str) -> Option<&'static str> {
-    synonym_map().get(input).copied()
+    SYNONYMS
+        .iter()
+        .find_map(|&(alias, canonical)| (alias == input).then_some(canonical))
 }
 
 /// True iff `input` superficially looks like a Rust target triple.
