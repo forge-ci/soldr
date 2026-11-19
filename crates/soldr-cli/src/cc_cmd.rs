@@ -55,6 +55,10 @@ pub(crate) struct CcArgs {
     #[arg(long)]
     pub(crate) clang: bool,
 
+    /// Select the MSVC-compatible frontend (MSVC targets only).
+    #[arg(long, value_parser = ["gcc", "cl"])]
+    pub(crate) driver_mode: Option<String>,
+
     /// Arguments forwarded verbatim to the selected compiler
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub(crate) args: Vec<String>,
@@ -92,12 +96,26 @@ pub(crate) async fn run(args: CcArgs, language: Language) -> Result<i32, SoldrEr
     }
 
     let paths = SoldrPaths::new()?;
-    let (rust_triple, tools) = if args.clang {
+    let (rust_triple, mut tools) = if args.clang {
         prepare_clang_for_target(&paths, &args.target, language).await?
     } else {
         prepare_for_target(&paths, &args.target, language).await?
     };
     let resolved_triple = rust_triple.as_str();
+    if args.driver_mode.as_deref() == Some("cl") {
+        if !resolved_triple.ends_with("-pc-windows-msvc") {
+            return Err(SoldrError::Other(
+                "--driver-mode=cl requires a Windows MSVC target".into(),
+            ));
+        }
+        let suffix = crate::platform::executable::name::script_suffix();
+        let cl = tools
+            .cc
+            .with_file_name(format!("{resolved_triple}-clang-cl{suffix}"));
+        tools.cc = cl.clone();
+        tools.cxx = cl.clone();
+        tools.linker = cl;
+    }
 
     if args.print_rc {
         let rc = tools.rc.as_ref().ok_or_else(|| {
@@ -427,6 +445,7 @@ mod tests {
             print_rc: false,
             print_runtime_dlls: false,
             clang: false,
+            driver_mode: None,
             args: Vec::new(),
         };
         assert_eq!(
@@ -495,6 +514,7 @@ mod tests {
             print_rc: false,
             print_runtime_dlls: false,
             clang: false,
+            driver_mode: None,
             args: vec!["hello.c".to_string()],
         };
         assert!(requests_print(&args));

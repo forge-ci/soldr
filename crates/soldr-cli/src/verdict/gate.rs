@@ -144,6 +144,14 @@ fn open_top_level(args: &[String], mode: Mode) -> Gate {
             return Gate::Pass;
         }
     };
+    // The lint evidence producer needs the exact key used by this invocation,
+    // with its prepared toolchain environment. This is transport only.
+    if let Some(path) = std::env::var_os("SOLDR_ATTEST_KEY_FILE") {
+        if let Err(error) = std::fs::write(path, &derivation.key) {
+            eprintln!("soldr: cannot export verdict key: {error}");
+        }
+        std::env::remove_var("SOLDR_ATTEST_KEY_FILE");
+    }
     let rel_cwd = derivation.cwd.clone();
     let seen = |hit| Seen {
         tool: derivation.tool.clone(),

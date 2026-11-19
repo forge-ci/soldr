@@ -1598,7 +1598,7 @@ soldr version --json
 
 ### `soldr toolchain`
 
-Project-aware orchestrators around `rustup` and `cargo install` that
+Project-aware Rust orchestrators plus [Darwin Swift provisioning](LINUX_DARWIN_SWIFT.md). Rust commands
 read `rust-toolchain.toml` so users (and CI) don't have to thread the
 pinned channel through every command. Like rustup and Cargo, they use
 the nearest `rust-toolchain.toml` in the current directory or any

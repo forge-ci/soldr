@@ -637,3 +637,65 @@ mod per_crate {
         assert_eq!(narrowing, vec!["fmt".to_string()]);
     }
 }
+
+#[test]
+fn nextest_adapter_accounts_for_runner_settings_and_workspace_scripts() {
+    let repo = fixture_repo();
+    let root = repo.path();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = ['member']\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("member/src")).unwrap();
+    std::fs::write(
+        root.join("member/Cargo.toml"),
+        "[package]\nname = 'member'\nversion = '0.1.0'\nedition = '2021'\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("member/src/lib.rs"), "pub fn value() {}\n").unwrap();
+    std::fs::create_dir_all(root.join(".github/scripts")).unwrap();
+    let wrapper = root.join(".github/scripts/nextest_wrapper.sh");
+    std::fs::write(&wrapper, "original wrapper\n").unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "virtual workspace"]);
+    let derive = |env: &std::collections::BTreeMap<String, String>| {
+        let mut context = Context::discover(root).unwrap();
+        // Keep this input-hashing test independent of installed plugin binaries.
+        context
+            .profiles
+            .iter_mut()
+            .find(|p| p.name == "nextest")
+            .unwrap()
+            .identity
+            .clear();
+        context
+            .derive_with_env(&argv("nextest run --workspace"), root, Some(env))
+            .unwrap()
+            .key
+    };
+    let env = std::collections::BTreeMap::from([("NEXTEST_PROFILE".into(), "default".into())]);
+    let baseline = derive(&env);
+    let mut changed_env = env.clone();
+    changed_env.insert("NEXTEST_PROFILE".into(), "ci".into());
+    assert_ne!(baseline, derive(&changed_env));
+    std::fs::write(&wrapper, "changed wrapper\n").unwrap();
+    assert_ne!(baseline, derive(&env));
+    assert_eq!(
+        matched("nextest run --workspace").as_deref(),
+        Some("nextest")
+    );
+    assert_eq!(matched("nextest list --workspace"), None);
+}
+
+#[test]
+fn nextest_external_inputs_and_nonworkspace_runs_stay_ungated() {
+    for invocation in [
+        "nextest run -p member",
+        "nextest run --workspace --archive-file /outside/tests.tar.zst",
+        "nextest run --workspace --config-file /outside/nextest.toml",
+        "nextest run --workspace --tool-config-file tool:/outside/tool.toml",
+    ] {
+        assert_eq!(matched(invocation), None, "{invocation}");
+    }
+}

@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "generation": "msvc-fixture",
+  "publication_state": {
+    "generation": "msvc-fixture",
+    "url": "https://example.invalid/generations/msvc-fixture/publish-state.v1.json"
+  },
+  "entries": [
+    {
+      "owner": "zackees",
+      "repo": "soldr-toolchain",
+      "tag": "assets",
+      "asset": "compiler-rt/21.1.5/windows-x64/bundle.tar.zst",
+      "source_path": "compiler-rt/21.1.5/windows-x64/bundle.tar.zst",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "size_bytes": 1,
+      "min_client_version": 2,
+      "parts": [
+        {
+          "number": 1,
+          "size_bytes": 1,
+          "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "urls": [
+            "https://example.invalid/compiler-rt/21.1.5/windows-x64/bundle.tar.zst"
+          ]
+        }
+      ]
+    }
+  ]
+}

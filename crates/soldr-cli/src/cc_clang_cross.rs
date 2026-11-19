@@ -15,7 +15,11 @@ use sha2::{Digest, Sha256};
 
 use crate::core::{SoldrError, SoldrPaths};
 
-const DRIVER_FORMAT_VERSION: &str = "v1";
+#[path = "cc_msvc_driver.rs"]
+mod msvc_driver;
+use msvc_driver::{config_quote, msvc_runtime_policy, render_msvc_driver};
+
+const DRIVER_FORMAT_VERSION: &str = "v2";
 
 /// What `soldr cc --target T` needs for an Apple or MSVC target.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,12 +45,21 @@ pub(crate) fn handles_target(target: &str) -> bool {
 /// The flags a target's driver shim carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DriverSpec {
+    /// MSVC frontend arguments, selected by driver name or --driver-mode=cl.
+    pub cl: Option<ClSpec>,
     /// Compile + link flags for both C and C++.
     pub common: Vec<String>,
     /// Extra flags for the C++ driver only.
     pub cxx_extra: Vec<String>,
     /// Link-only lines of the clang config file.
     pub config_lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClSpec {
+    pub common: Vec<String>,
+    pub config_lines: Vec<String>,
+    pub linker_args: Vec<String>,
 }
 
 pub(crate) async fn prepare(paths: &SoldrPaths, target: &str) -> Result<ClangCross, SoldrError> {
@@ -57,7 +70,8 @@ pub(crate) async fn prepare(paths: &SoldrPaths, target: &str) -> Result<ClangCro
         (sdk, spec, "llvm-ar")
     } else {
         let xwin = crate::fetch::xwin_cache::ensure_xwin_cache(paths, target).await?;
-        let spec = msvc_spec(target, &xwin);
+        let resource = crate::fetch::msvc_resources::ensure(paths, &bin_dir, target).await?;
+        let spec = msvc_spec(target, &xwin, &resource)?;
         (xwin, spec, "llvm-lib")
     };
     let (cc, cxx) = write_drivers(paths, target, &bin_dir, &spec)?;
@@ -86,6 +100,7 @@ pub(crate) fn apple_spec(target: &str, sdk: &Path) -> DriverSpec {
     let clang_target = crate::blessed_build::darwin_arch::clang_target(target);
     let min_os = crate::blessed_build::darwin_arch::deployment_target(target);
     DriverSpec {
+        cl: None,
         common: vec![
             format!("--target={clang_target}"),
             "-isysroot".to_string(),
@@ -97,7 +112,11 @@ pub(crate) fn apple_spec(target: &str, sdk: &Path) -> DriverSpec {
     }
 }
 
-pub(crate) fn msvc_spec(target: &str, xwin: &Path) -> DriverSpec {
+pub(crate) fn msvc_spec(
+    target: &str,
+    xwin: &Path,
+    resource: &Path,
+) -> Result<DriverSpec, SoldrError> {
     // The include/lib directory lists are shared with the cargo path
     // (`blessed_build_xwin.rs`) and `soldr link`, so the three cannot drift.
     let include_roots = crate::blessed_build::xwin_include_dirs(xwin);
@@ -110,25 +129,88 @@ pub(crate) fn msvc_spec(target: &str, xwin: &Path) -> DriverSpec {
         // CRT matches Rust's MSVC default (no `crt-static`).
         "-fms-runtime-lib=dll".to_string(),
     ];
+    common.extend([
+        format!("-resource-dir={}", resource.display()),
+        "-isystem".into(),
+        resource.join("include").display().to_string(),
+    ]);
+    let mut cl_common = vec![
+        "--driver-mode=cl".into(),
+        format!("--target={target}"),
+        "/MD".into(),
+        format!("/clang:-resource-dir={}", resource.display()),
+        format!("/imsvc{}", resource.join("include").display()),
+    ];
     for dir in &include_roots {
+        cl_common.push(format!("/imsvc{}", dir.display()));
         common.push("-isystem".to_string());
         common.push(dir.display().to_string());
     }
     let mut config_lines = vec!["-fuse-ld=lld".to_string()];
-    for lib in crate::blessed_build::xwin_lib_dirs(xwin, target) {
-        config_lines.push(format!("-L{}", lib.display()));
+    let mut cl_config = vec!["/clang:-fuse-ld=lld".into()];
+    let mut linker_args = Vec::new();
+    let lib_dirs = crate::blessed_build::xwin_lib_dirs(xwin, target);
+    if let Some(overlay) = crate::fetch::xwin_case_overlay::ensure_case_overlay(xwin, &lib_dirs)? {
+        let flag = format!("/vfsoverlay:{}", overlay.display());
+        linker_args.push(flag.clone());
+        for config in [&mut config_lines, &mut cl_config] {
+            config.extend(["$-Xlinker".into(), config_quote(&format!("${flag}"))]);
+        }
+    }
+    if target == "x86_64-pc-windows-msvc" {
+        config_lines.push("--rtlib=compiler-rt".into());
+        cl_config.push("-rtlib=compiler-rt".into());
+        // CMake's Windows-Clang GNU link rule uses -nostdlib, suppressing
+        // Clang's implicit rtlib. Keep the required C builtins in that link too.
+        linker_args.push(
+            resource
+                .join("lib/windows/clang_rt.builtins-x86_64.lib")
+                .display()
+                .to_string(),
+        );
+        let builtins = config_quote(&format!(
+            "${}",
+            resource
+                .join("lib/windows/clang_rt.builtins-x86_64.lib")
+                .display()
+        ));
+        for config in [&mut config_lines, &mut cl_config] {
+            config.extend(["$-Xlinker".into(), builtins.clone()]);
+        }
+    }
+    // Both tokens need the link-only prefix: CL otherwise counts a linker
+    // input during /c and rejects /Fo as a multiple-source invocation.
+    for lib in lib_dirs {
+        linker_args.push(format!("/LIBPATH:{}", lib.display()));
+        config_lines.push(config_quote(&format!("-L{}", lib.display())));
+        cl_config.extend([
+            "$-Xlinker".into(),
+            config_quote(&format!("$/LIBPATH:{}", lib.display())),
+        ]);
     }
     // soldr#3415: resolve any `#include` casing against the case-folded SDK.
     // In the config file, not on the command line: clang never reports a
     // config-file option as unused, so a link-only invocation stays quiet.
     if let Some(overlay) = crate::blessed_build::xwin_case_overlay(xwin, &include_roots) {
-        config_lines.push(format!("-ivfsoverlay {}", overlay.display()));
+        config_lines.push(format!(
+            "-ivfsoverlay {}",
+            config_quote(&overlay.display().to_string())
+        ));
+        cl_config.push(format!(
+            "-Xclang -ivfsoverlay -Xclang {}",
+            config_quote(&overlay.display().to_string())
+        ));
     }
-    DriverSpec {
+    Ok(DriverSpec {
+        cl: Some(ClSpec {
+            common: cl_common,
+            config_lines: cl_config,
+            linker_args,
+        }),
         common,
         cxx_extra: Vec::new(),
         config_lines,
-    }
+    })
 }
 
 fn write_drivers(
@@ -161,13 +243,33 @@ fn write_drivers(
         .join(DRIVER_FORMAT_VERSION)
         .join(target)
         .join(&digest[..16]);
-    std::fs::create_dir_all(&dir)?;
-    link_sibling_tools(bin_dir, &dir)?;
+    let suffix = crate::platform::executable::name::script_suffix();
+    let cc = dir.join(format!("{target}-clang{suffix}"));
+    let cxx = dir.join(format!("{target}-clang++{suffix}"));
+    let parent = dir.parent().unwrap();
+    let _lock = crate::fetch::syslib_common::acquire_install_lock(parent, &digest)?;
+    if dir.join(".complete").is_file() {
+        return Ok((cc, cxx));
+    }
+    let staging = tempfile::Builder::new()
+        .prefix(".staging-")
+        .tempdir_in(parent)?;
+    let staged = staging.path();
+    link_sibling_tools(bin_dir, staged)?;
     let config = dir.join(format!("{target}.cfg"));
-    crate::linker_shim::write_content_addressed_shim(&config, &config_body)?;
+    crate::linker_shim::write_content_addressed_shim(
+        &staged.join(config.file_name().unwrap()),
+        &config_body,
+    )?;
+    let cl_config = dir.join(format!("{target}-cl.cfg"));
+    if let Some(cl) = &spec.cl {
+        crate::linker_shim::write_content_addressed_shim(
+            &staged.join(cl_config.file_name().unwrap()),
+            &format!("{}\n", cl.config_lines.join("\n")),
+        )?;
+    }
     let config_arg = format!("--config={}", config.display());
 
-    let suffix = crate::platform::executable::name::script_suffix();
     let mut written = Vec::new();
     for (name, real, extra) in [
         ("clang", &clang, &spec.cxx_extra[..0]),
@@ -177,12 +279,57 @@ fn write_drivers(
         args.extend(extra.iter().cloned());
         args.push(config_arg.clone());
         let path = dir.join(format!("{target}-{name}{suffix}"));
-        crate::linker_shim::write_content_addressed_shim(&path, &render_driver(real, &args)?)?;
+        let body = if let Some(cl) = &spec.cl {
+            let mut cl_args = cl.common.clone();
+            cl_args.push(format!("--config={}", cl_config.display()));
+            render_msvc_driver(real, &args, &cl_args)?
+        } else {
+            render_driver(real, &args)?
+        };
+        crate::linker_shim::write_content_addressed_shim(
+            &staged.join(path.file_name().unwrap()),
+            &body,
+        )?;
         written.push(path);
     }
+    if let Some(cl) = &spec.cl {
+        write_msvc_tools(bin_dir, staged, &cc, target, &cl.linker_args)?;
+    }
+    std::fs::write(staged.join(".complete"), &digest)?;
+    crate::platform::fs::permissions::restore_mode(staged, Some(0o755))?;
+    std::fs::rename(staged, &dir)?;
     let cxx = written.pop().expect("two drivers written");
     let cc = written.pop().expect("two drivers written");
     Ok((cc, cxx))
+}
+
+fn write_msvc_tools(
+    bin: &Path,
+    staged: &Path,
+    cc: &Path,
+    target: &str,
+    linker_args: &[String],
+) -> Result<(), SoldrError> {
+    let suffix = crate::platform::executable::name::script_suffix();
+    let body = std::fs::read_to_string(staged.join(cc.file_name().unwrap()))?;
+    crate::linker_shim::write_content_addressed_shim(
+        &staged.join(format!("{target}-clang-cl{suffix}")),
+        &body,
+    )?;
+    std::fs::write(
+        staged.join("windows-runtime.json"),
+        msvc_runtime_policy(target),
+    )?;
+    // CMake's MSVC frontend invokes a linker directly. Give that separate
+    // stage the same SDK and builtins without relying on an ambient LIB.
+    let lld = bin.join(crate::platform::executable::name::native("lld-link"));
+    if lld.is_file() {
+        crate::linker_shim::write_content_addressed_shim(
+            &staged.join(format!("lld-link{suffix}")),
+            &render_driver(&lld, linker_args)?,
+        )?;
+    }
+    Ok(())
 }
 
 /// LLVM binutils linked next to the drivers. CMake looks for `llvm-ar` /

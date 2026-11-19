@@ -40,6 +40,7 @@ def _run(tmp_path, free_after_gib):
         mock.patch.object(reclaim.sys, "platform", "linux"),
         mock.patch.object(reclaim.shutil, "disk_usage", return_value=usage),
         mock.patch.object(reclaim, "remove_dir") as rm,
+        mock.patch.object(reclaim.subprocess, "run"),
     ):
         code = reclaim.main(["--volume", str(tmp_path), "--require-gib", "20"])
     return code, rm

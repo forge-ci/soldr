@@ -233,7 +233,7 @@ async fn install_locked(
         // completed in place, too.
         let libs_done = has_libs || complete_host_libs(paths, bin_dir).await?;
         if !has_exec || libs_done != has_libs {
-            std::fs::write(stamp, stamp_contents(libs_done))?;
+            write_stamp(stamp, libs_done)?;
         }
         return Ok(bin_dir.to_path_buf());
     }
@@ -280,7 +280,7 @@ async fn install_locked(
 
     restore_bin_exec_bits(bin_dir)?;
     let libs_done = complete_host_libs(paths, bin_dir).await?;
-    std::fs::write(stamp, stamp_contents(libs_done))?;
+    write_stamp(stamp, libs_done)?;
     eprintln!("soldr: extracted LLVM to {}", install_dir.display());
     Ok(bin_dir.to_path_buf())
 }
@@ -354,6 +354,20 @@ fn stamp_contents(host_libs: bool) -> String {
         ""
     };
     format!("{MANAGED_LLVM_VERSION}\n{STAMP_EXEC_MARKER}\n{libs}\n")
+}
+
+/// Write the `.complete` stamp by replacing the file, never by rewriting it
+/// in place: a host may hardlink identical files across soldr roots
+/// (forge-ci/gh-runner#23), and an in-place write would mark every root that
+/// shares the inode complete, so those roots would skip their own repair.
+fn write_stamp(stamp: &Path, host_libs: bool) -> Result<(), SoldrError> {
+    let dir = stamp.parent().unwrap_or_else(|| Path::new("."));
+    let mut staged = tempfile::NamedTempFile::new_in(dir)?;
+    std::io::Write::write_all(&mut staged, stamp_contents(host_libs).as_bytes())?;
+    staged
+        .persist(stamp)
+        .map_err(|error| SoldrError::Io(error.error))?;
+    Ok(())
 }
 
 /// soldr#3774: put `libxml2.so.2` / `libz.so.1` beside the bundle's `lld`
@@ -485,6 +499,31 @@ mod tests {
             }
         }
         assert!(stamp_contents(false).contains(STAMP_EXEC_MARKER));
+    }
+
+    #[test]
+    fn rewriting_the_stamp_leaves_a_hardlinked_copy_alone() {
+        // A host may hardlink identical files across soldr roots (gh-runner#23
+        // links bin/ across runner slots). Repairing one root's stamp must
+        // replace that root's file, not write through the shared inode into
+        // every other root, which would then skip its own repair.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let stamp = tmp.path().join(".complete");
+        write_stamp(&stamp, false).unwrap();
+        let other_root = tmp.path().join("other-root.complete");
+        std::fs::hard_link(&stamp, &other_root).unwrap();
+
+        write_stamp(&stamp, true).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&stamp).unwrap(),
+            stamp_contents(true)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&other_root).unwrap(),
+            stamp_contents(false),
+            "the stamp was rewritten in place through a hardlink"
+        );
     }
 
     #[test]

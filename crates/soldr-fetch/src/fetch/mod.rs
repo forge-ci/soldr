@@ -51,6 +51,7 @@ pub use rustup_init::{
 
 pub mod apple_sdk;
 pub mod archive;
+pub mod darwin_toolchain;
 /// soldr#988 Phase 4 — on-demand builds via `forge-ci/forge` when the
 /// toolchain catalogue lookup misses. See module doc for the env-var
 /// contract and failure surface.
@@ -58,13 +59,12 @@ pub mod forge_dispatch;
 pub mod github;
 pub mod llvm;
 pub mod llvm_background;
-/// soldr#997 Phase A — LLVM-tools bundle from soldr-toolchain
-/// `recipes/llvm-tools-linux-x64/`. See module doc for why this is
-/// distinct from [`llvm`].
+/// soldr#997 — `llvm-tools-linux-x64` bundle; see module docs for the distinction from [`llvm`].
 pub mod llvm_host_libs;
 pub mod llvm_tools_bundle;
 pub mod manifest_lookup;
 pub mod manifest_v6;
+pub mod msvc_resources;
 /// soldr#997 Phase A — Node.js node.lib bundle for Windows MSVC cross (#944).
 pub mod nodelib;
 /// soldr#3246 — managed static, source-built OpenSSL sysroot for every

@@ -215,3 +215,104 @@ fn an_exited_daemon_child_is_reaped_rather_than_left_a_zombie() {
         "daemon child {pid} exited but was never reaped"
     );
 }
+
+/// soldr#4170: a front door running from a per-session shim dir registers
+/// `<tmp>/soldr-shims-XXXX/soldr-daemon`, and the session deletes that dir on
+/// exit. The broker already holds a verified copy of the same image in the
+/// route's runtime tree, so a later launch must reuse that copy instead of
+/// refusing the route because the registered path is gone.
+fn registered_then_vanished_image(
+    temp: &tempfile::TempDir,
+    image: &[u8],
+) -> (PathBuf, String, PathBuf) {
+    let shim_dir = temp.path().join("soldr-shims-session");
+    std::fs::create_dir_all(&shim_dir).expect("shim dir");
+    let registered = shim_dir.join(crate::platform::executable::name::native("soldr-daemon"));
+    std::fs::write(&registered, image).expect("registered image");
+    let hash = crate::daemon::image_hash::blake3_hex(&registered).expect("image hash");
+    let runtime = temp
+        .path()
+        .join("route")
+        .join("runtime")
+        .join("soldr-daemon");
+    (registered, hash, runtime)
+}
+
+fn place_copy(runtime: &std::path::Path, generation: &str, image: &[u8]) -> PathBuf {
+    let dir = runtime.join(generation);
+    std::fs::create_dir_all(&dir).expect("placed dir");
+    let placed = dir.join(crate::platform::executable::name::native("soldr-daemon"));
+    std::fs::write(&placed, image).expect("placed image");
+    placed
+}
+
+#[test]
+fn a_vanished_registered_image_reuses_the_broker_placed_copy() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let image = b"daemon image shared by every session";
+    let (registered, hash, runtime) = registered_then_vanished_image(&temp, image);
+    place_copy(&runtime, "v0.0.0-older", b"an older generation's image");
+    let placed = place_copy(&runtime, &format!("v0.0.0-{hash}"), image);
+    let root = temp.path().join("root");
+    let (definition, key, trace_context) = request_parts(&root, &registered, &hash);
+    let request = BackendLaunchRequest {
+        key: &key,
+        service_definition: &definition,
+        trace_context: &trace_context,
+        session_token: None,
+    };
+    std::fs::remove_dir_all(registered.parent().expect("shim dir")).expect("session ends");
+
+    let source = resolve_image_source(&request, &runtime, &crate::daemon::image_hash::blake3_hex)
+        .expect("a placed copy of the route's image must stand in for the vanished path");
+
+    assert_eq!(source, ImageSource::Placed(placed));
+}
+
+#[test]
+fn a_vanished_registered_image_without_a_matching_copy_is_still_refused() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (registered, hash, runtime) = registered_then_vanished_image(&temp, b"route image");
+    place_copy(&runtime, "v0.0.0-other", b"a different image");
+    let root = temp.path().join("root");
+    let (definition, key, trace_context) = request_parts(&root, &registered, &hash);
+    let request = BackendLaunchRequest {
+        key: &key,
+        service_definition: &definition,
+        trace_context: &trace_context,
+        session_token: None,
+    };
+    std::fs::remove_dir_all(registered.parent().expect("shim dir")).expect("session ends");
+
+    let error = resolve_image_source(&request, &runtime, &crate::daemon::image_hash::blake3_hex)
+        .expect_err("no verified copy of the image exists");
+
+    assert!(
+        matches!(error, BackendLaunchError::CanonicalizeBinary { .. }),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_present_registered_image_is_used_as_registered() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let image = b"route image";
+    let (registered, hash, runtime) = registered_then_vanished_image(&temp, image);
+    place_copy(&runtime, &format!("v0.0.0-{hash}"), image);
+    let root = temp.path().join("root");
+    let (definition, key, trace_context) = request_parts(&root, &registered, &hash);
+    let request = BackendLaunchRequest {
+        key: &key,
+        service_definition: &definition,
+        trace_context: &trace_context,
+        session_token: None,
+    };
+
+    let source = resolve_image_source(&request, &runtime, &crate::daemon::image_hash::blake3_hex)
+        .expect("registered image");
+
+    assert_eq!(
+        source,
+        ImageSource::Registered(std::fs::canonicalize(&registered).expect("canonical"))
+    );
+}

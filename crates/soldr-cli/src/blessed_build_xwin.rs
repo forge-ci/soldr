@@ -44,6 +44,15 @@ fn xwin_msvc_cflags(cache_dir: &std::path::Path) -> String {
     flags
 }
 
+/// Keep the Cargo/cc-rs route's intrinsic headers in the same order as the
+/// standalone driver. The composed resource tree includes the matching builtins.
+fn xwin_msvc_resource_cflags(cache_dir: &std::path::Path, resource: &std::path::Path) -> String {
+    format!(
+        "/clang:-resource-dir={} /imsvc{} {}",
+        resource.display(), resource.join("include").display(), xwin_msvc_cflags(cache_dir)
+    )
+}
+
 /// The xwin bundle's C/C++ include directories that exist on disk, in search
 /// order. Shared by the cargo path above and `soldr cc` (soldr#3806) so the
 /// two cannot disagree about which SDK headers a target sees.
@@ -133,13 +142,14 @@ fn xwin_msvc_link_args(
     cache_dir: &std::path::Path,
     target_triple: &str,
     linkage: CrtLinkage,
-) -> String {
+) -> Result<String, crate::core::SoldrError> {
     if !target_triple.ends_with("-pc-windows-msvc")
         || !(target_triple.starts_with("aarch64-") || target_triple.starts_with("x86_64-"))
     {
-        return String::new();
+        return Ok(String::new());
     }
     let lib_dirs = xwin_lib_dirs(cache_dir, target_triple);
+    let overlay = crate::fetch::xwin_case_overlay::ensure_case_overlay(cache_dir, &lib_dirs)?;
     // Exclude the CRT we are not using and name the one we are, for both the
     // UCRT and the VCRuntime. Naming without excluding is not enough: the
     // unwanted archive still arrives via another object's default-lib
@@ -164,6 +174,9 @@ fn xwin_msvc_link_args(
         ],
     };
     let mut args = vec!["-C".to_string(), "linker-flavor=lld-link".to_string()];
+    if let Some(overlay) = overlay {
+        args.extend(["-C".into(), format!("link-arg=/vfsoverlay:{}", overlay.display())]);
+    }
     args.extend(
         crt_args
             .iter()
@@ -179,5 +192,5 @@ fn xwin_msvc_link_args(
                 ]
             }),
     );
-    args.join(" ")
+    Ok(args.join(" "))
 }
