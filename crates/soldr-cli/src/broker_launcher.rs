@@ -161,6 +161,40 @@ impl SoldrBackendLauncher {
             .map(|handle| (instance, handle)))
     }
 
+    /// Resolve the daemon image this launch copies from, reporting where it
+    /// came from (soldr#4170).
+    fn resolve_image_source(
+        &self,
+        request: &BackendLaunchRequest<'_>,
+    ) -> Result<PathBuf, BackendLaunchError> {
+        let runtime = crate::self_relocate::daemon_runtime_root(&route_image_paths(request));
+        let digest = |path: &Path| {
+            crate::daemon::image_hash::cached_blake3_hex(&image_hash_memo_dir(), path)
+        };
+        match resolve_image_source(request, &runtime, &digest)? {
+            ImageSource::Registered(path) => {
+                self.report_progress(
+                    request,
+                    "image-source-resolved",
+                    format!("resolved daemon image {}", path.display()),
+                );
+                Ok(path)
+            }
+            ImageSource::Placed(path) => {
+                self.report_progress(
+                    request,
+                    "image-source-resolved",
+                    format!(
+                        "registered daemon image {} is gone; reusing the broker-placed copy {}",
+                        request.service_definition.binary_path,
+                        path.display()
+                    ),
+                );
+                Ok(path)
+            }
+        }
+    }
+
     fn report_progress(
         &self,
         request: &BackendLaunchRequest<'_>,
@@ -216,12 +250,7 @@ impl SoldrBackendLauncher {
         );
         self.ensure_route_deadline(request)?;
         let paths = routed_paths(request)?;
-        let source_binary = canonical_backend_binary(request)?;
-        self.report_progress(
-            request,
-            "image-source-resolved",
-            format!("resolved daemon image {}", source_binary.display()),
-        );
+        let source_binary = self.resolve_image_source(request)?;
         // The broker is the sole owner of daemon placement.  Resolve the
         // request's allow-listed source image into this route's stable runtime
         // tree before spawning so the child PID registered below is the
@@ -718,6 +747,77 @@ fn canonical_backend_binary(
         return Err(BackendLaunchError::BinaryOutsideAllowRoot { binary, root });
     }
     Ok(binary)
+}
+
+/// Where a launch takes its daemon image from.
+#[derive(Debug, PartialEq, Eq)]
+enum ImageSource {
+    /// The path the route's service definition registered.
+    Registered(PathBuf),
+    /// A copy the broker placed in the route's runtime tree earlier.
+    Placed(PathBuf),
+}
+
+/// Resolve the registered daemon image, falling back to the broker's own
+/// placed copy when the registered path no longer exists (soldr#4170).
+///
+/// Routes are keyed by root and image hash, not by who registered them, so
+/// every session running the same soldr rewrites one service definition and
+/// the last writer's path wins. A front door running from a per-session shim
+/// dir (`<tmp>/soldr-shims-XXXX/`) registers a path that disappears when that
+/// session ends. The broker verified and copied that image into the route's
+/// runtime tree the first time it launched the route, and that copy is what
+/// the daemon actually runs from; refusing every later launch of the shared
+/// route because the registrar's directory is gone broke every other
+/// session's build. The copy is accepted only when its digest equals the
+/// route's image hash label, the same check a registered image must pass.
+fn resolve_image_source(
+    request: &BackendLaunchRequest<'_>,
+    runtime_root: &Path,
+    digest: &dyn Fn(&Path) -> std::io::Result<String>,
+) -> Result<ImageSource, BackendLaunchError> {
+    match canonical_backend_binary(request) {
+        Ok(path) => Ok(ImageSource::Registered(path)),
+        Err(error @ BackendLaunchError::CanonicalizeBinary { .. }) => {
+            let image_hash = route_image_hash(request)?;
+            placed_route_image(runtime_root, image_hash, digest)
+                .map(ImageSource::Placed)
+                .ok_or(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// A daemon image under `runtime_root` whose digest is `image_hash`.
+///
+/// Placement writes `<runtime_root>/<generation>/soldr-daemon`, or
+/// `<generation>/<pkg>.scripts/soldr-daemon` for a repaired wheel layout
+/// (see `ensure_daemon_relocated_for_route_with_digest`).
+fn placed_route_image(
+    runtime_root: &Path,
+    image_hash: &str,
+    digest: &dyn Fn(&Path) -> std::io::Result<String>,
+) -> Option<PathBuf> {
+    let file = crate::platform::executable::name::native("soldr-daemon");
+    let mut candidates = Vec::new();
+    for generation in std::fs::read_dir(runtime_root).ok()?.flatten() {
+        let generation = generation.path();
+        candidates.push(generation.join(&file));
+        let Ok(entries) = std::fs::read_dir(&generation) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "scripts") {
+                candidates.push(path.join(&file));
+            }
+        }
+    }
+    candidates.sort();
+    candidates.into_iter().find(|candidate| {
+        candidate.is_file()
+            && digest(candidate).is_ok_and(|hash| hash.eq_ignore_ascii_case(image_hash))
+    })
 }
 
 /// Opt-out for placing the daemon in its own systemd user scope (soldr#4012).
