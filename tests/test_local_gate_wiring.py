@@ -523,6 +523,88 @@ def test_host_run_moves_every_identity_root_off_the_callers_state(
     assert env["CARGO_HOME"] == str(real_home / ".cargo")
 
 
+@pytest.mark.parametrize(
+    ("cpus", "load", "threads"),
+    [(16, 0.5, 16), (16, 16.0, 16), (16, 32.0, 8), (16, 110.0, 2), (4, 400.0, 2)],
+)
+def test_test_threads_shrink_with_host_load(
+    cpus: int, load: float, threads: int
+) -> None:
+    """A loaded shared host gets fewer concurrent tests, an idle one all CPUs."""
+    assert _workspace_test().load_aware_test_threads(cpus, load) == threads
+
+
+def test_explicit_test_threads_are_kept(tmp_path: Path) -> None:
+    ws = _workspace_test()
+    layout = ws.host_layout(tmp_path / "gitdir", tmp_path / "cache")
+    env: dict[str, str] = {}
+    ws.host_environment(layout, {"NEXTEST_TEST_THREADS": "3"}, tmp_path / "real", env)
+    assert env["NEXTEST_TEST_THREADS"] == "3"
+    env = {}
+    ws.host_environment(layout, {}, tmp_path / "real", env)
+    assert int(env["NEXTEST_TEST_THREADS"]) >= 2
+
+
+TIMED_OUT_RUN = [
+    "  TIMEOUT [ 124.919s] (2605/2846) soldr-cli::cargo_front_door"
+    " cli_cargo_trampoline_workspace::legacy_no_trampoline_flag_is_not_forwarded\n",
+    "  \x1b[33mTIMEOUT\x1b[0m [ 123.271s] (2820/2846) soldr-cli::toolchain_env"
+    " source_mtime_freshness::default_build_script_stays_fresh\n",
+    "     Summary [1639.844s] 2846 tests run: 2844 passed (2 slow),"
+    " 2 timed out, 24 skipped\n",
+    "  TIMEOUT [ 124.919s] (2605/2846) soldr-cli::cargo_front_door"
+    " cli_cargo_trampoline_workspace::legacy_no_trampoline_flag_is_not_forwarded\n",
+]
+
+
+def test_timeout_only_runs_name_each_timed_out_test_once() -> None:
+    ws = _workspace_test()
+    tests = ws.timed_out_only([ws.ANSI.sub("", line) for line in TIMED_OUT_RUN])
+    assert tests == [
+        ws.TimedOutTest(
+            "soldr-cli::cargo_front_door",
+            "cli_cargo_trampoline_workspace::legacy_no_trampoline_flag_is_not_forwarded",
+        ),
+        ws.TimedOutTest(
+            "soldr-cli::toolchain_env",
+            "source_mtime_freshness::default_build_script_stays_fresh",
+        ),
+    ]
+    assert ws.rerun_filter(tests[:1]) == (
+        "(binary_id(=soldr-cli::cargo_front_door) & test(="
+        "cli_cargo_trampoline_workspace::legacy_no_trampoline_flag_is_not_forwarded))"
+    )
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "2846 tests run: 2842 passed, 1 failed, 3 timed out, 24 skipped",
+        "2846 tests run: 2845 passed, 1 leaky, 1 timed out",
+        "2846 tests run: 2846 passed, 24 skipped",
+    ],
+)
+def test_a_real_failure_or_no_timeout_is_never_rerun(summary: str) -> None:
+    ws = _workspace_test()
+    lines = [TIMED_OUT_RUN[0], f"     Summary [1.0s] {summary}\n"]
+    assert ws.timed_out_only(lines) == []
+
+
+def test_no_summary_means_the_build_or_doctests_failed() -> None:
+    assert _workspace_test().timed_out_only(TIMED_OUT_RUN[:1]) == []
+
+
+def test_timeout_rerun_runs_one_test_at_a_time() -> None:
+    ws = _workspace_test()
+    plan = ws.workspace_test_plan(
+        target=Path("/t"), bootstrap=Path("/b/soldr"), packages=("soldr-cli",)
+    )
+    argv = plan.timeout_rerun.argv
+    assert argv[1:4] == ["cargo", "nextest", "run"]
+    assert argv[-2:] == ["--test-threads", "1"]
+    assert plan.timeout_rerun not in plan.steps
+
+
 def test_host_root_is_never_inside_a_checkout(tmp_path: Path) -> None:
     """Fixtures make their pin-free cwd under TMPDIR; a private root below a
     rust-toolchain.toml would hand every one of them the repository's pin."""

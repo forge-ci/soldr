@@ -152,7 +152,7 @@ def test_bosn_workspace_test_cleans_up_source_route_after_validation_failure(
     )
     calls: list[list[str]] = []
 
-    def fake_run(step: StepLike, *, repo: Path) -> None:
+    def fake_run(step: StepLike, *, repo: Path, **_: object) -> None:
         argv = step.argv
         calls.append(argv)
         if argv == plan.validation.argv:
@@ -181,7 +181,7 @@ def test_bosn_workspace_test_cleans_up_source_route_after_start_failure(
     )
     calls: list[list[str]] = []
 
-    def fake_run(step: StepLike, *, repo: Path) -> None:
+    def fake_run(step: StepLike, *, repo: Path, **_: object) -> None:
         argv = step.argv
         calls.append(argv)
         if argv == plan.source_start.argv:
@@ -212,7 +212,7 @@ def test_bosn_workspace_test_preserves_validation_error_when_cleanup_fails(
     )
     calls: list[list[str]] = []
 
-    def fake_run(step: StepLike, *, repo: Path) -> None:
+    def fake_run(step: StepLike, *, repo: Path, **_: object) -> None:
         argv = step.argv
         calls.append(argv)
         if argv in (plan.validation.argv, plan.teardown[0].argv):
@@ -242,7 +242,7 @@ def test_bosn_workspace_test_preserves_validation_error_when_cleanup_launch_fail
     )
     calls: list[list[str]] = []
 
-    def fake_run(step: StepLike, *, repo: Path) -> None:
+    def fake_run(step: StepLike, *, repo: Path, **_: object) -> None:
         argv = step.argv
         calls.append(argv)
         if argv == plan.validation.argv:
