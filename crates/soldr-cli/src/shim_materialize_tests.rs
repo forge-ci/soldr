@@ -233,6 +233,64 @@ fn materialize_executable_is_idempotent_for_matching_bytes() {
     assert!(!second.created);
 }
 
+/// A `uv tool install` puts `~/.local/bin/soldr` on PATH as a symlink,
+/// and on macOS `current_exe()` returns that unresolved path. Linking the
+/// symlink itself made `soldr-daemon` a symlink to `.../bin/soldr`; the
+/// broker canonicalizes it, stages the image as `soldr`, and the daemon
+/// starts as the plain CLI (argv[0] `soldr`) and exits with usage.
+fn symlinked_source(tmp: &tempfile::TempDir) -> Option<PathBuf> {
+    let real = fake_source(tmp, b"fake-soldr-v1");
+    let link_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&link_dir).unwrap();
+    let link = link_dir.join("soldr");
+    // Windows needs a privilege to create symlinks; the bug is Unix-only.
+    crate::platform::fs::links::create(&real.to_string_lossy(), &link, false).ok()?;
+    Some(link)
+}
+
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|meta| crate::platform::fs::links::is_link_or_reparse(&meta))
+}
+
+#[test]
+fn symlinked_source_materializes_a_real_executable_not_a_symlink() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(source) = symlinked_source(&tmp) else {
+        return;
+    };
+    let target = source.with_file_name("soldr-daemon");
+    materialize_executable(&source, &target).unwrap();
+    assert!(!is_symlink(&target), "{} is a symlink", target.display());
+    assert_eq!(
+        std::fs::canonicalize(&target).unwrap().file_name(),
+        Some(std::ffi::OsStr::new("soldr-daemon")),
+        "the alias must keep its own name after canonicalization"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"fake-soldr-v1");
+}
+
+#[test]
+fn a_symlinked_alias_left_by_an_older_soldr_is_replaced() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(source) = symlinked_source(&tmp) else {
+        return;
+    };
+    let target = source.with_file_name("soldr-daemon");
+    // What older releases left behind: a link to the `soldr` symlink.
+    crate::platform::fs::links::create(
+        &std::fs::canonicalize(&source).unwrap().to_string_lossy(),
+        &target,
+        false,
+    )
+    .unwrap();
+    let result = materialize_executable(&source, &target).unwrap();
+    assert!(result.created);
+    assert!(!is_symlink(&target), "{} is a symlink", target.display());
+    // And it stays repaired: the next call is a no-op.
+    assert!(!materialize_executable(&source, &target).unwrap().created);
+}
+
 #[test]
 fn unchanged_copy_uses_validated_materialization_memo() {
     let tmp = tempfile::tempdir().unwrap();
