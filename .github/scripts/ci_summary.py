@@ -235,7 +235,11 @@ def list_run_attempt_jobs(repository: str, run_id: str, attempt: str, token: str
             body = json.loads(response.read().decode("utf-8"))
         batch = body.get("jobs", [])
         jobs += batch
-        if len(jobs) >= int(body.get("total_count", 0)) or not batch:
+        # total_count can lag the job records. Never let a stale count hide
+        # a full page's successor (and a failed job on that page).
+        if not batch or (
+            len(batch) < 100 and len(jobs) >= int(body.get("total_count", 0))
+        ):
             return jobs
         page += 1
 
@@ -243,9 +247,10 @@ def list_run_attempt_jobs(repository: str, run_id: str, attempt: str, token: str
 def settled_run_attempt_jobs(repository: str, run_id: str, attempt: str, token: str):
     """Refresh stale job states before auditing; CI Pre is never waited on.
 
-    Eight snapshots allow 70 seconds of consistency lag, within the summary's
-    five-minute timeout. Exhaustion returns the last snapshot for the normal
-    fail-closed audit; an unfinished job never becomes a successful job.
+    Empty lists and unfinished jobs get eight snapshots for 70 seconds of lag,
+    within the summary's five-minute timeout. Exhaustion returns the last
+    snapshot for the normal fail-closed audit; an unfinished job never becomes
+    a successful job.
     """
     for number in range(1, 9):
         jobs = list_run_attempt_jobs(repository, run_id, attempt, token)
@@ -261,7 +266,7 @@ def settled_run_attempt_jobs(repository: str, run_id: str, attempt: str, token: 
             f"Run attempt jobs: attempt {number}/8; unfinished jobs: {pending}",
             flush=True,
         )
-        if not pending or number == 8:
+        if (jobs and not pending) or number == 8:
             return jobs
         time.sleep(10)
     raise AssertionError("unreachable job listing attempt")
