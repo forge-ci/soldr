@@ -66,7 +66,22 @@ env:
 jobs:
   build-and-test:
     name: ${{ inputs.target }}
-    runs-on: ${{ inputs.runner }}
+    # Self-hosted forge pool (forge-ci/gh-runner docs/pool.md): when the repo
+    # variable FORGE_POOL_LABELS holds a JSON label array, the x86_64 Linux
+    # lane runs on the pool's Ubuntu 26.04 image for trusted events only
+    # (push to the default branch, merge_group, workflow_dispatch, schedule).
+    # Pull requests always stay hosted (fork safety). Unset the variable to
+    # fall back to hosted at once.
+    runs-on: >-
+      ${{ (vars.FORGE_POOL_LABELS != ''
+           && inputs.target == 'x86_64-unknown-linux-gnu'
+           && startsWith(inputs.runner, 'ubuntu-')
+           && (github.event_name == 'merge_group'
+               || github.event_name == 'workflow_dispatch'
+               || github.event_name == 'schedule'
+               || (github.event_name == 'push'
+                   && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))))
+          && fromJSON(vars.FORGE_POOL_LABELS) || inputs.runner }}
     # soldr#1985 - was inheriting GitHub's 360-minute default.
     timeout-minutes: 90
     env:
@@ -130,12 +145,16 @@ jobs:
 
       # Make room before toolchain/cache hydration and archive extraction.
       - name: Reclaim unused hosted Linux SDKs
-        if: runner.os == 'Linux'
+        # Hosted-image housekeeping; a forge-pool container has neither the
+        # preinstalled SDKs nor a host swap to manage.
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
         shell: bash
         run: python3 ci/reclaim_runner_disk.py --require-gib 20
 
       - name: Enlarge swap (OOM headroom)
-        if: runner.os == 'Linux'
+        # Hosted-image housekeeping; a forge-pool container has neither the
+        # preinstalled SDKs nor a host swap to manage.
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
         shell: bash
         run: bash .github/scripts/setup_ci_swap.sh
 
