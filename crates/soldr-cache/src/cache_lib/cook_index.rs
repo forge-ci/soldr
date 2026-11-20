@@ -2,7 +2,7 @@
 //! #579). This module owns the `cook_index_v2` table inside the shared
 //! `~/.soldr/state.sqlite3` and gives the daemon a per-request-open
 //! surface to look up, record, touch, and stat cook artifacts. Heavy
-//! I/O (tar+zstd:19 packing) lives in the PR 2 `soldr cook` worker;
+//! I/O (tar+zstd packing) lives in the PR 2 `soldr cook` worker;
 //! this module never reads or writes the artifact bytes themselves —
 //! it only tracks where they are and how big they are.
 //!

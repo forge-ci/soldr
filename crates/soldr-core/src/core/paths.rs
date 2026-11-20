@@ -287,7 +287,7 @@ impl PinsConfig {
 /// max_total_gb     = 10
 /// max_age_days     = 30
 /// keep_per_origin  = 3
-/// zstd_level       = 19
+/// zstd_level       = 9
 /// zstd_long_window = 27
 /// ```
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -337,7 +337,7 @@ impl CookConfig {
         3
     }
     pub const fn default_zstd_level() -> i32 {
-        19
+        9
     }
     pub const fn default_zstd_long_window() -> u32 {
         27
