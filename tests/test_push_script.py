@@ -36,7 +36,12 @@ def test_gate_runs_before_any_push(monkeypatch: pytest.MonkeyPatch) -> None:
     push = _push()
     calls: list[list[str]] = []
     monkeypatch.setattr(push, "git", lambda *a: "feat/x" if "--abbrev-ref" in a else "")
-    monkeypatch.setattr(push, "step", lambda argv: calls.append(argv) or 1)
+
+    def failing_step(argv: list[str]) -> int:
+        calls.append(argv)
+        return 1
+
+    monkeypatch.setattr(push, "step", failing_step)
     assert push.main([]) == 1
     assert calls and calls[0][-2:] == ["local-gate", "run"]
     assert not any(argv[:2] == ["git", "push"] for argv in calls)

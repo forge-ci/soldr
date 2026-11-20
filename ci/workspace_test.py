@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -78,6 +79,10 @@ class WorkspaceTestPlan:
     source_start: Step
     validation: Step
     teardown: tuple[Step, ...]
+    # Run only on demand: the nextest command that re-checks the tests a
+    # validation run lost to its time budget, one at a time (see
+    # ``run_validation``). Appended with ``-E <filterset>``.
+    timeout_rerun: Step
 
     @property
     def steps(self) -> list[Step]:
@@ -257,6 +262,16 @@ def workspace_test_plan(
             unset=source_unset,
             unset_prefixes=source_unset_prefixes,
         ),
+        timeout_rerun=Step(
+            [
+                source_text,
+                *("cargo", "nextest", "run", "--no-fail-fast", *scope.split()),
+                *("--lib", "--tests", "--test-threads", "1"),
+            ],
+            base_env,
+            unset=source_unset,
+            unset_prefixes=source_unset_prefixes,
+        ),
         teardown=(
             Step(
                 [source_text, "cache", "shutdown", "--shutdown-timeout-seconds", "30"],
@@ -267,14 +282,114 @@ def workspace_test_plan(
     )
 
 
-def run_step(step: Step, *, repo: Path) -> None:
+def run_step(step: Step, *, repo: Path, transcript: list[str] | None = None) -> None:
+    """Run one step, streaming its output; with ``transcript``, also keep it."""
     env = os.environ.copy()
     for name in step.unset:
         env.pop(name, None)
     for name in [n for n in env if n.startswith(step.unset_prefixes)]:
         env.pop(name)
     env.update((var.name, var.value) for var in step.env)
-    subprocess.run(step.argv, cwd=repo, env=env, check=True)
+    if transcript is None:
+        subprocess.run(step.argv, cwd=repo, env=env, check=True)
+        return
+    # Tee, never swallow: every line still reaches the lane log as it arrives.
+    with subprocess.Popen(
+        step.argv,
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+    ) as proc:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            transcript.append(line)
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, step.argv)
+
+
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+TIMEOUT_LINE = re.compile(r"\bTIMEOUT \[[^\]]*\] (?:\([^)]*\) )?(\S+) (\S+)\s*$")
+SUMMARY_LINE = re.compile(r"\bSummary \[[^\]]*\] (.*)$")
+
+
+@dataclass(frozen=True)
+class TimedOutTest:
+    """One test nextest stopped at its time budget."""
+
+    binary_id: str
+    name: str
+
+
+def timed_out_only(lines: list[str]) -> list[TimedOutTest]:
+    """The tests a nextest run lost only to its time budget, in order.
+
+    Empty unless nextest's summary reports timeouts and nothing else wrong:
+    any failed, crashed or leaky test, or no summary at all (the doctests or
+    the build failed first), keeps the run red.
+    """
+    summary = ""
+    tests: list[TimedOutTest] = []
+    for raw in lines:
+        line = ANSI.sub("", raw)
+        if found := SUMMARY_LINE.search(line):
+            summary = found.group(1)
+        elif found := TIMEOUT_LINE.search(line):
+            test = TimedOutTest(found.group(1), found.group(2))
+            if test not in tests:
+                tests.append(test)
+    bad = ("failed", "leak", "signal", "crash", "abort", "exec fail")
+    if "timed out" not in summary or any(word in summary for word in bad):
+        return []
+    return tests
+
+
+def rerun_filter(tests: list[TimedOutTest]) -> str:
+    return " | ".join(f"(binary_id(={t.binary_id}) & test(={t.name}))" for t in tests)
+
+
+def run_validation(plan: WorkspaceTestPlan, *, repo: Path) -> None:
+    """Run the validation step; re-check, alone, tests that only timed out.
+
+    A loaded shared host starves fixture-compiling integration tests past
+    their nextest budget, a different handful each run (soldr's CLAUDE.md:
+    "rerun the failed job before blaming the PR"). When the summary shows
+    timeouts and no failure, each timed-out test runs again with one test
+    thread and the full budget. The lane passes only if every one of them
+    passes; the banners name them so the rerun is never silent. A failed,
+    crashed or leaky test is never rerun.
+    """
+    transcript: list[str] = []
+    try:
+        run_step(plan.validation, repo=repo, transcript=transcript)
+        return
+    except subprocess.CalledProcessError:
+        tests = timed_out_only(transcript)
+        if not tests:
+            raise
+    names = ", ".join(f"{t.binary_id} {t.name}" for t in tests)
+    print(
+        f"tests lane: {len(tests)} test(s) only TIMED OUT under host load;"
+        f" re-checking them one at a time: {names}",
+        flush=True,
+    )
+    rerun = plan.timeout_rerun
+    run_step(
+        Step(
+            [*rerun.argv, "-E", rerun_filter(tests)],
+            rerun.env,
+            rerun.unset,
+            rerun.unset_prefixes,
+        ),
+        repo=repo,
+    )
+    print(
+        f"tests lane: TIMEOUT RERUN PASSED for {len(tests)} test(s): {names}",
+        flush=True,
+    )
 
 
 def cleanup(steps: list[Step], *, repo: Path, preserve_primary: bool) -> None:
@@ -493,7 +608,7 @@ def main(argv: list[str] | None = None) -> int:
         run_step(step, repo=args.repo.resolve())
     try:
         run_step(plan.source_start, repo=args.repo.resolve())
-        run_step(plan.validation, repo=args.repo.resolve())
+        run_validation(plan, repo=args.repo.resolve())
     except BaseException:
         cleanup(list(plan.teardown), repo=args.repo.resolve(), preserve_primary=True)
         raise
