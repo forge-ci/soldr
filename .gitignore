@@ -190,6 +190,11 @@ uv.lock
 # repository content.
 .perf-local/
 
+# `ci/smoke_published_dylint.py` defaults `--state-root` to
+# `.published-dylint-state/`; its soldr cache and daemon lifecycle log are
+# runtime output, never repository content.
+/.published-dylint-state/
+
 # nektos/act local workflow runs (soldr#3039): the local cache/artifact
 # servers and the tee'd run logs are per-developer runtime output. `.actrc`
 # itself IS repository content and stays tracked.
