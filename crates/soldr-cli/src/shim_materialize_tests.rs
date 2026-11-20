@@ -248,11 +248,6 @@ fn symlinked_source(tmp: &tempfile::TempDir) -> Option<PathBuf> {
     Some(link)
 }
 
-fn is_symlink(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .is_ok_and(|meta| crate::platform::fs::links::is_link_or_reparse(&meta))
-}
-
 #[test]
 fn symlinked_source_materializes_a_real_executable_not_a_symlink() {
     let tmp = tempfile::tempdir().unwrap();

@@ -152,6 +152,13 @@ pub(crate) fn materialize_executable(
     source: &Path,
     target: &Path,
 ) -> Result<MaterializeResult, SoldrError> {
+    // A symlinked source must be resolved first: `uv tool install` puts
+    // `~/.local/bin/soldr` on PATH as a symlink, and on macOS `current_exe()`
+    // returns it unresolved. A hard link of the symlink is itself a symlink to
+    // `.../soldr`, so an alias such as `soldr-daemon` canonicalizes back to
+    // the name `soldr` and starts as the plain CLI instead of the daemon.
+    let resolved = std::fs::canonicalize(source).ok();
+    let source = resolved.as_deref().unwrap_or(source);
     // #1908: a position-dependent binary cannot be hardlinked or copied
     // anywhere -- it names its libraries relative to its own location, so
     // dyld aborts the copy at exec, before main and before any logging.
@@ -170,7 +177,7 @@ pub(crate) fn materialize_executable(
     // where the Soldr binary and cache live on different volumes. Rehashing
     // both files for every cargo invocation made a no-op build reread
     // hundreds of MiB before Cargo could start.
-    if materialization_memo_matches(source, target) {
+    if !is_symlink(target) && materialization_memo_matches(source, target) {
         return Ok(MaterializeResult {
             created: false,
             link_mode: LINK_MODE_HARDLINK_OR_COPY,
@@ -484,7 +491,18 @@ fn write_materialization_memo_if_unchanged(
     std::fs::write(materialization_memo_path(target), raw).is_ok()
 }
 
+/// True when `path` itself is a symlink (not followed).
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|meta| crate::platform::fs::links::is_link_or_reparse(&meta))
+}
+
 pub(crate) fn executable_matches(target: &Path, source: &Path) -> Result<bool, SoldrError> {
+    // A symlinked target reads the same bytes but keeps its link's name
+    // only until something canonicalizes it, so it never counts as current.
+    if is_symlink(target) {
+        return Ok(false);
+    }
     let Ok(target_meta) = std::fs::metadata(target) else {
         return Ok(false);
     };
