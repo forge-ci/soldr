@@ -50,3 +50,26 @@ def test_gate_runs_before_any_push(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_push_has_no_attestation_bypass() -> None:
     text = (ROOT / "push").read_text(encoding="utf-8")
     assert "--no-proof" not in text and "--no-attest" not in text
+
+
+def test_verify_names_the_stamped_head(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Outside Actions `local-gate verify` needs --sha; it must be HEAD after the gate."""
+    push = _push()
+    calls: list[list[str]] = []
+
+    def fake_git(*args: str) -> str:
+        if "--abbrev-ref" in args:
+            return "feat/x"
+        return "f" * 40 if args == ("rev-parse", "HEAD") else ""
+
+    def ok_step(argv: list[str]) -> int:
+        calls.append(argv)
+        return 0
+
+    monkeypatch.setattr(push, "git", fake_git)
+    monkeypatch.setattr(push, "step", ok_step)
+    assert push.main(["--prove-only"]) == 0
+    verify = next(argv for argv in calls if "verify" in argv)
+    assert verify[verify.index("--sha") + 1] == "f" * 40
+    assert verify[verify.index("--event") + 1] == "pull_request"
+    assert "--base-sha" in verify

@@ -113,7 +113,19 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    if step([*CI_LINT, "local-gate", "verify", "--repo", "."]) != 0:
+    head = git("rev-parse", "HEAD")  # the gate amended it
+    # Verify as the PR will: without a pull_request event and base,
+    # `local-gate verify` reports "nothing to verify" and exits 0.
+    base = git("merge-base", f"{args.remote}/main", "HEAD")
+    if (
+        step(
+            [
+                *(*CI_LINT, "local-gate", "verify", "--repo", ".", "--sha", head),
+                *("--event", "pull_request", "--base-sha", base),
+            ]
+        )
+        != 0
+    ):
         print(
             "./push: HEAD is not attested after the gate; nothing pushed",
             file=sys.stderr,
