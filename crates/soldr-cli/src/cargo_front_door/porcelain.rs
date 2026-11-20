@@ -89,7 +89,7 @@ pub(crate) const PORCELAIN_ENV_VAR: &str = "SOLDR_PORCELAIN";
 
 /// Schema version of the emitted JSON object. Additive field changes do
 /// not bump it; a breaking shape change does.
-pub(super) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 2;
 
 /// Subdirectory of `<soldr root>/logs/` that holds porcelain run logs.
 pub(super) const PORCELAIN_LOG_DIR: &str = "porcelain";

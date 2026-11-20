@@ -204,6 +204,8 @@ mod cwd_guard_tests {
     }
 }
 
+/// soldr#3924 — the capability/version document an agent consumer reads.
+pub mod agent_cmd;
 pub mod archive_cmd;
 pub mod binaries;
 pub mod blaze_cmd;
