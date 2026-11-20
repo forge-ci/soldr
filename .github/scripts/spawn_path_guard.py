@@ -117,11 +117,6 @@ ALLOWLIST: tuple[AllowedSpawns, ...] = (
         "gc probe child that holds a target/ handle to test liveness",
     ),
     AllowedSpawns(
-        "crates/soldr-cli/src/shim_materialize.rs",
-        1,
-        "shim self-verification child (spawns the materialized shim once)",
-    ),
-    AllowedSpawns(
         "crates/soldr-core/src/core/installer_watchdog.rs",
         1,
         "watchdog-supervised installer children (rustup/toolchain installs)",
