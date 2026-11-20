@@ -337,6 +337,22 @@ class HostRun:
     bootstrap: Path
 
 
+def load_aware_test_threads(cpus: int, load1: float) -> int:
+    """Nextest's test concurrency for a host that other work is also using.
+
+    Nextest defaults to one test per CPU and assumes the CPUs are free. On a
+    shared host (several agents' gates and builds) the one-minute load was
+    80-170 on 16 CPUs, and fixture-compiling integration tests then missed
+    their 120 s nextest budget in every run -- a different handful each time,
+    none related to the change under test. Scale the CPU count by the share
+    the host can give us (``cpus / load``), never below 2 and never above
+    ``cpus``. An idle host keeps the full default.
+    """
+    cpus = max(1, cpus)
+    share = cpus / max(float(cpus), load1)
+    return max(2, min(cpus, int(cpus * share)))
+
+
 def host_environment(
     layout: HostLayout,
     caller: Mapping[str, str],
@@ -368,6 +384,11 @@ def host_environment(
             or str(real_home / ".local" / "share" / "uv" / "python"),
         }
     )
+    # An explicit NEXTEST_TEST_THREADS (the caller's) stays authoritative.
+    if "NEXTEST_TEST_THREADS" not in env:
+        env["NEXTEST_TEST_THREADS"] = str(
+            load_aware_test_threads(os.cpu_count() or 1, os.getloadavg()[0])
+        )
     # CI parity, not isolation (each test is isolated by the nextest
     # wrapper): an agent session's variables change what the code under test
     # does (IN_CLUD turns a Dylint warning into an error), and no CI runner

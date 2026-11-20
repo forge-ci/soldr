@@ -1,0 +1,134 @@
+#!/usr/bin/env -S uv run --no-project --python 3.13 --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""Push a branch the way CI expects: attest on this host, push, open the PR.
+
+    ./push                 # attest HEAD, push it, open a PR if none is open
+    ./push --no-pr         # attest and push only
+    ./push --prove-only    # attest HEAD, push nothing
+
+Attestation is not optional (ci.yml GATE-014). ``./push`` runs the local gate
+(``ci-lint local-gate run``, lanes in ``local-gate.toml``) on the committed
+HEAD. The gate amends HEAD with a tree-bound ``Local-Gate:`` trailer and one
+``Ci-Attestation:`` trailer per proven gate (GATE-010, prooft-compatible),
+covering fmt, Clippy and Dylint for every shipped target and the Linux host
+unit tests. If any lane fails, nothing is pushed: fix it and run ``./push``
+again. Lanes whose inputs did not change since a recorded pass are reused,
+not rerun (GATE-007), so a re-push after a message edit or a rebase that left
+a lane's inputs alone is fast.
+
+CI then reads the trailers from the PR base's policy (GATE-008) and skips the
+remote ``Lint`` and ``Linux x64`` jobs (Clippy, Dylint, nextest, doctests) for
+this head; the merge queue credits the same proof while the lane inputs are
+unchanged. ``main`` and release candidates always run everything.
+
+The gate rewrites HEAD, so a branch pushed before is updated with
+``--force-with-lease``.
+
+Exit codes: 0 pushed, 1 a step failed, 2 usage, 3 refused.
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "ci"))
+# One ci-lint pin for CI and ./push: ci.toml's `linter`.
+from local_gate import CI_LINT_REF  # noqa: E402  # pylint: disable=wrong-import-position
+
+PROTECTED = {"main", "master"}
+CI_LINT = [
+    "uvx",
+    "--with",
+    "pyyaml",
+    "--from",
+    f"git+https://github.com/zackees/ci.yml@{CI_LINT_REF}",
+    "ci-lint",
+]
+
+
+def git(*args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=ROOT, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def step(argv: list[str]) -> int:
+    print(f"./push: $ {' '.join(argv)}", flush=True)
+    return subprocess.run(argv, cwd=ROOT, check=False).returncode
+
+
+def has_open_pr(branch: str) -> bool:
+    out = subprocess.run(
+        [
+            *("gh", "pr", "list", "--head", branch, "--state", "open"),
+            *("--json", "number", "--jq", "length"),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return out.returncode == 0 and out.stdout.strip() not in ("", "0")
+
+
+def refusal(branch: str) -> str | None:
+    """Why this checkout cannot be attested and pushed, or None."""
+    if branch == "HEAD" or branch in PROTECTED:
+        return f"refusing to push {branch!r}; work on a feature branch"
+    if git("status", "--porcelain", "--untracked-files=no"):
+        return (
+            "tracked files have uncommitted changes (a proof binds the committed tree)"
+        )
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("--no-pr", action="store_true", help="do not open a PR")
+    parser.add_argument(
+        "--prove-only", action="store_true", help="attest HEAD but push nothing"
+    )
+    parser.add_argument("--remote", default="origin")
+    args = parser.parse_args(argv)
+
+    branch = git("rev-parse", "--abbrev-ref", "HEAD")
+    reason = refusal(branch)
+    if reason:
+        print(f"./push: {reason}", file=sys.stderr)
+        return 3
+
+    code = step([*CI_LINT, "local-gate", "run"])
+    if code != 0:
+        print(
+            f"./push: the local gate failed (exit {code}); nothing pushed",
+            file=sys.stderr,
+        )
+        return 1
+    if step([*CI_LINT, "local-gate", "verify", "--repo", "."]) != 0:
+        print(
+            "./push: HEAD is not attested after the gate; nothing pushed",
+            file=sys.stderr,
+        )
+        return 1
+    if args.prove_only:
+        return 0
+
+    target = f"HEAD:refs/heads/{branch}"
+    if step(["git", "push", "--force-with-lease", "-u", args.remote, target]) != 0:
+        return 1
+    if args.no_pr or has_open_pr(branch):
+        return 0
+    return 0 if step(["gh", "pr", "create", "--fill", "--head", branch]) == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

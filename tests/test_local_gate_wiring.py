@@ -523,6 +523,28 @@ def test_host_run_moves_every_identity_root_off_the_callers_state(
     assert env["CARGO_HOME"] == str(real_home / ".cargo")
 
 
+@pytest.mark.parametrize(
+    ("cpus", "load", "threads"),
+    [(16, 0.5, 16), (16, 16.0, 16), (16, 32.0, 8), (16, 110.0, 2), (4, 400.0, 2)],
+)
+def test_test_threads_shrink_with_host_load(
+    cpus: int, load: float, threads: int
+) -> None:
+    """A loaded shared host gets fewer concurrent tests, an idle one all CPUs."""
+    assert _workspace_test().load_aware_test_threads(cpus, load) == threads
+
+
+def test_explicit_test_threads_are_kept(tmp_path: Path) -> None:
+    ws = _workspace_test()
+    layout = ws.host_layout(tmp_path / "gitdir", tmp_path / "cache")
+    env: dict[str, str] = {}
+    ws.host_environment(layout, {"NEXTEST_TEST_THREADS": "3"}, tmp_path / "real", env)
+    assert env["NEXTEST_TEST_THREADS"] == "3"
+    env = {}
+    ws.host_environment(layout, {}, tmp_path / "real", env)
+    assert int(env["NEXTEST_TEST_THREADS"]) >= 2
+
+
 def test_host_root_is_never_inside_a_checkout(tmp_path: Path) -> None:
     """Fixtures make their pin-free cwd under TMPDIR; a private root below a
     rust-toolchain.toml would hand every one of them the repository's pin."""
