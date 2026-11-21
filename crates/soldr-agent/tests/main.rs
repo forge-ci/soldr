@@ -1,6 +1,6 @@
 use ed25519_dalek::{Signature, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use soldr_agent::{
     backoff::Backoff, checks, config::Config, host_identity, proto::*, runtime, status::Status,
@@ -25,6 +25,15 @@ fn roundtrip<T: Serialize + DeserializeOwned>(name: &str) {
     let typed: T = serde_json::from_value(json.clone()).unwrap();
     assert_eq!(serde_json::to_value(typed).unwrap(), json, "{name}");
 }
+#[derive(Serialize, Deserialize)]
+struct SignatureVector {
+    seed_hex: String,
+    public_key: String,
+    nonce: String,
+    name: String,
+    signing_bytes_b64: String,
+    sig: String,
+}
 #[test]
 fn every_protocol_fixture_roundtrips() {
     roundtrip::<ToHost>("challenge");
@@ -36,6 +45,7 @@ fn every_protocol_fixture_roundtrips() {
     roundtrip::<HostView>("host_view");
     roundtrip::<HostEvent>("host_event");
     roundtrip::<DistNode>("dist_node");
+    roundtrip::<SignatureVector>("signature");
     let names = std::fs::read_dir(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/signal-proto"),
     )

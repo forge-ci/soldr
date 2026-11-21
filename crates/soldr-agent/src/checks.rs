@@ -156,7 +156,7 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Option<T
     serde_json::from_slice(&data).ok()
 }
 pub async fn collect(config: &Config) -> Vec<Check> {
-    let services = config.units.iter().map(|unit| async {
+    let services = config.units.iter().map(|unit| async move {
         let result = probe("systemctl", &["is-active".into(), unit.clone()]).await;
         match result {
             Ok(p) => Check {
