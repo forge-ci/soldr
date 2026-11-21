@@ -292,3 +292,9 @@ fn c_search_paths_and_existing_remaps_are_relocated() {
         "-ffile-prefix-map=/tmp/job/root/repo=."
     );
 }
+
+#[test]
+fn absolute_output_parent_segments_are_normalised_before_matching() {
+    let job = DistJob { cwd: "/repo".into(), outputs: vec!["/outputs/unit.o".into()], ..DistJob::default() };
+    assert_eq!(sandbox::rewrite(std::path::Path::new("/tmp/job"), &job, "/outputs/subdir/../unit.o").unwrap(), "/tmp/job/root/outputs/unit.o");
+}

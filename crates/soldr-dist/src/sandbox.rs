@@ -119,7 +119,8 @@ pub fn rewrite(root: &Path, job: &DistJob, value: &str) -> Result<String> {
     } else {
         return Ok(value.into());
     };
-    let path = &value[start..];
+    let normal = absolute(Path::new(&job.cwd), Path::new(&value[start..]))?;
+    let path = normal.to_str().ok_or("non-UTF8 path")?;
     // Only declared file/directory trees belong to the mirror. Sysroots stay worker-owned.
     let owned = Path::new(path).starts_with(&job.cwd)
         || job.inputs.iter().any(|i| {
@@ -133,10 +134,9 @@ pub fn rewrite(root: &Path, job: &DistJob, value: &str) -> Result<String> {
     if !owned {
         return Ok(value.into());
     }
-    let normal = absolute(Path::new(&job.cwd), Path::new(path))?;
     Ok(format!(
         "{}{}",
         &value[..start],
-        mirrored(root, normal.to_str().ok_or("non-UTF8 path")?)?.display()
+        mirrored(root, path)?.display()
     ))
 }
