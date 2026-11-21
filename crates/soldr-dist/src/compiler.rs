@@ -78,6 +78,16 @@ impl Compiler {
     /// Runtime/toolchain environment cannot be relocated as an arbitrary Rust string.
     pub fn environment_decline(&self, job: &DistJob) -> Option<String> {
         for (key, value) in &job.env {
+            if Path::new(value).is_absolute()
+                && job
+                    .inputs
+                    .iter()
+                    .any(|input| Path::new(&input.abs_path).starts_with(value))
+            {
+                return Some(format!(
+                    "input-path environment {key} requires namespace isolation"
+                ));
+            }
             if self.kind == "rustc"
                 && [
                     "HOME",

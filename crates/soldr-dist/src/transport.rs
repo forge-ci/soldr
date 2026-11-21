@@ -111,3 +111,22 @@ pub async fn receive_blob(
         .await?;
     Ok(blob.digest)
 }
+
+/// Hold while a CLI endpoint uses this persistent identity. Separate processes
+/// with the same key would replace each other's outbound relay registration.
+pub struct EndpointLease {
+    _file: std::fs::File,
+}
+impl EndpointLease {
+    pub fn acquire(root: &Path) -> Result<Self> {
+        use fs2::FileExt;
+        std::fs::create_dir_all(root)?;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(root.join("endpoint.lock"))?;
+        file.try_lock_exclusive().map_err(|e| format!("another dist endpoint owns {}: {e}; reuse its library Endpoint or choose a separate --root", root.display()))?;
+        Ok(Self { _file: file })
+    }
+}

@@ -358,3 +358,35 @@ fn rust_runtime_environment_dependencies_decline_before_execution() {
         .unwrap()
         .contains("RUSTUP_TOOLCHAIN"));
 }
+
+#[test]
+fn custom_input_path_environment_declines_instead_of_reading_host_files() {
+    let compiler = soldr_dist::compiler::Compiler {
+        kind: "rustc".into(),
+        identity: "test".into(),
+        program: "soldr".into(),
+        prefix: vec!["rustc".into()],
+        toolchain: None,
+    };
+    let job = DistJob {
+        env: HashMap::from([("DATA_FILE".into(), "/repo/data.bin".into())]),
+        inputs: vec![InputFile {
+            abs_path: "/repo/data.bin".into(),
+            ..InputFile::default()
+        }],
+        ..DistJob::default()
+    };
+    assert!(compiler
+        .environment_decline(&job)
+        .unwrap()
+        .contains("DATA_FILE"));
+}
+
+#[test]
+fn endpoint_identity_has_one_process_owner_until_lease_drops() {
+    let temp = tempfile::tempdir().unwrap();
+    let lease = soldr_dist::transport::EndpointLease::acquire(temp.path()).unwrap();
+    assert!(soldr_dist::transport::EndpointLease::acquire(temp.path()).is_err());
+    drop(lease);
+    assert!(soldr_dist::transport::EndpointLease::acquire(temp.path()).is_ok());
+}

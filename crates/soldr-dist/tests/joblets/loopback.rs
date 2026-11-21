@@ -6,7 +6,7 @@ use soldr_dist::{
 use std::{
     collections::HashMap,
     fs,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
