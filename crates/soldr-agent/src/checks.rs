@@ -195,7 +195,9 @@ pub async fn collect(config: &Config) -> Vec<Check> {
 /// escaped output stays below signal's 16 KiB frame limit, including envelope.
 fn bound_checks(checks: &mut [Check]) {
     for check in checks {
-        if let Some((offset, _)) = check.name.char_indices().nth(128) { check.name.truncate(offset); }
+        if let Some((offset, _)) = check.name.char_indices().nth(128) {
+            check.name.truncate(offset);
+        }
         let mut shortened = false;
         if let Some((offset, _)) = check.detail.char_indices().nth(256) {
             check.detail.truncate(offset);

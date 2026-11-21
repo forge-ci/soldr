@@ -2814,6 +2814,7 @@ dependencies = [
  "getrandom 0.4.3",
  "if-addrs",
  "prost",
+ "rustls",
  "serde",
  "serde_json",
  "soldr-platform",
@@ -2822,6 +2823,7 @@ dependencies = [
  "tokio-tungstenite",
  "toml",
  "url",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
