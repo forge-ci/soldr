@@ -204,6 +204,12 @@ count is zero. Admission is checked atomically, and reservation changes affect
 new work without cancelling accepted compiles. Serving with a host-load file
 reports role `shared`; a standalone node reports `dist`.
 
+Standalone `serve` and `exec` processes hold `endpoint.lock` while using their
+persistent identity. A second endpoint using the same key would replace the
+first endpoint's relay registration, so concurrent CLI roles must use separate
+`--root` directories and pin those identities separately. Embedding callers can
+reuse an existing iroh Endpoint and give the client a dedicated CAS/trust root.
+
 ## Decision log
 - 2026-11-21 Name **dist**; host roles `runner` / `dist` / `shared`.
 - 2026-11-21 Transport **iroh** over Tailscale/Headscale: no client-side root/TUN, embeds in
@@ -238,3 +244,7 @@ reports role `shared`; a standalone node reports `dist`.
 - 2026-11-21 Shared-host admission reads the dispatcher snapshot per joblet;
   timestamps are Unix seconds, stale/unreadable data limits concurrency to one,
   and atomic admission prevents racing offers from exceeding the reservation.
+
+- 2026-11-21 Standalone endpoint identity ownership uses a file lease so concurrent
+  CLI processes cannot silently replace one another's outbound relay session;
+  embedded callers should reuse an Endpoint, and CLI roles can use separate roots.

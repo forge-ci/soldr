@@ -83,6 +83,7 @@ pub async fn run(args: DistArgs) -> Result<i32> {
             serve(&root, slots, cas_budget, host_load_file, relay).await
         }
         DistCommand::Exec { worker, argv } => {
+            let _endpoint_lease = transport::EndpointLease::acquire(&root)?;
             let job = scaffold::job(&argv).await?;
             let worker = transport::parse_ticket(&worker)?;
             let relay = args
@@ -131,6 +132,7 @@ async fn serve(
     host_load_file: Option<PathBuf>,
     relay: &str,
 ) -> Result<i32> {
+    let _endpoint_lease = transport::EndpointLease::acquire(root)?;
     let endpoint = transport::endpoint_with_relay(root, false, Some(relay)).await?;
     tokio::time::timeout(std::time::Duration::from_secs(10), endpoint.online())
         .await
