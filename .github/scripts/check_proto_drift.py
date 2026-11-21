@@ -28,6 +28,7 @@ from pathlib import Path
 
 # Each entry pairs a schema with the module carrying its prost types.
 PAIRS = [
+    ("crates/soldr-agent/src/status.proto", "crates/soldr-agent/src/status.rs"),
     (
         "crates/soldr-core/src/core/wire.proto",
         "crates/soldr-core/src/core/wire_proto.rs",

@@ -1,0 +1,8 @@
+syntax = "proto3";
+package soldr.agent;
+message Status {
+  string state = 1;
+  uint64 updated_ms = 2;
+  string signal_url = 3;
+  string detail = 4;
+}

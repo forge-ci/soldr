@@ -1,0 +1,11 @@
+{
+  "state": "online",
+  "offline_since": null,
+  "checks": [
+    {
+      "name": "disk:/",
+      "ok": true,
+      "detail": "disk usage below 95 percent"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "public_key": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+  "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+  "name": "test-node",
+  "signing_bytes_b64": "QUFFQ0F3UUZCZ2NJQ1FvTERBME9EeEFSRWhNVUZSWVhHQmthR3h3ZEhoOD10ZXN0LW5vZGU=",
+  "sig": "KDuE+0cI/PChKfwg9WVvF7jlStwtyx495y5cRzbaI7KBFyvOZps45KaQaNf7NlayYOzwrJgSpoH5UUnbX5DmCA=="
+}

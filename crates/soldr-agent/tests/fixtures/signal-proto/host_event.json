@@ -1,0 +1,6 @@
+{
+  "name": "test-node",
+  "kind": "rebooted",
+  "at_ms": 1000,
+  "boot_id": "test-boot"
+}

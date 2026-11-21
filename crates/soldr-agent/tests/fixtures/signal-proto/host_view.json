@@ -1,0 +1,29 @@
+{
+  "name": "test-node",
+  "owner": "forge",
+  "role": "shared",
+  "state": "online",
+  "last_seen": 1000,
+  "offline_since": null,
+  "boot_id": "test-boot",
+  "uptime_s": 12,
+  "ips": [
+    "192.168.1.2"
+  ],
+  "versions": {
+    "soldr": "0.1.0",
+    "agent": "0.1.0",
+    "os": "Linux"
+  },
+  "load": {
+    "cpus": 8,
+    "gh_jobs_running": 1,
+    "gh_cpus_reserved": 2
+  },
+  "dist": {
+    "node_id": "node-public-key",
+    "relay_url": null,
+    "slots_total": 6,
+    "slots_free": 4
+  }
+}

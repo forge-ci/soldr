@@ -6,6 +6,7 @@ resolver = "2"
 # soldr publishes no crates, so workspace membership has no external
 # surface — the old monocrate_guard test was deleted with the split.
 members = [
+    "crates/soldr-agent",
     "crates/soldr-cli",
     "crates/soldr-daemon",
     "crates/soldr-cache",
