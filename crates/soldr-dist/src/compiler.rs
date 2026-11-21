@@ -6,6 +6,21 @@ use crate::{
 use running_process::AsyncProcessBuilder;
 use std::path::{Path, PathBuf};
 
+/// Worker-owned process context, including the three nextest isolation roots.
+pub(crate) const RUNTIME_ENV: &[&str] = &[
+    "PATH",
+    "HOME",
+    "RUSTUP_HOME",
+    "CARGO_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "XDG_RUNTIME_DIR",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "SOLDR_CACHE_DIR",
+    "RUSTUP_AUTO_INSTALL",
+];
+
 #[derive(Clone)]
 pub struct Compiler {
     pub kind: String,
@@ -17,7 +32,7 @@ pub struct Compiler {
 impl Compiler {
     /// Rust always enters the Soldr front door, which resolves the pinned compiler.
     pub async fn rustc() -> Result<Self> {
-        let resolved = AsyncProcessBuilder::new("soldr")
+        let resolved = soldr_command()
             .args(["rustup", "which", "rustc"])
             .capture()
             .await?;
@@ -34,9 +49,9 @@ impl Compiler {
             .and_then(Path::parent)
             .ok_or("invalid resolved rustc path")?
             .to_path_buf();
-        let output = AsyncProcessBuilder::new("soldr")
+        let output = soldr_command()
             .env("RUSTUP_TOOLCHAIN", &toolchain)
-            .args(["rustc", "-vV"])
+            .args(["--no-cache", "rustc", "-vV"])
             .capture()
             .await?;
         if !output.status.success() {
@@ -59,7 +74,10 @@ impl Compiler {
             kind: "rustc".into(),
             identity,
             program: "soldr".into(),
-            prefix: vec!["rustc".into()],
+            // Remote joblets execute as owned children after the client's cache miss.
+            // Disable nested cache/executor routing; worker slots and host-load
+            // admission govern these direct children without a global Cargo cap.
+            prefix: vec!["--no-cache".into(), "rustc".into()],
             toolchain: Some(toolchain),
         })
     }
@@ -89,16 +107,7 @@ impl Compiler {
                     "input-path environment {key} requires namespace isolation"
                 ));
             }
-            if self.kind == "rustc"
-                && [
-                    "HOME",
-                    "PATH",
-                    "RUSTUP_HOME",
-                    "CARGO_HOME",
-                    "RUSTUP_TOOLCHAIN",
-                ]
-                .contains(&key.as_str())
-            {
+            if self.kind == "rustc" && RUNTIME_ENV.contains(&key.as_str()) {
                 return Some(format!(
                     "worker-owned Rust runtime environment dependency: {key}"
                 ));
@@ -125,14 +134,7 @@ impl Compiler {
                     "path-dependent environment {key} requires namespace isolation"
                 ));
             }
-            if [
-                "HOME",
-                "PATH",
-                "RUSTUP_HOME",
-                "CARGO_HOME",
-                "RUSTUP_TOOLCHAIN",
-            ]
-            .contains(&key.as_str())
+            if RUNTIME_ENV.contains(&key.as_str())
                 && std::env::var(key).ok().as_ref() != Some(value)
             {
                 return Some(format!("worker runtime environment differs: {key}"));
@@ -140,9 +142,21 @@ impl Compiler {
         }
         None
     }
+    /// The sanctioned one-hop edge is consumed by Soldr before it launches
+    /// rustc, so strict re-entry remains enforced for compiler descendants.
+    pub fn command(&self) -> AsyncProcessBuilder {
+        let mut command = AsyncProcessBuilder::new(&self.program).args(&self.prefix);
+        if self.kind == "rustc" {
+            command = command.env(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR, "1");
+        }
+        if let Some(toolchain) = &self.toolchain {
+            command = command.env("RUSTUP_TOOLCHAIN", toolchain);
+        }
+        command
+    }
     pub async fn run(&self, job: &DistJob, root: &Path) -> Result<Done> {
-        let mut command = AsyncProcessBuilder::new(&self.program)
-            .args(&self.prefix)
+        let mut command = self
+            .command()
             .clear_env(true)
             .kill_on_drop(true)
             .create_process_group(true);
@@ -150,7 +164,7 @@ impl Compiler {
             command = command.env(key, value);
         }
         // PATH and toolchain homes are worker configuration, never sandbox-rewritten.
-        for key in ["PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME"] {
+        for &key in RUNTIME_ENV {
             if let Some(value) = std::env::var_os(key) {
                 command = command.env(key, value);
             }
@@ -182,9 +196,13 @@ impl Compiler {
             .build();
         child.start().await?;
         if !job.stdin.is_empty() {
-            child.write_stdin(&job.stdin).await?;
+            if let Err(error) = child.write_stdin(&job.stdin).await {
+                eprintln!("dist compiler stdin: {error}");
+            }
         }
-        child.close_stdin().await?;
+        if let Err(error) = child.close_stdin().await {
+            eprintln!("dist compiler stdin close: {error}");
+        }
         let output = child.capture().await?;
         Ok(Done {
             exit_code: output.status.code().unwrap_or(1),
@@ -212,4 +230,8 @@ pub fn outputs(
         });
     }
     Ok(outputs)
+}
+
+fn soldr_command() -> AsyncProcessBuilder {
+    AsyncProcessBuilder::new("soldr").env(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR, "1")
 }

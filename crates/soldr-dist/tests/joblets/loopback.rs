@@ -113,8 +113,8 @@ async fn compare(compiler: Compiler, source_name: &str, source: &str, args: &[&s
         .map(|s| (*s).into())
         .chain([source_name.into(), "-o".into(), "hello.o".into()])
         .collect();
-    let mut local = AsyncProcessBuilder::new(&compiler.program)
-        .args(&compiler.prefix)
+    let mut local = compiler
+        .command()
         .args(&args)
         .current_dir(&cwd)
         .env("DIST_TAG", format!("{}/tag", cwd.display()));
@@ -392,6 +392,42 @@ fn joined_c_search_path_uses_cas_instead_of_host_headers() {
             "{outcome:?}"
         );
         assert_eq!(fs::read(&output).unwrap(), expected);
+        fixture.stop().await;
+    });
+}
+
+#[test]
+fn rustc_stdin_job_has_no_file_inputs() {
+    if !Path::new("/").is_absolute() {
+        eprintln!("SKIP: dist job materialisation currently supports POSIX paths only");
+        return;
+    }
+    Runtime::new().unwrap().block_on(async {
+        let compiler = Compiler::rustc().await.unwrap();
+        let fixture = Fixture::new(vec![compiler.clone()], true).await;
+        let output = fixture._temp.path().join("stdin.o");
+        let job = DistJob {
+            compiler_kind: compiler.kind,
+            compiler_identity: compiler.identity,
+            cwd: "/dist-stdin".into(),
+            argv: vec![
+                "--emit=obj".into(),
+                "--crate-name=stdin_unit".into(),
+                "-".into(),
+                "-o".into(),
+                output.to_str().unwrap().into(),
+            ],
+            stdin: b"fn main() {}\n".to_vec(),
+            outputs: vec![output.to_str().unwrap().into()],
+            ..DistJob::default()
+        };
+        let outcome = fixture.client.execute(job).await;
+        assert!(
+            matches!(outcome, DistOutcome::Executed { exit_code: 0, .. }),
+            "{outcome:?}"
+        );
+        assert!(!fs::read(output).unwrap().is_empty());
+        assert_eq!(fixture.client.uploaded_blobs.load(Ordering::Relaxed), 0);
         fixture.stop().await;
     });
 }

@@ -50,7 +50,7 @@ pub fn node_key(root: &Path) -> Result<SecretKey> {
     let path = root.join("node.key");
     if !path.exists() {
         let mut temp = tempfile::NamedTempFile::new_in(root)?;
-        soldr_platform::fs::permissions::make_private(temp.path())?;
+        soldr_platform::fs::permissions::restore_mode(temp.path(), Some(0o600))?;
         temp.write_all(&SecretKey::generate().to_bytes())?;
         temp.as_file().sync_all()?;
         match temp.persist_noclobber(&path) {
@@ -59,7 +59,7 @@ pub fn node_key(root: &Path) -> Result<SecretKey> {
             Err(e) => return Err(e.into()),
         }
     }
-    soldr_platform::fs::permissions::make_private(&path)?;
+    soldr_platform::fs::permissions::restore_mode(&path, Some(0o600))?;
     let bytes: [u8; 32] = fs::read(path)?
         .try_into()
         .map_err(|_| "invalid Dist node.key length")?;

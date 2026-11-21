@@ -1,6 +1,5 @@
 //! Deliberately narrow debug input discovery; the real manifest comes from zccache.
 use crate::{cas::DigestMemo, compiler::Compiler, DistJob, Result};
-use running_process::AsyncProcessBuilder;
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
@@ -34,6 +33,11 @@ pub async fn job(argv: &[String]) -> Result<DistJob> {
     if !rust && !args.iter().any(|a| a == "-c") {
         return Err("Dist debug cc requires -c".into());
     }
+    if args.iter().any(|a| a == "-") {
+        return Err(
+            "dist debug requires file inputs/outputs; the library API supports stdin".into(),
+        );
+    }
     if args.iter().any(|a| a.starts_with('@')) {
         return Err("Dist debug response files are unsupported".into());
     }
@@ -44,7 +48,7 @@ pub async fn job(argv: &[String]) -> Result<DistJob> {
         .ok_or("Dist debug requires explicit -o OUTPUT")??;
     let temp = tempfile::tempdir()?;
     let depfile = temp.path().join("inputs.d");
-    let mut command = AsyncProcessBuilder::new(&compiler.program).args(&compiler.prefix);
+    let mut command = compiler.command();
     if let Some(toolchain) = &compiler.toolchain {
         command = command.env("RUSTUP_TOOLCHAIN", toolchain);
     }
@@ -173,15 +177,7 @@ fn dependency_environment(text: &str) -> Result<HashMap<String, String>> {
         let key = dependency
             .split_once('=')
             .map_or(dependency, |(key, _)| key);
-        if [
-            "HOME",
-            "PATH",
-            "RUSTUP_HOME",
-            "CARGO_HOME",
-            "RUSTUP_TOOLCHAIN",
-        ]
-        .contains(&key)
-        {
+        if crate::compiler::RUNTIME_ENV.contains(&key) {
             return Err(
                 format!("dist debug cannot preserve worker-runtime env dependency {key}").into(),
             );

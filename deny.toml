@@ -51,7 +51,7 @@ skip = [
     # new side exact so another version still fails the ratchet.
     { name = "winnow", version = "=1.0.5" },
     # iroh -> netwatch -> netdev's Android JNI 0.21 dependency holds
-    # windows-sys 0.45 and this old support archive. JNI must upgrade its
+    # windows-sys 0.45 and this old support package. JNI must upgrade its
     # Windows dependency before the graph can converge with windows 0.52+.
     { name = "windows_x86_64_msvc", version = "=0.42.2" },
     # iroh 1.5 requires reqwest 0.13 (and its wasm-streams 0.5), while
@@ -83,7 +83,7 @@ skip = [
     { name = "windows-link", version = "=0.100.0" },
     { name = "windows-result", version = "=0.100.0" },
     { name = "windows-strings", version = "=0.100.0" },
-    # JNI 0.21's windows-sys 0.45 also holds the rest of this 0.42 archive
+    # JNI 0.21's windows-sys 0.45 also holds the rest of this 0.42 package
     # family; the existing sysinfo Windows implementation requires 0.52.
     { name = "windows-targets", version = "=0.42.2" },
     { name = "windows_aarch64_gnullvm", version = "=0.42.2" },

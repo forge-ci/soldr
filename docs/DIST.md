@@ -155,7 +155,8 @@ parses an explicit worker list; discovery and scheduling remain future work.
   fail explicitly instead of being mapped incorrectly.
 - Debug `exec` requires explicit `-o`, rustc `--emit=obj`/`--emit=metadata` or cc
   `-c`, scans dep-info locally, and includes explicit `--extern` and `-L` files.
-  Response files are refused. It is test scaffolding, not a replacement for the
+  Response files and debug stdin/stdout paths are refused; the library job API
+  supports stdin bytes directly. It is test scaffolding, not a replacement for the
   complete zccache depgraph (especially generated inputs and environment deps).
 - Worker compiler commands are locally configured, never supplied as remote
   executable paths. Rust identity is commit-hash + host from Soldr's resolved
@@ -248,3 +249,18 @@ reuse an existing iroh Endpoint and give the client a dedicated CAS/trust root.
 - 2026-11-21 Standalone endpoint identity ownership uses a file lease so concurrent
   CLI processes cannot silently replace one another's outbound relay session;
   embedded callers should reuse an Endpoint, and CLI roles can use separate roots.
+
+- 2026-11-21 Compiler probes/scans use Soldr's existing one-hop self-spawn edge,
+  consumed at child entry, so strict re-entry remains enabled. Key file mode is
+  explicitly 0600 (the generic private-permissions helper is for executables).
+
+- 2026-11-21 Remote Rustc joblets use `soldr --no-cache rustc` with the resolved
+  toolchain pinned. This is intentional direct execution after the client's cache
+  miss: it avoids recursive executor/cache routing and keeps the compiler owned
+  by the joblet for shutdown. Node slots/host-load admission apply to these
+  children; no Cargo-wide job cap is set. The absolute-path wrapper surface needs
+  a registered front-door route and is not a standalone executor API.
+
+- 2026-11-21 Compiler children preserve the worker's cache, temporary and runtime
+  roots along with toolchain homes; client semantic variables cannot replace
+  that process context. This retains the repository's nextest root isolation.
