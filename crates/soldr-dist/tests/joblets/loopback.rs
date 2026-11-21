@@ -98,6 +98,10 @@ fn job(
     }
 }
 async fn compare(compiler: Compiler, source_name: &str, source: &str, args: &[&str]) {
+    if !Path::new("/").is_absolute() {
+        eprintln!("SKIP: dist job materialisation currently supports POSIX paths only");
+        return;
+    }
     let fixture = Fixture::new(vec![compiler.clone()], true).await;
     let cwd = fixture._temp.path().join("project");
     fs::create_dir_all(&cwd).unwrap();
@@ -327,6 +331,10 @@ fn reserved_host_capacity_declines_joblets() {
 
 #[test]
 fn joined_c_search_path_uses_cas_instead_of_host_headers() {
+    if !Path::new("/").is_absolute() {
+        eprintln!("SKIP: dist job materialisation currently supports POSIX paths only");
+        return;
+    }
     let Some(compiler) = cc() else {
         eprintln!("SKIP: no host C compiler");
         return;

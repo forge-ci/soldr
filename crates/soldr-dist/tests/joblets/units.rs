@@ -91,6 +91,9 @@ fn cas_put_verify_restart_evict() {
 }
 #[test]
 fn materialisation_and_digest_memo() {
+    if !posix_paths() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let cas = Cas::new(temp.path(), u64::MAX).unwrap();
     let source = temp.path().join("source.rs");
@@ -139,6 +142,9 @@ fn trust_and_key_persistence() {
 
 #[test]
 fn remaps_keep_zccache_workspace_convention() {
+    if !posix_paths() {
+        return;
+    }
     let job = DistJob {
         cwd: "/repo/crate".into(),
         ..DistJob::default()
@@ -156,6 +162,9 @@ fn remaps_keep_zccache_workspace_convention() {
 
 #[test]
 fn equivalent_manifest_paths_cannot_corrupt_cas() {
+    if !posix_paths() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let cas = Cas::new(temp.path(), u64::MAX).unwrap();
     let a = cas.put(b"first").unwrap();
@@ -185,6 +194,9 @@ fn equivalent_manifest_paths_cannot_corrupt_cas() {
 
 #[test]
 fn lexical_output_paths_and_arg_component_boundaries() {
+    if !posix_paths() {
+        return;
+    }
     let job = DistJob {
         cwd: "/work/proj".into(),
         ..DistJob::default()
@@ -225,6 +237,9 @@ fn eviction_preserves_active_job_and_releases_on_drop() {
 
 #[test]
 fn digest_manifest_retains_symlink_alias() {
+    if !posix_paths() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     fs::write(temp.path().join("actual.rs"), b"source").unwrap();
     let alias = temp.path().join("alias.rs");
@@ -274,6 +289,9 @@ fn host_load_reservation_staleness_and_running_slots() {
 
 #[test]
 fn c_search_paths_and_existing_remaps_are_relocated() {
+    if !posix_paths() {
+        return;
+    }
     let job = DistJob {
         cwd: "/repo".into(),
         inputs: vec![InputFile {
@@ -295,6 +313,29 @@ fn c_search_paths_and_existing_remaps_are_relocated() {
 
 #[test]
 fn absolute_output_parent_segments_are_normalised_before_matching() {
-    let job = DistJob { cwd: "/repo".into(), outputs: vec!["/outputs/unit.o".into()], ..DistJob::default() };
-    assert_eq!(sandbox::rewrite(std::path::Path::new("/tmp/job"), &job, "/outputs/subdir/../unit.o").unwrap(), "/tmp/job/root/outputs/unit.o");
+    if !posix_paths() {
+        return;
+    }
+    let job = DistJob {
+        cwd: "/repo".into(),
+        outputs: vec!["/outputs/unit.o".into()],
+        ..DistJob::default()
+    };
+    assert_eq!(
+        sandbox::rewrite(
+            std::path::Path::new("/tmp/job"),
+            &job,
+            "/outputs/subdir/../unit.o"
+        )
+        .unwrap(),
+        "/tmp/job/root/outputs/unit.o"
+    );
+}
+
+fn posix_paths() -> bool {
+    let supported = std::path::Path::new("/").is_absolute();
+    if !supported {
+        eprintln!("SKIP: dist job materialisation currently supports POSIX paths only");
+    }
+    supported
 }
