@@ -28,6 +28,7 @@ running-process = { version = "=4.10.20", default-features = false, features = [
 soldr-cache = { path = "../soldr-cache" }
 soldr-daemon = { path = "../soldr-daemon" }
 soldr-core = { path = "../soldr-core" }
+soldr-dist = { path = "../soldr-dist" }
 soldr-fetch = { path = "../soldr-fetch" }
 soldr-platform = { path = "../soldr-platform" }
 cap-fs-ext = { workspace = true }

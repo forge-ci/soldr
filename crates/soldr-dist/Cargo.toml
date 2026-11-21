@@ -1,0 +1,25 @@
+[package]
+name = "soldr-dist"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+iroh = { version = "1.5.0", default-features = false, features = ["tls-ring"] }
+blake3 = "1"
+fs2.workspace = true
+filetime.workspace = true
+tokio.workspace = true
+prost.workspace = true
+tempfile.workspace = true
+toml.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+running-process = { version = "=4.10.20", default-features = false, features = ["client-async"] }
+clap.workspace = true
+soldr-platform = { path = "../soldr-platform" }
+
+[lints]
+workspace = true

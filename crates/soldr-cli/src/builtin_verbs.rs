@@ -86,6 +86,7 @@ pub(crate) const SOLDR_BUILTIN_VERBS: &[&str] = &[
     // surface). It layers catalogue-driven sysroot prep on top of the
     // cargo front door and stays paired with `Commands::Build` in the
     // enum.
+    "dist",
     "build",
     "cc",
     "c++",
