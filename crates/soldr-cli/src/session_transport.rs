@@ -360,8 +360,17 @@ fn run_session_compile_for_service(
             .build()
             .map_err(SessionError::pre_output)?;
         let compile = run_session_compile_async(service_name, rustc_argv, cwd, env);
-        crate::platform::wait::block_on_for(&runtime, compile, crate::platform::wait::LONG_CHILD)
-            .unwrap_or_else(|error| Err(SessionError::pre_output(error.into())))
+        let result = crate::platform::wait::block_on_for(
+            &runtime,
+            compile,
+            crate::platform::wait::LONG_CHILD,
+        )
+        .unwrap_or_else(|error| Err(SessionError::pre_output(error.into())));
+        // A progress probe may have timed out while its blocking connector is
+        // still running. Runtime::drop would wait without a deadline for it,
+        // undoing the compile's connection-liveness bound.
+        runtime.shutdown_background();
+        result
     };
 
     // A Cargo wrapper arrives before Soldr constructs its command runtime, but
