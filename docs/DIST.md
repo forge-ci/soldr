@@ -318,3 +318,10 @@ reuse an existing iroh Endpoint and give the client a dedicated CAS/trust root.
   probes for the service's `TMPDIR=<root>/tmp`. No capabilities or writes to
   system directories are required. Fractional Unix `updated_at` values from the
   dispatcher retain the strict 30-second freshness boundary.
+
+- 2026-11-21 The CLI's `dist` Cargo feature is default-on but optional because
+  the initial iroh graph adds more than 120 crates. `soldr cargo build -p
+  soldr-cli --no-default-features` excludes soldr-dist and its networking stack
+  from the CLI build graph. The frozen `dist` verb remains captured and reports
+  that the feature is disabled. Iroh defaults remain off; only `tls-ring` is
+  enabled (no metrics, portmapper, or discovery feature backends).

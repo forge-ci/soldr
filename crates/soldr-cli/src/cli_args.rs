@@ -326,7 +326,14 @@ pub(crate) use crate::builtin_verbs::{
 #[derive(clap::Subcommand)]
 pub(crate) enum Commands {
     /// Distributed compilation worker and single-joblet debug client.
+    #[cfg(feature = "dist")]
     Dist(soldr_dist::cli::DistArgs),
+    /// Distributed compilation is disabled in this build; enable feature `dist`.
+    #[cfg(not(feature = "dist"))]
+    Dist {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        argv: Vec<String>,
+    },
     /// Build the workspace via soldr's blessed cross-compile path
     ///
     /// `soldr build --target X` is the **blessed-default surface** for
