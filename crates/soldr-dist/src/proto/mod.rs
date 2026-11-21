@@ -107,6 +107,10 @@ pub struct Status {
     pub running_joblets: u64,
     #[prost(uint64, tag = "7")]
     pub pid: u64,
+    #[prost(string, tag = "8")]
+    pub build_id: String,
+    #[prost(string, tag = "9")]
+    pub signal_url: String,
 }
 #[derive(Clone, PartialEq, Message)]
 pub struct Reply {

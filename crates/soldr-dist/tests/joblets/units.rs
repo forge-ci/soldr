@@ -268,13 +268,13 @@ fn digest_manifest_retains_symlink_alias() {
 fn host_load_reservation_staleness_and_running_slots() {
     use soldr_dist::host_load::{free_slots, HostLoad};
     let mut load: HostLoad = serde_json::from_str(
-        r#"{"gh_jobs_running":3,"gh_cpus_reserved":6,"cap":8,"updated_at":1000}"#,
+        r#"{"gh_jobs_running":3,"gh_cpus_reserved":6,"cap":8,"updated_at":1000.25}"#,
     )
     .unwrap();
     assert_eq!(load.limit(4, 8, 1010.0), 2);
     assert_eq!(free_slots(load.limit(4, 8, 1010.0), 2), 0);
-    assert_eq!(load.limit(4, 8, 1030.0), 2);
-    assert_eq!(load.limit(4, 8, 1030.1), 1);
+    assert_eq!(load.limit(4, 8, 1030.25), 2);
+    assert_eq!(load.limit(4, 8, 1030.26), 1);
     load.gh_cpus_reserved = 100;
     assert_eq!(load.limit(4, 8, 1010.0), 0);
     assert_eq!(free_slots(load.limit(4, 8, 1040.0), 1), 0);
@@ -389,4 +389,110 @@ fn endpoint_identity_has_one_process_owner_until_lease_drops() {
     assert!(soldr_dist::transport::EndpointLease::acquire(temp.path()).is_err());
     drop(lease);
     assert!(soldr_dist::transport::EndpointLease::acquire(temp.path()).is_ok());
+}
+
+#[test]
+fn service_cli_accepts_signal_and_status_root() {
+    use clap::Parser;
+    use soldr_dist::cli::{DistArgs, DistCommand};
+    #[derive(Parser)]
+    struct Command {
+        #[command(flatten)]
+        args: DistArgs,
+    }
+    let serve = Command::try_parse_from([
+        "dist",
+        "serve",
+        "--root",
+        "/var/lib/soldr-dist/state",
+        "--slots",
+        "8",
+        "--cas-budget",
+        "10000",
+        "--relay-url",
+        "https://relay.example.com",
+        "--signal-url",
+        "https://signal.example.com",
+        "--host-load-file",
+        "/run/forge/host-load.json",
+    ])
+    .unwrap()
+    .args;
+    assert_eq!(
+        serve.root.unwrap(),
+        std::path::Path::new("/var/lib/soldr-dist/state")
+    );
+    let DistCommand::Serve {
+        signal_url, slots, ..
+    } = serve.command
+    else {
+        panic!("expected serve");
+    };
+    assert_eq!(signal_url, "https://signal.example.com");
+    assert_eq!(slots, 8);
+    let status = Command::try_parse_from([
+        "dist",
+        "status",
+        "--json",
+        "--root",
+        "/var/lib/soldr-dist/state",
+    ])
+    .unwrap()
+    .args;
+    assert_eq!(
+        status.root.unwrap(),
+        std::path::Path::new("/var/lib/soldr-dist/state")
+    );
+    assert!(matches!(status.command, DistCommand::Status { json: true }));
+}
+
+#[test]
+fn explicit_root_status_preserves_daemon_build_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let expected = Status {
+        node_id: "serving-node".into(),
+        role: "dist".into(),
+        pid: u64::from(std::process::id()),
+        build_id: "a".repeat(64),
+        signal_url: "https://signal.example.com".into(),
+        ..Status::default()
+    };
+    fs::write(root.path().join("status.pb"), expected.encode_to_vec()).unwrap();
+    let loaded = soldr_dist::status::load(root.path()).unwrap();
+    let json = soldr_dist::status::json(&loaded);
+    assert_eq!(json["build_id"], expected.build_id);
+    assert_eq!(json["signal_url"], expected.signal_url);
+    assert_eq!(json["pid"], std::process::id());
+    // A privileged status query must not replace the daemon's identity/key.
+    assert!(!root.path().join("node.key").exists());
+    let actual = soldr_dist::status::build_id().unwrap();
+    assert_eq!(actual.len(), 64);
+    assert!(actual
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+    assert_ne!(loaded.build_id, actual);
+    use sha2::Digest;
+    let executable = fs::read(std::env::current_exe().unwrap()).unwrap();
+    assert_eq!(actual, format!("{:x}", sha2::Sha256::digest(executable)));
+}
+
+#[test]
+fn inactive_status_cannot_confirm_a_deployed_node() {
+    let root = tempfile::tempdir().unwrap();
+    let missing = soldr_dist::status::load(root.path()).unwrap();
+    assert!(missing.build_id.is_empty());
+    for pid in [0, u64::from(u32::MAX)] {
+        let stale = Status {
+            pid,
+            role: "dist".into(),
+            build_id: "a".repeat(64),
+            running_joblets: 1,
+            ..Status::default()
+        };
+        fs::write(root.path().join("status.pb"), stale.encode_to_vec()).unwrap();
+        let loaded = soldr_dist::status::load(root.path()).unwrap();
+        assert_eq!(loaded.pid, 0);
+        assert_eq!(loaded.running_joblets, 0);
+        assert!(loaded.build_id.is_empty());
+    }
 }

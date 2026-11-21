@@ -31,6 +31,7 @@ pub struct Worker {
     pub slots: usize,
     pub cas_budget: u64,
     pub host_load_file: Option<PathBuf>,
+    pub signal_url: String,
     pub total_cpus: usize,
     pub uploaded_blobs: Arc<AtomicU64>,
 }
@@ -41,6 +42,8 @@ struct State {
     cas: Cas,
     uploaded: Arc<AtomicU64>,
     node_id: String,
+    build_id: String,
+    signal_url: String,
     total: usize,
     total_cpus: usize,
     host_load_file: Option<PathBuf>,
@@ -67,6 +70,8 @@ impl Worker {
             slots: Arc::new(Semaphore::new(self.slots)),
             uploaded: self.uploaded_blobs,
             node_id: self.endpoint.id().to_string(),
+            build_id: crate::status::build_id()?,
+            signal_url: self.signal_url,
             total: self.slots,
             total_cpus: self.total_cpus,
             host_load_file: self.host_load_file,
@@ -157,6 +162,8 @@ fn write_status(state: &State) -> Result<()> {
         cas_bytes: state.cas.size()?,
         running_joblets: (state.total - state.slots.available_permits()) as u64,
         pid: std::process::id() as u64,
+        build_id: state.build_id.clone(),
+        signal_url: state.signal_url.clone(),
     };
     let mut temp = tempfile::NamedTempFile::new_in(&state.root)?;
     temp.write_all(&status.encode_to_vec())?;

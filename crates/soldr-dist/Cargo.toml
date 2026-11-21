@@ -13,6 +13,7 @@ fs2.workspace = true
 filetime.workspace = true
 tokio.workspace = true
 prost.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 toml.workspace = true
 serde.workspace = true
