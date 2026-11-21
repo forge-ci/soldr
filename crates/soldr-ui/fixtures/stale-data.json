@@ -1,0 +1,72 @@
+{
+  "sources": {
+    "status": {
+      "stdout": "{\"schema_version\": 1, \"soldr_version\": \"0.9.54\", \"zccache\": {\"status_lines\": []}}",
+      "stderr": "",
+      "success": true
+    },
+    "daemon": {
+      "stdout": "{\"running\": true, \"in_flight_compiles\": 0, \"pid\": 1234}",
+      "stderr": "",
+      "success": true
+    },
+    "doctor": {
+      "stdout": "{\"schema_version\": 1, \"drift\": false, \"cache_health\": {\"zero_hit_storm\": false, \"daemon_churn\": false}}",
+      "stderr": "",
+      "success": true
+    },
+    "logs": {
+      "stdout": "{\"schema_version\": 1, \"root\": \"/home/developer/.soldr\", \"paths\": [{\"name\": \"logs\", \"path\": \"/home/developer/.soldr/logs\", \"exists\": true}]}",
+      "stderr": "",
+      "success": true
+    },
+    "builds": {
+      "stdout": "{\"schema_version\": 1, \"launches\": [{\"repo_root\": \"/work/soldr\", \"duration_ms\": 12400, \"cache\": {\"hits\": 142, \"misses\": 3}}]}",
+      "stderr": "",
+      "success": true
+    },
+    "session": {
+      "stdout": "",
+      "stderr": "Connection was reset while reading cache statistics.",
+      "success": false
+    },
+    "cache": {
+      "stdout": "{\"schema_version\": 1, \"on_disk_bytes\": 4509715660, \"budget_bytes\": 26843545600}",
+      "stderr": "",
+      "success": true
+    },
+    "dist": {
+      "stdout": "{\"role\": \"off\", \"nodes\": [], \"joblets_local\": 0, \"joblets_remote\": 0, \"bytes_transferred\": 0, \"bytes_saved\": 0, \"host_mode\": \"runner\", \"sharing_enabled\": false}",
+      "stderr": "",
+      "success": true
+    }
+  },
+  "now": 1700000000,
+  "samples": {
+    "session": {
+      "last_good": {
+        "at": 1699999875,
+        "generation": 0,
+        "value": {
+          "schema_version": 1,
+          "last_session": {
+            "hits": 142,
+            "misses": 3,
+            "hit_rate": 0.9793103448275862
+          }
+        }
+      },
+      "freshness": {
+        "state": "stale",
+        "at": 1699999875,
+        "failed_at": 1700000000,
+        "reason": "Connection reset"
+      },
+      "reply": {
+        "stdout": "",
+        "stderr": "Connection was reset while reading cache statistics.",
+        "success": false
+      }
+    }
+  }
+}
