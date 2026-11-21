@@ -41,7 +41,7 @@ pub fn load_or_create(path: &Path) -> Result<HostKey> {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-    soldr_platform::platform::fs::permissions::restore_mode(staged.path(), Some(0o600))?;
+    soldr_platform::fs::permissions::restore_mode(staged.path(), Some(0o600))?;
     staged.write_all(&seed)?;
     staged.as_file().sync_all()?;
     match staged.persist_noclobber(path) {
@@ -56,7 +56,7 @@ fn load(path: &Path) -> Result<HostKey> {
     if !metadata.is_file() || metadata.len() != 32 {
         return Err("host key must be a regular 32-byte seed file".into());
     }
-    soldr_platform::platform::fs::permissions::restore_mode(path, Some(0o600))?;
+    soldr_platform::fs::permissions::restore_mode(path, Some(0o600))?;
     let mut seed = [0; 32];
     std::fs::File::open(path)?.read_exact(&mut seed)?;
     Ok(HostKey(SigningKey::from_bytes(&seed)))

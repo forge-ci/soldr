@@ -5,7 +5,7 @@ use crate::{
     proto::{Check, Dist, Load},
     Result,
 };
-use soldr_platform::platform::{
+use soldr_platform::{
     fs::volume,
     process::{command, terminate},
 };
@@ -27,7 +27,7 @@ impl Drop for ProcessGroup {
     fn drop(&mut self) {
         // Also kill descendants that kept running after their parent exited.
         let _ = terminate::terminate_tree(&mut self.0);
-        let _ = soldr_platform::platform::wait::wait_for(&mut self.0, Duration::from_millis(100));
+        let _ = soldr_platform::wait::wait_for(&mut self.0, Duration::from_millis(100));
     }
 }
 pub async fn probe(program: &str, args: &[String]) -> Result<Probe> {
@@ -39,7 +39,10 @@ pub async fn probe(program: &str, args: &[String]) -> Result<Probe> {
         .stdout(stdout.try_clone()?)
         .stderr(stderr.try_clone()?);
     command::configure_process_group(&mut cmd);
-    let child = cmd.spawn()?;
+    let child = {
+        let _spawn = soldr_platform::process::spawn_exclusion::spawn_shared();
+        cmd.spawn()?
+    };
     let mut group = ProcessGroup(child);
     let wait = async {
         loop {

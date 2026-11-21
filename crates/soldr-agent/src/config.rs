@@ -28,7 +28,8 @@ pub struct Config {
     pub soldr_root: PathBuf,
 }
 pub fn system_service() -> bool {
-    std::env::var_os("INVOCATION_ID").is_some() || std::env::var_os("SYSTEMD_EXEC_PID").is_some()
+    std::env::var_os("INVOCATION_ID").is_some_and(|v| !v.is_empty())
+        || std::env::var_os("SYSTEMD_EXEC_PID").is_some_and(|v| !v.is_empty())
 }
 fn user_root() -> PathBuf {
     std::env::var_os("HOME")

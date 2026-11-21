@@ -91,11 +91,11 @@ fn keygen_is_atomic_private_and_idempotent() {
         .collect();
     let keys: Vec<_> = threads
         .into_iter()
-        .map(|t| soldr_platform::platform::wait::join_for(t, Duration::from_secs(5)).unwrap())
+        .map(|t| soldr_platform::wait::join_for(t, Duration::from_secs(5)).unwrap())
         .collect();
     assert!(keys.iter().all(|key| key == &keys[0]));
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 32);
-    if let Some(mode) = soldr_platform::platform::fs::permissions::mode(&path) {
+    if let Some(mode) = soldr_platform::fs::permissions::mode(&path) {
         assert_eq!(mode & 0o777, 0o600);
     }
     std::fs::write(&path, b"invalid key").unwrap();
