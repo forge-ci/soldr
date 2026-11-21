@@ -51,7 +51,12 @@ skip = [
     { name = "serde_spanned", version = "=1.1.3" },
     { name = "winnow", version = "=1.0.5" },
     { name = "digest", version = "=0.11.3" },
-    { name = "sha2", version = "=0.11.0" },
+    { name = "sha2", version = "=0.11.1" },
+    # iroh-relay 1.5 -> num_enum -> proc-macro-crate requires toml_edit 0.25
+    # and winnow 1, while the workspace's toml 0.8/toml_edit 0.22 require
+    # winnow 0.7. Convergence needs a workspace TOML API migration; keep the
+    # new side exact so another version still fails the ratchet.
+    { name = "winnow", version = "=1.0.5" },
     # errno/rustix/tempfile still cap at 0.52, reached only through
     # prost-build's build-dependency tree (amalgamated zccache-protocol and
     # running-process). The #2406 convergence covered the runtime tree;
