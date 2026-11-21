@@ -125,36 +125,53 @@ pub(crate) fn snapshot() -> WireAdmissionProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
     #[test]
-    fn queued_clients_progress_through_one_slot_and_cancel_cleanly() {
+    fn resident_compile_admission_queued_clients_progress_and_cancel_cleanly() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
-            let held = gate.clone().acquire_owned().await.unwrap();
-            let mut tasks = Vec::new();
-            for n in 0..3 {
-                let progress = register(format!("queue-test-{n}"));
-                let id = progress.0;
-                let gate = gate.clone();
-                tasks.push(tokio::spawn(CURRENT.scope(id, async move {
-                    phase(1);
-                    let _permit = gate.acquire_owned().await.unwrap();
-                    phase(2);
-                    tokio::task::yield_now().await;
-                    progress.complete();
-                })));
+            let gate = crate::resident_compile_admission::ResidentCompileAdmission::new(1);
+            let held = gate.acquire_compiler().await.unwrap();
+            let mut guards: Vec<_> = (0..3)
+                .map(|n| register(format!("queue-test-{n}")))
+                .collect();
+            let mut waiters: Vec<_> = guards
+                .iter()
+                .map(|guard| Box::pin(CURRENT.scope(guard.0, gate.acquire_compiler())))
+                .collect();
+            for waiter in &mut waiters {
+                let polled =
+                    std::future::poll_fn(|cx| std::task::Poll::Ready(waiter.as_mut().poll(cx)))
+                        .await;
+                assert!(polled.is_pending());
             }
-            tokio::task::yield_now().await;
+            let queued = snapshot();
+            let own: Vec<_> = queued
+                .waits
+                .iter()
+                .filter(|w| w.token.starts_with("queue-test-"))
+                .collect();
+            assert_eq!(own.len(), 3);
+            assert!(own.iter().all(|w| w.phase == 1));
+            drop(waiters.remove(1));
+            drop(guards.remove(1));
             assert_eq!(
                 snapshot()
                     .waits
                     .iter()
                     .filter(|w| w.token.starts_with("queue-test-"))
                     .count(),
-                3
+                2
             );
             drop(held);
-            for task in tasks {
-                task.await.unwrap();
+            for (waiter, guard) in waiters.into_iter().zip(guards) {
+                let permit = waiter.await.unwrap();
+                let admitted = snapshot();
+                assert!(admitted
+                    .waits
+                    .iter()
+                    .any(|w| w.token.starts_with("queue-test-") && w.phase == 2));
+                guard.complete();
+                drop(permit);
             }
             assert!(!snapshot()
                 .waits

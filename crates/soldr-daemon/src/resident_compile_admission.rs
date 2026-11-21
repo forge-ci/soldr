@@ -55,11 +55,16 @@ impl ResidentCompileAdmission {
         self
     }
 
-    async fn acquire_compiler(&self) -> Result<OwnedSemaphorePermit, HostAdmissionError> {
-        Arc::clone(&self.capacity)
+    pub(crate) async fn acquire_compiler(
+        &self,
+    ) -> Result<OwnedSemaphorePermit, HostAdmissionError> {
+        crate::admission_progress::phase(1);
+        let permit = Arc::clone(&self.capacity)
             .acquire_owned()
             .await
-            .map_err(|error| HostAdmissionError::new(error.to_string()))
+            .map_err(|error| HostAdmissionError::new(error.to_string()))?;
+        crate::admission_progress::phase(2);
+        Ok(permit)
     }
 
     /// Reserve weighted capacity while always leaving one slot for compilers.
@@ -149,12 +154,7 @@ impl HostAdmissionClassifier for ResidentCompileAdmission {
         _request: HostCompilerRequest<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<HostAdmissionPermit, HostAdmissionError>> + Send + 'a>>
     {
-        Box::pin(async move {
-            crate::admission_progress::phase(1);
-            let permit = self.acquire_compiler().await?;
-            crate::admission_progress::phase(2);
-            Ok(HostAdmissionPermit::new(permit))
-        })
+        Box::pin(async move { self.acquire_compiler().await.map(HostAdmissionPermit::new) })
     }
 }
 
