@@ -70,7 +70,8 @@ pub(crate) async fn await_compile_reply<F: Future>(work: F) -> std::io::Result<F
         }
         let probe_started = std::time::Instant::now();
         let since = disconnected_since.unwrap_or(probe_started);
-        let budget = crate::session_transport::compile_liveness_deadline().saturating_sub(since.elapsed());
+        let budget =
+            crate::session_transport::compile_liveness_deadline().saturating_sub(since.elapsed());
         let probe = tokio::task::spawn_blocking(daemon_progress);
         let status = tokio::select! {
             biased;
