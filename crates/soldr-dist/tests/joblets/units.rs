@@ -369,7 +369,7 @@ fn custom_input_path_environment_declines_instead_of_reading_host_files() {
         toolchain: None,
     };
     let job = DistJob {
-        env: HashMap::from([("DATA_FILE".into(), "/repo/data.bin".into())]),
+        env: HashMap::from([("DATA_FILE".into(), "/repo/build/../data.bin".into())]),
         inputs: vec![InputFile {
             abs_path: "/repo/data.bin".into(),
             ..InputFile::default()

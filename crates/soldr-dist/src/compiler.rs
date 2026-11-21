@@ -79,10 +79,11 @@ impl Compiler {
     pub fn environment_decline(&self, job: &DistJob) -> Option<String> {
         for (key, value) in &job.env {
             if Path::new(value).is_absolute()
-                && job
-                    .inputs
-                    .iter()
-                    .any(|input| Path::new(&input.abs_path).starts_with(value))
+                && sandbox::absolute(Path::new(&job.cwd), Path::new(value)).map_or(true, |path| {
+                    job.inputs
+                        .iter()
+                        .any(|input| Path::new(&input.abs_path).starts_with(&path))
+                })
             {
                 return Some(format!(
                     "input-path environment {key} requires namespace isolation"
