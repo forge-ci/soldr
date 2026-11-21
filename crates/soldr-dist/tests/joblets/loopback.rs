@@ -114,6 +114,9 @@ async fn compare(compiler: Compiler, source_name: &str, source: &str, args: &[&s
         .args(&args)
         .current_dir(&cwd)
         .env("DIST_TAG", format!("{}/tag", cwd.display()));
+    if let Some(toolchain) = &compiler.toolchain {
+        local = local.env("RUSTUP_TOOLCHAIN", toolchain);
+    }
     if compiler.kind == "rustc" {
         local = local.arg(format!("--remap-path-prefix={}=.", cwd.display()));
     }
