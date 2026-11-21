@@ -59,6 +59,7 @@ impl Fixture {
             slots: 2,
             cas_budget: 1024 * 1024 * 32,
             host_load_file,
+            signal_url: "https://signal.forge-ci.com".into(),
             total_cpus: 8,
             uploaded_blobs: uploaded.clone(),
         };

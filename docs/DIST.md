@@ -303,3 +303,18 @@ reuse an existing iroh Endpoint and give the client a dedicated CAS/trust root.
 - 2026-11-21 Compiler children preserve the worker's cache, temporary and runtime
   roots along with toolchain homes; client semantic variables cannot replace
   that process context. This retains the repository's nextest root isolation.
+
+- 2026-11-21 The gh-runner service interface accepts `serve --signal-url`
+  (`SOLDR_DIST_SIGNAL_URL`, default `https://signal.forge-ci.com`). The node
+  stores it in its runtime state and protobuf status snapshot; registration is
+  deferred. `status --json --root /var/lib/soldr-dist/state` reads that snapshot
+  across user/HOME boundaries and reports its `build_id`: lowercase SHA-256 of
+  the serving executable, computed once at startup rather than hashing the
+  querying binary or a subsequently deployed replacement. This is separate from
+  linker build IDs. Stale/dead or absent snapshots are marked as client status with an empty
+  `build_id`, so a stopped node cannot falsely confirm deployment.
+- 2026-11-21 Hardened services keep CAS, sandbox directories, snapshots, locks,
+  and `node.key` beneath `--root`; serve creates `<root>/tmp` before compiler
+  probes for the service's `TMPDIR=<root>/tmp`. No capabilities or writes to
+  system directories are required. Fractional Unix `updated_at` values from the
+  dispatcher retain the strict 30-second freshness boundary.

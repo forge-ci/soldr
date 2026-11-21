@@ -1,15 +1,8 @@
 //! Debug command surface. No discovery or zccache integration.
 use crate::{
-    cas::Cas,
-    compiler::Compiler,
-    proto::Status,
-    transport,
-    trust::{self, Trust},
-    worker::Worker,
-    DistClient, DistOutcome, Result,
+    compiler::Compiler, transport, trust::Trust, worker::Worker, DistClient, DistOutcome, Result,
 };
 use clap::{Args, Subcommand};
-use prost::Message;
 use std::{
     path::{Path, PathBuf},
     sync::{atomic::AtomicU64, Arc},
@@ -35,6 +28,13 @@ pub enum DistCommand {
         cas_budget: u64,
         #[arg(long)]
         host_load_file: Option<PathBuf>,
+        /// Registry configuration only; registration is a later slice.
+        #[arg(
+            long,
+            env = "SOLDR_DIST_SIGNAL_URL",
+            default_value = "https://signal.forge-ci.com"
+        )]
+        signal_url: String,
     },
     /// Run one debug compiler invocation on an explicitly trusted worker.
     Exec {
@@ -75,12 +75,13 @@ pub async fn run(args: DistArgs) -> Result<i32> {
             slots,
             cas_budget,
             host_load_file,
+            signal_url,
         } => {
             let relay = args
                 .relay_url
                 .as_deref()
                 .ok_or("dist serve requires --relay-url or SOLDR_DIST_RELAY_URL")?;
-            serve(&root, slots, cas_budget, host_load_file, relay).await
+            serve(&root, slots, cas_budget, host_load_file, relay, signal_url).await
         }
         DistCommand::Exec { worker, argv } => {
             let _endpoint_lease = transport::EndpointLease::acquire(&root)?;
@@ -131,7 +132,9 @@ async fn serve(
     cas_budget: u64,
     host_load_file: Option<PathBuf>,
     relay: &str,
+    signal_url: String,
 ) -> Result<i32> {
+    std::fs::create_dir_all(root.join("tmp"))?;
     let _endpoint_lease = transport::EndpointLease::acquire(root)?;
     let endpoint = transport::endpoint_with_relay(root, false, Some(relay)).await?;
     tokio::time::timeout(std::time::Duration::from_secs(10), endpoint.online())
@@ -155,6 +158,7 @@ async fn serve(
         slots,
         cas_budget,
         host_load_file,
+        signal_url,
         total_cpus: std::thread::available_parallelism()?.get(),
         uploaded_blobs: Arc::new(AtomicU64::new(0)),
     };
@@ -171,31 +175,11 @@ async fn serve(
     Ok(0)
 }
 fn status(root: &Path, json: bool) -> Result<()> {
-    let path = root.join("status.pb");
-    let mut status = if path.exists() {
-        Status::decode(std::fs::read(path)?.as_slice())?
-    } else {
-        Status {
-            node_id: trust::node_key(root)?.public().to_string(),
-            role: "client".into(),
-            ..Status::default()
-        }
-    };
-    if status.pid != 0 && !soldr_platform::process::inspect::is_alive(status.pid as u32) {
-        status.role = "client".into();
-        status.running_joblets = 0;
-        status.pid = 0;
-    }
-    status.trusted_clients = Trust::load(&root.join("trusted_clients.toml"))?.peers;
-    status.trusted_workers = Trust::load(&root.join("trusted_workers.toml"))?.peers;
-    status.cas_bytes = Cas::new(root, u64::MAX)?.size()?;
+    let status = crate::status::load(root)?;
     if json {
-        println!(
-            "{}",
-            serde_json::json!({ "node_id": status.node_id, "role": status.role, "trusted_clients": status.trusted_clients, "trusted_workers": status.trusted_workers, "cas_bytes": status.cas_bytes, "running_joblets": status.running_joblets, "pid": status.pid })
-        );
+        println!("{}", crate::status::json(&status));
     } else {
-        println!("Dist {} ({})\nCAS: {} bytes; running joblets: {}\nTrusted clients: {:?}\nTrusted workers: {:?}", status.node_id, status.role, status.cas_bytes, status.running_joblets, status.trusted_clients, status.trusted_workers);
+        println!("Dist {} ({})\nBuild: {}\nSignal: {}\nCAS: {} bytes; running joblets: {}\nTrusted clients: {:?}\nTrusted workers: {:?}", status.node_id, status.role, status.build_id, status.signal_url, status.cas_bytes, status.running_joblets, status.trusted_clients, status.trusted_workers);
     }
     Ok(())
 }

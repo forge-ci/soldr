@@ -6,6 +6,7 @@ pub mod compiler;
 pub mod host_load;
 pub mod proto;
 pub mod sandbox;
+pub mod status;
 pub mod transport;
 pub mod trust;
 pub mod worker;

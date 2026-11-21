@@ -59,6 +59,8 @@ message Status {
   uint64 cas_bytes = 5;
   uint64 running_joblets = 6;
   uint64 pid = 7;
+  string build_id = 8;
+  string signal_url = 9;
 }
 message Reply {
   Accepted accepted = 1;
