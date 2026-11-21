@@ -395,7 +395,7 @@ impl SoldrZccacheService {
     /// binary and argv[1] is the tool path).
     pub async fn compile(
         &self,
-        req: CompileRequest,
+        mut req: CompileRequest,
     ) -> Result<CompileResponseBody, EmbeddedServiceError> {
         // soldr#2706: keep this lease through zccache's synchronous staged
         // publication. Shutdown takes the fair write side before it closes
@@ -405,6 +405,7 @@ impl SoldrZccacheService {
             self.shutdown_gate.enter().await.ok_or_else(|| {
                 EmbeddedServiceError::Compile("service is shutting down".to_string())
             })?;
+        let progress = crate::admission_progress::register_request(&mut req);
         let ci_test_report = crate::ci_test_report::prepare(&req);
         let (compiler, rustc_args) = split_compiler_and_args(&req.args)?;
         let cwd: NormalizedPath = std::path::PathBuf::from(req.cwd).into();
@@ -441,11 +442,16 @@ impl SoldrZccacheService {
         // carrying that state inline makes this adapter's callers inherit the
         // full stack footprint even when they only use the buffered API.
         crate::daemon::compile_profile::mark_compile_start();
-        let zresult = Box::pin(
-            self.inner
-                .compile_with_options(zreq, soldr_compile_options()),
-        )
-        .await;
+        let zresult = crate::admission_progress::CURRENT
+            .scope(
+                progress.0,
+                Box::pin(
+                    self.inner
+                        .compile_with_options(zreq, soldr_compile_options()),
+                ),
+            )
+            .await;
+        progress.complete();
         crate::daemon::compile_profile::mark_compile_end();
         let zresp = zresult
             .map_err(|e| EmbeddedServiceError::Compile(e.to_string()))?

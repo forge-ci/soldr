@@ -82,7 +82,7 @@ async fn requests_past_the_in_flight_cap_get_a_loud_error() {
     let (mut control, _publisher) = control_without_state();
     control.in_flight = Arc::new(tokio::sync::Semaphore::new(0));
     let (mut client, server) = tokio::io::duplex(64 * 1024);
-    crate::daemon::ipc::write_frame_async(&mut client, &Request::Status)
+    crate::daemon::ipc::write_frame_async(&mut client, &Request::CompileStats)
         .await
         .expect("write request");
     let task = tokio::spawn(handle_connection(
@@ -104,4 +104,38 @@ async fn requests_past_the_in_flight_cap_get_a_loud_error() {
     task.await
         .expect("connection task")
         .expect("connection result");
+}
+
+#[test]
+fn touch_receipt_bypasses_saturated_control_requests() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let (mut control, _publisher) = control_without_state();
+        control.in_flight = Arc::new(tokio::sync::Semaphore::new(0));
+        let (mut client, server) = tokio::io::duplex(4096);
+        crate::daemon::ipc::write_frame_async(
+            &mut client,
+            &Request::RecordTargetTouch {
+                path: "target".into(),
+                unix_seconds: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let task = tokio::spawn(handle_connection(
+            server,
+            control,
+            crate::daemon::ipc_peer::PeerIdentity::unknown(),
+        ));
+        let response: Response = tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::daemon::ipc::read_frame_async(&mut client),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(response, Response::Ack));
+        task.abort();
+        let _ = task.await;
+    });
 }

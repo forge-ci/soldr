@@ -11,7 +11,7 @@ where
     let Some(req) = read_control_request(&mut stream, &mut control).await else {
         return Ok(());
     };
-    let _in_flight = if matches!(req, Request::AcquireResidentCapacity { .. }) {
+    let _in_flight = if matches!(req, Request::AcquireResidentCapacity { .. } | Request::Status | Request::RecordTargetTouch { .. } | Request::CookTouch { .. }) {
         None
     } else {
         match Arc::clone(&control.in_flight).try_acquire_owned() {
@@ -328,7 +328,7 @@ where
             .await;
         }
         Request::Status => {
-            let info = state.status();
+            let info = tokio::task::spawn_blocking(move || state.status()).await.map_err(std::io::Error::other)?;
             let _ = write_frame_async(&mut stream, &Response::Status(info)).await;
         }
         Request::Shutdown => {

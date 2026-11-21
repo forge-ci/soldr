@@ -315,3 +315,29 @@ pub fn default_sock_path(paths: &SoldrPaths) -> PathBuf {
     crate::daemon::session_endpoint::resolved_control_endpoint_path(paths)
         .unwrap_or_else(|_| PathBuf::from("<missing-daemon-control-endpoint>"))
 }
+
+/// Retries individual I/O operations, so a partial header/body is never lost.
+struct ReceiptRetry<'a, S> { inner: &'a mut S, deadline: std::time::Instant }
+fn retry_receipt<T>(deadline: std::time::Instant, mut operation: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    loop {
+        match operation() {
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted | std::io::ErrorKind::TimedOut) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+}
+impl<S: Read> Read for ReceiptRetry<'_, S> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        retry_receipt(self.deadline, || self.inner.read(buf))
+    }
+}
+impl<S: Write> Write for ReceiptRetry<'_, S> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        retry_receipt(self.deadline, || self.inner.write(buf))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        retry_receipt(self.deadline, || self.inner.flush())
+    }
+}

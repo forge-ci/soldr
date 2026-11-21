@@ -219,3 +219,50 @@ fn dropping_resident_capacity_lease_disconnects_without_a_release_frame() {
     ));
     assert!(read_frame_sync::<_, Request>(&mut sent).is_err());
 }
+
+#[test]
+fn receipt_retries_eagain_after_partial_frame_and_validates_ack() {
+    struct RetryPeer {
+        reply: Cursor<Vec<u8>>,
+        step: usize,
+    }
+    impl Read for RetryPeer {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.step += 1;
+            if self.step == 2 {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            let n = buf.len().min(2);
+            self.reply.read(&mut buf[..n])
+        }
+    }
+    impl Write for RetryPeer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut bytes = Vec::new();
+    write_frame_sync(&mut bytes, &Response::Ack).unwrap();
+    let mut peer = RetryPeer {
+        reply: Cursor::new(bytes),
+        step: 0,
+    };
+    let result = write_awaiting_receipt_ack(
+        &mut peer,
+        &Request::RecordTargetTouch {
+            path: "target".into(),
+            unix_seconds: 1,
+        },
+    );
+    assert_eq!(result.unwrap(), ReceiptAck::Acknowledged);
+}
+#[test]
+fn receipt_retry_has_a_deadline() {
+    let result: std::io::Result<()> = retry_receipt(std::time::Instant::now(), || {
+        Err(std::io::ErrorKind::WouldBlock.into())
+    });
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+}

@@ -212,6 +212,7 @@ where
 
     tokio::pin!(fut);
     let mut probe = TargetDirProbe::new(target_dir);
+    let mut daemon_counters = None;
     let mut last_marker = probe.sample();
     let mut last_progress = Instant::now();
     let mut last_heartbeat = Instant::now();
@@ -231,6 +232,19 @@ where
 
                 let now = Instant::now();
                 if heartbeat_due(now.duration_since(last_heartbeat), HEARTBEAT_INTERVAL) {
+                    let status = tokio::select! {
+                        result = &mut fut => return result,
+                        status = tokio::task::spawn_blocking(crate::compile_stall_watch::daemon_progress) => status,
+                    };
+                    if let Ok(Ok(status)) = status {
+                        if let Some(a) = status.admission {
+                            let counters = (status.generation, a.admissions, a.completions);
+                            if daemon_counters.is_some_and(|previous| previous != counters) && (a.queued > 0 || a.running > 0) {
+                                last_progress = Instant::now();
+                            }
+                            daemon_counters = Some(counters);
+                        }
+                    }
                     eprintln!("{}", heartbeat_line(phase, artifacts_since_heartbeat));
                     last_heartbeat = now;
                     artifacts_since_heartbeat = 0;

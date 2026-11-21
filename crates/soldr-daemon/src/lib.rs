@@ -24,6 +24,7 @@ pub(crate) use soldr_platform as platform;
 pub use soldr_cache::cache_lib;
 pub use soldr_core::{core, self_relocate};
 
+pub mod admission_progress;
 /// soldr#2023 — the daemon's single resolution of the compile limit.
 pub(crate) mod amalgamation;
 pub(crate) mod ci_test_report;

@@ -149,7 +149,12 @@ impl HostAdmissionClassifier for ResidentCompileAdmission {
         _request: HostCompilerRequest<'a>,
     ) -> Pin<Box<dyn Future<Output = Result<HostAdmissionPermit, HostAdmissionError>> + Send + 'a>>
     {
-        Box::pin(async move { self.acquire_compiler().await.map(HostAdmissionPermit::new) })
+        Box::pin(async move {
+            crate::admission_progress::phase(1);
+            let permit = self.acquire_compiler().await?;
+            crate::admission_progress::phase(2);
+            Ok(HostAdmissionPermit::new(permit))
+        })
     }
 }
 

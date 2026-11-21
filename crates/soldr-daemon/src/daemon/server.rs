@@ -398,6 +398,7 @@ impl State {
             compile_jobs,
             compile_jobs_source,
             maintenance_active: Some(self.maintenance_activity.is_active()),
+            admission: Some(crate::admission_progress::snapshot()),
             in_flight_compiles: Some(
                 u32::try_from(crate::daemon::inflight_compiles::count()).unwrap_or(u32::MAX),
             ),

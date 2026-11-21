@@ -147,6 +147,22 @@ If the compile-reply heartbeat appears, use a smaller positive
 `SOLDR_COMPILE_REPLY_TIMEOUT_SECS` for the next diagnostic run so it fails
 quickly with evidence rather than waiting for the production backstop.
 
+### Admission queue under load
+
+`soldr daemon status` reports waiting requests (including preparation/cache
+lookup), their oldest wait, host-admitted work, and completions in the last
+minute. Queue positions are request-registration order, not an estimate of
+remaining wall time. Host admission precedes zccache's final resource lock;
+`running` therefore describes host permits, not confirmed compiler children.
+
+A queued wrapper prints at most one dim information line. Daemon-wide
+admissions or completions reset its no-progress timer. A status probe failure
+must persist through the connection-liveness deadline before failing a compile.
+Stall dumps are serialized per root, limited to once per selected daemon
+generation per ten minutes, deduplicated by process state, and retain twenty
+directories. Exact per-child admission/output silence still requires an
+embedded zccache callback and is not inferred from host-permit elapsed time.
+
 ### Daemon is wedged
 
 Run `soldr daemon stop`, wait for its bounded graceful shutdown, then run

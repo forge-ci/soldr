@@ -482,6 +482,8 @@ pub struct WireStatusInfo {
     /// v26: absent on legacy daemons, which is unknown activity.
     #[prost(bool, optional, tag = "13")]
     pub maintenance_active: Option<bool>,
+    #[prost(message, optional, tag = "14")]
+    pub admission: Option<WireAdmissionProgress>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -639,4 +641,34 @@ pub struct WireCookEntry {
     pub compile_duration_ms: u64,
     #[prost(uint64, tag = "9")]
     pub save_elapsed_ms: u64,
+}
+
+/// Live admission telemetry (soldr#4186). Phase: 0 preparing, 1 queued, 2 host admitted.
+#[derive(Clone, PartialEq, Eq, Message, serde::Serialize, serde::Deserialize)]
+pub struct WireAdmissionProgress {
+    #[prost(uint32, tag = "1")]
+    pub queued: u32,
+    #[prost(uint32, tag = "2")]
+    pub running: u32,
+    #[prost(uint64, tag = "3")]
+    pub oldest_wait_secs: u64,
+    #[prost(uint64, tag = "4")]
+    pub admissions: u64,
+    #[prost(uint64, tag = "5")]
+    pub completions: u64,
+    #[prost(uint64, tag = "6")]
+    pub completions_last_minute: u64,
+    #[prost(message, repeated, tag = "7")]
+    pub waits: Vec<WireCompileWait>,
+}
+#[derive(Clone, PartialEq, Eq, Message, serde::Serialize, serde::Deserialize)]
+pub struct WireCompileWait {
+    #[prost(string, tag = "1")]
+    pub token: String,
+    #[prost(uint32, tag = "2")]
+    pub phase: u32,
+    #[prost(uint32, tag = "3")]
+    pub position: u32,
+    #[prost(uint64, tag = "4")]
+    pub waited_secs: u64,
 }

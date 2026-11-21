@@ -373,6 +373,7 @@ fn status_response_round_trips_with_cook_stats() {
         compile_jobs_source: "SOLDR_JOBS".to_string(),
         in_flight_compiles: Some(5),
         maintenance_active: Some(false),
+        admission: None,
     };
     let resp = Response::Status(info.clone());
     let bytes = encode_response(&resp);
@@ -402,6 +403,7 @@ fn status_in_flight_count_distinguishes_absent_from_zero() {
         compile_jobs_source: "default".to_string(),
         in_flight_compiles: None,
         maintenance_active: Some(false),
+        admission: None,
     };
     for expected in [None, Some(false), Some(true)] {
         info.maintenance_active = expected;

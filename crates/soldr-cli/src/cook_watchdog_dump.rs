@@ -39,12 +39,19 @@ struct ProcessSnapshot {
 /// prevents the rest, because a partial dump remains far more useful than
 /// none (mirrors `rss_ceiling::write_breach_dump`'s shape, soldr#3053).
 pub(crate) fn write_stall_dump(paths: &SoldrPaths, phase: &str) -> std::io::Result<PathBuf> {
-    let dir = paths
-        .cache
-        .join("logs")
-        .join(crate::cook_watchdog::stall_dump_dirname());
-    std::fs::create_dir_all(&dir)?;
-
+    let logs = paths.cache.join("logs");
+    std::fs::create_dir_all(&logs)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(logs.join("cook-stall.lock"))?;
+    // One writer across every wrapper process sharing this root. Never queue
+    // diagnostic work behind another diagnostic.
+    if kernal_api::fs_try_lock_exclusive(&lock).is_err() {
+        return Ok(logs.join("cook-stall-suppressed"));
+    }
     let table = metadata::snapshot();
     let this_pid = std::process::id();
     let now = SystemTime::now()
@@ -62,6 +69,30 @@ pub(crate) fn write_stall_dump(paths: &SoldrPaths, phase: &str) -> std::io::Resu
         .collect();
     let daemon_and_broker = soldr_service_processes(&services, this_pid);
 
+    // Identify only this selected root's daemon; unrelated roots and transient
+    // CLI commands cannot reset the dump budget. Failed status is conservatively
+    // grouped by root so a wedged daemon still has bounded diagnostics.
+    let generation =
+        crate::daemon::client::status(&crate::daemon::client::default_sock_path(paths))
+            .map(|s| format!("{}:{}:{}", paths.cache.display(), s.pid, s.generation))
+            .unwrap_or_else(|_| format!("{}:unreachable", paths.cache.display()));
+    let mut fingerprint: Vec<_> = descendants
+        .iter()
+        .chain(daemon_and_broker.iter())
+        .map(|p| format!("{}:{}:{:?}:{}", p.pid, p.name, p.cmd, p.status))
+        .collect();
+    fingerprint.sort_unstable();
+    let fingerprint = blake3::hash(fingerprint.join("\n").as_bytes())
+        .to_hex()
+        .to_string();
+    if let Some(previous) = reusable_dump(&logs, &generation, &fingerprint)? {
+        return Ok(previous);
+    }
+    let dir = logs.join(crate::cook_watchdog::stall_dump_dirname());
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("generation.txt"), generation)?;
+    std::fs::write(dir.join("fingerprint.txt"), fingerprint)?;
+    prune_dumps(&logs, 20)?;
     write_process_list(&dir.join("cook-descendants.txt"), &descendants)?;
     write_process_list(
         &dir.join("daemon-broker.txt"),
@@ -313,5 +344,91 @@ mod tests {
         let services = soldr_service_processes(&table, 10);
         assert_eq!(services.len(), 1);
         assert_eq!(services[0].pid, 11);
+    }
+}
+
+fn dump_dirs(logs: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut dirs = Vec::new();
+    for entry in std::fs::read_dir(logs)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir()
+            && entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("cook-stall-")
+        {
+            dirs.push(entry.path());
+        }
+    }
+    dirs.sort_by_key(|p| std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).ok()));
+    Ok(dirs)
+}
+fn reusable_dump(
+    logs: &std::path::Path,
+    generation: &str,
+    fingerprint: &str,
+) -> std::io::Result<Option<PathBuf>> {
+    for dir in dump_dirs(logs)? {
+        let same_generation = std::fs::read_to_string(dir.join("generation.txt"))
+            .ok()
+            .as_deref()
+            == Some(generation);
+        let same_dump = std::fs::read_to_string(dir.join("fingerprint.txt"))
+            .ok()
+            .as_deref()
+            == Some(fingerprint);
+        let recent = std::fs::metadata(&dir)?
+            .modified()?
+            .elapsed()
+            .unwrap_or_default()
+            < Duration::from_secs(600);
+        if same_generation && (recent || same_dump) {
+            return Ok(Some(dir));
+        }
+    }
+    Ok(None)
+}
+fn prune_dumps(logs: &std::path::Path, keep: usize) -> std::io::Result<()> {
+    for dir in dump_dirs(logs)?.into_iter().skip(keep) {
+        std::fs::remove_dir_all(dir)?;
+    }
+    Ok(())
+}
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    #[test]
+    fn dump_rate_limit_dedup_and_pruning() {
+        let tmp = tempfile::tempdir().unwrap();
+        for n in 0..25 {
+            let dir = tmp.path().join(format!("cook-stall-{n:03}"));
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("generation.txt"), "generation").unwrap();
+            std::fs::write(dir.join("fingerprint.txt"), "same").unwrap();
+            let age = std::time::SystemTime::now() - Duration::from_secs(900 - n);
+            filetime::set_file_mtime(&dir, filetime::FileTime::from_system_time(age)).unwrap();
+        }
+        assert!(reusable_dump(tmp.path(), "generation", "changed")
+            .unwrap()
+            .is_none());
+        assert!(reusable_dump(tmp.path(), "generation", "same")
+            .unwrap()
+            .is_some());
+        let newest = tmp.path().join("cook-stall-024");
+        filetime::set_file_mtime(&newest, filetime::FileTime::now()).unwrap();
+        assert!(reusable_dump(tmp.path(), "generation", "changed")
+            .unwrap()
+            .is_some());
+        assert!(reusable_dump(tmp.path(), "new-generation", "same")
+            .unwrap()
+            .is_none());
+        prune_dumps(tmp.path(), 20).unwrap();
+        assert_eq!(dump_dirs(tmp.path()).unwrap().len(), 20);
+        for n in 0..5 {
+            assert!(!tmp.path().join(format!("cook-stall-{n:03}")).exists());
+        }
+        for n in 5..25 {
+            assert!(tmp.path().join(format!("cook-stall-{n:03}")).exists());
+        }
     }
 }
