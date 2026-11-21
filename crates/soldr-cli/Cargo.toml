@@ -28,7 +28,7 @@ running-process = { version = "=4.10.20", default-features = false, features = [
 soldr-cache = { path = "../soldr-cache" }
 soldr-daemon = { path = "../soldr-daemon" }
 soldr-core = { path = "../soldr-core" }
-soldr-dist = { path = "../soldr-dist" }
+soldr-dist = { path = "../soldr-dist", optional = true }
 soldr-fetch = { path = "../soldr-fetch" }
 soldr-platform = { path = "../soldr-platform" }
 cap-fs-ext = { workspace = true }
@@ -110,6 +110,9 @@ tokio = { workspace = true, features = ["test-util"] }
 # `include_bytes!`. See the build script's docstring for context.
 # soldr#1356 A1 — `ureq` build-dep removed; build.rs uses only std + zstd.
 [features]
+default = ["dist"]
+# Keep networking and its dependency graph removable for minimal CLI builds.
+dist = ["dep:soldr-dist"]
 # Opt-in tokio-console support for the soldr daemon and embedded zccache
 # service. Requires a `--cfg tokio_unstable` build to produce useful Tokio
 # task instrumentation.
