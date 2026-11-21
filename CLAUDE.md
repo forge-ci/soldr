@@ -326,7 +326,10 @@ branch is merged.
   repository's shared git root read-only at `/repo`; a worktree *below* that
   root is reachable with `docker exec -w`, a sister worktree under
   `../soldr-extern` is not -- use `bosn run --task <t>` from the worktree
-  instead (bosn mounts the workspace it is run from).
+  instead (bosn mounts the workspace it is run from). bosn tasks are for
+  tests and builds only: lint never runs under bosn (forge-ci/ci.yml
+  GATE-016). Run Rust lint with `soldr lint` and Python lint with `./lint`,
+  both on the host.
 - **Never share one worktree between agents**, and never edit a checkout or
   worktree another agent owns.
 

@@ -40,6 +40,11 @@ artifact = { scope = "machine", destination = "/artifact" }
 [stack.warm.mounts]
 repo = { source = ".", destination = "/repo", readonly = true }
 
+# Lint never runs under bosn (forge-ci/ci.yml GATE-016): no task here may run
+# rustfmt, Clippy, Dylint or a Python linter/formatter. Rust lint is `soldr
+# lint` on the host (the local gate's lint lanes); Python lint is `./lint` on
+# the host. bosn tasks are for tests and builds only.
+
 [task.strip-rematerialization-test]
 stack = "cook"
 cmd = "cd /repo && CARGO_TARGET_DIR=/target soldr cargo test -p soldr-cache cook_preset_preserves_build_script_binaries_for_rematerialization --lib"
@@ -48,17 +53,9 @@ cmd = "cd /repo && CARGO_TARGET_DIR=/target soldr cargo test -p soldr-cache cook
 stack = "cook"
 cmd = "python3 /repo/ci/workspace_test.py"
 
-[task.lint]
-stack = "cook"
-cmd = "cd /repo && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo fmt --all -- --check && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo clippy --workspace --all-targets -- -D warnings"
-
 [task.platform-boundary]
 stack = "cook"
 cmd = "cd /repo && python3 .github/scripts/platform_cfg_boundary_ratchet.py"
-
-[task.format]
-stack = "cook"
-cmd = "cd /repo && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo fmt --all"
 
 [task.cache-projection-acceptance]
 stack = "cook"
@@ -76,29 +73,13 @@ cmd = "cd /repo && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo
 stack = "cook"
 cmd = "cd /repo && uv run --no-project --with pytest --with pyyaml pytest -q tests/test_windows_guest_probe.py tests/test_cross_compile_workflows.py"
 
-[task.windows-guest-probe-lint]
-stack = "cook"
-cmd = "cd /repo && uv run --no-project --with 'ruff==0.12.12' ruff check ci/windows_guest_probe.py tests/test_windows_guest_probe.py && uv run --no-project --with 'ruff>=0.12,<0.13' ruff format --check --line-length 88 --target-version py310 ci/windows_guest_probe.py tests/test_windows_guest_probe.py && uv run --no-project --with isort isort --check-only ci/windows_guest_probe.py tests/test_windows_guest_probe.py && uv run --no-project --with flake8 flake8 ci/windows_guest_probe.py tests/test_windows_guest_probe.py && uv run --no-project --with pylint pylint ci/windows_guest_probe.py && uv run --no-project --with pylint --with pytest pylint --rcfile=tests/.pylintrc tests/test_windows_guest_probe.py && uv run --no-project --with mypy --with pytest mypy ci/windows_guest_probe.py tests/test_windows_guest_probe.py && uv run --no-project --with pyyaml python .github/scripts/check_workflow_python_pin.py"
-
-[task.windows-guest-probe-format]
-stack = "cook"
-cmd = "cd /repo && uv run --no-project --with isort isort ci/windows_guest_probe.py tests/test_windows_guest_probe.py && uv run --no-project --with 'ruff>=0.12,<0.13' ruff format --line-length 88 --target-version py310 ci/windows_guest_probe.py tests/test_windows_guest_probe.py"
-
 [task.macos-recovery-executor-contract]
 stack = "cook"
 cmd = "cd /repo && uv run --no-project --with pytest pytest -q tests/test_macos_recovery_run.py tests/test_macos_recovery_lane_contract.py tests/test_cross_compile_workflows.py"
 
-[task.macos-recovery-executor-contract-lint]
-stack = "cook"
-cmd = "cd /repo && uv run --no-project --with 'ruff==0.12.12' ruff check ci/macos_recovery_run.py tests/test_macos_recovery_run.py tests/test_macos_recovery_lane_contract.py"
-
 [task.macos-arm64-release-contract]
 stack = "cook"
 cmd = "cd /repo && uv run --no-project --with pytest pytest -q tests/test_release_execution_contract.py tests/test_release_completeness.py tests/test_canonical_target_contract.py tests/test_cross_compile_workflows.py tests/test_release_yaml_ratchet.py && uv run --no-project --python 3.13 --with pyyaml python .github/scripts/check_workflow_python_pin.py"
-
-[task.macos-arm64-release-contract-lint]
-stack = "cook"
-cmd = "cd /repo && uv run --no-project --with 'ruff==0.12.12' ruff check .github/scripts/release_completeness.py .github/scripts/release_manifest.py .github/scripts/verify_release_manifest.py tests/test_release_execution_contract.py && uv run --no-project --with 'pylint>=4.0,<5' --with 'pytest>=8.0' --with 'pyyaml>=6,<7' python -m pylint --rcfile=tests/.pylintrc tests && uv run --no-project --with 'pylint>=4.0,<5' --with 'pytest>=8.0' --with 'pyyaml>=6,<7' python -m pylint .github/scripts/release_completeness.py .github/scripts/release_manifest.py .github/scripts/verify_release_manifest.py && uv run --no-project --with 'mypy>=1.18,<2' --with 'pytest>=8.0' --with types-PyYAML python -m mypy .github/scripts/release_completeness.py .github/scripts/release_manifest.py .github/scripts/verify_release_manifest.py tests/test_release_execution_contract.py tests/test_release_manifest.py"
 
 [task.macos-arm64-release-provenance]
 stack = "cook"
@@ -131,10 +112,6 @@ cmd = "cd /repo && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo
 [task.test-rematerialization]
 stack = "cook"
 cmd = "cd /repo && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo test -p soldr-cache --lib && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo test -p soldr-cli --lib cook::tests:: && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo test -p soldr-cli --test toolchain_env cli_save::"
-
-[task.clippy-rematerialization]
-stack = "cook"
-cmd = "cd /repo && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo clippy -p soldr-cache -p soldr-cli --all-targets -- -D warnings"
 
 [task.build-rematerialization-tool]
 stack = "cook"
@@ -170,20 +147,11 @@ cmd = "cd /repo && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo
 stack = "cook"
 cmd = "cd /repo && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo test -p soldr-core --lib tool_output && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo test -p soldr-cli --lib -- hydrate_rustc_version rustc_identity_ all_section_dumps_failing dylint_link_validation_tests:: && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo nextest run -p soldr-cli --test guards -E 'test(/^cli_ci_test::/)'"
 
-[task.small-tool-stderr-lint]
-stack = "cook"
-cmd = "cd /repo && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo fmt --all -- --check && CARGO_TARGET_DIR=/target /opt/soldr-bootstrap/bin/soldr cargo clippy -p soldr-core -p soldr-cli --all-targets -- -D warnings"
-
 # soldr#3387: the new Dylint's UI fixtures (RED -> GREEN evidence), run the
 # prescribed way: `soldr ci-test` provisions Dylint's tools and driver itself.
 [task.small-tool-stderr-dylint-ui]
 stack = "cook"
 cmd = "cd /repo/dylints/ban_swallowed_child_stdio && CARGO_TARGET_DIR=/target/dylint-ui /opt/soldr-bootstrap/bin/soldr cargo test"
-
-# soldr#3387: run the new Dylint over the whole workspace (must be clean).
-[task.small-tool-stderr-dylint-workspace]
-stack = "cook"
-cmd = "cd /repo && CARGO_TARGET_DIR=/target/dylint-ws /opt/soldr-bootstrap/bin/soldr cargo dylint --path dylints/ban_swallowed_child_stdio -- --workspace --all-targets"
 
 # soldr#3389: the soldr-cli call-site tests alone (used for RED runs).
 [task.small-tool-stderr-cli]
