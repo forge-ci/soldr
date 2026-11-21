@@ -144,7 +144,7 @@ parses an explicit worker list; discovery and scheduling remain future work.
   Admission is a worker-local slot semaphore, never a Cargo job cap.
 - Sandboxes mirror absolute POSIX paths under `<job>/root/`. Compiler args,
   declared paths are rewritten; semantic environment values stay verbatim.
-  Conflicting worker-runtime variables and path-dependent environment such as
+  Rust worker-runtime environment dependencies and path-dependent environment such as
   `OUT_DIR`/`CPATH` explicitly decline until namespace isolation is available.
   rustc remaps the mirrored
   cwd to `.` to match the `ZCCACHE_PATH_REMAP=auto` workspace convention. The
@@ -224,7 +224,7 @@ reports role `shared`; a standalone node reports `dist`.
   only active working sets may temporarily exceed the configured budget.
 - 2026-11-21 Mirrored POSIX paths plus workspace remaps match local rustc paths;
   directory materialisation is not process confinement. Unsupported path prefixes decline.
-- 2026-11-21 Environment strings stay verbatim; conflicting runtime homes and
+- 2026-11-21 Environment strings stay verbatim; Rust runtime-environment dependencies and
   path-dependent variables such as OUT_DIR decline until namespace isolation exists.
 - 2026-11-21 Debug exec uses dep-info plus explicit extern/search files, requires
   object/metadata output and explicit -o, and refuses response files; full depgraphs

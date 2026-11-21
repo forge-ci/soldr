@@ -339,3 +339,22 @@ fn posix_paths() -> bool {
     }
     supported
 }
+
+#[test]
+fn rust_runtime_environment_dependencies_decline_before_execution() {
+    let compiler = soldr_dist::compiler::Compiler {
+        kind: "rustc".into(),
+        identity: "test".into(),
+        program: "soldr".into(),
+        prefix: vec!["rustc".into()],
+        toolchain: None,
+    };
+    let job = DistJob {
+        env: HashMap::from([("RUSTUP_TOOLCHAIN".into(), "1.98.1".into())]),
+        ..DistJob::default()
+    };
+    assert!(compiler
+        .environment_decline(&job)
+        .unwrap()
+        .contains("RUSTUP_TOOLCHAIN"));
+}
