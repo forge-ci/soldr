@@ -1,0 +1,9 @@
+{
+  "type": "heartbeat",
+  "load": {
+    "cpus": 64,
+    "gh_jobs_running": 2,
+    "gh_cpus_reserved": 10
+  },
+  "dist": null
+}

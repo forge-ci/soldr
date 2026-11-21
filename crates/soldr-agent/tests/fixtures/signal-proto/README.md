@@ -1,12 +1,12 @@
-Canonical source: forge-ci/signal.forge-ci.com, `proto/src/lib.rs`, commit
-`bfcedba9a7c570d3e08741db5e8b6f67be8f9d99` (PR #24, feat/host-registry).
+Byte-for-byte copies of every JSON fixture in
+`forge-ci/signal.forge-ci.com:proto/fixtures/` at commit
+`02069c72a3f5cac9d9e48a77dc7e7d0244b23b74` (signal PR #24, feat/host-registry).
 
-That commit has no `proto/fixtures/` directory. These fixtures are derived
-from its types and signing_bytes contract, rather than copied upstream.
-Each external message is represented. The signature vector uses RFC 8032's
-first public test seed, a fixed 32-byte nonce encoded in standard base64,
-and an independently calculated signature (Python cryptography Ed25519).
-This is PUBLIC TEST MATERIAL, never a production key.
+The canonical types are `proto/src/lib.rs`, deliberately copied in
+`src/proto.rs`. Fixtures cover challenge, ping, both hello/heartbeat forms,
+passing/failing pong, close control frames and the Ed25519 signing vector.
+The signature seed is PUBLIC RFC8032 TEST MATERIAL, never a production key.
 
-When upstream fixtures land, replace these with byte-for-byte copies, record
-that source commit, and extend the single integration target's fixture list.
+The conformance test round-trips every fixture and verifies the signature
+and exact signing-input layout. Close fixtures describe WebSocket control
+frames rather than application-level JSON messages.

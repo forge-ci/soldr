@@ -1,10 +1,10 @@
 {
-  "state": "online",
-  "offline_since": null,
+  "type": "pong",
+  "id": 42,
   "checks": [
     {
       "name": "disk:/",
-      "ok": true,
+      "ok": false,
       "detail": "disk usage below 95 percent"
     }
   ]

@@ -1,7 +1,8 @@
 //! Deliberate serde copy of forge-ci/signal.forge-ci.com proto/src/lib.rs
-//! at bfcedba9a7c570d3e08741db5e8b6f67be8f9d99 (PR #24).
+//! at 02069c72a3f5cac9d9e48a77dc7e7d0244b23b74 (PR #24).
 //! Soldr permits exact crates.io pins, not git dependencies. JSON is the
-//! canonical external protocol; fixture conformance protects this boundary.
+//! canonical external protocol. Its upstream fixture-test module is replaced
+//! by conformance coverage in this crate's single integration target.
 //! JSON phone-home protocol. All timestamps are Unix milliseconds.
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
@@ -82,6 +83,34 @@ pub enum FromHost {
     Hello(Hello),
     Heartbeat { load: Load, dist: Option<Dist> },
     Pong { id: u64, checks: Vec<Check> },
+}
+/// WebSocket close control frames, represented as JSON only in fixtures.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CloseReason {
+    #[serde(rename = "authentication refused")]
+    AuthenticationRefused,
+    #[serde(rename = "connection ended")]
+    ConnectionEnded,
+}
+impl CloseReason {
+    pub const fn code(self) -> u16 {
+        match self {
+            Self::AuthenticationRefused => 1008,
+            Self::ConnectionEnded => 1000,
+        }
+    }
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthenticationRefused => "authentication refused",
+            Self::ConnectionEnded => "connection ended",
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServerClose {
+    pub code: u16,
+    pub reason: CloseReason,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

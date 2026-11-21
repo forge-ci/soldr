@@ -27,25 +27,40 @@ fn roundtrip<T: Serialize + DeserializeOwned>(name: &str) {
 }
 #[derive(Serialize, Deserialize)]
 struct SignatureVector {
-    seed_hex: String,
-    public_key: String,
+    layout: String,
+    secret_seed_hex: String,
+    public_key_hex: String,
+    nonce_bytes_hex: String,
     nonce: String,
     name: String,
-    signing_bytes_b64: String,
-    sig: String,
+    signing_input_hex: String,
+    signature_hex: String,
 }
 #[test]
 fn every_protocol_fixture_roundtrips() {
-    roundtrip::<ToHost>("challenge");
-    roundtrip::<ToHost>("ping");
-    for name in ["hello", "heartbeat", "pong"] {
+    for name in ["server-challenge", "server-ping"] {
+        roundtrip::<ToHost>(name);
+    }
+    for name in [
+        "host-hello-dist",
+        "host-hello-no-dist",
+        "host-heartbeat-dist",
+        "host-heartbeat-no-dist",
+        "host-pong-passing",
+        "host-pong-failing",
+    ] {
         roundtrip::<FromHost>(name);
     }
-    roundtrip::<Health>("health");
-    roundtrip::<HostView>("host_view");
-    roundtrip::<HostEvent>("host_event");
-    roundtrip::<DistNode>("dist_node");
-    roundtrip::<SignatureVector>("signature");
+    for name in [
+        "server-close-authentication-refused",
+        "server-close-connection-ended",
+    ] {
+        roundtrip::<ServerClose>(name);
+        let close: ServerClose = serde_json::from_value(fixture(name)).unwrap();
+        assert_eq!(close.code, close.reason.code());
+        assert_eq!(close.reason.as_str(), fixture(name)["reason"]);
+    }
+    roundtrip::<SignatureVector>("signing-vector");
     let names = std::fs::read_dir(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/signal-proto"),
     )
@@ -56,36 +71,44 @@ fn every_protocol_fixture_roundtrips() {
     })
     .count();
     assert_eq!(
-        names, 10,
+        names, 11,
         "add every newly copied fixture to this conformance test"
     );
 }
-fn vector_key(path: &Path) -> host_identity::HostKey {
-    let vector = fixture("signature");
-    let hex = vector["seed_hex"].as_str().unwrap();
-    let bytes: Vec<u8> = (0..hex.len())
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
-        .collect();
-    std::fs::write(path, bytes).unwrap();
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+        .collect()
+}
+fn vector_key(path: &Path) -> host_identity::HostKey {
+    let vector = fixture("signing-vector");
+    std::fs::write(path, unhex(vector["secret_seed_hex"].as_str().unwrap())).unwrap();
     host_identity::load_or_create(path).unwrap()
 }
 #[test]
 fn signature_vector_and_shared_iroh_identity() {
     let dir = tempfile::tempdir().unwrap();
     let key = vector_key(&dir.path().join("host.key"));
-    let v = fixture("signature");
+    let v = fixture("signing-vector");
     let nonce = v["nonce"].as_str().unwrap();
     let name = v["name"].as_str().unwrap();
-    assert_eq!(encode(&signing_bytes(nonce, name)), v["signing_bytes_b64"]);
-    assert_eq!(key.public_key(), v["public_key"]);
-    assert_eq!(key.sign_challenge(nonce, name), v["sig"]);
-    let public = ed25519_dalek::SigningKey::from_bytes(&key.iroh_secret_bytes()).verifying_key();
-    let signature = Signature::from_slice(&decode(v["sig"].as_str().unwrap()).unwrap()).unwrap();
-    public
-        .verify_strict(&signing_bytes(nonce, name), &signature)
-        .unwrap();
-    assert!(public
+    let input = unhex(v["signing_input_hex"].as_str().unwrap());
+    let sig = unhex(v["signature_hex"].as_str().unwrap());
+    let public = unhex(v["public_key_hex"].as_str().unwrap());
+    assert_eq!(
+        decode(nonce).unwrap(),
+        unhex(v["nonce_bytes_hex"].as_str().unwrap())
+    );
+    assert_eq!(signing_bytes(nonce, name), input);
+    assert_eq!(decode(&key.public_key()).unwrap(), public);
+    assert_eq!(decode(&key.sign_challenge(nonce, name)).unwrap(), sig);
+    let shared_public =
+        ed25519_dalek::SigningKey::from_bytes(&key.iroh_secret_bytes()).verifying_key();
+    assert_eq!(shared_public.as_bytes().as_slice(), public);
+    let signature = Signature::from_slice(&sig).unwrap();
+    shared_public.verify_strict(&input, &signature).unwrap();
+    assert!(shared_public
         .verify_strict(&signing_bytes(nonce, "other-host"), &signature)
         .is_err());
 }
@@ -113,7 +136,7 @@ fn keygen_is_atomic_private_and_idempotent() {
     assert_eq!(std::fs::read(path).unwrap(), b"invalid key");
 }
 fn config(url: &str, root: &Path) -> Config {
-    Config::parse(&format!("name = 'test-node'\nrole = 'shared'\nsignal_url = '{url}'\nhealth_bind = '127.0.0.1:0'\nstate_dir = '{}'\nsoldr_root = '{}'\n",root.display(),root.display())).unwrap()
+    Config::parse(&format!("name = 'fixture-host'\nrole = 'shared'\nsignal_url = '{url}'\nhealth_bind = '127.0.0.1:0'\nstate_dir = '{}'\nsoldr_root = '{}'\n",root.display(),root.display())).unwrap()
 }
 #[test]
 fn config_requires_secure_signal_and_lan_health() {
@@ -190,16 +213,17 @@ fn loopback_challenge_hello_heartbeat_ping_pong_and_status() {
         )
         .await
         .unwrap();
-        ws.send(Message::Text(fixture("challenge").to_string().into()))
-            .await
-            .unwrap();
+        ws.send(Message::Text(
+            fixture("server-challenge").to_string().into(),
+        ))
+        .await
+        .unwrap();
         let message = ws.next().await.unwrap().unwrap().into_text().unwrap();
         let FromHost::Hello(hello) = serde_json::from_str(&message).unwrap() else {
             panic!("expected hello")
         };
-        let v = fixture("signature");
-        let public: [u8; 32] = decode(v["public_key"].as_str().unwrap())
-            .unwrap()
+        let v = fixture("signing-vector");
+        let public: [u8; 32] = unhex(v["public_key_hex"].as_str().unwrap())
             .try_into()
             .unwrap();
         VerifyingKey::from_bytes(&public)
@@ -216,7 +240,7 @@ fn loopback_challenge_hello_heartbeat_ping_pong_and_status() {
             serde_json::from_str::<FromHost>(&heartbeat).unwrap(),
             FromHost::Heartbeat { .. }
         ));
-        ws.send(Message::Text(fixture("ping").to_string().into()))
+        ws.send(Message::Text(fixture("server-ping").to_string().into()))
             .await
             .unwrap();
         let pong = ws.next().await.unwrap().unwrap().into_text().unwrap();
