@@ -51,7 +51,7 @@ pub async fn probe(program: &str, args: &[String]) -> Result<Probe> {
     };
     let result = tokio::time::timeout(PROBE_LIMIT, wait).await;
     // Drop kills the entire group before reading output, including on timeout.
-    drop(group);
+    tokio::task::spawn_blocking(move || drop(group)).await?;
     let (out, output_truncated) = read_output(&mut stdout)?;
     let (err, stderr_truncated) = read_output(&mut stderr)?;
     let (ok, result) = match result {
@@ -187,5 +187,57 @@ pub async fn collect(config: &Config) -> Vec<Check> {
             detail,
         });
     }
+    bound_checks(&mut checks);
     checks
+}
+
+/// At most 36 checks, each at most 400 encoded bytes: even adversarial
+/// escaped output stays below signal's 16 KiB frame limit, including envelope.
+fn bound_checks(checks: &mut [Check]) {
+    for check in checks {
+        if let Some((offset, _)) = check.name.char_indices().nth(128) { check.name.truncate(offset); }
+        let mut shortened = false;
+        if let Some((offset, _)) = check.detail.char_indices().nth(256) {
+            check.detail.truncate(offset);
+            shortened = true;
+        }
+        while serde_json::to_string(&check.name).is_ok_and(|s| s.len() > 128) {
+            check.name.pop();
+        }
+        while serde_json::to_vec(&*check).is_ok_and(|s| s.len() > 380) {
+            if check.detail.pop().is_none() {
+                break;
+            }
+            shortened = true;
+        }
+        if shortened {
+            check.detail.push_str(" [truncated]");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn largest_health_response_fits_even_with_json_escape_amplification() {
+        let mut checks = vec![
+            Check {
+                name: "\u{1}".repeat(512),
+                ok: false,
+                detail: "\u{1}".repeat(16384)
+            };
+            36
+        ];
+        bound_checks(&mut checks);
+        assert_eq!(checks.len(), 36);
+        assert!(checks
+            .iter()
+            .all(|c| !c.ok && c.detail.ends_with(" [truncated]")));
+        let pong = crate::proto::FromHost::Pong {
+            id: u64::MAX,
+            checks,
+        };
+        assert!(serde_json::to_vec(&pong).unwrap().len() < crate::proto::MAX_MESSAGE);
+    }
 }

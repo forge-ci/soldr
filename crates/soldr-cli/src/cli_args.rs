@@ -882,7 +882,7 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         subcommand: DefenderExclusionsSubcommand,
     },
-    /// Report the agent-facing capability/version document (soldr#3924)
+    /// Host phone-home, enrollment keys, status and agent capabilities
     ///
     /// `soldr agent capabilities --json` prints one JSON object on one line
     /// describing the opt-in, versioned machine-facing mode this build

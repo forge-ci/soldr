@@ -100,9 +100,14 @@ async fn connect(config: &Config, key: &HostKey, url: &str) -> Result<Socket> {
             .max_message_size(Some(MAX_MESSAGE))
             .max_frame_size(Some(MAX_MESSAGE));
         // Never format tungstenite errors: protocol errors can embed frames/signatures.
-        let (mut socket, _) = tokio_tungstenite::connect_async_with_config(url, Some(ws), false)
-            .await
-            .map_err(connection_error)?;
+        let (mut socket, _) = tokio_tungstenite::connect_async_tls_with_config(
+            url,
+            Some(ws),
+            false,
+            Some(tls_connector()?),
+        )
+        .await
+        .map_err(connection_error)?;
         let ToHost::Challenge { nonce } = receive(&mut socket).await? else {
             return Err("expected signal challenge".into());
         };
@@ -231,4 +236,24 @@ async fn health_request(mut stream: TcpStream, config: &Config) -> Result<()> {
         stream.write_all(response.as_bytes()).await?;
         Ok::<(), crate::Error>(())
     }).await.map_err(|_| "health request timed out")?
+}
+
+/// Choose our provider per connection rather than relying on process-global
+/// feature unification (dist/iroh may enable another Rustls provider).
+fn tls_connector() -> Result<tokio_tungstenite::Connector> {
+    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    Ok(tokio_tungstenite::Connector::Rustls(Arc::new(config)))
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn tls_has_an_explicit_provider_without_sibling_features() {
+        assert!(super::tls_connector().is_ok());
+    }
 }

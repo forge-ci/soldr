@@ -379,3 +379,26 @@ fn the_agent_capability_verb_parses_to_its_own_variant() {
         _ => panic!("expected Commands::Agent"),
     }
 }
+
+#[test]
+fn host_agent_commands_parse_without_external_fetch() {
+    for args in [
+        vec!["soldr", "agent", "keygen", "--key", "host.key"],
+        vec![
+            "soldr",
+            "agent",
+            "run",
+            "--config",
+            "agent.toml",
+            "--key",
+            "host.key",
+        ],
+        vec!["soldr", "agent", "status", "--json", "--state-dir", "state"],
+    ] {
+        assert!(matches!(
+            Cli::try_parse_from(args).unwrap().command,
+            Commands::Agent { .. }
+        ));
+    }
+    assert!(Cli::try_parse_from(["soldr", "agent", "run", "--unknown"]).is_err());
+}
