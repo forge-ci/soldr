@@ -21,6 +21,7 @@ const TOOLCHAIN_TOOLS: &[&str] = &[
 ];
 const ZCCACHE_SOLDR: &str = "zccache-soldr";
 const SOLDR_DAEMON: &str = "soldr-daemon";
+const SOLDR_UI: &str = "soldr-ui";
 const SOLDR_DYLINT: &str = "soldr-dylint";
 
 #[derive(Debug, PartialEq)]
@@ -37,6 +38,7 @@ enum ShimIdentity {
     ZccacheSoldr,
     SoldrDaemon,
     SoldrDylint,
+    SoldrUi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +113,11 @@ pub(crate) fn maybe_dispatch(raw_args: &[String]) -> Option<MulticallDispatch> {
             args.extend(raw_args.iter().skip(1).cloned());
             Some(MulticallDispatch::SoldrArgs(args))
         }
+        ShimIdentity::SoldrUi => {
+            let mut args = vec!["ui".to_string()];
+            args.extend(raw_args.iter().skip(1).cloned());
+            Some(MulticallDispatch::SoldrArgs(args))
+        }
         ShimIdentity::Clang(tool) => Some(MulticallDispatch::Exit(run_clang_shim(tool))),
         ShimIdentity::ZccacheSoldr => Some(MulticallDispatch::Exit(run_zccache_soldr())),
         ShimIdentity::SoldrDaemon => Some(MulticallDispatch::Exit(crate::daemon_entry::run())),
@@ -152,6 +159,7 @@ fn classify_argv0(argv0: &str) -> Option<ShimIdentity> {
         "clang++" => Some(ShimIdentity::Clang(ClangTool::ClangPP)),
         ZCCACHE_SOLDR => Some(ShimIdentity::ZccacheSoldr),
         SOLDR_DAEMON => Some(ShimIdentity::SoldrDaemon),
+        SOLDR_UI => Some(ShimIdentity::SoldrUi),
         SOLDR_DYLINT => Some(ShimIdentity::SoldrDylint),
         _ => None,
     }
@@ -716,5 +724,24 @@ mod tests {
                 .into()
             ))
         );
+    }
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+
+    #[test]
+    fn soldr_ui_argv0_preserves_ui_arguments() {
+        for argv0 in ["/opt/soldr/soldr-ui", "soldr-ui.exe"] {
+            assert_eq!(classify_argv0(argv0), Some(ShimIdentity::SoldrUi));
+            assert_eq!(
+                maybe_dispatch(&[argv0.into(), "--window".into()]),
+                Some(MulticallDispatch::SoldrArgs(vec![
+                    "ui".into(),
+                    "--window".into()
+                ]))
+            );
+        }
     }
 }

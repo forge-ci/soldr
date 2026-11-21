@@ -703,3 +703,19 @@ fn prepend_loader_library_path_keeps_existing_entries_after_the_toolchain() {
         ]
     );
 }
+
+#[cfg(feature = "ui")]
+#[test]
+fn ui_alias_and_cli_are_materialized_from_the_same_soldr_image() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = SoldrPaths::with_root(root.path().join("soldr"));
+    let ui = ui_shim_binary(&paths).unwrap();
+    let cli = ui_cli_binary(&paths).unwrap();
+    assert_eq!(ui.file_stem().unwrap(), "soldr-ui");
+    assert_eq!(cli.file_stem().unwrap(), "soldr");
+    assert_eq!(ui.parent(), cli.parent());
+    assert_eq!(
+        std::fs::metadata(ui).unwrap().len(),
+        std::fs::metadata(cli).unwrap().len()
+    );
+}

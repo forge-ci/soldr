@@ -1,0 +1,22 @@
+[package]
+name = "soldr-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Soldr desktop quick-launch library"
+
+[dependencies]
+soldr-platform = { path = "../soldr-platform" }
+kernal-api = { version = "=0.1.41", default-features = false, features = ["json", "gfx-egui", "system-tray", "global-hotkey"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+png = "0.18"
+arboard = { version = "3", default-features = false }
+open = "5"
+
+[lints]
+workspace = true

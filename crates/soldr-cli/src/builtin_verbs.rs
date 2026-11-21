@@ -119,6 +119,7 @@ pub(crate) const SOLDR_BUILTIN_VERBS: &[&str] = &[
     "rust-gdb",
     "rust-lldb",
     "rust-analyzer",
+    "ui",
     "status",
     "clean",
     "purge",

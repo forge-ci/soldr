@@ -30,6 +30,7 @@ soldr-daemon = { path = "../soldr-daemon" }
 soldr-core = { path = "../soldr-core" }
 soldr-fetch = { path = "../soldr-fetch" }
 soldr-platform = { path = "../soldr-platform" }
+soldr-ui = { path = "../soldr-ui", optional = true }
 cap-fs-ext = { workspace = true }
 cap-std = { workspace = true }
 blake3 = "1"
@@ -109,6 +110,8 @@ tokio = { workspace = true, features = ["test-util"] }
 # `include_bytes!`. See the build script's docstring for context.
 # soldr#1356 A1 — `ureq` build-dep removed; build.rs uses only std + zstd.
 [features]
+default = ["ui"]
+ui = ["dep:soldr-ui"]
 # Opt-in tokio-console support for the soldr daemon and embedded zccache
 # service. Requires a `--cfg tokio_unstable` build to produce useful Tokio
 # task instrumentation.

@@ -7,6 +7,7 @@ resolver = "2"
 # surface — the old monocrate_guard test was deleted with the split.
 members = [
     "crates/soldr-cli",
+    "crates/soldr-ui",
     "crates/soldr-daemon",
     "crates/soldr-cache",
     "crates/soldr-core",
