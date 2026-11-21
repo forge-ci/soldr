@@ -178,7 +178,7 @@ async fn dispatch_state_command(command: Commands, flags: DispatchFlags) -> Resu
         Commands::Logs { command } => run_logs_command(command),
         Commands::Cache { json, command } => run_cache_command(json, command).await,
         Commands::Version { json } => run_version_command(json),
-        Commands::Agent { args } => exit_with(crate::agent_cmd::run(&args)),
+        Commands::Agent { command } => exit_with(crate::host_agent_cmd::run(command).await),
         Commands::Gc {
             dry_run,
             all,

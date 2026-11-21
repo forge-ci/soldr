@@ -340,6 +340,7 @@ pub mod gc;
 /// Project policy that can hand a local checkout invocation to a newer
 /// globally-installed soldr binary.
 pub mod global_upgrade;
+pub mod host_agent_cmd;
 pub(crate) mod host_pressure;
 pub(crate) mod host_tool_link;
 /// soldr#2310 — `soldr install <github-url|path>` prebuilt-first tool install.

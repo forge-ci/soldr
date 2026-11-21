@@ -868,6 +868,11 @@ pub(crate) fn soldr_daemon_binary() -> Result<std::path::PathBuf, SoldrError> {
     materialize_runtime_alias("soldr-daemon")
 }
 
+/// Materialize the phone-home service's argv[0] identity from the same binary.
+pub(crate) fn soldr_agent_binary() -> Result<std::path::PathBuf, SoldrError> {
+    materialize_runtime_alias("soldr-agent")
+}
+
 /// Ensure compiler-side daemon recovery has a canonically named executable.
 ///
 /// The managed Cargo front door normally injects this handoff once for every

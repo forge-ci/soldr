@@ -372,11 +372,10 @@ fn zccache_mode_flag_is_global_and_rejects_unknown_modes() {
 fn the_agent_capability_verb_parses_to_its_own_variant() {
     let parsed = Cli::parse_from(["soldr", "agent", "capabilities", "--json"]);
     match &parsed.command {
-        Commands::Agent { args } => assert_eq!(
-            args,
-            &["capabilities".to_string(), "--json".into()],
-            "the consumer's exact probe spelling must reach the handler"
-        ),
+        Commands::Agent { command } => assert!(matches!(
+            command,
+            crate::host_agent_cmd::AgentCommand::Capabilities { json: true }
+        )),
         _ => panic!("expected Commands::Agent"),
     }
 }

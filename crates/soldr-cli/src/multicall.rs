@@ -21,6 +21,7 @@ const TOOLCHAIN_TOOLS: &[&str] = &[
 ];
 const ZCCACHE_SOLDR: &str = "zccache-soldr";
 const SOLDR_DAEMON: &str = "soldr-daemon";
+const SOLDR_AGENT: &str = "soldr-agent";
 const SOLDR_DYLINT: &str = "soldr-dylint";
 
 #[derive(Debug, PartialEq)]
@@ -37,6 +38,7 @@ enum ShimIdentity {
     ZccacheSoldr,
     SoldrDaemon,
     SoldrDylint,
+    SoldrAgent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +116,11 @@ pub(crate) fn maybe_dispatch(raw_args: &[String]) -> Option<MulticallDispatch> {
         ShimIdentity::Clang(tool) => Some(MulticallDispatch::Exit(run_clang_shim(tool))),
         ShimIdentity::ZccacheSoldr => Some(MulticallDispatch::Exit(run_zccache_soldr())),
         ShimIdentity::SoldrDaemon => Some(MulticallDispatch::Exit(crate::daemon_entry::run())),
+        ShimIdentity::SoldrAgent => {
+            let mut args = vec!["agent".into(), "run".into()];
+            args.extend(raw_args.iter().skip(1).cloned());
+            Some(MulticallDispatch::SoldrArgs(args))
+        }
         ShimIdentity::SoldrDylint => Some(MulticallDispatch::Exit(run_soldr_dylint(raw_args))),
     }
 }
@@ -152,6 +159,7 @@ fn classify_argv0(argv0: &str) -> Option<ShimIdentity> {
         "clang++" => Some(ShimIdentity::Clang(ClangTool::ClangPP)),
         ZCCACHE_SOLDR => Some(ShimIdentity::ZccacheSoldr),
         SOLDR_DAEMON => Some(ShimIdentity::SoldrDaemon),
+        SOLDR_AGENT => Some(ShimIdentity::SoldrAgent),
         SOLDR_DYLINT => Some(ShimIdentity::SoldrDylint),
         _ => None,
     }
@@ -716,5 +724,25 @@ mod tests {
                 .into()
             ))
         );
+    }
+}
+
+#[cfg(test)]
+mod host_agent_tests {
+    use super::*;
+    #[test]
+    fn soldr_agent_alias_maps_to_run_and_preserves_arguments() {
+        for argv0 in ["/opt/soldr/soldr-agent", "soldr-agent.exe"] {
+            assert_eq!(
+                maybe_dispatch(&[argv0.into(), "--config".into(), "host.toml".into()]),
+                Some(MulticallDispatch::SoldrArgs(vec![
+                    "agent".into(),
+                    "run".into(),
+                    "--config".into(),
+                    "host.toml".into()
+                ]))
+            );
+            assert!(is_shim_identity(argv0));
+        }
     }
 }

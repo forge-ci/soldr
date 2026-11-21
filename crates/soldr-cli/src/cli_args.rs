@@ -894,8 +894,8 @@ pub(crate) enum Commands {
     /// `schema_version` is not one the consumer understands. It must never
     /// infer support from a version string. See `soldr agent capabilities`.
     Agent {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        command: crate::host_agent_cmd::AgentCommand,
     },
     /// Show version
     #[command(hide = true)]
