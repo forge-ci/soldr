@@ -64,24 +64,48 @@ env:
   PR_CACHE_TAG: ${{ github.event_name == 'pull_request' && format('-pr-{0}', github.event.pull_request.number) || '' }}
 
 jobs:
+  # Self-hosted forge pool (forge-ci/gh-runner docs/pool.md): when the repo
+  # variable FORGE_POOL_LABELS holds a JSON label array, the x86_64 Linux lane
+  # asks pool-select right before it starts whether the pool's Ubuntu 26.04
+  # runners have an idle slot, for trusted events only (push to the default
+  # branch, merge_group, workflow_dispatch, schedule), and runs there only if
+  # so; otherwise, or on any error, it runs hosted. pool-select reads
+  # https://signal.forge-ci.com/v1/pool with no token. Pull requests and the
+  # other lanes never run the selector and stay hosted (fork safety). Unset
+  # FORGE_POOL_LABELS to stop routing at once; unset the org variable
+  # FORGE_QUICK_LABELS to run the selector itself on hosted runners (RUN-004).
+  pool:
+    name: Select runner (${{ inputs.target }})
+    if: >-
+      vars.FORGE_POOL_LABELS != ''
+      && inputs.target == 'x86_64-unknown-linux-gnu'
+      && startsWith(inputs.runner, 'ubuntu-')
+      && (github.event_name == 'merge_group'
+          || github.event_name == 'workflow_dispatch'
+          || github.event_name == 'schedule'
+          || (github.event_name == 'push'
+              && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)))
+    runs-on: ${{ vars.FORGE_QUICK_LABELS != '' && fromJSON(vars.FORGE_QUICK_LABELS) || 'ubuntu-latest' }}
+    timeout-minutes: 2
+    permissions: {}
+    outputs:
+      runs-on: ${{ steps.select.outputs.runs-on || toJSON(inputs.runner) }}
+    steps:
+      - name: Select pool or hosted
+        id: select
+        continue-on-error: true
+        uses: forge-ci/ci.yml/actions/pool-select@a36bc81ad6ada5fb17398e3e7ba38435cc67a951
+        with:
+          labels: ${{ vars.FORGE_POOL_LABELS }}
+          fallback: ${{ inputs.runner }}
+
   build-and-test:
     name: ${{ inputs.target }}
-    # Self-hosted forge pool (forge-ci/gh-runner docs/pool.md): when the repo
-    # variable FORGE_POOL_LABELS holds a JSON label array, the x86_64 Linux
-    # lane runs on the pool's Ubuntu 26.04 image for trusted events only
-    # (push to the default branch, merge_group, workflow_dispatch, schedule).
-    # Pull requests always stay hosted (fork safety). Unset the variable to
-    # fall back to hosted at once.
-    runs-on: >-
-      ${{ (vars.FORGE_POOL_LABELS != ''
-           && inputs.target == 'x86_64-unknown-linux-gnu'
-           && startsWith(inputs.runner, 'ubuntu-')
-           && (github.event_name == 'merge_group'
-               || github.event_name == 'workflow_dispatch'
-               || github.event_name == 'schedule'
-               || (github.event_name == 'push'
-                   && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))))
-          && fromJSON(vars.FORGE_POOL_LABELS) || inputs.runner }}
+    needs: pool
+    # Runs when the selector was skipped (pull requests, other lanes, routing
+    # off) or failed, too: the hosted inputs.runner is then the runner.
+    if: ${{ !cancelled() }}
+    runs-on: ${{ fromJSON(needs.pool.outputs.runs-on || toJSON(inputs.runner)) }}
     # soldr#1985 - was inheriting GitHub's 360-minute default.
     timeout-minutes: 90
     env:
