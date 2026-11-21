@@ -74,6 +74,36 @@ Host roles (soldrix / gh-runner host config `forge.role`):
 - Ship source + resolved header closure from zccache's depgraph (scanner + depfile);
   system headers are part of toolchain identity, not shipped.
 
+## Host registry and phone-home (shared with soldrix / GH pool)
+Machines can be plugged in anywhere (wired or Wi-Fi, behind NAT) and become usable
+immediately. Everything is outbound; nothing listens on the internet.
+- **Identity**: each host has an Ed25519 key (`/var/lib/forge/host.key`), enrolled once
+  (public key + name + role in signal's host policy). The same key derives the host's iroh
+  NodeId, so the dist node and admin tunnel share the identity.
+- **`soldr agent`** (host side, inside the single soldr binary; argv[0] alias `soldr-agent`; every soldrix host has soldr; systemd, starts after network-online): holds one outbound
+  WebSocket `wss://signal.forge-ci.com/v1/hosts/connect`; authenticates by signing a
+  server challenge; sends `hello` (name, role, ips, boot id, uptime, versions, load, dist
+  NodeId/slots) then heartbeats every 5 s; answers server `ping` with fresh local checks;
+  reconnects with jittered backoff. Also serves `/healthz` on the LAN only.
+- **signal registry** (`/v1/hosts/*`, ledger module): host leases (TTL 15 s; expiry =
+  offline, with `offline_since`), `GET /v1/hosts` (admin), `GET /v1/hosts/<name>/healthz`
+  (live round trip through the socket, 2 s timeout -> 200 / 503 / 504 offline),
+  `GET /v1/dist/nodes` (online dist/shared hosts for dist clients). New `boot_id` on
+  reconnect = the host rebooted -> its in-flight dist joblets are declared lost so clients
+  reschedule immediately instead of waiting for QUIC timeouts.
+- **Admin access without iDRAC/switch**: ssh over iroh (agent forwards an iroh ALPN to
+  localhost:22 for enrolled admin keys; `soldr agent ssh-proxy <host>` as ssh ProxyCommand).
+- **Wi-Fi caveats**: iDRAC has its own NIC and no Wi-Fi, so out-of-band power/console is
+  lost unless its port stays cabled; set BIOS "AC power recovery = On" so a power cycle
+  always brings the host back. USB Wi-Fi adapter with in-kernel driver; credentials are a
+  root-only secret in the image.
+- **Preferred Wi-Fi topology (keeps iDRAC)**: host NIC + iDRAC dedicated port -> small
+  switch -> Ethernet port of a mesh satellite / client bridge. Requirements: the bridge must
+  pass multiple wired MACs (mesh/4-address/WDS; cheap MAC-NAT repeaters can break DHCP for
+  the second device), DHCP reservations for host + iDRAC, BIOS AC-power-recovery On.
+  iDRAC stays LAN-only; remote iDRAC access later via soldr agent forwarding (Redfish/web)
+  to enrolled admins, available only while some phone-home host on that segment is up.
+
 ## Signal registry (signal.forge-ci.com, /v1/dist/*)
 - `POST /v1/dist/register` (worker bearer token): node_id, relay_url, role, slots_total,
   slots_free, cpu/mem, soldr build id. Returns lease_ttl (15 s). Heartbeat = re-POST every 5 s.
@@ -222,6 +252,15 @@ reuse an existing iroh Endpoint and give the client a dedicated CAS/trust root.
   A worker host is a *dist node*; a remote job is a *joblet*.
 - 2026-11-21 Name: **soldr dist** (a nod to distcc), chosen by the owner. Host roles `runner` / `dist` / `shared`. A worker host is a
   *dist node*; a remote job is a *joblet*.
+
+- 2026-11-21 One shared **host registry** on signal (owner approved): phone-home agent
+  over outbound WebSocket, live `/healthz` proxy, lease expiry marks power loss; dist node
+  discovery is a view over it (`/v1/dist/nodes`), not a separate registry.
+- 2026-11-21 **One shipped executable** (owner): every host-side tool is an argv[0] alias of
+  `soldr`. The phone-home agent is `soldr agent` (not a separate forge-agent binary): every
+  soldrix host has soldr. One host Ed25519 key serves phone-home and the dist node's iroh
+  identity. signal's `proto/` crate is canonical; soldr carries a documented copy checked
+  against shared JSON fixtures.
 
 - 2026-11-21 Bring-up uses `DistJob`/`DistOutcome` independently of the unreleased
   zccache executor; explicit tickets only keep discovery/scheduling out of this slice.
