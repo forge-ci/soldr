@@ -152,7 +152,7 @@ fn backoff_schedule_uses_a_deterministic_clock_and_caps_at_30s() {
             let delay = backoff.next_delay(0);
             assert_eq!(delay, Duration::from_secs(expected));
             let start = tokio::time::Instant::now();
-            tokio::time::sleep(delay).await;
+            tokio::time::advance(delay).await;
             assert_eq!(start.elapsed(), delay);
         }
         backoff.reset();
@@ -162,6 +162,10 @@ fn backoff_schedule_uses_a_deterministic_clock_and_caps_at_30s() {
 }
 #[test]
 fn loopback_challenge_hello_heartbeat_ping_pong_and_status() {
+    if !Path::new("/proc/sys/kernel/random/boot_id").is_file() {
+        eprintln!("skipped: phone-home integration requires Linux /proc boot facts");
+        return;
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -274,6 +278,10 @@ fn load_failure_reserves_all_cpus_and_health_is_fresh() {
 
 #[test]
 fn probe_timeout_preserves_stderr_and_kills_descendants() {
+    if !Path::new("/proc/sys/kernel/random/boot_id").is_file() {
+        eprintln!("skipped: child probe fixture requires the Linux host agent environment");
+        return;
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
