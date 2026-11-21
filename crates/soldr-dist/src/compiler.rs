@@ -78,6 +78,20 @@ impl Compiler {
     /// Runtime/toolchain environment cannot be relocated as an arbitrary Rust string.
     pub fn environment_decline(&self, job: &DistJob) -> Option<String> {
         for (key, value) in &job.env {
+            if self.kind == "rustc"
+                && [
+                    "HOME",
+                    "PATH",
+                    "RUSTUP_HOME",
+                    "CARGO_HOME",
+                    "RUSTUP_TOOLCHAIN",
+                ]
+                .contains(&key.as_str())
+            {
+                return Some(format!(
+                    "worker-owned Rust runtime environment dependency: {key}"
+                ));
+            }
             if key == "RUSTUP_TOOLCHAIN"
                 && self
                     .toolchain

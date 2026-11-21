@@ -170,20 +170,21 @@ fn dependency_environment(text: &str) -> Result<HashMap<String, String>> {
         .lines()
         .filter_map(|line| line.strip_prefix("# env-dep:"))
     {
-        if !dependency.contains('=')
-            && [
-                "HOME",
-                "PATH",
-                "RUSTUP_HOME",
-                "CARGO_HOME",
-                "RUSTUP_TOOLCHAIN",
-            ]
-            .contains(&dependency)
+        let key = dependency
+            .split_once('=')
+            .map_or(dependency, |(key, _)| key);
+        if [
+            "HOME",
+            "PATH",
+            "RUSTUP_HOME",
+            "CARGO_HOME",
+            "RUSTUP_TOOLCHAIN",
+        ]
+        .contains(&key)
         {
-            return Err(format!(
-                "dist cannot represent absent worker-runtime env dependency {dependency}"
-            )
-            .into());
+            return Err(
+                format!("dist debug cannot preserve worker-runtime env dependency {key}").into(),
+            );
         }
     }
     // dep-info names the env! inputs; avoid exporting unrelated host credentials.
