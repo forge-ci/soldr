@@ -13,6 +13,7 @@ members = [
     "crates/soldr-fetch",
     "crates/soldr-platform",
     "crates/soldr-nextest-wrapper",
+    "crates/soldr-dist",
 ]
 # soldr#2837 removed the two entries this list used to exist for. zccache and
 # running-process were `_vender/` submodules with their own [workspace]

@@ -325,6 +325,8 @@ pub(crate) use crate::builtin_verbs::{
 
 #[derive(clap::Subcommand)]
 pub(crate) enum Commands {
+    /// Distributed compilation worker and single-joblet debug client.
+    Dist(soldr_dist::cli::DistArgs),
     /// Build the workspace via soldr's blessed cross-compile path
     ///
     /// `soldr build --target X` is the **blessed-default surface** for

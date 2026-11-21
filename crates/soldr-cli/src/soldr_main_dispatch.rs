@@ -169,6 +169,7 @@ async fn dispatch_toolchain_command(
 /// families hand back.
 async fn dispatch_state_command(command: Commands, flags: DispatchFlags) -> Result<(), SoldrError> {
     match command {
+        Commands::Dist(args) => exit_with(soldr_dist::cli::run(args).await.map_err(|e| SoldrError::Other(e.to_string()))),
         Commands::Save(args) => guarded_exit(save_load::run_save(args)),
         Commands::Hydrate(args) => guarded_exit(save_load::run_load(args)),
         Commands::Status { json } => run_status_command(json, flags.cache_enabled),
