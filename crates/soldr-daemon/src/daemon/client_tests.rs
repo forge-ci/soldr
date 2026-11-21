@@ -264,5 +264,16 @@ fn receipt_retry_has_a_deadline() {
     let result: std::io::Result<()> = retry_receipt(std::time::Instant::now(), || {
         Err(std::io::ErrorKind::WouldBlock.into())
     });
-    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+}
+
+#[test]
+fn receipt_deadline_rejects_further_successful_partial_reads() {
+    let mut called = false;
+    let result = retry_receipt(std::time::Instant::now(), || {
+        called = true;
+        Ok(1)
+    });
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    assert!(!called);
 }

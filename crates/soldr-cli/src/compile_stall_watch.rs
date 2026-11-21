@@ -68,11 +68,17 @@ pub(crate) async fn await_compile_reply<F: Future>(work: F) -> std::io::Result<F
             output = &mut work => return Ok(output),
             () = tokio::time::sleep(Duration::from_secs(5).min(threshold)) => {}
         }
+        let probe_started = std::time::Instant::now();
+        let since = disconnected_since.unwrap_or(probe_started);
+        let budget = crate::session_transport::compile_liveness_deadline().saturating_sub(since.elapsed());
         let probe = tokio::task::spawn_blocking(daemon_progress);
         let status = tokio::select! {
             biased;
             output = &mut work => return Ok(output),
-            result = probe => result.map_err(std::io::Error::other).and_then(|r| r),
+            result = tokio::time::timeout(budget, probe) => result
+                .map_err(std::io::Error::other)
+                .and_then(|r| r.map_err(std::io::Error::other))
+                .and_then(|r| r),
         };
         let status = match status {
             Ok(status) => {
@@ -80,7 +86,7 @@ pub(crate) async fn await_compile_reply<F: Future>(work: F) -> std::io::Result<F
                 status
             }
             Err(error) => {
-                let since = disconnected_since.get_or_insert_with(std::time::Instant::now);
+                let since = disconnected_since.get_or_insert(probe_started);
                 if since.elapsed() < crate::session_transport::compile_liveness_deadline() {
                     continue;
                 }

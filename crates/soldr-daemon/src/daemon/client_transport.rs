@@ -320,6 +320,9 @@ pub fn default_sock_path(paths: &SoldrPaths) -> PathBuf {
 struct ReceiptRetry<'a, S> { inner: &'a mut S, deadline: std::time::Instant }
 fn retry_receipt<T>(deadline: std::time::Instant, mut operation: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
     loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "receipt acknowledgement deadline expired"));
+        }
         match operation() {
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted | std::io::ErrorKind::TimedOut) && std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
