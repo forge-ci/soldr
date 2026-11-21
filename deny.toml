@@ -50,6 +50,10 @@ skip = [
     # winnow 0.7. Convergence needs a workspace TOML API migration; keep the
     # new side exact so another version still fails the ratchet.
     { name = "winnow", version = "=1.0.5" },
+    # iroh -> netwatch -> netdev's Android JNI 0.21 dependency holds
+    # windows-sys 0.45 and this old support archive. JNI must upgrade its
+    # Windows dependency before the graph can converge with windows 0.52+.
+    { name = "windows_x86_64_msvc", version = "=0.42.2" },
     # errno/rustix/tempfile still cap at 0.52, reached only through
     # prost-build's build-dependency tree (amalgamated zccache-protocol and
     # running-process). The #2406 convergence covered the runtime tree;
