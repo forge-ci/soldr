@@ -114,7 +114,8 @@ fn walk_package(
         // file_type does not follow symlinks: a linked directory is not walked.
         let kind = entry.file_type()?;
         if kind.is_dir() {
-            let nested = dir != package && path.join("Cargo.toml").is_file();
+            // `path` is never the package root itself, so its own manifest marks a nested package.
+            let nested = path.join("Cargo.toml").is_file();
             if (dir == package && name == "target") || nested {
                 continue;
             }
