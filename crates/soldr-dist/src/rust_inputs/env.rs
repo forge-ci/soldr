@@ -131,22 +131,39 @@ pub(super) fn inspect(job: &mut DistJob) -> Result<BTreeSet<String>> {
     Ok(uses.keys)
 }
 
-/// Whether a file could read an env var, alias `env`, include a path or define
-/// a macro. `env` counts only as a whole identifier (or `option_env`) followed,
-/// after any whitespace, by `!` or `as`, so libc's `environ`/`getenv` do not.
+/// Whether a file could read an env var, include a path, alias either, or
+/// define a macro. A macro name counts only as a whole identifier followed,
+/// after any whitespace, by `!` or `as`: libc's `environ`/`getenv` and C header
+/// paths in comments (`posix/include/...`) do not.
 fn may_matter(text: &str) -> bool {
-    if text.contains("include") || text.contains("macro_rules") {
-        return true;
-    }
+    text.contains("macro_rules")
+        || ["env", "include"].iter().any(|stem| macro_use(text, stem))
+}
+
+/// `stem`, `option_env` / `include_str` / `include_bytes` style spellings
+/// included, used as a macro (`!`) or renamed (`as`).
+fn macro_use(text: &str, stem: &str) -> bool {
     let bytes = text.as_bytes();
     let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-    text.match_indices("env").any(|(at, _)| {
-        let starts = at == 0 || !ident(bytes[at - 1]) || text[..at].ends_with("option_");
-        let after = &text[at + 3..];
-        if !starts || after.as_bytes().first().is_some_and(|b| ident(*b)) {
+    text.match_indices(stem).any(|(at, _)| {
+        // Walk back/forward over the rest of the identifier (option_env,
+        // include_str): the whole word must be a known macro name.
+        let mut first = at;
+        while first > 0 && ident(bytes[first - 1]) {
+            first -= 1;
+        }
+        let mut last = at + stem.len();
+        while last < bytes.len() && ident(bytes[last]) {
+            last += 1;
+        }
+        let word = &text[first..last];
+        if !matches!(
+            word,
+            "env" | "option_env" | "include" | "include_str" | "include_bytes"
+        ) {
             return false;
         }
-        let rest = after.trim_start();
+        let rest = text[last..].trim_start();
         rest.starts_with('!')
             || (rest.starts_with("as") && !rest.as_bytes().get(2).is_some_and(|b| ident(*b)))
     })
@@ -333,6 +350,7 @@ mod tests {
         assert!(!may_matter(
             "extern { fn getenv(); static environ: u8; } fn f(env: u8) {}"
         ));
+        assert!(!may_matter("// uspace/lib/posix/include/posix/time.h\nfn f() {}"));
         for text in [
             "env!(\"X\")",
             "env ! (\"X\")",
@@ -340,6 +358,8 @@ mod tests {
             "use std::env as e;",
             "use core::{env\n  as e};",
             "include_str!(\"a\")",
+            "include ! (\"a\")",
+            "use std::include_bytes as ib;",
             "macro_rules! m {}",
         ] {
             assert!(may_matter(text), "{text}");
