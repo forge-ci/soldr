@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use sha2::{Digest, Sha256};
+
+use crate::platform::wait;
 
 use super::wire::Source;
 
@@ -14,10 +16,10 @@ pub(super) struct Snapshot {
 }
 
 fn git(directory: &Path, args: &[&str]) -> io::Result<Vec<u8>> {
-    let result = Command::new("git")
-        .current_dir(directory)
-        .args(args)
-        .output()?;
+    let result = wait::output_for(
+        Command::new("git").current_dir(directory).args(args),
+        wait::PROBE,
+    )?;
     if !result.status.success() {
         return Err(io::Error::other(format!(
             "git {} failed: {}",
@@ -72,12 +74,18 @@ pub(super) fn capture(directory: &Path) -> io::Result<Snapshot> {
     }
 
     let tree = git(&root, &["ls-tree", "-r", "-z", "--full-tree", &commit])?;
-    let mut reader = Command::new("git")
-        .current_dir(root)
-        .args(["cat-file", "--batch"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()?;
+    let mut reader = running_process::spawn(
+        Command::new("git")
+            .current_dir(root)
+            .args(["cat-file", "--batch"]),
+        running_process::SpawnStdio {
+            stdin: running_process::StdioSource::Pipe,
+            stdout: running_process::StdioSource::Pipe,
+            stderr: running_process::StdioSource::Parent,
+            drain_timeout: Some(wait::HELPER_JOIN),
+            show_console: false,
+        },
+    )?;
     let input = reader
         .stdin
         .take()
@@ -89,7 +97,7 @@ pub(super) fn capture(directory: &Path) -> io::Result<Snapshot> {
     let snapshot = read_tree(commit, &tree, input, BufReader::new(output));
     let status = reader.wait()?;
     let snapshot = snapshot?;
-    if !status.success() {
+    if status != 0 {
         return Err(io::Error::other(
             "git cat-file failed while reading the commit",
         ));

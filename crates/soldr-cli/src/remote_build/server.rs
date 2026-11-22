@@ -9,9 +9,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::Router;
-use fs2::FileExt;
 use globset::{GlobBuilder, GlobSetBuilder};
 use prost::Message;
+
+use crate::platform::wait;
 
 use super::snapshot::{digest, relative_path};
 use super::wire::{self, Action, Artifact, Artifacts, Blob, Fetch, ResultFrame, Session, Start};
@@ -164,7 +165,7 @@ fn run(root: &Path, session: &Path, id: &str) -> io::Result<Vec<u8>> {
         .create(true)
         .truncate(false)
         .open(root.join("build.lock"))?;
-    FileExt::lock_exclusive(&runner_lock)?;
+    wait::lock_exclusive_announced(&runner_lock, wait::LONG_LOCK, "remote build runner")?;
     let cache_root = root.join("compiler");
     let cache_dir = crate::core::SoldrPaths::with_root(cache_root.clone()).cache;
     let source = session.join("source");
@@ -194,24 +195,28 @@ fn run(root: &Path, session: &Path, id: &str) -> io::Result<Vec<u8>> {
         Action::Dylint => "dylint",
     };
     let soldr = std::env::current_exe()?;
-    let result = runner_soldr(&soldr, &cache_root)
-        .current_dir(&source)
-        .env("CARGO_TARGET_DIR", output.join("target"))
-        .arg(action)
-        .args(&request.args)
-        .output()?;
+    let result = wait::output_for(
+        runner_soldr(&soldr, &cache_root)
+            .current_dir(&source)
+            .env("CARGO_TARGET_DIR", output.join("target"))
+            .arg(action)
+            .args(&request.args),
+        wait::WHOLE_COMMAND,
+    )?;
     let exit_code = result.status.code().unwrap_or(1);
     let mut stderr = result.stderr;
     let cache_saved = request.cache_zstd_level.map(|level| {
-        let cache = runner_soldr(&soldr, &cache_root)
-            .current_dir(&source)
-            .args(["save", "--zstd-level"])
-            .arg(level.to_string())
-            .arg("--cache-dir")
-            .arg(&cache_dir)
-            .arg("--out")
-            .arg(output.join("cache.tar.zst"))
-            .output();
+        let cache = wait::output_for(
+            runner_soldr(&soldr, &cache_root)
+                .current_dir(&source)
+                .args(["save", "--zstd-level"])
+                .arg(level.to_string())
+                .arg("--cache-dir")
+                .arg(&cache_dir)
+                .arg("--out")
+                .arg(output.join("cache.tar.zst")),
+            wait::LONG_CHILD,
+        );
         match cache {
             Ok(cache) if cache.status.success() => true,
             Ok(cache) => {
