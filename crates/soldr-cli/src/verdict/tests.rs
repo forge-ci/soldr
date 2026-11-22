@@ -472,7 +472,9 @@ fn rekey_derives_with_the_recorded_env_not_its_own() {
 mod per_crate {
     use std::collections::BTreeMap;
 
-    use super::super::crates::{merkle, narrow, owner, parse_metadata, selects_workspace, Member};
+    use super::super::crates::{
+        merkle, metadata_selector, narrow, owner, parse_metadata, selects_workspace, Member,
+    };
     use super::super::key::{derive_crates, KeyRequest, Snapshot};
     use super::super::profiles;
     use super::{argv, fixture_repo, git};
@@ -483,6 +485,27 @@ mod per_crate {
             dir: dir.into(),
             deps: deps.iter().map(|d| (*d).to_string()).collect(),
         }
+    }
+
+    /// The member list must come from the workspace the invocation names: a
+    /// `--manifest-path` run of a second workspace (bosn's excluded widget
+    /// crate) otherwise read the cwd workspace's members and was narrowed to
+    /// `-p` packages its own workspace does not have.
+    #[test]
+    fn metadata_reads_the_invocations_manifest_path() {
+        assert_eq!(
+            metadata_selector(&argv("fmt --all --manifest-path w/Cargo.toml -- --check")),
+            argv("--manifest-path w/Cargo.toml")
+        );
+        assert_eq!(
+            metadata_selector(&argv("clippy --workspace --manifest-path=w/Cargo.toml")),
+            argv("--manifest-path w/Cargo.toml")
+        );
+        assert!(metadata_selector(&argv("fmt --all -- --check")).is_empty());
+        assert!(
+            metadata_selector(&argv("fmt --all -- --manifest-path x")).is_empty(),
+            "after -- is the tool's argv"
+        );
     }
 
     #[test]

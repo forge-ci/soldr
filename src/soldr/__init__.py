@@ -1811,10 +1811,11 @@ def _stage_bundle_bins(
         return filename
     env = _prep_env(config_settings, editable=editable)
     target_args = _target_args(config_settings)
-    if not target_args:
+    injected_pyo3_python = not target_args and "PYO3_PYTHON" not in env
+    if injected_pyo3_python:
         # Same interpreter maturin was given, so PyO3's build script resolves
         # an identical configuration and Cargo reuses the extension's units.
-        env.setdefault("PYO3_PYTHON", sys.executable)
+        env["PYO3_PYTHON"] = sys.executable
     manifest = _project_maturin_options().get("manifest-path")
     manifest_path = _project_root() / manifest if manifest else None
     profile_args = _bundle_bin_profile_args(config_settings, editable=editable)
@@ -1826,8 +1827,14 @@ def _stage_bundle_bins(
             profile_args=profile_args,
             target_args=target_args,
         )
-        with _hold_build_lease(env):
-            return helper.build_bundle_bin(entry, command, env)
+        entry_env = env
+        if injected_pyo3_python and helper.entry_target_args(entry, target_args):
+            # A bin retargeted to musl is a cross build: the host interpreter
+            # would make soldr treat PyO3 as caller-configured instead of
+            # planning the abi3 no-Python build.
+            entry_env = {k: v for k, v in env.items() if k != "PYO3_PYTHON"}
+        with _hold_build_lease(entry_env):
+            return helper.build_bundle_bin(entry, command, entry_env)
 
     added = helper.bundle_into_wheel(Path(wheel_directory, filename), entries, build)
     print(f"soldr PEP 517: bundled {', '.join(added)}", file=sys.stderr)
