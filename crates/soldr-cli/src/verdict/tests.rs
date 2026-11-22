@@ -196,6 +196,48 @@ fn replay_output_drops_cargo_progress() {
 }
 
 #[test]
+fn replay_output_drops_nested_dylint_build_telemetry() {
+    let raw = concat!(
+        "# t0=1795341572.335\n",
+        "    1.20    Compiling proc-macro2 v1.0.106\n",
+        "   20.44    19.17    Compiling rayon-core v1.13.0\n",
+        "   23.96    22.71 soldr[cache] foldhash [MISS]\n",
+        "soldr[cache] dep [HIT!]\n",
+        "   24.04 soldr: cache 0 HIT, 30 MISS (0% hit rate, saved 0.0s)\n",
+        "soldr: cargo diagnostic capture still running after 60s (no wall-clock deadline configured)\n",
+        "warning: a real lint warning\n",
+        "  --> src/lib.rs:4:5\n",
+        "    |\n",
+        "4   | value();\n",
+        "    | ^^^^^^^\n",
+        "   23.50 warning: a timestamped diagnostic from a nested command\n",
+        "   24.07    23.10     Finished `dev` profile in 23.10s\n",
+    );
+    assert_eq!(
+        strip_cargo_status(raw),
+        concat!(
+            "warning: a real lint warning\n",
+            "  --> src/lib.rs:4:5\n",
+            "    |\n",
+            "4   | value();\n",
+            "    | ^^^^^^^\n",
+            "   23.50 warning: a timestamped diagnostic from a nested command\n",
+        )
+    );
+}
+
+#[test]
+fn replay_output_preserves_colored_diagnostics_and_source_excerpts() {
+    let diagnostic =
+        "\u{1b}[33mwarning:\u{1b}[0m a lint warning\n    Checking();\n12 | Compiling\n";
+    let raw = format!(
+        "    0.12 \u{1b}[32mCompiling\u{1b}[0m dep v1.0.0\n\
+         1.20 soldr[cache] dep \u{1b}[33m[MISS]\u{1b}[0m\n{diagnostic}"
+    );
+    assert_eq!(strip_cargo_status(&raw), diagnostic);
+}
+
+#[test]
 fn modes_parse() {
     assert_eq!(Mode::parse(None), Mode::On);
     assert_eq!(Mode::parse(Some("off")), Mode::Off);
