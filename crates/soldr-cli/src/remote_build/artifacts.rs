@@ -20,7 +20,7 @@ use crate::platform::fs::permissions;
 use crate::platform::wait::block_on_handle_for;
 
 const PARALLEL_DOWNLOADS: usize = 8;
-const COMPRESSION_LEVEL: i32 = 15;
+const COMPRESSION_LEVEL: i32 = 9;
 const CHUNK_QUEUE: usize = 4;
 const IO_IDLE: Duration = Duration::from_secs(120);
 

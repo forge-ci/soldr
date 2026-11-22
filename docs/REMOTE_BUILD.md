@@ -48,7 +48,7 @@ output directory. For example, `--target-dir target/special` makes
 
 Fetch uses one HTTP/2 connection and up to eight concurrent file streams.
 The runner can advertise a lower limit with `remote serve --artifact-streams N`.
-Each stream sends binary Zstandard at level 15. The client verifies the
+Each stream sends binary Zstandard at level 9. The client verifies the
 uncompressed size and SHA-256 before publishing a file.
 
 To reuse the build connection for downloads, request artifacts on the run
