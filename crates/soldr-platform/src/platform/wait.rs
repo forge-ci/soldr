@@ -190,6 +190,53 @@ pub fn output_for(
     })
 }
 
+/// Capture both pipes and report each line as it is read.
+pub fn output_for_observed(
+    command: &mut std::process::Command,
+    bound: Duration,
+    on_line: impl Fn(bool, &[u8]) + Send + Sync + 'static,
+) -> io::Result<std::process::Output> {
+    use std::io::{BufRead, BufReader, Read};
+    use std::process::Stdio;
+    use std::sync::Arc;
+
+    fn drain(
+        pipe: impl Read,
+        is_stderr: bool,
+        on_line: impl Fn(bool, &[u8]),
+    ) -> io::Result<Vec<u8>> {
+        let mut reader = BufReader::new(pipe);
+        let mut bytes = Vec::new();
+        loop {
+            let start = bytes.len();
+            if reader.read_until(b'\n', &mut bytes)? == 0 {
+                return Ok(bytes);
+            }
+            on_line(is_stderr, &bytes[start..]);
+        }
+    }
+
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let on_line = Arc::new(on_line);
+    let on_stdout = Arc::clone(&on_line);
+    let stdout = std::thread::spawn(move || drain(stdout, false, |s, line| on_stdout(s, line)));
+    let stderr = std::thread::spawn(move || drain(stderr, true, |s, line| on_line(s, line)));
+    let status = wait_for(&mut child, bound)?;
+    let collect =
+        |reader| join_for(reader, HELPER_JOIN).map_err(|(_, error)| io::Error::from(error));
+    Ok(std::process::Output {
+        status,
+        stdout: collect(stdout)??,
+        stderr: collect(stderr)??,
+    })
+}
+
 /// Run `command` with its stdio as configured (typically inherited) and wait
 /// at most `bound` for it to exit; the timeout-only `Command::status()`.
 pub fn status_for(command: &mut std::process::Command, bound: Duration) -> io::Result<ExitStatus> {

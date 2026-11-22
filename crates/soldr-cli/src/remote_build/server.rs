@@ -238,16 +238,17 @@ fn run(root: &Path, session: &Path, id: &str, slot_limit: Option<u32>) -> io::Re
         Action::Lint => "lint",
     };
     let soldr = std::env::current_exe()?;
-    let result = wait::output_for(
+    let transcript = Transcript::new();
+    let result = transcript.run(
         runner_soldr(&soldr, &cache_root)
             .current_dir(&source)
             .env("CARGO_TARGET_DIR", build_output.join("target"))
             .arg(action)
             .args(&arguments),
-        wait::WHOLE_COMMAND,
     )?;
     let exit_code = result.status.code().unwrap_or(1);
     let mut stderr = result.stderr;
+    let stderr_before_postprocessing = stderr.len();
     let run_cook = lease.is_some() && exit_code == 0 && full_lint;
     let mut cook_archive_sha256 = None;
     if let Some(lease) = &lease {
@@ -287,30 +288,97 @@ fn run(root: &Path, session: &Path, id: &str, slot_limit: Option<u32>) -> io::Re
         "arch": std::env::consts::ARCH,
         "source": request.files.iter().map(|file| (&file.path, &file.digest)).collect::<std::collections::BTreeMap<_, _>>(),
     }))?;
-    let result_code = if exit_code == 0 && (cache_saved == Some(false) || cook_ready == Some(false))
-    {
-        1
-    } else {
-        exit_code
+    let result_code = match (exit_code, cache_saved, cook_ready) {
+        (0, Some(false), _) | (0, _, Some(false)) => 1,
+        _ => exit_code,
     };
     if let Some(lease) = &lease {
         lease.finish(Some(result_code))?;
     }
-    publish_attestation(&output, &attestation)?;
-    wire::encode(&ResultFrame {
+    let result = ResultFrame {
         exit_code: result_code,
         stdout: result.stdout,
         stderr,
         attestation,
-    })
+    };
+    transcript.record_stderr(&result.stderr[stderr_before_postprocessing..]);
+    publish_result(&output, &result, &transcript)?;
+    wire::encode(&result)
 }
 
-fn publish_attestation(output: &Path, attestation: &[u8]) -> io::Result<()> {
+fn publish_result(output: &Path, result: &ResultFrame, transcript: &Transcript) -> io::Result<()> {
+    let mut logs = std::io::BufWriter::new(fs::File::create(output.join("stdout-stderr.jsonl"))?);
+    transcript.write_to(&mut logs)?;
+    serde_json::to_writer(&mut logs, &serde_json::json!({"return": result.exit_code}))?;
+    logs.write_all(b"\n")?;
+    logs.flush()?;
+
     // Fetch uses the atomically published attestation as its readiness signal.
     let mut staging = tempfile::NamedTempFile::new_in(output)?;
-    staging.write_all(attestation)?;
+    staging.write_all(&result.attestation)?;
     staging.persist(output.join("attestation.json"))?;
     Ok(())
+}
+
+struct Transcript {
+    start: std::time::Instant,
+    lines: std::sync::Arc<crate::platform::sync::Mutex<Vec<OutputLine>>>,
+}
+
+#[derive(serde::Serialize)]
+struct OutputLine {
+    t: f64,
+    #[serde(rename = "type")]
+    kind: char,
+    v: String,
+}
+
+impl Transcript {
+    fn new() -> Self {
+        Self {
+            start: std::time::Instant::now(),
+            lines: std::sync::Arc::new(crate::platform::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn run(&self, command: &mut Command) -> io::Result<std::process::Output> {
+        let lines = self.lines.clone();
+        let start = self.start;
+        wait::output_for_observed(command, wait::WHOLE_COMMAND, move |is_stderr, line| {
+            lines.lock().push(OutputLine::new(
+                start,
+                if is_stderr { 'e' } else { 'o' },
+                line,
+            ));
+        })
+    }
+
+    fn record_stderr(&self, bytes: &[u8]) {
+        self.lines.lock().extend(
+            bytes
+                .split_inclusive(|&byte| byte == b'\n')
+                .map(|line| OutputLine::new(self.start, 'e', line)),
+        );
+    }
+
+    fn write_to(&self, writer: &mut impl Write) -> io::Result<()> {
+        let lines = std::mem::take(&mut *self.lines.lock());
+        for line in lines {
+            serde_json::to_writer(&mut *writer, &line)?;
+            writer.write_all(b"\n")?;
+        }
+        Ok(())
+    }
+}
+
+impl OutputLine {
+    fn new(start: std::time::Instant, kind: char, line: &[u8]) -> Self {
+        Self {
+            t: (start.elapsed().as_secs_f64() * 100.0).floor() / 100.0,
+            kind,
+            v: String::from_utf8_lossy(line).into_owned(),
+        }
+    }
 }
 
 fn collect_slot_output(

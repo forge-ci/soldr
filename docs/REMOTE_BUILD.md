@@ -87,6 +87,13 @@ and user for accounting. The shared bearer token grants access to this
 trusted runner. The user ID routes builds to a warm slot and does not
 authenticate an individual user.
 
+Fetch `stdout-stderr.jsonl` from a completed session for the captured output
+and exit status. Each line is recorded as `{"t":0.25,"type":"o","v":"message\n"}`.
+`t` is elapsed seconds at capture, `o` means stdout, and `e` means stderr.
+The final record contains only `return`, such
+as `{"return":0}` for a successful run. The client still prints the raw
+streams to the terminal.
+
 A new slot lives at `<root>/github/repo/<owner>/<repo>/<DATE>_<PARENT_BRANCH>_<commit>/`.
 `DATE` is the UTC allocation timestamp, and `commit` is the full hash of the
 commit used to allocate the slot. `parent-branch` is optional and defaults
