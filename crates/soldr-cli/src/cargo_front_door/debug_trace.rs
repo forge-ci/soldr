@@ -17,6 +17,7 @@ use std::io::Write;
 use std::process::{Child, Command, ExitStatus};
 
 use super::nested_cargo_guard::{NestedCargoGuard, GUARD_TICK};
+use crate::platform::process::command::supports_process_groups;
 use crate::platform::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -179,6 +180,31 @@ fn emit(_context: &str, human: &str, json: &str) {
 #[path = "debug_trace_tests.rs"]
 mod tests;
 
+fn terminate_observed_on_signal(
+    process: &running_process::NativeProcess,
+    pid: u32,
+    grouped: bool,
+    context: &str,
+) -> Result<(), crate::core::SoldrError> {
+    if !crate::platform::process::signal::forward_child_termination(pid)
+        .map_err(|err| crate::core::SoldrError::Other(format!("forward termination: {err}")))?
+    {
+        return Ok(());
+    }
+    let _ = process.wait(Some(std::time::Duration::from_millis(100)));
+    // NativeProcess::kill can return AlreadyExited after reaping the root.
+    // Our owned group can still contain descendants that ignored the signal.
+    if grouped {
+        let _ = crate::platform::process::signal::kill_owned_process_group(pid);
+    }
+    let _ = process.kill();
+    let _ = process.wait(Some(std::time::Duration::from_secs(5)));
+    let _ = process.close();
+    Err(crate::core::SoldrError::Other(format!(
+        "{context} interrupted by termination signal; observed tree terminated"
+    )))
+}
+
 /// soldr#2546 slice 2: run an inherited-stdio cargo child under the
 /// running-process observer so the timeline includes descendants
 /// (grandchildren: rustc, build scripts, linkers spawned by cargo).
@@ -205,6 +231,8 @@ pub(crate) fn run_observed_inheriting_stdio(
     let argv = render_argv(command);
     // `with_observer_and_command` consumes the Command; the config's own
     // command field is ignored in favor of the override.
+    let grouped = std::env::var_os(super::INHERIT_PARENT_PROCESS_GROUP_ENV).is_none();
+    let _signals = super::prepare_cargo_child(command)?;
     let owned = std::mem::replace(command, Command::new("soldr-debug-trace-consumed"));
     let config = ProcessConfig {
         command: CommandSpec::Argv(vec!["soldr-debug-trace-override".to_string()]),
@@ -213,7 +241,7 @@ pub(crate) fn run_observed_inheriting_stdio(
         capture: false,
         stderr_mode: StderrMode::Stdout,
         creationflags: None,
-        create_process_group: false,
+        create_process_group: grouped && supports_process_groups(),
         stdin_mode: StdinMode::Inherit,
         nice: None,
         address_space_limit_bytes: None,
@@ -275,6 +303,7 @@ pub(crate) fn run_observed_inheriting_stdio(
     let started = Instant::now();
     let mut next_heartbeat = heartbeat;
     let code = loop {
+        terminate_observed_on_signal(&process, pid, grouped, context)?;
         if let Some(violation) = guard.as_ref().and_then(|guard| guard.violation()) {
             // soldr#2924: running-process containment owns this spawn, so its
             // kill takes the observed tree down.
@@ -302,12 +331,9 @@ pub(crate) fn run_observed_inheriting_stdio(
                 )));
             }
         }
-        let mut slice = next_heartbeat.saturating_sub(elapsed);
+        let mut slice = next_heartbeat.saturating_sub(elapsed).min(GUARD_TICK);
         if let Some(limit) = timeout {
             slice = slice.min(limit.saturating_sub(elapsed));
-        }
-        if guard.is_some() {
-            slice = slice.min(GUARD_TICK);
         }
         match process.wait(Some(slice)) {
             Ok(code) => break code,
