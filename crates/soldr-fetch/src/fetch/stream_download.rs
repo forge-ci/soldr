@@ -254,6 +254,70 @@ use sha2::{Digest, Sha256};
 pub(crate) const ASSET_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const ASSET_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const CONTROL_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
+/// Client for an authenticated HTTP service on a local tunnel endpoint.
+pub struct LoopbackPostClient {
+    http: reqwest::Client,
+    endpoint: std::net::SocketAddr,
+}
+
+impl LoopbackPostClient {
+    /// Use a literal loopback address and keep credentials on that endpoint.
+    pub fn new(endpoint: std::net::SocketAddr) -> std::io::Result<Self> {
+        if !endpoint.ip().is_loopback() {
+            return Err(std::io::Error::other(
+                "Remote build endpoint must be a loopback SSH tunnel.",
+            ));
+        }
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .map_err(std::io::Error::other)?;
+        Ok(Self { http, endpoint })
+    }
+
+    /// Post a frame and return its response with a bounded body size.
+    pub async fn post(
+        &self,
+        path: &str,
+        token: &str,
+        content_type: &str,
+        body: Vec<u8>,
+        max_response: usize,
+    ) -> std::io::Result<Vec<u8>> {
+        if !path.starts_with('/') {
+            return Err(std::io::Error::other("HTTP service path must begin with /"));
+        }
+        let mut response = self
+            .http
+            .post(format!("http://{}{path}", self.endpoint))
+            .header("content-type", content_type)
+            .bearer_auth(token)
+            .body(body)
+            .send()
+            .await
+            .map_err(std::io::Error::other)?;
+        let mut data = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(std::io::Error::other)? {
+            if chunk.len() > max_response - data.len() {
+                return Err(std::io::Error::other(
+                    "HTTP service response exceeds its size limit",
+                ));
+            }
+            data.extend_from_slice(&chunk);
+        }
+        if !response.status().is_success() {
+            return Err(std::io::Error::other(format!(
+                "remote build {}: {}",
+                response.status(),
+                String::from_utf8_lossy(&data)
+            )));
+        }
+        Ok(data)
+    }
+}
+
 /// Catalogue and asset redirects are bounded independently of reqwest's
 /// changing default.  Reqwest strips sensitive headers on cross-origin hops.
 pub(crate) const MAX_REDIRECT_HOPS: usize = 5;

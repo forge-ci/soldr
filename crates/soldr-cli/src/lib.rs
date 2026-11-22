@@ -455,6 +455,7 @@ pub use soldr_daemon::{daemon, zccache_embedded};
 pub use soldr_fetch::fetch;
 
 /// CLI entry logic — formerly the `main.rs` crate root (#1490 Phase 1).
+mod remote_build;
 mod soldr_main;
 
 /// The full soldr CLI entry point, called by the `src/main.rs` shim.

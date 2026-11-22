@@ -1,0 +1,383 @@
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use axum::body::Bytes;
+use axum::extract::{DefaultBodyLimit, Path as RoutePath, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
+use axum::routing::post;
+use axum::Router;
+use cap_fs_ext::DirExt;
+use cap_std::{ambient_authority, fs::Dir};
+use globset::{GlobBuilder, GlobSetBuilder};
+use prost::Message;
+
+use crate::platform::{fs::permissions, wait};
+
+use super::snapshot::{digest, relative_path};
+use super::wire::{self, Action, Artifact, Artifacts, Blob, Fetch, ResultFrame, Session, Start};
+
+pub(super) async fn serve(
+    listen: std::net::SocketAddr,
+    root: PathBuf,
+    token: &str,
+) -> io::Result<i32> {
+    if !listen.ip().is_loopback() {
+        return Err(io::Error::other(
+            "Remote build must bind to loopback. Connect through an SSH tunnel.",
+        ));
+    }
+    fs::create_dir_all(root.join("blobs"))?;
+    fs::create_dir_all(root.join("sessions"))?;
+    let router = Router::new()
+        .route("/v1/{*operation}", post(handle))
+        .layer(DefaultBodyLimit::max(wire::MAX_FRAME + 1024 * 1024))
+        .with_state((
+            root.canonicalize()?,
+            digest(format!("Bearer {token}").as_bytes()),
+        ));
+    let listener = tokio::net::TcpListener::bind(listen).await?;
+    eprintln!(
+        "soldr remote listening at http://{}",
+        listener.local_addr()?
+    );
+    axum::serve(listener, router).await?;
+    Ok(0)
+}
+
+async fn handle(
+    State((root, expected)): State<(PathBuf, String)>,
+    RoutePath(operation): RoutePath<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        != Some("application/x-protobuf+zstd")
+    {
+        return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+    }
+    let provided = headers
+        .get("authorization")
+        .map(|value| digest(value.as_bytes()));
+    if provided.as_ref() != Some(&expected) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match tokio::task::spawn_blocking(move || dispatch(&root, &operation, &body)).await {
+        Ok(Ok(data)) => (
+            StatusCode::OK,
+            [("content-type", "application/x-protobuf+zstd")],
+            data,
+        )
+            .into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+fn key(value: &str, len: usize) -> io::Result<&str> {
+    if value.len() == len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        Ok(value)
+    } else {
+        Err(io::Error::other("invalid remote build identifier"))
+    }
+}
+
+fn dispatch(root: &Path, operation: &str, body: &[u8]) -> io::Result<Vec<u8>> {
+    let parts: Vec<_> = operation.split('/').collect();
+    match parts.as_slice() {
+        ["start"] => start(root, wire::decode(body)?),
+        ["blob", hash] => store_blob(root, hash, wire::decode(body)?),
+        ["run", id] => run(root, &root.join("sessions").join(key(id, 32)?), id),
+        ["fetch", id] => fetch(
+            &root.join("sessions").join(key(id, 32)?),
+            wire::decode(body)?,
+        ),
+        _ => Err(io::Error::other("unknown remote build operation")),
+    }
+}
+
+fn start(root: &Path, request: Start) -> io::Result<Vec<u8>> {
+    if request.commit.len() != 40 && request.commit.len() != 64 {
+        return Err(io::Error::other("invalid commit ID"));
+    }
+    key(&request.commit, request.commit.len())?;
+    Action::try_from(request.action).map_err(io::Error::other)?;
+    let mut missing = std::collections::BTreeSet::new();
+    let paths: std::collections::BTreeSet<_> = request
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    if paths.len() != request.files.len() {
+        return Err(io::Error::other("duplicate remote source path"));
+    }
+    for file in &request.files {
+        let path = relative_path(&file.path)?;
+        if path
+            .ancestors()
+            .skip(1)
+            .any(|parent| parent.to_str().is_some_and(|path| paths.contains(path)))
+        {
+            return Err(io::Error::other(
+                "remote source path has a file as an ancestor",
+            ));
+        }
+        key(&file.digest, 64)?;
+        if !root.join("blobs").join(&file.digest).is_file() {
+            missing.insert(file.digest.clone());
+        }
+    }
+
+    let mut random = [0; 16];
+    getrandom::fill(&mut random).map_err(io::Error::other)?;
+    let id = hex::encode(random);
+    let directory = root.join("sessions").join(&id);
+    fs::create_dir(&directory)?;
+    fs::write(directory.join("start.pb"), request.encode_to_vec())?;
+    wire::encode(&Session {
+        id,
+        missing: missing.into_iter().collect(),
+    })
+}
+
+fn store_blob(root: &Path, hash: &str, blob: Blob) -> io::Result<Vec<u8>> {
+    key(hash, 64)?;
+    if digest(&blob.data) != hash {
+        return Err(io::Error::other("uploaded blob does not match its digest"));
+    }
+    let directory = root.join("blobs");
+    let mut staging = tempfile::NamedTempFile::new_in(&directory)?;
+    staging.write_all(&blob.data)?;
+    staging.persist(directory.join(hash))?;
+    wire::encode(&Blob::default())
+}
+
+fn run(root: &Path, session: &Path, id: &str) -> io::Result<Vec<u8>> {
+    let request = Start::decode(fs::read(session.join("start.pb"))?.as_slice())?;
+    let runner_lock = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("build.lock"))?;
+    wait::lock_exclusive_announced(&runner_lock, wait::LONG_LOCK, "remote build runner")?;
+    let cache_root = root.join("compiler");
+    let cache_dir = crate::core::SoldrPaths::with_root(cache_root.clone()).cache;
+    let source = session.join("source");
+    let output = session.join("output");
+    fs::create_dir(&source)?;
+    fs::create_dir(&output)?;
+    for file in request.files.iter().filter(|file| !file.symlink) {
+        let path = source.join(relative_path(&file.path)?);
+        fs::create_dir_all(parent(&path)?)?;
+        write_file(
+            &path,
+            &fs::read(root.join("blobs").join(key(&file.digest, 64)?))?,
+            file.executable,
+        )?;
+    }
+    for file in request.files.iter().filter(|file| file.symlink) {
+        let relative = relative_path(&file.path)?;
+        let path = source.join(relative);
+        fs::create_dir_all(parent(&path)?)?;
+        let data = fs::read(root.join("blobs").join(key(&file.digest, 64)?))?;
+        create_link(&path, &data)?;
+    }
+
+    let action = Action::try_from(request.action).map_err(io::Error::other)?;
+    let arguments = compile_args(action, &request.args, &output)?;
+    let action = match action {
+        Action::Build => "build",
+        Action::Test => "test",
+        Action::Dylint => "dylint",
+    };
+    let soldr = std::env::current_exe()?;
+    let result = wait::output_for(
+        runner_soldr(&soldr, &cache_root)
+            .current_dir(&source)
+            .env("CARGO_TARGET_DIR", output.join("target"))
+            .arg(action)
+            .args(&arguments),
+        wait::WHOLE_COMMAND,
+    )?;
+    let exit_code = result.status.code().unwrap_or(1);
+    let mut stderr = result.stderr;
+    let cache_saved = request.cache_zstd_level.map(|level| {
+        let cache = wait::output_for(
+            runner_soldr(&soldr, &cache_root)
+                .current_dir(&source)
+                .args(["save", "--zstd-level"])
+                .arg(level.to_string())
+                .arg("--cache-dir")
+                .arg(&cache_dir)
+                .arg("--out")
+                .arg(output.join("cache.tar.zst")),
+            wait::LONG_CHILD,
+        );
+        match cache {
+            Ok(cache) if cache.status.success() => true,
+            Ok(cache) => {
+                stderr.extend_from_slice(b"\nRemote soldr save failed:\n");
+                stderr.extend_from_slice(&cache.stderr);
+                false
+            }
+            Err(error) => {
+                stderr
+                    .extend_from_slice(format!("\nRemote soldr save failed: {error}\n").as_bytes());
+                false
+            }
+        }
+    });
+    let attestation = serde_json::to_vec_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "session": id,
+        "commit": request.commit,
+        "action": action,
+        "args": request.args,
+        "exit_code": exit_code,
+        "cache_saved": cache_saved,
+        "runner": sysinfo::System::host_name(),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "source": request.files.iter().map(|file| (&file.path, &file.digest)).collect::<std::collections::BTreeMap<_, _>>(),
+    }))?;
+    fs::write(output.join("attestation.json"), &attestation)?;
+    wire::encode(&ResultFrame {
+        exit_code: if cache_saved == Some(false) && exit_code == 0 {
+            1
+        } else {
+            exit_code
+        },
+        stdout: result.stdout,
+        stderr,
+        attestation,
+    })
+}
+
+fn runner_soldr(executable: &Path, cache_root: &Path) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .env(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR, "1")
+        .env("SOLDR_CACHE_DIR", cache_root);
+    command
+}
+
+fn compile_args(action: Action, original: &[String], output: &Path) -> io::Result<Vec<String>> {
+    let mut args = original.to_vec();
+    let mut cargo_separator = action == Action::Dylint;
+    let mut index = 0;
+    while index < args.len() {
+        let argument = &args[index];
+        if argument == "--" {
+            if !cargo_separator {
+                break;
+            }
+            cargo_separator = false;
+        } else if argument == "--target-dir" {
+            index += 1;
+            let value = args
+                .get_mut(index)
+                .ok_or_else(|| io::Error::other("--target-dir requires a relative path"))?;
+            *value = output_path(output, value)?;
+        } else if let Some(value) = argument.strip_prefix("--target-dir=") {
+            args[index] = format!("--target-dir={}", output_path(output, value)?);
+        }
+        index += 1;
+    }
+    Ok(args)
+}
+
+fn output_path(output: &Path, value: &str) -> io::Result<String> {
+    output
+        .join(relative_path(value)?)
+        .into_os_string()
+        .into_string()
+        .map_err(|_| io::Error::other("remote output path must be UTF-8"))
+}
+
+pub(super) fn parent(path: &Path) -> io::Result<&Path> {
+    path.parent()
+        .ok_or_else(|| io::Error::other("missing parent directory"))
+}
+
+fn create_link(path: &Path, data: &[u8]) -> io::Result<()> {
+    let target = std::str::from_utf8(data).map_err(io::Error::other)?;
+    let target = relative_path(target)?;
+    let directory = Dir::open_ambient_dir(parent(path)?, ambient_authority())?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("missing remote symlink file name"))?;
+    DirExt::symlink(&directory, target, name)
+}
+
+pub(super) fn write_file(path: &Path, data: &[u8], executable: bool) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(data)?;
+    if executable {
+        permissions::make_executable(path)?;
+    }
+    Ok(())
+}
+
+fn fetch(session: &Path, request: Fetch) -> io::Result<Vec<u8>> {
+    let output = session.join("output");
+    if !output.join("attestation.json").is_file() {
+        return Err(io::Error::other("remote build session has not finished"));
+    }
+    let mut builder = GlobSetBuilder::new();
+    for pattern in request.globs {
+        builder.add(
+            GlobBuilder::new(&pattern)
+                .literal_separator(true)
+                .build()
+                .map_err(io::Error::other)?,
+        );
+    }
+    let patterns = builder.build().map_err(io::Error::other)?;
+    let mut files = Vec::new();
+    let mut size = 0_u64;
+    for entry in jwalk::WalkDir::new(&output).skip_hidden(false) {
+        let entry = entry.map_err(io::Error::other)?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let absolute = entry.path();
+        let path = absolute.strip_prefix(&output).map_err(io::Error::other)?;
+        if !patterns.is_match(path) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&absolute)?;
+        size = size.saturating_add(metadata.len());
+        if size > wire::MAX_FRAME as u64 {
+            return Err(io::Error::other(
+                "remote artifacts exceed 256 MiB. Fetch a narrower glob.",
+            ));
+        }
+        let executable = permissions::mode(&absolute).is_some_and(|mode| mode & 0o111 != 0);
+        let path = path
+            .components()
+            .map(|part| {
+                part.as_os_str()
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("non-UTF-8 artifact path"))
+            })
+            .collect::<io::Result<Vec<_>>>()?
+            .join("/");
+        files.push(Artifact {
+            path,
+            data: fs::read(absolute)?,
+            executable,
+        });
+    }
+    wire::encode(&Artifacts { files })
+}

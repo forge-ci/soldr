@@ -129,6 +129,8 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "itoa",
  "matchit",
  "memchr",
@@ -137,6 +139,7 @@ dependencies = [
  "pin-project-lite",
  "serde_core",
  "sync_wrapper",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",
@@ -2638,6 +2641,7 @@ dependencies = [
 name = "soldr-cli"
 version = "0.9.56"
 dependencies = [
+ "axum",
  "blake3",
  "cap-fs-ext",
  "cap-std",
