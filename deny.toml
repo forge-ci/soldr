@@ -38,11 +38,18 @@ skip = [
     # to the newer side so another version remains a ratchet failure.
     { name = "block-buffer", version = "=0.12.1" },
     { name = "crypto-common", version = "=0.2.2" },
-    # The published zccache 1.15.14 crate depends on sysinfo 0.39, while soldr's
+    # The published zccache 1.15.18 crate depends on sysinfo 0.39, while soldr's
     # own crates still use sysinfo 0.30 (the vendored zccache amalgamation was
     # built against 0.30). Pin the exception to the newer side so a third
     # version still fails the ratchet.
     { name = "sysinfo", version = "=0.39.6" },
+    # zccache 1.15.18 and notify 8 bring the toml 1.x stack, while soldr's own
+    # crates still use toml 0.8 / toml_edit 0.22. Pinned to the newer side so a
+    # third version still fails the ratchet; moving soldr to toml 1.x drops them.
+    { name = "toml", version = "=1.1.8" },
+    { name = "toml_datetime", version = "=1.1.3" },
+    { name = "serde_spanned", version = "=1.1.3" },
+    { name = "winnow", version = "=1.0.5" },
     { name = "digest", version = "=0.11.3" },
     { name = "sha2", version = "=0.11.0" },
     # errno/rustix/tempfile still cap at 0.52, reached only through
