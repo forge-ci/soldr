@@ -40,6 +40,7 @@ import json
 import os
 import re
 import stat
+import struct
 import sys
 import tarfile
 import zipfile
@@ -59,7 +60,7 @@ BUNDLE_BINS_KEY = "bundle-bins"
 DEFAULT_DEST = "scripts"
 WHEEL_SCHEMES = ("scripts", "platlib", "purelib", "data", "headers")
 _SECTION = "tool.soldr.pep517"
-_ENTRY_KEYS = {"bin", "package", "dest", "features", "linux-libc"}
+_ENTRY_KEYS = {"bin", "package", "dest", "features", "linux-libc", "rename"}
 # `linux-libc = "musl"`: on a Linux wheel, build the bin for the same
 # architecture's `-unknown-linux-musl` triple and require a static executable,
 # so the CLI runs on any Linux while the PyO3 extension keeps the
@@ -82,6 +83,14 @@ class BundleBin:
     dest: str = DEFAULT_DEST
     features: "tuple[str, ...]" = ()
     linux_libc: Optional[str] = None
+    rename: Optional[str] = None
+
+    def staged_name(self, executable: Path) -> str:
+        """The file name inside the wheel: ``rename`` plus the executable's
+        own suffix (``.exe`` on Windows), else Cargo's file name."""
+        if not self.rename:
+            return executable.name
+        return self.rename + (".exe" if executable.suffix.lower() == ".exe" else "")
 
 
 def read_bundle_bins(pyproject: Path) -> "list[BundleBin]":
@@ -111,9 +120,7 @@ def _raw_entries(text: str) -> "list[Any]":
     if value is None:
         return []
     if not isinstance(value, list):
-        raise BundleBinsError(
-            f"[{_SECTION}] {BUNDLE_BINS_KEY} must be an array of tables"
-        )
+        raise BundleBinsError(f"[{_SECTION}] {BUNDLE_BINS_KEY} must be an array of tables")
     return value
 
 
@@ -174,9 +181,7 @@ def _fallback_entries(text: str) -> "list[Any]":  # noqa: C901
         return []
     body = " ".join(collected).strip()
     if not (body.startswith("[") and body.endswith("]")):
-        raise BundleBinsError(
-            f"[{_SECTION}] {BUNDLE_BINS_KEY} must be an array of tables"
-        )
+        raise BundleBinsError(f"[{_SECTION}] {BUNDLE_BINS_KEY} must be an array of tables")
     entries: "list[Any]" = []
     for table in re.findall(r"\{([^{}]*)\}", body):
         entry: "dict[str, Any]" = {}
@@ -216,20 +221,20 @@ def _parse_entry(index: int, raw: Any) -> BundleBin:
         raise BundleBinsError(f"{where} `dest` must be a string")
     features = raw.get("features", [])
     if not isinstance(features, list) or not all(
-        isinstance(feature, str) and _FEATURE_NAME.fullmatch(feature)
-        for feature in features
+        isinstance(feature, str) and _FEATURE_NAME.fullmatch(feature) for feature in features
     ):
-        raise BundleBinsError(
-            f"{where} `features` must be an array of Cargo feature names"
-        )
+        raise BundleBinsError(f"{where} `features` must be an array of Cargo feature names")
     linux_libc = raw.get("linux-libc")
     if linux_libc is not None and linux_libc not in LINUX_LIBCS:
         raise BundleBinsError(
-            f"{where} `linux-libc` must be one of {', '.join(LINUX_LIBCS)}; "
-            f"got {linux_libc!r}"
+            f"{where} `linux-libc` must be one of {', '.join(LINUX_LIBCS)}; got {linux_libc!r}"
         )
+    rename = raw.get("rename")
+    if rename is not None and (not isinstance(rename, str) or not _BIN_NAME.fullmatch(rename)):
+        raise BundleBinsError(f"{where} `rename` must be a plain executable name")
     return BundleBin(
         bin=name,
+        rename=rename,
         package=package.strip() if package else None,
         dest=_normalize_dest(where, dest),
         features=tuple(features),
@@ -293,7 +298,9 @@ def entry_target_args(entry: BundleBin, target_args: Sequence[str]) -> "list[str
     wheel_target = (
         target_args[1]
         if len(target_args) == 2 and target_args[0] == "--target"
-        else _host_linux_triple() if not target_args else None
+        else _host_linux_triple()
+        if not target_args
+        else None
     )
     if wheel_target is None:
         return list(target_args)
@@ -313,13 +320,9 @@ def assert_static_elf(entry: BundleBin, executable: Path) -> None:
     """Refuse a ``linux-libc = "musl"`` bin that needs an interpreter or a
     shared library. static-pie keeps PT_DYNAMIC for its own relocations, so
     the test is the absence of PT_INTERP and of every DT_NEEDED entry."""
-    import struct  # pylint: disable=import-outside-toplevel
-
     data = executable.read_bytes()
     if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
-        raise BundleBinsError(
-            f"bundled bin `{entry.bin}` is not a little-endian ELF64 executable"
-        )
+        raise BundleBinsError(f"bundled bin `{entry.bin}` is not a little-endian ELF64 executable")
     (phoff,) = struct.unpack_from("<Q", data, 0x20)
     phentsize, phnum = struct.unpack_from("<HH", data, 0x36)
     for index in range(phnum):
@@ -337,8 +340,7 @@ def assert_static_elf(entry: BundleBin, executable: Path) -> None:
                     break
                 if tag == _ELF_DT_NEEDED:
                     raise BundleBinsError(
-                        f"bundled bin `{entry.bin}` (linux-libc = musl) needs a "
-                        "shared library"
+                        f"bundled bin `{entry.bin}` (linux-libc = musl) needs a shared library"
                     )
 
 
@@ -353,10 +355,7 @@ def executable_from_messages(stdout: str, bin_name: str) -> Path:
             message = json.loads(line)
         except ValueError:
             continue
-        if (
-            not isinstance(message, dict)
-            or message.get("reason") != "compiler-artifact"
-        ):
+        if not isinstance(message, dict) or message.get("reason") != "compiler-artifact":
             continue
         target = message.get("target")
         if not isinstance(target, dict) or target.get("name") != bin_name:
@@ -367,9 +366,7 @@ def executable_from_messages(stdout: str, bin_name: str) -> Path:
         if isinstance(executable, str) and executable:
             found = Path(executable)
     if found is None:
-        raise BundleBinsError(
-            f"cargo reported no executable for bundled bin `{bin_name}`"
-        )
+        raise BundleBinsError(f"cargo reported no executable for bundled bin `{bin_name}`")
     return found
 
 
@@ -414,9 +411,7 @@ def wheel_arcname(prefix: str, dest: str, filename: str, root_is_purelib: bool) 
     """Map an install scheme destination to its path inside the wheel."""
     scheme, _, subdir = dest.partition("/")
     parts = [part for part in (subdir, filename) if part]
-    if (scheme == "platlib" and not root_is_purelib) or (
-        scheme == "purelib" and root_is_purelib
-    ):
+    if (scheme == "platlib" and not root_is_purelib) or (scheme == "purelib" and root_is_purelib):
         return "/".join(parts)
     return "/".join([f"{prefix}.data", scheme, *parts])
 
@@ -451,9 +446,7 @@ def _root_is_purelib(wheel_metadata: str) -> bool:
     return False
 
 
-def add_files_to_wheel(
-    wheel: Path, files: "Sequence[tuple[BundleBin, Path]]"
-) -> "list[str]":
+def add_files_to_wheel(wheel: Path, files: "Sequence[tuple[BundleBin, Path]]") -> "list[str]":
     """Add executables to ``wheel`` in place and regenerate its ``RECORD``.
 
     Returns the wheel paths that were added.
@@ -472,7 +465,7 @@ def add_files_to_wheel(
         taken = set(names)
         for entry, executable in files:
             arcname = wheel_arcname(
-                prefix, entry.dest, executable.name, root_is_purelib
+                prefix, entry.dest, entry.staged_name(executable), root_is_purelib
             )
             if arcname in taken:
                 raise BundleBinsError(
@@ -484,9 +477,7 @@ def add_files_to_wheel(
         temporary = wheel.with_name(f".{wheel.name}.{os.getpid()}.tmp")
         rows: "list[list[str]]" = []
         try:
-            with zipfile.ZipFile(
-                temporary, "w", compression=zipfile.ZIP_DEFLATED
-            ) as out:
+            with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as out:
                 for info in infos:
                     if info.filename == record_name:
                         continue
@@ -621,9 +612,7 @@ def patch_sdist_workspace_members(  # noqa: C901
             parsed_root = None
         except ValueError:
             parsed_root = None
-        workspace = (
-            parsed_root.get("workspace") if isinstance(parsed_root, dict) else None
-        )
+        workspace = parsed_root.get("workspace") if isinstance(parsed_root, dict) else None
         if not isinstance(workspace, dict):
             return []
         existing_members = set(workspace.get("members") or [])

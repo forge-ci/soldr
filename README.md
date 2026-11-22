@@ -462,7 +462,8 @@ Each bin is built with `soldr build` under the same target, profile, and cache
 environment as the extension, then added to the wheel with a regenerated
 `RECORD`. `dest` is `<scheme>[/<subdir>]` with scheme `scripts` (default),
 `platlib`, `purelib`, `data`, or `headers`. `features = ["..."]` adds Cargo
-features for that bin only. soldr does not repair a bundled bin's
+features for that bin only, and `rename = "name"` stages it under another
+name. soldr does not repair a bundled bin's
 shared-library dependencies, so link it statically or give it an rpath;
 `linux-libc = "musl"` does that on Linux wheels by building the bin as a
 static `*-unknown-linux-musl` executable (verified) while the extension keeps

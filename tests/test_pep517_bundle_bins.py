@@ -112,13 +112,9 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(self.helper._fallback_entries(text), [{"bin": "x"}])
 
     def test_absent_configuration_is_empty(self) -> None:
-        self.assertEqual(
-            self._read('[tool.soldr.pep517]\ndelegate-backend = "x"\n'), []
-        )
+        self.assertEqual(self._read('[tool.soldr.pep517]\ndelegate-backend = "x"\n'), [])
         with tempfile.TemporaryDirectory() as raw:
-            self.assertEqual(
-                self.helper.read_bundle_bins(Path(raw) / "missing.toml"), []
-            )
+            self.assertEqual(self.helper.read_bundle_bins(Path(raw) / "missing.toml"), [])
 
     def test_invalid_entries_are_refused_by_name(self) -> None:
         cases = {
@@ -227,12 +223,8 @@ class WheelTest(unittest.TestCase):
 
     def test_arcname_follows_wheel_install_schemes(self) -> None:
         arcname = self.helper.wheel_arcname
-        self.assertEqual(
-            arcname("demo-0.1.0", "scripts", "x", False), "demo-0.1.0.data/scripts/x"
-        )
-        self.assertEqual(
-            arcname("demo-0.1.0", "platlib/demo/_bin", "x", False), "demo/_bin/x"
-        )
+        self.assertEqual(arcname("demo-0.1.0", "scripts", "x", False), "demo-0.1.0.data/scripts/x")
+        self.assertEqual(arcname("demo-0.1.0", "platlib/demo/_bin", "x", False), "demo/_bin/x")
         self.assertEqual(
             arcname("demo-0.1.0", "platlib/demo", "x", True),
             "demo-0.1.0.data/platlib/demo/x",
@@ -261,17 +253,13 @@ class WheelTest(unittest.TestCase):
                     ),
                 ],
             )
-            self.assertEqual(
-                added, ["demo-0.1.0.data/scripts/demo-cli", "demo/_bin/helper.exe"]
-            )
+            self.assertEqual(added, ["demo-0.1.0.data/scripts/demo-cli", "demo/_bin/helper.exe"])
             with zipfile.ZipFile(wheel) as archive:
                 self.assertIsNone(archive.testzip())
                 names = archive.namelist()
                 self.assertEqual(names[-1], "demo-0.1.0.dist-info/RECORD")
                 for name in added:
-                    self.assertEqual(
-                        (archive.getinfo(name).external_attr >> 16) & 0o777, 0o755
-                    )
+                    self.assertEqual((archive.getinfo(name).external_attr >> 16) & 0o777, 0o755)
                 self.assertEqual(archive.read("demo/_bin/helper.exe"), b"MZ helper")
                 rows = list(csv.reader(io.StringIO(archive.read(names[-1]).decode())))
                 recorded = {row[0]: row for row in rows}
@@ -279,9 +267,7 @@ class WheelTest(unittest.TestCase):
                 self.assertEqual(recorded["demo-0.1.0.dist-info/RECORD"][1:], ["", ""])
                 for name in names[:-1]:
                     data = archive.read(name)
-                    self.assertEqual(
-                        recorded[name][1:], [_record_hash(data), str(len(data))]
-                    )
+                    self.assertEqual(recorded[name][1:], [_record_hash(data), str(len(data))])
             self.assertEqual(
                 sorted(p.name for p in Path(raw).iterdir()),
                 sorted([WHEEL_NAME, "demo-cli", "helper.exe"]),
@@ -437,18 +423,14 @@ class _BackendHarness(unittest.TestCase):
     """A loaded backend over a scratch project; `_build` runs one hook."""
 
     def setUp(self) -> None:
-        self.backend = load_script_module(
-            SRC / "__init__.py", "soldr_bundle_bins_backend"
-        )
+        self.backend = load_script_module(SRC / "__init__.py", "soldr_bundle_bins_backend")
         self.helper = self.backend._sibling_module("_bundle_bins")
         self.scratch = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.scratch, ignore_errors=True)
         self.root = self.scratch / "project"
         self.root.mkdir()
         (self.root / "pyproject.toml").write_text(PYPROJECT, encoding="utf-8")
-        (self.root / "Cargo.toml").write_text(
-            "[package]\nname = 'demo'\n", encoding="utf-8"
-        )
+        (self.root / "Cargo.toml").write_text("[package]\nname = 'demo'\n", encoding="utf-8")
         self.out = self.scratch / "out"
         self.out.mkdir()
 
@@ -486,9 +468,7 @@ class _BackendHarness(unittest.TestCase):
 
         def build_bin(entry: Any, command: list[str], env: dict[str, str]) -> Path:
             calls.append(
-                BinBuildCall(
-                    entry, command, env.get("RUSTC_WRAPPER"), env.get("PYO3_PYTHON")
-                )
+                BinBuildCall(entry, command, env.get("RUSTC_WRAPPER"), env.get("PYO3_PYTHON"))
             )
             path = self.scratch / entry.bin
             path.write_bytes(entry.bin.encode())
@@ -501,7 +481,6 @@ class _BackendHarness(unittest.TestCase):
         return calls
 
 
-
 class BackendIntegrationTest(_BackendHarness):
     """The native maturin hooks build and stage configured bins."""
 
@@ -511,20 +490,14 @@ class BackendIntegrationTest(_BackendHarness):
         command = calls[0].command
         self.assertEqual(command[:4], ["soldr", "build", "--bin", "demo-cli"])
         self.assertIn("--package", command)
-        self.assertEqual(
-            command[-4:], ["--profile", "dev", "--target", "x86_64-unknown-linux-gnu"]
-        )
-        self.assertEqual(
-            calls[0].rustc_wrapper, os.environ.get("RUSTC_WRAPPER", "soldr")
-        )
+        self.assertEqual(command[-4:], ["--profile", "dev", "--target", "x86_64-unknown-linux-gnu"])
+        self.assertEqual(calls[0].rustc_wrapper, os.environ.get("RUSTC_WRAPPER", "soldr"))
         self.assertIsNone(
             calls[0].pyo3_python,
             "a cross target must not inherit the host interpreter",
         )
         with zipfile.ZipFile(self.out / WHEEL_NAME) as archive:
-            self.assertEqual(
-                archive.read("demo-0.1.0.data/scripts/demo-cli"), b"demo-cli"
-            )
+            self.assertEqual(archive.read("demo-0.1.0.data/scripts/demo-cli"), b"demo-cli")
             self.assertEqual(archive.read("demo/_bin/helper"), b"helper")
 
     def test_maturin_default_profile_is_mirrored_when_soldr_profile_is_disabled(
@@ -566,7 +539,9 @@ class BackendIntegrationTest(_BackendHarness):
             self.assertEqual(subcommand, "write-sdist")
             root_cargo = '[workspace]\nmembers = [\n    "crates/demo",\n]\n'
             extension_cargo = '[package]\nname = "demo"\n'
-            cli_cargo = '[package]\nname = "demo-cli"\n\n[[bin]]\nname = "demo-cli"\npath = "src/main.rs"\n'
+            cli_cargo = (
+                '[package]\nname = "demo-cli"\n\n[[bin]]\nname = "demo-cli"\npath = "src/main.rs"\n'
+            )
             with tarfile.open(self.out / sdist_name, "w:gz") as archive:
                 for name, text in (
                     ("demo-0.1.0/Cargo.toml", root_cargo),
@@ -620,9 +595,7 @@ class BackendIntegrationTest(_BackendHarness):
         self.assertIn("bundle-bins", str(raised.exception))
 
     def test_projects_without_bundle_bins_are_untouched(self) -> None:
-        (self.root / "pyproject.toml").write_text(
-            "[project]\nname = 'demo'\n", encoding="utf-8"
-        )
+        (self.root / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
         self.assertEqual(self._build("build_wheel"), [])
         with zipfile.ZipFile(self.out / WHEEL_NAME) as archive:
             self.assertFalse(any(".data/" in name for name in archive.namelist()))
@@ -823,20 +796,31 @@ class MuslBundleBinTest(unittest.TestCase):
             retarget(musl, ["--target", "aarch64-unknown-linux-gnu"]),
             ["--target", "aarch64-unknown-linux-musl"],
         )
-        for darwin in (["--target", "aarch64-apple-darwin"], ["--target", "x86_64-pc-windows-msvc"]):
+        for darwin in (
+            ["--target", "aarch64-apple-darwin"],
+            ["--target", "x86_64-pc-windows-msvc"],
+        ):
             self.assertEqual(retarget(musl, darwin), darwin)
-        self.assertEqual(retarget(plain, ["--target", "x86_64-unknown-linux-gnu"]),
-                         ["--target", "x86_64-unknown-linux-gnu"])
+        self.assertEqual(
+            retarget(plain, ["--target", "x86_64-unknown-linux-gnu"]),
+            ["--target", "x86_64-unknown-linux-gnu"],
+        )
         self.assertEqual(retarget(plain, []), [])
-        with mock.patch.object(self.helper.sys, "platform", "linux"), mock.patch.object(
-            self.helper.os, "uname",
-            return_value=os.uname_result(("Linux", "h", "6", "#1", "x86_64")),
+        with (
+            mock.patch.object(self.helper.sys, "platform", "linux"),
+            mock.patch.object(
+                self.helper.os,
+                "uname",
+                return_value=os.uname_result(("Linux", "h", "6", "#1", "x86_64")),
+            ),
         ):
             self.assertEqual(retarget(musl, []), ["--target", "x86_64-unknown-linux-musl"])
         with mock.patch.object(self.helper.sys, "platform", "darwin"):
             self.assertEqual(retarget(musl, []), [])
         command = self.helper.cargo_build_command(
-            musl, manifest_path=None, profile_args=["--release"],
+            musl,
+            manifest_path=None,
+            profile_args=["--release"],
             target_args=["--target", "x86_64-unknown-linux-gnu"],
         )
         self.assertEqual(
@@ -849,11 +833,13 @@ class MuslBundleBinTest(unittest.TestCase):
         command = ["soldr", "build", "--target", "x86_64-unknown-linux-musl"]
         with tempfile.TemporaryDirectory() as raw:
             executable = Path(raw) / "demo-cli"
-            message = json.dumps({
-                "reason": "compiler-artifact",
-                "target": {"name": "demo-cli", "kind": ["bin"]},
-                "executable": str(executable),
-            })
+            message = json.dumps(
+                {
+                    "reason": "compiler-artifact",
+                    "target": {"name": "demo-cli", "kind": ["bin"]},
+                    "executable": str(executable),
+                }
+            )
 
             def run(argv: Any, **_kwargs: Any) -> Any:
                 return subprocess.CompletedProcess(argv, 0, stdout=message)
@@ -870,6 +856,46 @@ class MuslBundleBinTest(unittest.TestCase):
                 self.assertIn(reason, str(raised.exception))
 
 
+class RenameTest(unittest.TestCase):
+    """`rename` stages a bin under another name (bosn's `bosn-native` -> `bosn`)."""
+
+    def setUp(self) -> None:
+        self.helper = _helper()
+
+    def test_rename_keeps_only_the_windows_suffix(self) -> None:
+        entry = self.helper.BundleBin(bin="tool-native", rename="tool")
+        self.assertEqual(entry.staged_name(Path("/t/tool-native")), "tool")
+        self.assertEqual(entry.staged_name(Path("/t/tool-native.exe")), "tool.exe")
+        plain = self.helper.BundleBin(bin="tool.v2")
+        self.assertEqual(plain.staged_name(Path("/t/tool.v2")), "tool.v2")
+        self.assertEqual(
+            self.helper.BundleBin(bin="a.b", rename="c").staged_name(Path("/t/a.b")), "c"
+        )
+
+    def test_renamed_bin_is_staged_under_its_new_name(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            wheel = Path(raw) / WHEEL_NAME
+            _write_wheel(wheel)
+            built = Path(raw) / "tool-native"
+            built.write_bytes(b"cli")
+            entry = self.helper.BundleBin(bin="tool-native", rename="tool")
+            self.helper.bundle_into_wheel(wheel, [entry], lambda _entry: built)
+            with zipfile.ZipFile(wheel) as archive:
+                self.assertEqual(archive.read("demo-0.1.0.data/scripts/tool"), b"cli")
+                self.assertNotIn("demo-0.1.0.data/scripts/tool-native", archive.namelist())
+
+    def test_rename_must_be_a_plain_name(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            pyproject = Path(raw) / "pyproject.toml"
+            pyproject.write_text(
+                '[tool.soldr.pep517]\nbundle-bins = [{ bin = "t", rename = "../x" }]\n',
+                encoding="utf-8",
+            )
+            with self.assertRaises(self.helper.BundleBinsError) as raised:
+                self.helper.read_bundle_bins(pyproject)
+        self.assertIn("plain executable name", str(raised.exception))
+
+
 class MuslBackendTest(_BackendHarness):
     """The backend gives a host-interpreter PyO3 config only to host bins."""
 
@@ -884,12 +910,16 @@ class MuslBackendTest(_BackendHarness):
         )
 
     def test_host_wheel_builds_the_musl_bin_without_the_host_interpreter(self) -> None:
-        with mock.patch.object(self.helper.sys, "platform", "linux"), mock.patch.object(
-            self.helper.os, "uname",
-            return_value=os.uname_result(("Linux", "h", "6", "#1", "x86_64")),
+        with (
+            mock.patch.object(self.helper.sys, "platform", "linux"),
+            mock.patch.object(
+                self.helper.os,
+                "uname",
+                return_value=os.uname_result(("Linux", "h", "6", "#1", "x86_64")),
+            ),
         ):
             calls = self._build("build_wheel")
-        musl, helper = calls
+        musl, helper = calls[0], calls[1]
         self.assertEqual(musl.command[-2:], ["--target", "x86_64-unknown-linux-musl"])
         self.assertIn("--features", musl.command)
         self.assertIsNone(musl.pyo3_python, "a musl bin is a cross build for PyO3")

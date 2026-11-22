@@ -275,6 +275,7 @@ bundle-bins = [
 | `package` | no | Cargo package that owns the bin (`--package`). |
 | `dest` | no | `<scheme>[/<subdir>]`; scheme is `scripts` (default), `platlib`, `purelib`, `data`, or `headers`. |
 | `features` | no | Array of Cargo features for this bin (`--features a,b`), e.g. a vendored-TLS feature the extension does not need. |
+| `rename` | no | Stage the executable under this name instead of Cargo's (`.exe` is kept on Windows), for a bin whose Cargo name is taken elsewhere in the workspace. |
 | `linux-libc` | no | `"musl"`: on a Linux wheel, build the bin for the same architecture's `*-unknown-linux-musl` triple and refuse it unless it is a static executable (no `PT_INTERP`, no `DT_NEEDED`). The PyO3 extension keeps the interpreter's glibc; Darwin and Windows wheels ignore the key. The retargeted build gets no `PYO3_PYTHON`, so an abi3 `extension-module` package plans `PYO3_NO_PYTHON`. |
 
 After maturin writes the wheel (or editable wheel), each entry runs
