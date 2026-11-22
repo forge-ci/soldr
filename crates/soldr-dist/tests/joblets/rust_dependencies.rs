@@ -129,7 +129,7 @@ fn cold_rust_unit_with_two_dependencies_and_host_proc_macro_is_byte_identical() 
         manifest
             .env
             .insert("CARGO_MANIFEST_DIR".into(), cwd.to_str().unwrap().into());
-        let memo = tokio::sync::Mutex::new(DigestMemo::default());
+        let memo = soldr_dist::rust_inputs::SharedMemo::default();
         let manifest = soldr_dist::rust_inputs::construct(manifest, &memo)
             .await
             .unwrap();

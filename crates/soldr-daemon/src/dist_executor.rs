@@ -18,7 +18,7 @@ struct Executor {
     next: AtomicUsize,
     _lease: transport::EndpointLease,
     root: std::path::PathBuf,
-    inputs: tokio::sync::Mutex<soldr_dist::cas::DigestMemo>,
+    inputs: soldr_dist::rust_inputs::SharedMemo,
 }
 
 pub(crate) async fn register(
@@ -81,7 +81,7 @@ pub(crate) async fn register(
     Ok(service.with_executor(Arc::new(Executor {
         clients,
         next: AtomicUsize::new(0),
-        inputs: tokio::sync::Mutex::new(soldr_dist::cas::DigestMemo::default()),
+        inputs: soldr_dist::rust_inputs::SharedMemo::default(),
         _lease: lease,
         root,
     }))?)

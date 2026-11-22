@@ -4,10 +4,25 @@ mod env;
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
+/// Digest memo shared by every construction in a process.
+pub type SharedMemo = Arc<soldr_platform::sync::Mutex<DigestMemo>>;
+
 /// Enlarge a hook manifest from package membership, compiler search paths and generated files.
-pub async fn construct(mut job: DistJob, memo: &tokio::sync::Mutex<DigestMemo>) -> Result<DistJob> {
+///
+/// Listing and hashing are blocking filesystem work, so they run on the blocking
+/// pool: done inline they starve the async runtime of the daemon hosting the
+/// client, which then cannot accept broker handoffs for the rest of the build.
+pub async fn construct(job: DistJob, memo: &SharedMemo) -> Result<DistJob> {
+    let memo = memo.clone();
+    tokio::task::spawn_blocking(move || construct_blocking(job, &memo))
+        .await
+        .map_err(|error| format!("dist input construction task failed: {error}"))?
+}
+
+fn construct_blocking(mut job: DistJob, memo: &soldr_platform::sync::Mutex<DigestMemo>) -> Result<DistJob> {
     let original_inputs = job.inputs.clone();
     let cwd = Path::new(&job.cwd);
     let mut paths = job
@@ -26,12 +41,11 @@ pub async fn construct(mut job: DistJob, memo: &tokio::sync::Mutex<DigestMemo>) 
         )?;
     }
     paths.retain(|path| !job.outputs.iter().any(|output| Path::new(output) == path));
-    let mut memo = memo.lock().await;
+    // Lock per file so concurrent constructions interleave instead of queueing.
     job.inputs = paths
         .into_iter()
-        .map(|p| memo.input(&p))
+        .map(|p| memo.lock().input(&p))
         .collect::<Result<_>>()?;
-    drop(memo);
     for known in &original_inputs {
         if !job.inputs.iter().any(|input| input == known) {
             return Err(format!(
@@ -276,7 +290,7 @@ mod tests {
                 inputs: vec![known],
                 ..Default::default()
             };
-            let result = construct(job, &tokio::sync::Mutex::new(DigestMemo::default())).await;
+            let result = construct(job, &SharedMemo::default()).await;
             assert!(result
                 .unwrap_err()
                 .to_string()
