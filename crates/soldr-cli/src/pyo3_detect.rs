@@ -720,6 +720,13 @@ fn detect_from_metadata_json(
     }
     extension |= features.contains("extension-module");
     embedding |= features.contains("auto-initialize");
+    // `extension-module` stops PyO3 from linking libpython, so a bin target
+    // built with it cannot embed Python: a cdylib-plus-CLI package (a PyO3
+    // wheel that also ships its command, bundle-bins) is an extension build.
+    // Only `auto-initialize` proves embedding once `extension-module` is on.
+    if features.contains("extension-module") && !features.contains("auto-initialize") {
+        embedding = false;
+    }
     let shape = match (extension, embedding) {
         (true, false) => BuildShape::Extension,
         (false, true) => BuildShape::Embedding,
