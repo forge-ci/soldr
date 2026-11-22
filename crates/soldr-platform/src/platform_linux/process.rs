@@ -1,6 +1,7 @@
 //! Linux process implementation index.
 pub mod affinity;
 pub mod command;
+pub mod child_termination;
 pub mod cpu_ticks;
 pub mod exit;
 pub mod inspect;
