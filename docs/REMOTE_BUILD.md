@@ -40,10 +40,13 @@ Use the session ID printed by `remote run`. The same command accepts
 `test` or `dylint` in place of `build` and forwards arguments to that
 Soldr command from the repository root. To export the runner's Soldr cache,
 pass `--cache-zstd-level 3` before the action and include `cache.tar.zst`
-among the fetch globs. The fetch destination must be a new directory with an
-existing parent. Artifact paths retain their relative layout.
+among the fetch globs. The runner serializes builds and cache exports
+against its dedicated compiler cache. The fetch destination must be a new
+directory with an existing parent. Artifact paths retain their relative layout.
 
-The client supplies regular files from the committed Git tree. The runner
+The client requires a commit and a clean Git status, including untracked
+files. Ignored build outputs stay local. The client reads sources from the
+committed Git tree. The runner
 asks for SHA-256 blobs missing from its disk store, then materializes each
 session in a fresh directory. The HTTP bodies use Zstandard-compressed
 Protocol Buffers. A single request or response can carry up to 256 MiB of
@@ -55,3 +58,9 @@ whose targets contain no parent traversal.
 command, and exit code. It is an unsigned record from the trusted runner.
 The CI commit-trailer verification under `ci-attestations.yml` uses a
 different format.
+
+When launching the server inside a Bosn job configured with
+`bosn ci run --github-proxy`, the runner-side command inherits Bosn's
+stand-in `GITHUB_TOKEN`, proxy settings, and CA bundle. Keep the server
+inside that job's network and lifetime so GitHub requests stay within
+Bosn's per-run allowlist.

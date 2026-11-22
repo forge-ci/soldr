@@ -9,6 +9,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::Router;
+use fs2::FileExt;
 use globset::{GlobBuilder, GlobSetBuilder};
 use prost::Message;
 
@@ -158,6 +159,14 @@ fn store_blob(root: &Path, hash: &str, blob: Blob) -> io::Result<Vec<u8>> {
 
 fn run(root: &Path, session: &Path, id: &str) -> io::Result<Vec<u8>> {
     let request = Start::decode(fs::read(session.join("start.pb"))?.as_slice())?;
+    let runner_lock = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("build.lock"))?;
+    FileExt::lock_exclusive(&runner_lock)?;
+    let cache_root = root.join("compiler");
+    let cache_dir = crate::core::SoldrPaths::with_root(cache_root.clone()).cache;
     let source = session.join("source");
     let output = session.join("output");
     fs::create_dir(&source)?;
@@ -188,25 +197,37 @@ fn run(root: &Path, session: &Path, id: &str) -> io::Result<Vec<u8>> {
     let result = Command::new(&soldr)
         .current_dir(&source)
         .env("CARGO_TARGET_DIR", output.join("target"))
+        .env("SOLDR_CACHE_DIR", &cache_root)
         .arg(action)
         .args(&request.args)
         .output()?;
     let exit_code = result.status.code().unwrap_or(1);
-    if let Some(level) = request.cache_zstd_level {
+    let mut stderr = result.stderr;
+    let cache_saved = request.cache_zstd_level.map(|level| {
         let cache = Command::new(soldr)
             .current_dir(&source)
+            .env("SOLDR_CACHE_DIR", &cache_root)
             .args(["save", "--zstd-level"])
             .arg(level.to_string())
+            .arg("--cache-dir")
+            .arg(&cache_dir)
             .arg("--out")
             .arg(output.join("cache.tar.zst"))
-            .output()?;
-        if !cache.status.success() {
-            return Err(io::Error::other(format!(
-                "soldr save failed: {}",
-                String::from_utf8_lossy(&cache.stderr)
-            )));
+            .output();
+        match cache {
+            Ok(cache) if cache.status.success() => true,
+            Ok(cache) => {
+                stderr.extend_from_slice(b"\nRemote soldr save failed:\n");
+                stderr.extend_from_slice(&cache.stderr);
+                false
+            }
+            Err(error) => {
+                stderr
+                    .extend_from_slice(format!("\nRemote soldr save failed: {error}\n").as_bytes());
+                false
+            }
         }
-    }
+    });
     let attestation = serde_json::to_vec_pretty(&serde_json::json!({
         "schema_version": 1,
         "session": id,
@@ -214,6 +235,7 @@ fn run(root: &Path, session: &Path, id: &str) -> io::Result<Vec<u8>> {
         "action": action,
         "args": request.args,
         "exit_code": exit_code,
+        "cache_saved": cache_saved,
         "runner": fs::read_to_string("/etc/hostname").ok().map(|name| name.trim().to_owned()),
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
@@ -221,9 +243,13 @@ fn run(root: &Path, session: &Path, id: &str) -> io::Result<Vec<u8>> {
     }))?;
     fs::write(output.join("attestation.json"), &attestation)?;
     wire::encode(&ResultFrame {
-        exit_code,
+        exit_code: if cache_saved == Some(false) && exit_code == 0 {
+            1
+        } else {
+            exit_code
+        },
         stdout: result.stdout,
-        stderr: result.stderr,
+        stderr,
         attestation,
     })
 }
