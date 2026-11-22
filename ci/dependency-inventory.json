@@ -97,6 +97,7 @@
       "filetime",
       "fs2",
       "iroh",
+      "proc-macro2",
       "prost",
       "running-process",
       "serde",

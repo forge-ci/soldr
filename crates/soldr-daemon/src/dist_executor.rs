@@ -17,6 +17,7 @@ struct Executor {
     cache_identity: [u8; 32],
     _lease: transport::EndpointLease,
     root: std::path::PathBuf,
+    inputs: tokio::sync::Mutex<soldr_dist::cas::DigestMemo>,
 }
 
 pub(crate) async fn register(
@@ -77,6 +78,7 @@ pub(crate) async fn register(
         next: AtomicUsize::new(0),
         compiler,
         cache_identity,
+        inputs: tokio::sync::Mutex::new(soldr_dist::cas::DigestMemo::default()),
         _lease: lease,
         root,
     }))?)
@@ -139,11 +141,6 @@ fn manifest(job: &CompileJob, compiler: &Compiler, identity: &[u8; 32]) -> Resul
     if &job.compiler_identity != identity {
         return Err("requested rustc differs from the dist client's resolved toolchain".into());
     }
-    if !job.inputs_complete && job.inputs.len() != 1 {
-        return Err(
-            "incomplete input manifest; compile locally to populate dependency discovery".into(),
-        );
-    }
     let path = |p: &std::path::Path| {
         p.to_str()
             .map(str::to_owned)
@@ -162,10 +159,11 @@ fn manifest(job: &CompileJob, compiler: &Compiler, identity: &[u8; 32]) -> Resul
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(DistJob {
+        rewrite_env: vec![],
         compiler_kind: compiler.kind.clone(),
         compiler_identity: compiler.identity.clone(),
         argv: job.args.clone(),
-        env: job.env.iter().cloned().collect(),
+        env: execution_env(job),
         cwd: path(job.cwd.as_path())?,
         stdin: job.stdin.clone(),
         inputs,
@@ -175,6 +173,10 @@ fn manifest(job: &CompileJob, compiler: &Compiler, identity: &[u8; 32]) -> Resul
             .map(|p| path(p.as_path()))
             .collect::<Result<_, _>>()?,
     })
+}
+
+fn execution_env(job: &CompileJob) -> std::collections::HashMap<String, String> {
+    job.exec_env.iter().cloned().collect()
 }
 
 impl CompileExecutor for Executor {
@@ -189,16 +191,13 @@ impl CompileExecutor for Executor {
                 Ok(job) => job,
                 Err(reason) => return self.declined(job, reason),
             };
-            let complete = job.inputs_complete;
-            let manifest = match tokio::task::spawn_blocking(move || {
-                namespace::check(&manifest, complete).map(|()| manifest)
-            })
-            .await
-            {
-                Ok(Ok(manifest)) => manifest,
-                Ok(Err(reason)) => return self.declined(job, reason),
+            if let Err(reason) = namespace::check(&manifest, true) {
+                return self.declined(job, reason);
+            }
+            let manifest = match soldr_dist::rust_inputs::construct(manifest, &self.inputs).await {
+                Ok(manifest) => manifest,
                 Err(error) => {
-                    return self.declined(job, format!("dist input inspection: {error}"));
+                    return self.declined(job, format!("dist input construction: {error}"))
                 }
             };
             let index = self.next.fetch_add(1, Ordering::Relaxed) % self.clients.len();
@@ -233,12 +232,7 @@ mod tests {
     use super::peer_list;
     #[test]
     fn reverse_and_public_relay_modes_are_explicit_overrides() {
-        assert_eq!(
-            super::relay_config(Some("default"), Some("https://custom.example".into()))
-                .unwrap()
-                .as_deref(),
-            Some("default")
-        );
+        assert!(super::relay_config(Some("default"), None).is_err());
         assert!(
             super::relay_config(Some("none"), Some("https://custom.example".into()))
                 .unwrap()
@@ -276,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_requires_complete_inputs_and_matching_cache_identity() {
+    fn manifest_accepts_cold_inputs_and_requires_matching_cache_identity() {
         use super::manifest;
         let compiler = soldr_dist::compiler::Compiler {
             kind: "rustc".into(),
@@ -291,15 +285,15 @@ mod tests {
             compiler_identity: [7; 32],
             args: vec!["--emit=metadata".into()],
             env: vec![],
+            exec_env: vec![],
+            request_args: vec![],
             cwd: std::path::PathBuf::from("/tmp").into(),
             stdin: vec![],
             inputs: vec![],
             inputs_complete: false,
             outputs: vec![std::path::PathBuf::from("/tmp/test.rmeta").into()],
         };
-        assert!(manifest(&job, &compiler, &[7; 32])
-            .unwrap_err()
-            .contains("incomplete"));
+        assert!(manifest(&job, &compiler, &[7; 32]).is_ok());
         job.inputs_complete = true;
         assert!(manifest(&job, &compiler, &[8; 32])
             .unwrap_err()

@@ -95,7 +95,44 @@ impl Compiler {
     }
     /// Runtime/toolchain environment cannot be relocated as an arbitrary Rust string.
     pub fn environment_decline(&self, job: &DistJob) -> Option<String> {
+        if self.kind == "rustc"
+            && job.inputs.iter().any(|input| {
+                Path::new(&input.abs_path).extension().is_some_and(|ext| {
+                    ["so", "dylib", "dll"]
+                        .iter()
+                        .any(|candidate| ext == *candidate)
+                })
+            })
+        {
+            let host = self
+                .identity
+                .lines()
+                .find_map(|line| line.strip_prefix("host: "));
+            for (index, arg) in job.argv.iter().enumerate() {
+                let target = if arg == "--target" {
+                    job.argv.get(index + 1).map(String::as_str)
+                } else {
+                    arg.strip_prefix("--target=")
+                };
+                if target.is_some() && target != host {
+                    return Some("cross-triple proc macro input".into());
+                }
+            }
+        }
+        if job
+            .rewrite_env
+            .iter()
+            .any(|key| !sandbox::path_environment(key))
+        {
+            return Some("invalid Rust path environment rewrite".into());
+        }
         for (key, value) in &job.env {
+            if self.kind == "rustc" {
+                continue;
+            }
+            if self.kind == "rustc" && sandbox::path_environment(key) {
+                continue;
+            }
             if Path::new(value).is_absolute()
                 && sandbox::absolute(Path::new(&job.cwd), Path::new(value)).map_or(true, |path| {
                     job.inputs
@@ -108,9 +145,7 @@ impl Compiler {
                 ));
             }
             if self.kind == "rustc" && RUNTIME_ENV.contains(&key.as_str()) {
-                return Some(format!(
-                    "worker-owned Rust runtime environment dependency: {key}"
-                ));
+                continue; // Worker configuration is applied separately; proof verifies observed reads.
             }
             if key == "RUSTUP_TOOLCHAIN"
                 && self
@@ -161,6 +196,33 @@ impl Compiler {
             .kill_on_drop(true)
             .create_process_group(true);
         for (key, value) in &job.env {
+            if RUNTIME_ENV.contains(&key.as_str())
+                || key.starts_with("SOLDR_")
+                || key.starts_with("ZCCACHE_")
+                || key.starts_with("RUNNING_PROCESS_")
+                || [
+                    "CARGO_MAKEFLAGS",
+                    "MAKEFLAGS",
+                    "MFLAGS",
+                    "RUSTC_WRAPPER",
+                    "RUSTC_WORKSPACE_WRAPPER",
+                ]
+                .contains(&key.as_str())
+            {
+                continue;
+            }
+            let value = if self.kind == "rustc" && job.rewrite_env.contains(key) {
+                if Path::new(value).is_absolute() {
+                    sandbox::mirrored(root, value)?
+                        .to_str()
+                        .ok_or("non-UTF8 Rust environment path")?
+                        .to_owned()
+                } else {
+                    value.clone()
+                }
+            } else {
+                value.clone()
+            };
             command = command.env(key, value);
         }
         // PATH and toolchain homes are worker configuration, never sandbox-rewritten.
@@ -179,7 +241,8 @@ impl Compiler {
         } else {
             command = command.arg(format!("-ffile-prefix-map={}=", mirror_root.display()));
         }
-        for arg in sandbox::argv(root, job)? {
+        let (args, proof) = crate::rust_output::proof_args(job, root)?;
+        for arg in args {
             command = command.arg(arg);
         }
         if self.kind == "rustc"
@@ -209,6 +272,8 @@ impl Compiler {
             stdout: output.stdout,
             stderr: output.stderr,
             outputs: vec![],
+            dependency_info: crate::rust_output::proof(job, root, proof.as_deref())
+                .map_err(|error| crate::dep_info::InvalidProof(error.to_string()))?,
         })
     }
 }

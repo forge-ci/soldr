@@ -30,6 +30,8 @@ pub struct DistJob {
     pub inputs: Vec<InputFile>,
     #[prost(string, repeated, tag = "8")]
     pub outputs: Vec<String>,
+    #[prost(string, repeated, tag = "9")]
+    pub rewrite_env: Vec<String>,
 }
 #[derive(Clone, PartialEq, Message)]
 pub struct Hello {
@@ -89,6 +91,8 @@ pub struct Done {
     pub stderr: Vec<u8>,
     #[prost(message, repeated, tag = "4")]
     pub outputs: Vec<OutputFile>,
+    #[prost(bytes = "vec", tag = "5")]
+    pub dependency_info: Vec<u8>,
 }
 #[derive(Clone, PartialEq, Message)]
 pub struct Fetch {

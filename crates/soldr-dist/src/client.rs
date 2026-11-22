@@ -30,6 +30,7 @@ pub struct DistClient {
     // Speculation is an optimisation, never a substitute for Need after worker restart.
     offered: Mutex<HashSet<String>>,
     memo: crate::cas::DigestMemo,
+    upload_slots: Arc<tokio::sync::Semaphore>,
     pub uploaded_blobs: AtomicU64,
 }
 impl DistClient {
@@ -42,6 +43,7 @@ impl DistClient {
         worker: EndpointAddr,
         root: &Path,
     ) -> Result<Self> {
+        transport::validate_peer(&worker)?;
         if !Trust::load(&root.join("trusted_workers.toml"))?.contains(worker.id) {
             return Err(format!("untrusted Dist worker {}", worker.id).into());
         }
@@ -54,6 +56,8 @@ impl DistClient {
             cas: Cas::new(root, u64::MAX)?,
             offered: Mutex::new(HashSet::new()),
             memo: crate::cas::DigestMemo::default(),
+            // Bound open blob files/streams for package manifests with thousands of artifacts.
+            upload_slots: Arc::new(tokio::sync::Semaphore::new(16)),
             uploaded_blobs: AtomicU64::new(0),
         })
     }
@@ -65,21 +69,32 @@ impl DistClient {
     pub fn input_files(&mut self, paths: &[std::path::PathBuf]) -> Result<Vec<InputFile>> {
         paths.iter().map(|path| self.memo.input(path)).collect()
     }
-    pub async fn execute(&self, job: DistJob) -> DistOutcome {
+    pub async fn execute(&self, mut job: DistJob) -> DistOutcome {
         let started = std::time::Instant::now();
         let mut metrics = JobMetrics::for_job(self.worker.id.to_string(), &job);
-        let mut outcome = match self.try_execute(&job, &mut metrics).await {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                eprintln!(
-                    "\x1b[31msoldr dist: WARNING worker {} lost: {error}; run locally\x1b[0m",
-                    self.worker.id
-                );
-                DistOutcome::Declined {
-                    metrics: JobMetrics::default(),
-                    reason: "worker lost".into(),
+        let validation = if job.compiler_kind == "rustc" {
+            crate::rust_inputs::validate_environment(&mut job)
+        } else {
+            Ok(())
+        };
+        let mut outcome = match validation {
+            Err(error) => DistOutcome::Declined {
+                reason: format!("Rust environment: {error}"),
+                metrics: Default::default(),
+            },
+            Ok(()) => match self.try_execute(&job, &mut metrics).await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    eprintln!(
+                        "\x1b[31msoldr dist: WARNING worker {} lost: {error}; run locally\x1b[0m",
+                        self.worker.id
+                    );
+                    DistOutcome::Declined {
+                        metrics: JobMetrics::default(),
+                        reason: "worker lost".into(),
+                    }
                 }
-            }
+            },
         };
         metrics.elapsed_millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         metrics.finish(&outcome);
@@ -175,9 +190,27 @@ impl DistClient {
             .extend(job.inputs.iter().map(|i| i.blake3.clone()));
         // No compile wall-clock timeout: QUIC keepalive bounds worker loss without killing live work.
         let reply: Reply = transport::recv(&mut recv).await?;
+        self.complete(conn, job, reply, &mut send).await
+    }
+    async fn complete(
+        &self,
+        conn: &iroh::endpoint::Connection,
+        job: &DistJob,
+        reply: Reply,
+        send: &mut iroh::endpoint::SendStream,
+    ) -> Result<DistOutcome> {
+        if let Some(declined) = reply.declined {
+            return Ok(DistOutcome::Declined {
+                reason: declined.reason,
+                metrics: Default::default(),
+            });
+        }
         let done = reply.done.ok_or("expected Done")?;
-        let outputs = self.fetch(conn, job, &done, &mut send).await?;
-        transport::send(&mut send, &Accepted {}).await?;
+        if let Some(declined) = crate::dep_info::decline(job, &done, &self.worker.id.to_string()) {
+            return Ok(declined);
+        }
+        let outputs = self.fetch(conn, job, &done, send).await?;
+        transport::send(send, &Accepted {}).await?;
         send.finish()?;
         // After publication starts, errors must not permit a local fallback over
         // partly replaced outputs. No await/cancellation point follows publication.
@@ -213,11 +246,16 @@ impl DistClient {
                 .iter()
                 .find(|i| &i.blake3 == digest)
                 .ok_or("worker requested undeclared digest")?;
-            let file = fs::File::open(&input.abs_path)?;
+            let path = input.abs_path.clone();
             let conn = conn.clone();
             let digest = digest.clone();
+            let slots = self.upload_slots.clone();
             self.uploaded_blobs.fetch_add(1, Ordering::Relaxed);
-            transfers.spawn(async move { transport::upload(&conn, digest, file).await });
+            transfers.spawn(async move {
+                let _slot = slots.acquire_owned().await?;
+                let file = fs::File::open(path)?;
+                transport::upload(&conn, digest, file).await
+            });
         }
         Ok(())
     }

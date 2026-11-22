@@ -65,6 +65,7 @@ impl Worker {
         }
         let trusted = Trust::load(&self.root.join("trusted_clients.toml"))?;
         for client in &self.clients {
+            transport::validate_peer(client)?;
             if !trusted.contains(client.id) {
                 return Err(
                     format!("configured outbound client {} is not trusted", client.id).into(),
@@ -255,7 +256,9 @@ async fn handle_job(
         },
     )
     .await?;
-    let mut done = compiler.run(&job, sandbox.path()).await?;
+    let Some(mut done) = execute_compiler(compiler, &job, sandbox.path(), &mut send).await? else {
+        return Ok(());
+    };
     crate::rust_output::restore(&job, sandbox.path(), &mut done)?;
     if done.exit_code == 0 {
         done.outputs = compiler::outputs(&job, sandbox.path(), &mut lease)?;
@@ -287,6 +290,27 @@ async fn handle_job(
     send.finish()?;
     Ok(())
 }
+async fn execute_compiler(
+    compiler: &Compiler,
+    job: &DistJob,
+    sandbox: &std::path::Path,
+    send: &mut SendStream,
+) -> Result<Option<crate::proto::Done>> {
+    match compiler.run(job, sandbox).await {
+        Ok(done) => Ok(Some(done)),
+        Err(error)
+            if error
+                .downcast_ref::<crate::dep_info::InvalidProof>()
+                .is_some() =>
+        {
+            decline(send, &format!("Rust input backstop: {error}")).await?;
+            send.finish()?;
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn expected_inputs(job: &DistJob) -> Result<Vec<(String, u64)>> {
     sandbox::mirrored(std::path::Path::new("/validation"), &job.cwd)?;
     let mut paths = HashSet::new();

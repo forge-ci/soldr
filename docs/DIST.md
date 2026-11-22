@@ -542,10 +542,9 @@ The direct2 bundle supplies transport/library and debug-exec support on zccache
 separate `feat/dist-miss-path` adapter bundle; a successful ordinary Cargo build
 on direct2 alone is not evidence of remote execution.
 
-`--relay default` (or `SOLDR_DIST_RELAY=default`) explicitly enables iroh's
-production n0 public relay map. This is opt-in: no flag/URL now selects the Forge
-relay at `https://signal.forge-ci.com`, and `--relay none` disables relay transports.
-Both `--relay <https-url>` and `--relay-url <https-url>` select a custom relay. No public address
+`--relay https://signal.forge-ci.com` selects the Forge-owned relay, also the
+default when no setting is present. `--relay none` disables relay transports.
+The privacy rule rejects public n0 selectors and any relay host outside the Forge allowlist. No public address
 lookup, registry, portmapper, or discovery backend is enabled. Relay traffic
 contains end-to-end encrypted QUIC payloads authenticated to the pinned peer
 identities; public relays can observe connection metadata. Iroh attempts direct
@@ -554,9 +553,9 @@ UDP paths when possible and keeps the encrypted relay fallback when they fail.
 | Mode | Required network reachability |
 |---|---|
 | Ordinary `--relay none` | Client must reach the node's advertised UDP IP/port. This needs allowed inbound UDP on the node and does **not** meet the Dell firewall policy. |
-| Ordinary `--relay default` or HTTPS relay URL | Both endpoints need outbound DNS and HTTPS to their configured relays. Optional outbound UDP enables hole punching; no node inbound port rule/forwarding is required for relay fallback. |
+| Ordinary `--relay https://signal.forge-ci.com` or HTTPS relay URL | Both endpoints need outbound DNS and HTTPS to their configured relays. Optional outbound UDP enables hole punching; no node inbound port rule/forwarding is required for relay fallback. |
 | `serve --outbound-only --client-ticket ... --relay none` | Node initiates UDP to the client's advertised IP/port. Client must allow that inbound path; node needs only outbound/established-return traffic. |
-| `serve --outbound-only --client-ticket ... --relay default` | Both endpoints use outbound relay connections. Node initiates QUIC to the client's full relay ticket; neither host needs an unsolicited inbound port rule. |
+| `serve --outbound-only --client-ticket ... --relay https://signal.forge-ci.com` | Both endpoints use outbound relay connections. Node initiates QUIC to the client's full relay ticket; neither host needs an unsolicited inbound port rule. |
 
 The node accepts repeatable `--client-ticket '<full JSON ticket>'` arguments.
 They do not grant trust: each client ID must already be in trusted_clients.toml,
@@ -583,22 +582,22 @@ First no-inbound debug proof (ordinary relay mode; reciprocal trust as above):
 ```sh
 # Dell, as soldr-dist. No inbound firewall change.
 RUSTUP_TOOLCHAIN=1.98.1 soldr dist serve --root /var/lib/soldr-dist/state \
-  --relay default --slots 8 --cas-budget 10737418240 \
+  --relay https://signal.forge-ci.com --slots 8 --cas-budget 10737418240 \
   --host-load-file /run/forge/host-load.json
 # Workstation, after copying the node's printed full ticket.
-RUSTUP_TOOLCHAIN=1.98.1 soldr dist exec --root "$CLIENT_ROOT" --relay default \
+RUSTUP_TOOLCHAIN=1.98.1 soldr dist exec --root "$CLIENT_ROOT" --relay https://signal.forge-ci.com \
   --worker "$DIST_TICKET" -- rustc --crate-type lib --emit=obj \
   "$PWD/target/dist-smoke/smoke.rs" -o "$PWD/target/dist-smoke/smoke.o"
 ```
 
 For reverse-only Cargo **on the separate feat/dist-miss-path adapter stack**,
 first initialise the long-lived miss-path daemon/client
-with SOLDR_DIST_RELAY=default and an explicit trusted worker, then copy its
+with SOLDR_DIST_RELAY=https://signal.forge-ci.com and an explicit trusted worker, then copy its
 client-ticket.json to CLIENT_TICKET. Start the node with:
 
 ```sh
 RUSTUP_TOOLCHAIN=1.98.1 soldr dist serve --root /var/lib/soldr-dist/state \
-  --relay default --outbound-only --client-ticket "$CLIENT_TICKET" \
+  --relay https://signal.forge-ci.com --outbound-only --client-ticket "$CLIENT_TICKET" \
   --slots 8 --cas-budget 10737418240 --host-load-file /run/forge/host-load.json
 ```
 
@@ -606,7 +605,7 @@ Set SOLDR_DIST_REVERSE_ONLY=true **before** that client daemon starts to enforce
 the direction. Its worker configuration may then be just the pinned node ID;
 the full client ticket supplies routing in the worker-to-client direction.
 
-- 2026-11-21 Owner explicitly opts into n0 public relays through --relay default
+- 2026-11-21 Owner explicitly opts into n0 public relays through --relay https://signal.forge-ci.com
   to reach Dells that open no inbound ports. Defaults remain private/direct.
 - 2026-11-21 Static worker-to-client warm connections provide a reverse path;
   one joblet per connection retains blob isolation without changing protobuf.
@@ -615,8 +614,8 @@ the full client ticket supplies routing in the worker-to-client direction.
 ### Updated miss-path bundle: public relay and reverse-only bootstrap
 
 The updated `feat/dist-miss-path` stack shares one ClientConnections listener
-across all configured workers. `SOLDR_DIST_RELAY=default` explicitly selects n0
-public relays, `none` disables them, and an HTTPS URL selects a custom relay.
+across all configured workers. `SOLDR_DIST_RELAY=https://signal.forge-ci.com` selects the Forge-owned relay;
+`none` disables relays. An HTTPS URL must be on the Forge allowlist.
 Without a setting the CLI and Cargo adapter both use `https://signal.forge-ci.com`.
 `SOLDR_DIST_REVERSE_ONLY=true` requires worker-originated connections; false
 permits normal dialing too. `[dist] reverse_only = true` is the file equivalent,
@@ -627,7 +626,7 @@ just the trusted worker node ID; the worker's full client ticket supplies routin
 # Workstation: use the updated miss-path binary on PATH, with a separate identity.
 export SOLDR_CACHE_DIR="$PWD/target/dist-miss-cache"
 export SOLDR_DIST_ROOT="$PWD/target/dist-miss-client"
-export SOLDR_DIST_RELAY=default
+export SOLDR_DIST_RELAY=https://signal.forge-ci.com
 export SOLDR_DIST_REVERSE_ONLY=true
 export SOLDR_DIST_PEERS="$WORKER_ID"
 soldr dist status --root "$SOLDR_DIST_ROOT" --json
@@ -640,7 +639,7 @@ CARGO_INCREMENTAL=0 RUSTUP_TOOLCHAIN=1.98.1 soldr cargo build --release \
 ```
 
 Copy the current ticket, including its relay URL after connection, to the node.
-Restart only the dist service with --relay default --outbound-only and
+Restart only the dist service with --relay https://signal.forge-ci.com --outbound-only and
 --client-ticket '<client-ticket.json contents>'. Keep the node's persisted key
 so WORKER_ID stays unchanged. Run the next eligible library miss and verify
 `soldr dist remote cache miss executed` in daemon logs or the zccache execution
@@ -660,7 +659,7 @@ namespace/input-completeness restrictions of the miss adapter remain in force.
 The workstation-to-E640 Rust object proof passed through a public n0 relay:
 remote output bytes matched the local compile. Plain direct LAN required inbound
 UDP on the Dell and failed under fleet firewall policy; the client declined and
-fell back locally in about 11 seconds. Use `--relay default` (explicit n0 opt-in)
+fell back locally in about 11 seconds. Use `--relay https://signal.forge-ci.com` (explicit n0 opt-in)
 or an explicit HTTPS relay URL for no-inbound nodes. Relayed QUIC remains
 end-to-end encrypted; no node firewall opening or registry is required.
 
@@ -694,9 +693,9 @@ when speculation prevents reliable inference. Successful repeated jobs on the
 same retained client/node can report Need=0, uploaded=0 and CAS hits>0.
 
 ```sh
-soldr dist exec --root "$CLIENT_ROOT" --relay default --worker "$DIST_TICKET" \
+soldr dist exec --root "$CLIENT_ROOT" --relay https://signal.forge-ci.com --worker "$DIST_TICKET" \
   --verbose -- rustc --crate-type lib --emit=obj hello.rs -o hello.o
-soldr dist exec --root "$CLIENT_ROOT" --relay default --worker "$DIST_TICKET" \
+soldr dist exec --root "$CLIENT_ROOT" --relay https://signal.forge-ci.com --worker "$DIST_TICKET" \
   --json -- rustc --crate-type lib --emit=obj hello.rs -o hello.o
 soldr dist status --root "$CLIENT_ROOT" --json
 ```
@@ -713,14 +712,14 @@ the executed outcome; it cannot cause fallback after outputs were published.
 
 Dist CLI tracing uses EnvFilter precedence RUST_LOG, then SOLDR_LOG, then warn,
 and writes to stderr. Example: `RUST_LOG=iroh=debug,soldr_dist=info soldr dist serve
---relay default ...`. The daemon's existing rolling log respects this filter when
+--relay https://signal.forge-ci.com ...`. The daemon's existing rolling log respects this filter when
 feature dist is enabled; prefer SOLDR_LOG for Cargo since the broker forwards
 the SOLDR namespace. Set it before starting the fresh daemon generation.
 
 For the simplest first Cargo proof, use ordinary relay mode (no --outbound-only
 or reverse-only flag), a full worker ticket, and the current miss-path binary
 on **both** hosts. On the client select fresh isolated cache/identity roots,
-set SOLDR_DIST_PEERS to the full ticket, SOLDR_DIST_RELAY=default,
+set SOLDR_DIST_PEERS to the full ticket, SOLDR_DIST_RELAY=https://signal.forge-ci.com,
 SOLDR_DIST_REVERSE_ONLY=false, and SOLDR_LOG=info. Run the tiny release library
 with CARGO_INCREMENTAL=0. Verify that the client's status last_job has a new
 completion timestamp, outcome=executed, exit_code=0 and a measured path; Cargo
@@ -752,7 +751,7 @@ The default relay for `dist serve`, `dist exec`, and the Cargo miss adapter is
 behind Caddy; bring-up depends on that service being deployed. Override it with
 `--relay https://other-relay.example`, `--relay-url`, `SOLDR_DIST_RELAY_URL`, or
 `[dist] relay_url`. `--relay` / `SOLDR_DIST_RELAY` wins over the URL setting.
-Explicit `default` retains the n0 public relay map fallback; `none` is direct-only.
+Explicit `default` and third-party relay URLs are rejected by the privacy rule; `none` is direct-only.
 
 Both relay and ephemeral IPv4/IPv6 UDP transports remain enabled together. Iroh
 uses the relay to coordinate simultaneous-open hole punching, then prefers direct
@@ -777,3 +776,73 @@ Decision log:
   preserving dual-stack UDP so relay coordination can upgrade to direct QUIC.
 - 2026-11-22 Defer signal NodeAddr publication/resolution to the discovery follow-up
   PR after the miss path; static tickets continue to support bring-up meanwhile.
+
+### Rust input construction and input-proof backstop (next candidate)
+
+Cold misses construct inputs without relying on the hook's inputs_complete bit.
+The package source set comes from git ls-files under CARGO_MANIFEST_DIR or Cargo's
+package --list outside git; explicit extern files, files in -L search directories
+(including transitive Rust metadata/native archives), and recursive OUT_DIR files
+are added. Search directories are conservatively over-approximated because Rust
+can load transitive metadata. Digest memoisation and the content-addressed store
+reuse unchanged content across joblets, including identical bytes at different paths.
+Build scripts and final linking stay local under the hook's existing policy.
+Host/commit identity must match; non-host targets are declined before loading macros.
+
+The hook now supplies exec_env from the actual request, separately from key env.
+The adapter retains the full original execution snapshot, including CARGO_*,
+OUT_DIR and aliased env!/option_env! inputs. Worker runtime variables, jobserver
+descriptors and Soldr lineage controls are overridden only during execution;
+dep-info env observations are compared against the original snapshot. The encrypted
+execution manifest goes only to explicitly trusted Forge dist nodes, never a
+third-party relay or the persistent event/status logs.
+The bring-up branch temporarily pins published zccache Git commit
+605a5297a2858f66f80410cbc16dccbb939946c7 (PR2234), package version1.15.17;
+replace this with the exact released crate before merging to main. No absolute
+path dependency override is committed. Computed env macro names decline clearly.
+
+Path env values used only as string constants remain original client values.
+Values used inside include!/include_str!/include_bytes! are sandbox-rewritten,
+recorded in DistJob.rewrite_env. Mixed constant/include uses of one path variable decline until a filesystem
+namespace can preserve both semantics. Path rewrites with opaque/forwarded macros
+or transferred Rust artifacts also decline because external expansions can hide
+constant reads; ordinary external-dependency units without such rewrites remain
+eligible. These reasons are surfaced explicitly, not treated as remote success. Arbitrary
+proc-macro filesystem/environment reads are not made hermetic by argv remapping;
+macros that require unavailable host paths may decline to local execution.
+
+Every remote Rust invocation emits dep-info, reusing Cargo's existing depfile or
+a private sidecar. Done carries the proof bytes. The worker first requires physical dependency paths to stay under the sandbox
+and verifies their bytes against shipped digests with dep-info remapping disabled
+(object/diagnostic remaps remain active). The client validates all escaped
+file dependencies against shipped absolute paths and all env-dep lines against
+the supplied values before fetching/publishing outputs. Missing/invalid proof or
+an outside path discards the remote result and reports a decline; the cache
+executor compiles locally. Compiler path remaps restore original client paths and
+preserve the existing ZCCACHE_PATH_REMAP convention. Only textual depfiles and
+artifact notifications are restored; binary outputs are never edited.
+
+Protocol VERSION2 requires both client and node to update together. Static trust
+files remain. Relay configuration, tickets, and library peer arguments reject
+third-party relay URLs, credentials and non-HTTPS URLs: only signal.forge-ci.com
+on HTTPS443 is allowed. Public Default/Staging relay modes are never constructed.
+No registry is contacted by this candidate.
+
+Decision log:
+- 2026-11-22 Construct cold Rust source/artifact/generated input manifests rather
+  than rejecting incomplete hook graphs or every external dependency.
+- 2026-11-22 Add compiler dependency/env proof before output publication as a
+  correctness backstop; retain explicit local execution on a failed proof.
+- 2026-11-22 Preserve literal path env constants while separately remapping include
+  paths; decline mixed uses rather than producing different artifact bytes.
+- 2026-11-22 Owner privacy rule removes public relay default/staging selection and
+  validates relay hosts in static tickets and library APIs, not just CLI flags.
+- 2026-11-22 VERSION2 carries input proof and selective environment remaps; an old
+  node cannot silently omit the new correctness check.
+
+Construction review regressions also cover explicit env aliases, macro_rules
+forwarding, preservation of hook-keyed input digests, a CAS42/worker-host7 absolute
+include, and original execution environment values. Source/listing enumeration
+has bounded offline fallbacks; Cargo-generated registry checksum membership
+avoids nested Cargo locks. Arbitrary proc-macro side effects remain an explicit
+trusted-input/hermeticity assumption, not a capability guaranteed by dep-info.

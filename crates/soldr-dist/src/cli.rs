@@ -21,7 +21,7 @@ pub struct DistArgs {
     pub root: Option<PathBuf>,
     #[arg(long, global = true, env = "SOLDR_DIST_RELAY_URL")]
     pub relay_url: Option<String>,
-    /// HTTPS relay URL, default for public n0 relays, or none for direct LAN.
+    /// Forge HTTPS relay URL, or none for direct LAN; third-party relays are forbidden.
     #[arg(long, global = true, value_parser = transport::parse_relay_selection, env = "SOLDR_DIST_RELAY")]
     pub relay: Option<String>,
     #[command(subcommand)]

@@ -24,6 +24,7 @@ fn proto_roundtrip() {
             executable: true,
         }],
         outputs: vec!["/work/a.o".into()],
+        rewrite_env: vec![],
     };
     let offer = Offer {
         job: Some(job),
@@ -38,6 +39,7 @@ fn proto_roundtrip() {
             exit_code: 1,
             stdout: vec![0, 255],
             stderr: b"error".to_vec(),
+            dependency_info: b"a.o: a.rs\n".to_vec(),
             outputs: vec![OutputFile {
                 abs_path: "/work/a.o".into(),
                 blake3: "def".into(),
@@ -341,45 +343,50 @@ fn posix_paths() -> bool {
 }
 
 #[test]
-fn rust_runtime_environment_dependencies_decline_before_execution() {
-    let compiler = soldr_dist::compiler::Compiler {
-        kind: "rustc".into(),
-        identity: "test".into(),
-        program: "soldr".into(),
-        prefix: vec!["rustc".into()],
-        toolchain: None,
-    };
-    let job = DistJob {
+fn rust_runtime_environment_reads_are_checked_before_execution() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("lib.rs");
+    std::fs::write(
+        &source,
+        "pub const HOME: &str = env!(\"RUSTUP_TOOLCHAIN\");",
+    )
+    .unwrap();
+    let mut job = DistJob {
         env: HashMap::from([("RUSTUP_TOOLCHAIN".into(), "1.98.1".into())]),
-        ..DistJob::default()
+        inputs: vec![soldr_dist::cas::DigestMemo::default()
+            .input(&source)
+            .unwrap()],
+        ..Default::default()
     };
-    assert!(compiler
-        .environment_decline(&job)
-        .unwrap()
+    assert!(soldr_dist::rust_inputs::validate_environment(&mut job)
+        .unwrap_err()
+        .to_string()
         .contains("RUSTUP_TOOLCHAIN"));
 }
 
 #[test]
-fn custom_input_path_environment_declines_instead_of_reading_host_files() {
-    let compiler = soldr_dist::compiler::Compiler {
-        kind: "rustc".into(),
-        identity: "test".into(),
-        program: "soldr".into(),
-        prefix: vec!["rustc".into()],
-        toolchain: None,
+fn aliased_option_env_keeps_the_original_execution_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("lib.rs");
+    std::fs::write(
+        &source,
+        "use std::option_env as opt; pub const V: Option<&str> = opt!(\"CUSTOM\");",
+    )
+    .unwrap();
+    let mut job = DistJob {
+        cwd: temp.path().to_str().unwrap().into(),
+        env: HashMap::from([("CUSTOM".into(), "present".into())]),
+        inputs: vec![soldr_dist::cas::DigestMemo::default()
+            .input(&source)
+            .unwrap()],
+        ..Default::default()
     };
-    let job = DistJob {
-        env: HashMap::from([("DATA_FILE".into(), "/repo/build/../data.bin".into())]),
-        inputs: vec![InputFile {
-            abs_path: "/repo/data.bin".into(),
-            ..InputFile::default()
-        }],
-        ..DistJob::default()
-    };
-    assert!(compiler
-        .environment_decline(&job)
-        .unwrap()
-        .contains("DATA_FILE"));
+    soldr_dist::rust_inputs::validate_environment(&mut job).unwrap();
+    assert_eq!(job.env.get("CUSTOM").map(String::as_str), Some("present"));
+    assert!(soldr_dist::dep_info::validate(&job, "a.o: lib.rs\n# env-dep:CUSTOM\n").is_err());
+    assert!(
+        soldr_dist::dep_info::validate(&job, "a.o: lib.rs\n# env-dep:CUSTOM=present\n").is_ok()
+    );
 }
 
 #[test]
@@ -587,7 +594,7 @@ fn shared_key_lease_excludes_endpoints_with_different_roots() {
 fn static_peer_accepts_ticket_or_node_id_with_explicit_relay() {
     use soldr_dist::transport::{parse_peer, ticket};
     let id = iroh::SecretKey::generate().public();
-    let relay = "https://relay.example.com";
+    let relay = "https://signal.forge-ci.com";
     let expected = iroh::EndpointAddr::new(id).with_relay_url(relay.parse().unwrap());
     assert_eq!(parse_peer(&id.to_string(), Some(relay)).unwrap(), expected);
     assert_eq!(
@@ -689,46 +696,52 @@ fn assigned_rust_emit_outputs_are_mirrored_in_both_argument_forms() {
 }
 
 #[test]
-fn public_relays_are_explicit_and_reverse_peers_can_use_only_a_node_id() {
-    use soldr_dist::transport::{parse_worker, relay_mode};
+fn forge_relay_privacy_and_reverse_peers_are_enforced() {
+    use soldr_dist::transport::{parse_worker, relay_config, relay_mode, DEFAULT_RELAY_URL};
     assert!(matches!(
         relay_mode(None).unwrap(),
         iroh::RelayMode::Disabled
     ));
-    assert!(matches!(
-        relay_mode(Some("default")).unwrap(),
-        iroh::RelayMode::Default
-    ));
-    assert!(relay_mode(Some("http://relay.example.com")).is_err());
+    assert_eq!(
+        relay_config(None, None).unwrap().as_deref(),
+        Some(DEFAULT_RELAY_URL)
+    );
+    for rejected in [
+        "default",
+        "staging",
+        "https://use1-1.relay.n0.iroh-canary.iroh.link",
+        "https://iroh.link",
+        "https://iroh.network",
+        "https://n0.computer",
+        "http://signal.forge-ci.com",
+    ] {
+        assert!(relay_mode(Some(rejected)).is_err(), "{rejected}");
+    }
+    let source = include_str!("../../src/transport.rs");
+    for variant in ["Default", "Staging"] {
+        assert!(!source.contains(&format!("RelayMode::{variant}")));
+    }
     let id = iroh::SecretKey::generate().public();
     assert_eq!(parse_worker(&id.to_string(), None, true).unwrap().id, id);
     assert!(parse_worker(&id.to_string(), None, false).is_err());
-    assert!(parse_worker(&id.to_string(), Some("default"), false).is_err());
+    let forbidden =
+        iroh::EndpointAddr::new(id).with_relay_url("https://iroh.link".parse().unwrap());
+    assert!(soldr_dist::transport::parse_ticket(
+        &soldr_dist::transport::ticket(&forbidden).unwrap()
+    )
+    .is_err());
     #[derive(clap::Parser)]
     struct Command {
         #[command(flatten)]
         args: soldr_dist::cli::DistArgs,
     }
     use clap::Parser;
-    let args = Command::try_parse_from(["dist", "serve", "--relay", "default"])
+    assert!(Command::try_parse_from(["dist", "serve", "--relay", "default"]).is_err());
+    let args = Command::try_parse_from(["dist", "serve", "--relay", DEFAULT_RELAY_URL])
         .unwrap()
         .args;
-    assert_eq!(args.relay.as_deref(), Some("default"));
-    let args = Command::try_parse_from(["dist", "serve", "--relay", "https://signal.forge-ci.com"])
-        .unwrap()
-        .args;
-    assert_eq!(args.relay.as_deref(), Some("https://signal.forge-ci.com"));
-    assert_eq!(
-        soldr_dist::transport::relay_config(None, None)
-            .unwrap()
-            .as_deref(),
-        Some(soldr_dist::transport::DEFAULT_RELAY_URL)
-    );
-    assert!(soldr_dist::transport::relay_config(Some("none"), None)
-        .unwrap()
-        .is_none());
+    assert_eq!(args.relay.as_deref(), Some(DEFAULT_RELAY_URL));
     assert!(Command::try_parse_from(["dist", "serve", "--outbound-only"]).is_err());
-    assert!(Command::try_parse_from(["dist", "serve", "--relay", "auto"]).is_err());
 }
 
 #[test]

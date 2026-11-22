@@ -91,6 +91,7 @@ pub async fn job(argv: &[String]) -> Result<DistJob> {
         .collect::<Result<_>>()?;
     let env = dependency_environment(&text)?;
     Ok(DistJob {
+        rewrite_env: vec![],
         compiler_kind: compiler.kind,
         compiler_identity: compiler.identity,
         argv: args.to_vec(),

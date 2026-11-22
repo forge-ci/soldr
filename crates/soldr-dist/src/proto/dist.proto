@@ -15,6 +15,7 @@ message DistJob {
   bytes stdin = 6;
   repeated InputFile inputs = 7;
   repeated string outputs = 8;
+  repeated string rewrite_env = 9;
 }
 message Hello {
   uint32 version = 1;
@@ -49,6 +50,7 @@ message Done {
   bytes stdout = 2;
   bytes stderr = 3;
   repeated OutputFile outputs = 4;
+  bytes dependency_info = 5;
 }
 message Fetch {
   repeated string digests = 1;

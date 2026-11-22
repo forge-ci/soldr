@@ -46,11 +46,27 @@ pub fn materialise(root: &Path, job: &DistJob, cas: &Cas) -> Result<()> {
         }
     }
     fs::create_dir_all(mirrored(root, &job.cwd)?)?;
+    for key in ["OUT_DIR", "CARGO_MANIFEST_DIR", "CARGO_TARGET_DIR"] {
+        if let Some(path) = job
+            .env
+            .get(key)
+            .filter(|path| Path::new(path).is_absolute())
+        {
+            fs::create_dir_all(mirrored(root, path)?)?;
+        }
+    }
     for output in &job.outputs {
         let output = mirrored(root, output)?;
         fs::create_dir_all(output.parent().ok_or("output parent missing")?)?;
     }
     Ok(())
+}
+
+pub(crate) fn path_environment(key: &str) -> bool {
+    matches!(
+        key,
+        "OUT_DIR" | "CARGO_MANIFEST_DIR" | "CARGO_MANIFEST_PATH" | "CARGO_TARGET_DIR"
+    )
 }
 /// Normalise lexical absolute paths without requiring outputs to exist.
 pub fn absolute(cwd: &Path, path: &Path) -> Result<PathBuf> {

@@ -8,6 +8,22 @@ pub(crate) fn restore(job: &DistJob, root: &Path, done: &mut Done) -> Result<()>
     }
     for bytes in [&mut done.stdout, &mut done.stderr] {
         if let Ok(mut text) = String::from_utf8(bytes.clone()) {
+            // A private proof sidecar is transport metadata, never a Cargo artifact.
+            let proof = root.join("rust-input-proof.d");
+            text = text
+                .split_inclusive('\n')
+                .filter(|line| {
+                    serde_json::from_str::<serde_json::Value>(line)
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .get("artifact")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_owned)
+                        })
+                        .is_none_or(|artifact| Path::new(&artifact) != proof)
+                })
+                .collect();
             for output in &job.outputs {
                 let mirrored = sandbox::mirrored(root, output)?;
                 let before = serde_json::to_string(&mirrored)?;
@@ -31,6 +47,81 @@ pub(crate) fn restore(job: &DistJob, root: &Path, done: &mut Done) -> Result<()>
         std::fs::write(path, text.replace(prefix, ""))?;
     }
     Ok(())
+}
+
+/// Reuse Cargo's depfile where present; otherwise add a private proof sidecar.
+pub(crate) fn proof_args(
+    job: &DistJob,
+    root: &Path,
+) -> Result<(Vec<String>, Option<std::path::PathBuf>)> {
+    let mut args = sandbox::argv(root, job)?;
+    if job.compiler_kind != "rustc" {
+        return Ok((args, None));
+    }
+    if args.iter().any(|arg| arg.starts_with("--remap-path-scope")) {
+        return Err("custom remap scope requires separate input proof support".into());
+    }
+    args.push("--remap-path-scope=object,diagnostics".into());
+    if let Some(path) = depfiles(job)?.into_iter().next() {
+        return Ok((args, Some(sandbox::mirrored(root, &path)?)));
+    }
+    let proof = root.join("rust-input-proof.d");
+    let mode = format!("dep-info={}", proof.display());
+    if let Some(index) = args
+        .iter()
+        .position(|a| a == "--emit" || a.starts_with("--emit="))
+    {
+        let index = if args[index] == "--emit" {
+            index + 1
+        } else {
+            index
+        };
+        let value = args.get_mut(index).ok_or("missing emit value")?;
+        value.push(',');
+        value.push_str(&mode);
+    } else {
+        args.push(format!("--emit=link,{mode}"));
+    }
+    Ok((args, Some(proof)))
+}
+
+pub(crate) fn proof(job: &DistJob, root: &Path, path: Option<&Path>) -> Result<Vec<u8>> {
+    let Some(path) = path else {
+        return Ok(Vec::new());
+    };
+    // On a compiler error a proof may not exist: the client then declines before publication.
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    if std::fs::metadata(path)?.len() > 4 * 1024 * 1024 {
+        return Err("Rust dependency proof exceeds limit".into());
+    }
+    let text = std::fs::read_to_string(path)?;
+    let prefix = root.join("root");
+    let cwd = sandbox::mirrored(root, &job.cwd)?;
+    for actual in crate::dep_info::paths(&text, &cwd)? {
+        let relative = actual
+            .strip_prefix(&prefix)
+            .map_err(|_| format!("dependency read outside sandbox: {}", actual.display()))?;
+        let client = Path::new("/").join(relative);
+        let expected = job
+            .inputs
+            .iter()
+            .find(|input| Path::new(&input.abs_path) == client)
+            .ok_or_else(|| format!("dependency outside shipped inputs: {}", client.display()))?;
+        let mut hash = blake3::Hasher::new();
+        hash.update_reader(std::fs::File::open(&actual)?)?;
+        if hash.finalize().to_hex().as_str() != expected.blake3 {
+            return Err(format!(
+                "dependency bytes differ from shipped input: {}",
+                client.display()
+            )
+            .into());
+        }
+    }
+    Ok(text
+        .replace(prefix.to_str().ok_or("non-UTF8 sandbox root")?, "")
+        .into_bytes())
 }
 
 fn depfiles(job: &DistJob) -> Result<HashSet<String>> {

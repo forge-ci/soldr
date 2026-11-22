@@ -8,7 +8,7 @@ use prost::Message;
 use std::{path::Path, time::Duration};
 
 pub const ALPN: &[u8] = b"soldr-dist/0";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const DEFAULT_RELAY_URL: &str = "https://signal.forge-ci.com";
 pub const CONTROL_LIMIT: usize = 8 * 1024 * 1024;
 pub const BLOB_LIMIT: u64 = 16 * 1024 * 1024 * 1024;
@@ -83,40 +83,51 @@ pub fn parse_relay_selection(value: &str) -> Result<String> {
     Ok(value.to_owned())
 }
 
-/// Public n0 relays remain an explicit `default` selection.
+/// Forge-owned relays only: peer identity metadata must never reach a third party.
 pub fn relay_mode(value: Option<&str>) -> Result<iroh::RelayMode> {
     match value {
         None => Ok(iroh::RelayMode::Disabled),
-        Some("default") => Ok(iroh::RelayMode::Default),
-        Some(value) => {
-            let url: iroh::RelayUrl = value.parse()?;
-            if url.scheme() != "https" {
-                return Err("dist relay URL must use HTTPS".into());
-            }
-            Ok(iroh::RelayMode::custom([url]))
-        }
+        Some(value) => Ok(iroh::RelayMode::custom([relay_url(value)?])),
     }
+}
+
+pub fn relay_url(value: &str) -> Result<iroh::RelayUrl> {
+    let url: iroh::RelayUrl = value.parse().map_err(|_| {
+        "\x1b[31mDist privacy rule: relay must be none or HTTPS on signal.forge-ci.com\x1b[0m"
+    })?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("signal.forge-ci.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port_or_known_default() != Some(443)
+    {
+        return Err("\x1b[31mDist privacy rule: no third party may know our peers; only HTTPS relays on signal.forge-ci.com are allowed\x1b[0m".into());
+    }
+    Ok(url)
+}
+
+pub fn validate_peer(addr: &EndpointAddr) -> Result<()> {
+    for url in addr.relay_urls() {
+        relay_url(url.as_str())?;
+    }
+    Ok(())
 }
 /// Human-portable dial ticket. JSON is configuration, never the job wire format.
 pub fn ticket(addr: &EndpointAddr) -> Result<String> {
     Ok(serde_json::to_string(addr)?)
 }
 pub fn parse_ticket(ticket: &str) -> Result<EndpointAddr> {
-    Ok(serde_json::from_str(ticket)?)
+    let addr = serde_json::from_str(ticket)?;
+    validate_peer(&addr)?;
+    Ok(addr)
 }
 
 /// A static peer needs either a full ticket or a node ID plus an explicit relay.
 pub fn parse_peer(value: &str, relay_url: Option<&str>) -> Result<EndpointAddr> {
     if let Ok(id) = value.parse::<iroh::EndpointId>() {
-        if relay_url == Some("default") {
-            return Err("public-relay peers need a full printed ticket; a node ID alone has no home relay routing".into());
-        }
-        let relay: iroh::RelayUrl = relay_url
-            .ok_or("a node-id peer needs --relay-url or SOLDR_DIST_RELAY_URL; alternatively use the printed ticket")?
-            .parse()?;
-        if relay.scheme() != "https" {
-            return Err("dist relay URL must use HTTPS".into());
-        }
+        let relay = self::relay_url(
+            relay_url.ok_or("a node-id peer needs a Forge relay or a full direct ticket")?,
+        )?;
         return Ok(EndpointAddr::new(id).with_relay_url(relay));
     }
     parse_ticket(value)

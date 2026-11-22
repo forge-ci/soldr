@@ -109,6 +109,7 @@ fn job(
         stdin: vec![],
         inputs: vec![DigestMemo::default().input(source).unwrap()],
         outputs: vec![output.to_str().unwrap().into()],
+        rewrite_env: vec![],
     }
 }
 async fn compare(
@@ -461,3 +462,6 @@ fn rustc_stdin_job_has_no_file_inputs() {
         fixture.stop().await;
     });
 }
+
+#[path = "rust_dependencies.rs"]
+mod rust_dependencies;
