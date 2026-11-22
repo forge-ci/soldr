@@ -36,7 +36,9 @@ fn canonical_target_selection_table() {
         ),
         (CompilingVerb::Test, vec!["--workspace"], true),
         (CompilingVerb::NextestRun, vec!["--workspace"], true),
-        (CompilingVerb::NextestArchive, vec!["--workspace"], false),
+        // `nextest archive` builds every test binary the archive ships, so it
+        // is a bare test verb for target breadth.
+        (CompilingVerb::NextestArchive, vec!["--workspace"], true),
         (CompilingVerb::Test, vec!["--workspace", "--lib"], false),
         (
             CompilingVerb::NextestRun,
@@ -51,15 +53,10 @@ fn canonical_target_selection_table() {
             "{verb:?} {flags:?}"
         );
     }
-    for flag in [
-        "--all-targets",
-        "--tests",
-        "--test=foo",
-        "--benches",
-        "--bench=foo",
-        "--examples",
-        "--example=foo",
-    ] {
+    // Whole-kind selectors widen the run to the dev target kinds; naming one
+    // target of a kind is still narrow (`cargo check --test foo` builds that
+    // one target, not every test target).
+    for flag in ["--all-targets", "--tests", "--benches", "--examples"] {
         let mut profile = profile();
         profile.dev_targets = true;
         assert!(
@@ -69,8 +66,18 @@ fn canonical_target_selection_table() {
             "{flag}"
         );
     }
+    // A single-target selector is narrow: `dev_targets` means "the dev target
+    // kinds are selected", so only a whole-kind selector (or a bare test verb)
+    // sets it.
     for flag in ["--test", "--bench", "--example"] {
-        assert!(select(CompilingVerb::Build, &["--workspace", flag, "foo"]).dev_targets);
+        assert!(!select(CompilingVerb::Build, &["--workspace", flag, "foo"]).dev_targets);
+        assert!(
+            !select(
+                CompilingVerb::Build,
+                &["--workspace", &format!("{flag}=foo")]
+            )
+            .dev_targets
+        );
     }
 }
 
@@ -272,5 +279,23 @@ fn canonical_rendered_commands_match_the_same_profile() {
                 selection.drift(&profile)
             );
         }
+    }
+}
+
+#[test]
+fn canonical_dev_targets_tracks_target_breadth() {
+    // `dev-targets` is the `--all-targets` axis. A bare test verb builds every
+    // test target and therefore matches it; any narrowing does not.
+    assert!(select(CompilingVerb::Test, &["--workspace"]).dev_targets);
+    assert!(select(CompilingVerb::NextestRun, &["--workspace"]).dev_targets);
+    assert!(select(CompilingVerb::NextestArchive, &["--workspace"]).dev_targets);
+    assert!(select(CompilingVerb::Build, &["--workspace", "--all-targets"]).dev_targets);
+    for args in [
+        vec!["--workspace", "--lib"],
+        vec!["--workspace", "--bins"],
+        vec!["--workspace", "--lib", "--bins"],
+    ] {
+        assert!(!select(CompilingVerb::Test, &args).dev_targets, "{args:?}");
+        assert!(!select(CompilingVerb::Build, &args).dev_targets, "{args:?}");
     }
 }

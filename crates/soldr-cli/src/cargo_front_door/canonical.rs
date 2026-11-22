@@ -42,8 +42,10 @@ impl CompilingVerb {
         }
     }
 
+    /// Verbs that compile test binaries. `nextest archive` builds every test
+    /// binary the archive ships, so it belongs here with the two runners.
     pub(super) fn tests(self) -> bool {
-        matches!(self, Self::Test | Self::NextestRun)
+        matches!(self, Self::Test | Self::NextestRun | Self::NextestArchive)
     }
 }
 
@@ -161,6 +163,11 @@ impl Selection {
             selection.packages = CanonicalPackages::Workspace;
         }
         selection.exclude = sorted(selection.exclude);
+        // Breadth, not dev-dependency activation: a test verb with no target
+        // selector builds every test target, exactly like `--all-targets`
+        // does for the other verbs. (Dev-dependencies are on for *any* test
+        // verb, so they cannot distinguish these two shapes -- but they are
+        // the reason the difference costs a rebuild.)
         selection.dev_targets |= verb.tests() && !target_selector;
         selection
     }
@@ -190,11 +197,12 @@ impl Selection {
                 }
             }
             "--target" => self.target_explicit = true,
-            "--bin" => *selector = true,
-            _ => {
-                self.dev_targets = true;
-                *selector = true;
-            }
+            // A single-target selector (`--bin`, `--test`, `--bench`,
+            // `--example`) narrows the run, so it never widens `dev_targets`:
+            // that field means "the dev target kinds are selected", i.e.
+            // `--all-targets` or a test verb with no narrowing at all. It is
+            // the same axis `soldr cargo` prints as `--all-targets`.
+            _ => *selector = true,
         }
     }
 
