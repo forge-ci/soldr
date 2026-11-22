@@ -232,7 +232,11 @@ fn compile_service_that_never_publishes_is_bounded() {
 
 /// A broker that has accepted the connection but answers `delay` after the
 /// Hello: the reply frame a busy-but-alive broker eventually sends.
-async fn hold_negotiated_reply(mut server: tokio::io::DuplexStream, delay: Duration, handoff: bool) {
+async fn hold_negotiated_reply(
+    mut server: tokio::io::DuplexStream,
+    delay: Duration,
+    handoff: bool,
+) {
     use prost::Message as _;
     use running_process::broker::protocol::{
         hello_reply, Negotiated, PayloadEncoding, CONTROL_PAYLOAD_PROTOCOL,
@@ -389,8 +393,9 @@ fn connection_loss_is_a_loud_error_with_recovery_steps() {
     assert!(plain.contains("30.0s") && plain.contains("soldr daemon status"));
     assert!(plain.contains("soldr daemon stop") && plain.contains("soldr logs paths"));
     assert!(!plain.contains('\x1b'));
-    assert!(connection_failure_message(&err, "x", Duration::ZERO, true, None)
-        .starts_with("\x1b[1;31m"));
+    assert!(
+        connection_failure_message(&err, "x", Duration::ZERO, true, None).starts_with("\x1b[1;31m")
+    );
     let eof = SessionError {
         output_started: true,
         broker_unreachable: false,
@@ -399,8 +404,10 @@ fn connection_loss_is_a_loud_error_with_recovery_steps() {
             "SESSION relay closed before Exit",
         ),
     };
-    assert!(connection_failure_message(&eof, "x", Duration::ZERO, false, None)
-        .contains("lost the connection"));
+    assert!(
+        connection_failure_message(&eof, "x", Duration::ZERO, false, None)
+            .contains("lost the connection")
+    );
 }
 
 #[test]
@@ -429,7 +436,9 @@ fn handoff_deadline_reports_the_broker_identity_and_recovery_order() {
     assert!(text.contains("differs from this binary"));
     assert!(
         text.find("soldr broker remove").unwrap()
-            < text.find("soldr daemon stop && soldr daemon start").unwrap()
+            < text
+                .find("soldr daemon stop && soldr daemon start")
+                .unwrap()
     );
     assert!(format(Some(local)).contains("matches this binary"));
     assert!(format(None).contains("comparison unavailable"));
