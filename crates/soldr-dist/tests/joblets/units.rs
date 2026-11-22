@@ -846,3 +846,73 @@ fn original_and_sandbox_remaps_both_cover_imported_dependency_paths() {
         )
     );
 }
+
+#[test]
+fn path_mode_parses_auto_and_relay_and_rejects_the_rest() {
+    use soldr_dist::transport::{path_mode, PathMode};
+    assert_eq!(path_mode(None).unwrap(), PathMode::Auto);
+    assert_eq!(path_mode(Some("")).unwrap(), PathMode::Auto);
+    assert_eq!(path_mode(Some("auto")).unwrap(), PathMode::Auto);
+    assert_eq!(path_mode(Some("relay")).unwrap(), PathMode::Relay);
+    let error = path_mode(Some("direct")).unwrap_err().to_string();
+    assert!(
+        error.contains("SOLDR_DIST_PATH must be auto or relay"),
+        "{error}"
+    );
+}
+
+#[test]
+fn relay_only_endpoint_binds_no_ip_socket_and_refuses_third_party_relays() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let temp = tempfile::tempdir().unwrap();
+        let key = node_key(temp.path()).unwrap();
+        let endpoint =
+            soldr_dist::transport::endpoint_relay_only(key.clone(), "https://signal.forge-ci.com")
+                .await
+                .unwrap();
+        // No IP transport: the relay is the only path a peer can use.
+        assert!(
+            endpoint.bound_sockets().is_empty(),
+            "{:?}",
+            endpoint.bound_sockets()
+        );
+        endpoint.close().await;
+        let refused =
+            soldr_dist::transport::endpoint_relay_only(key, "https://relay.example.com").await;
+        assert!(refused.is_err(), "a third-party relay must be refused");
+    });
+}
+
+#[test]
+fn job_log_appends_one_labelled_line_per_joblet() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("jobs.jsonl");
+    let metrics = JobMetrics {
+        path: "relay".into(),
+        bytes_sent: 10,
+        bytes_received: 20,
+        outcome: "executed".into(),
+        ..JobMetrics::default()
+    };
+    let argv: Vec<String> = ["rustc", "--crate-name", "syn", "--edition=2021"]
+        .map(String::from)
+        .to_vec();
+    let unit = soldr_dist::status::unit_name(&argv);
+    soldr_dist::status::append_job_line(&log, unit, &metrics).unwrap();
+    soldr_dist::status::append_job_line(&log, "unknown", &JobMetrics::default()).unwrap();
+    let text = fs::read_to_string(&log).unwrap();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["unit"], "syn");
+    assert_eq!(lines[0]["metrics"]["path"], "relay");
+    assert_eq!(lines[0]["metrics"]["bytes_sent"], 10);
+    assert_eq!(lines[0]["metrics"]["bytes_received"], 20);
+    assert_eq!(lines[1]["unit"], "unknown");
+}

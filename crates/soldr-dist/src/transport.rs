@@ -30,20 +30,7 @@ pub async fn endpoint_with_identity(
     direct_only: bool,
     relay_url: Option<&str>,
 ) -> Result<Endpoint> {
-    // soldr#4212: see `link` for why these outlast a relay restart.
-    let config = QuicTransportConfig::builder()
-        .max_idle_timeout(Some(link::IDLE_TIMEOUT.try_into()?))
-        .keep_alive_interval(link::KEEP_ALIVE)
-        .default_path_max_idle_timeout(link::PATH_IDLE_TIMEOUT)
-        .default_path_keep_alive_interval(link::KEEP_ALIVE)
-        .build();
-    let mut builder = Endpoint::builder(presets::Minimal)
-        .secret_key(identity)
-        .alpns(vec![ALPN.to_vec()])
-        .transport_config(config)
-        .clear_address_lookup()
-        .relay_mode(iroh::RelayMode::Disabled)
-        .clear_ip_transports();
+    let mut builder = base_builder(identity)?;
     if direct_only {
         builder = builder
             .clear_relay_transports()
@@ -62,6 +49,49 @@ pub async fn endpoint_with_identity(
             builder = builder.clear_relay_transports();
         }
     }
+    Ok(builder.bind().await?)
+}
+
+/// No transports yet: no relay, no IP sockets, no address lookup.
+fn base_builder(identity: SecretKey) -> Result<iroh::endpoint::Builder> {
+    // soldr#4212: see `link` for why these outlast a relay restart.
+    let config = QuicTransportConfig::builder()
+        .max_idle_timeout(Some(link::IDLE_TIMEOUT.try_into()?))
+        .keep_alive_interval(link::KEEP_ALIVE)
+        .default_path_max_idle_timeout(link::PATH_IDLE_TIMEOUT)
+        .default_path_keep_alive_interval(link::KEEP_ALIVE)
+        .build();
+    Ok(Endpoint::builder(presets::Minimal)
+        .secret_key(identity)
+        .alpns(vec![ALPN.to_vec()])
+        .transport_config(config)
+        .clear_address_lookup()
+        .relay_mode(iroh::RelayMode::Disabled)
+        .clear_ip_transports())
+}
+
+/// Which network paths a dist client may use (`SOLDR_DIST_PATH`, soldr#4215).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathMode {
+    /// Direct UDP where hole punching succeeds, the relay otherwise.
+    Auto,
+    /// Only the forge relay: no IP socket is bound, so no direct path exists.
+    Relay,
+}
+
+pub const PATH_ENV: &str = "SOLDR_DIST_PATH";
+
+pub fn path_mode(value: Option<&str>) -> Result<PathMode> {
+    match value.map(str::trim) {
+        None | Some("" | "auto") => Ok(PathMode::Auto),
+        Some("relay") => Ok(PathMode::Relay),
+        Some(other) => Err(format!("{PATH_ENV} must be auto or relay, got {other:?}").into()),
+    }
+}
+
+/// A client endpoint whose only transport is the forge relay at `relay_url`.
+pub async fn endpoint_relay_only(identity: SecretKey, relay_url: &str) -> Result<Endpoint> {
+    let builder = base_builder(identity)?.relay_mode(relay_mode(Some(relay_url))?);
     Ok(builder.bind().await?)
 }
 

@@ -128,8 +128,14 @@ impl DistClient {
         metrics.finish(&outcome);
         outcome.set_metrics(metrics);
         let (root, recorded) = (self.root.clone(), outcome.metrics().clone());
-        let persisted =
-            tokio::task::spawn_blocking(move || crate::status::record_job(&root, &recorded)).await;
+        let unit = crate::status::unit_name(&job.argv).to_owned();
+        let persisted = tokio::task::spawn_blocking(move || {
+            if let Err(error) = crate::status::append_job_log(&unit, &recorded) {
+                eprintln!("\x1b[31msoldr dist: WARNING cannot append job log: {error}\x1b[0m");
+            }
+            crate::status::record_job(&root, &recorded)
+        })
+        .await;
         match persisted {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {

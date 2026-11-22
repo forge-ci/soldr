@@ -56,6 +56,40 @@ pub fn json(status: &Status) -> serde_json::Value {
     })
 }
 
+/// Per-joblet metrics log (soldr#4215): one JSON line per joblet, written only
+/// when the variable names a file. It is the evidence of which network path
+/// (direct, relay) and how many bytes each joblet used.
+pub const JOB_LOG_ENV: &str = "SOLDR_DIST_JOB_LOG";
+
+/// The crate a rustc argv compiles, for labelling log lines.
+pub fn unit_name(argv: &[String]) -> &str {
+    argv.iter()
+        .position(|arg| arg == "--crate-name")
+        .and_then(|index| argv.get(index + 1))
+        .map_or("unknown", String::as_str)
+}
+
+/// Appends `metrics` to the `SOLDR_DIST_JOB_LOG` file, if set. One `write` of
+/// one line on an `O_APPEND` handle, so concurrent joblets do not interleave.
+pub fn append_job_log(unit: &str, metrics: &JobMetrics) -> Result<()> {
+    let Some(path) = std::env::var_os(JOB_LOG_ENV).filter(|v| !v.is_empty()) else {
+        return Ok(());
+    };
+    append_job_line(Path::new(&path), unit, metrics)
+}
+
+pub fn append_job_line(path: &Path, unit: &str, metrics: &JobMetrics) -> Result<()> {
+    use std::io::Write;
+    let mut line = serde_json::to_vec(&serde_json::json!({ "unit": unit, "metrics": metrics }))?;
+    line.push(b'\n');
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?
+        .write_all(&line)?;
+    Ok(())
+}
+
 /// Lock attempts (10 ms apart) before a joblet's metrics are reported as lost.
 const METRICS_LOCK_ATTEMPTS: u32 = 50;
 

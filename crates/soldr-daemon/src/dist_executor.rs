@@ -68,7 +68,22 @@ pub(crate) async fn register(
     };
     let identity = soldr_dist::trust::node_key(&root)?;
     let lease = transport::EndpointLease::acquire_with_key(&root, &root.join("node.key"))?;
-    let endpoint = transport::endpoint_with_identity(identity, false, relay.as_deref()).await?;
+    let endpoint = match transport::path_mode(std::env::var(transport::PATH_ENV).ok().as_deref())? {
+        transport::PathMode::Auto => {
+            transport::endpoint_with_identity(identity, false, relay.as_deref()).await?
+        }
+        transport::PathMode::Relay => {
+            let Some(url) = relay.as_deref() else {
+                return Err(format!(
+                    "{}=relay needs the forge relay, but SOLDR_DIST_RELAY=none disables it",
+                    transport::PATH_ENV
+                )
+                .into());
+            };
+            tracing::info!(relay = url, "soldr dist: relay-only path mode");
+            transport::endpoint_relay_only(identity, url).await?
+        }
+    };
     // Ends with the endpoint; logs relay disconnects and reconnects (soldr#4212).
     drop(soldr_dist::link::watch_relay(&endpoint, "client"));
     let connections = ClientConnections::new(endpoint, &root)?;
@@ -104,9 +119,19 @@ impl Executor {
             dedup_inputs: job.inputs.len().saturating_sub(digests.len()) as u64,
             ..Default::default()
         };
-        if let Err(error) = soldr_dist::status::record_job(&self.root, &metrics) {
-            tracing::warn!(%error, "soldr dist cannot persist policy decline metrics");
-        }
+        // File I/O stays off the async runtime; the decline does not wait for it.
+        let (root, unit) = (
+            self.root.clone(),
+            soldr_dist::status::unit_name(&job.args).to_owned(),
+        );
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = soldr_dist::status::record_job(&root, &metrics) {
+                tracing::warn!(%error, "soldr dist cannot persist policy decline metrics");
+            }
+            if let Err(error) = soldr_dist::status::append_job_log(&unit, &metrics) {
+                tracing::error!(%error, "soldr dist cannot append the job log");
+            }
+        });
         ExecutorOutcome::Declined { reason }
     }
 }
