@@ -167,10 +167,12 @@ impl DistClient {
             });
         }
         // The session outlives this joblet: no handshake for the next one.
+        let waiting = std::time::Instant::now();
         let session = self
             .connections
             .session(&self.worker, self.reverse_only)
             .await?;
+        metrics.session_millis = u64::try_from(waiting.elapsed().as_millis()).unwrap_or(u64::MAX);
         let result = self.exchange(&session, job, metrics).await;
         metrics.capture(&session.conn);
         result
@@ -267,6 +269,10 @@ impl DistClient {
             });
         }
         let done = reply.done.ok_or("expected Done")?;
+        metrics.worker_receive_millis = done.receive_millis;
+        metrics.worker_materialise_millis = done.materialise_millis;
+        metrics.worker_compile_millis = done.compile_millis;
+        metrics.worker_outputs_millis = done.outputs_millis;
         if let Some(declined) = crate::dep_info::decline(job, &done, &self.worker.id.to_string()) {
             return Ok(declined);
         }

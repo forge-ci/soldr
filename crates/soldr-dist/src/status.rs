@@ -63,10 +63,15 @@ pub const JOB_LOG_ENV: &str = "SOLDR_DIST_JOB_LOG";
 
 /// The crate a rustc argv compiles, for labelling log lines.
 pub fn unit_name(argv: &[String]) -> &str {
+    // Cargo passes `--crate-name X`; build-script probes pass `--crate-name=X`.
     argv.iter()
-        .position(|arg| arg == "--crate-name")
-        .and_then(|index| argv.get(index + 1))
-        .map_or("unknown", String::as_str)
+        .enumerate()
+        .find_map(|(index, arg)| match arg.strip_prefix("--crate-name") {
+            Some("") => argv.get(index + 1).map(String::as_str),
+            Some(rest) => rest.strip_prefix('='),
+            None => None,
+        })
+        .unwrap_or("unknown")
 }
 
 /// Appends `metrics` to the `SOLDR_DIST_JOB_LOG` file, if set. One `write` of

@@ -99,6 +99,15 @@ pub struct Done {
     pub outputs: Vec<OutputFile>,
     #[prost(bytes = "vec", tag = "5")]
     pub dependency_info: Vec<u8>,
+    /// Worker phase timings, for per-joblet overhead attribution.
+    #[prost(uint64, tag = "6")]
+    pub receive_millis: u64,
+    #[prost(uint64, tag = "7")]
+    pub materialise_millis: u64,
+    #[prost(uint64, tag = "8")]
+    pub compile_millis: u64,
+    #[prost(uint64, tag = "9")]
+    pub outputs_millis: u64,
 }
 #[derive(Clone, PartialEq, Message)]
 pub struct Fetch {
@@ -191,4 +200,14 @@ pub struct JobMetrics {
     /// Client-side input listing + hashing before the joblet was sent.
     #[prost(uint64, tag = "24")]
     pub construct_millis: u64,
+    #[prost(uint64, tag = "25")]
+    pub session_millis: u64,
+    #[prost(uint64, tag = "26")]
+    pub worker_receive_millis: u64,
+    #[prost(uint64, tag = "27")]
+    pub worker_materialise_millis: u64,
+    #[prost(uint64, tag = "28")]
+    pub worker_compile_millis: u64,
+    #[prost(uint64, tag = "29")]
+    pub worker_outputs_millis: u64,
 }

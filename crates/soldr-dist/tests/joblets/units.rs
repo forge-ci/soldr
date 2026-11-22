@@ -916,3 +916,14 @@ fn job_log_appends_one_labelled_line_per_joblet() {
     assert_eq!(lines[0]["metrics"]["bytes_received"], 20);
     assert_eq!(lines[1]["unit"], "unknown");
 }
+
+#[test]
+fn unit_name_reads_both_crate_name_spellings() {
+    // Build-script probes pass `--crate-name=X`; they were logged as "unknown".
+    let joined: Vec<String> = ["rustc", "--crate-name=anyhow_build_probe"]
+        .map(String::from)
+        .to_vec();
+    assert_eq!(soldr_dist::status::unit_name(&joined), "anyhow_build_probe");
+    let none: Vec<String> = ["rustc", "--crate-type", "lib"].map(String::from).to_vec();
+    assert_eq!(soldr_dist::status::unit_name(&none), "unknown");
+}

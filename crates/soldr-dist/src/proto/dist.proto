@@ -55,6 +55,10 @@ message Done {
   bytes stderr = 3;
   repeated OutputFile outputs = 4;
   bytes dependency_info = 5;
+  uint64 receive_millis = 6;
+  uint64 materialise_millis = 7;
+  uint64 compile_millis = 8;
+  uint64 outputs_millis = 9;
 }
 message Fetch {
   repeated string digests = 1;
@@ -103,4 +107,9 @@ message JobMetrics {
   bool cas_hits_known = 22;
   uint64 completed_unix_millis = 23;
   uint64 construct_millis = 24;
+  uint64 session_millis = 25;
+  uint64 worker_receive_millis = 26;
+  uint64 worker_materialise_millis = 27;
+  uint64 worker_compile_millis = 28;
+  uint64 worker_outputs_millis = 29;
 }

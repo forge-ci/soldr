@@ -332,13 +332,17 @@ async fn handle_job(
     };
     let mut lease = state.cas.lease(job.inputs.iter().map(|i| i.blake3.clone()));
     request_maintenance(state);
+    let phase = std::time::Instant::now();
     receive_inputs(state, &mut inbox, &job, &offer.speculative, &mut send).await?;
+    let receive_millis = millis(phase.elapsed());
+    let phase = std::time::Instant::now();
     let sandbox = tempfile::tempdir_in(&state.root)?;
     {
         // Hard-links or copies every input: blocking filesystem work.
         let (path, job, cas) = (sandbox.path().to_path_buf(), job.clone(), state.cas.clone());
         tokio::task::spawn_blocking(move || sandbox::materialise(&path, &job, &cas)).await??;
     }
+    let materialise_millis = millis(phase.elapsed());
     transport::send(
         &mut send,
         &Reply {
@@ -347,9 +351,12 @@ async fn handle_job(
         },
     )
     .await?;
+    let phase = std::time::Instant::now();
     let Some(mut done) = execute_compiler(compiler, &job, sandbox.path(), &mut send).await? else {
         return Ok(());
     };
+    let compile_millis = millis(phase.elapsed());
+    let phase = std::time::Instant::now();
     let (done, lease) = {
         // Rewrites depfiles, then hashes and stores every output: blocking work.
         let (path, job) = (sandbox.path().to_path_buf(), job.clone());
@@ -362,9 +369,18 @@ async fn handle_job(
         })
         .await??
     };
+    let mut done = done;
+    done.receive_millis = receive_millis;
+    done.materialise_millis = materialise_millis;
+    done.compile_millis = compile_millis;
+    done.outputs_millis = millis(phase.elapsed());
     // The lease pins the outputs in the store until delivery completes.
     let _lease = lease;
     deliver(state, conn, offer.job_token, &done, (send, recv)).await
+}
+
+fn millis(elapsed: std::time::Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// The decline reason naming the requested and every offered identity.
