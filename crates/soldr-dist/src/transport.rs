@@ -2,7 +2,7 @@
 use crate::{cas::Cas, proto::Blob, trust::node_key, Result};
 use iroh::{
     endpoint::{presets, Connection, QuicTransportConfig, RecvStream, SendStream},
-    Endpoint, EndpointAddr,
+    Endpoint, EndpointAddr, SecretKey,
 };
 use prost::Message;
 use std::{path::Path, time::Duration};
@@ -20,6 +20,15 @@ pub async fn endpoint_with_relay(
     direct_only: bool,
     relay_url: Option<&str>,
 ) -> Result<Endpoint> {
+    endpoint_with_identity(node_key(root)?, direct_only, relay_url).await
+}
+
+/// Accept an existing host identity without coupling transport to its storage/provider.
+pub async fn endpoint_with_identity(
+    identity: SecretKey,
+    direct_only: bool,
+    relay_url: Option<&str>,
+) -> Result<Endpoint> {
     let config = QuicTransportConfig::builder()
         .max_idle_timeout(Some(Duration::from_secs(5).try_into()?))
         .keep_alive_interval(Duration::from_secs(1))
@@ -27,7 +36,7 @@ pub async fn endpoint_with_relay(
         .default_path_keep_alive_interval(Duration::from_secs(1))
         .build();
     let mut builder = Endpoint::builder(presets::Minimal)
-        .secret_key(node_key(root)?)
+        .secret_key(identity)
         .alpns(vec![ALPN.to_vec()])
         .transport_config(config)
         .clear_address_lookup()
@@ -115,6 +124,7 @@ pub async fn receive_blob(
 /// Hold while a CLI endpoint uses this persistent identity. Separate processes
 /// with the same key would replace each other's outbound relay registration.
 pub struct EndpointLease {
+    _identity: Option<std::fs::File>,
     _file: std::fs::File,
 }
 impl EndpointLease {
@@ -127,6 +137,25 @@ impl EndpointLease {
             .truncate(false)
             .open(root.join("endpoint.lock"))?;
         file.try_lock_exclusive().map_err(|e| format!("another dist endpoint owns {}: {e}; reuse its library Endpoint or choose a separate --root", root.display()))?;
-        Ok(Self { _file: file })
+        Ok(Self {
+            _identity: None,
+            _file: file,
+        })
+    }
+}
+
+impl EndpointLease {
+    /// Lock the selected key as well as the root. A read-only open is sufficient;
+    /// advisory ownership does not prevent the agent from reading/signing with it.
+    pub fn acquire_with_key(root: &Path, key_path: &Path) -> Result<Self> {
+        use fs2::FileExt;
+        let mut lease = Self::acquire(root)?;
+        let file = std::fs::File::open(key_path)?;
+        file.try_lock_exclusive().map_err(|e| format!(
+            "another dist endpoint owns identity {}: {e}; reuse its Endpoint instead of starting a second one",
+            key_path.display()
+        ))?;
+        lease._identity = Some(file);
+        Ok(lease)
     }
 }
