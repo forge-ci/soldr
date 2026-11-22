@@ -69,6 +69,7 @@ pub const GUARD_MODE_ENFORCING: &[&str] = &["strict", "on"];
 pub const IN_SOLDR_ROLE_ENV: &str = "IN_SOLDR_ROLE";
 
 /// The edge a user-facing global-version probe/delegation carries.
+const UI_COMMAND_EDGE: &str = "SOLDR_INTERNAL_UI_COMMAND";
 const GLOBAL_DELEGATION_EDGE: &str = "SOLDR_GLOBAL_DELEGATING";
 
 /// Internal spawn edges that legitimately re-enter Soldr. Each variable is
@@ -81,6 +82,7 @@ const SANCTIONED_EDGE_ENV_VARS: &[&str] = &[
     "SOLDR_INTERNAL_INHERIT_PROCESS_GROUP",
     "SOLDR_TRAMPOLINING",
     GLOBAL_DELEGATION_EDGE,
+    UI_COMMAND_EDGE,
     // soldr#2739: self-relocation re-runs soldr from `~/.soldr/runtime/` and
     // is a *spawn*, not an exec -- the child has its own pid, so the same-pid
     // self-exec rule cannot recognise it and it read as an unsanctioned
@@ -155,6 +157,9 @@ pub(crate) fn own_role(raw_args: &[String], wrapper_invocation: bool) -> Role {
 /// `is_delegation_exempt` already stops a broker from reaching the probe, so
 /// this is the structural backstop for that policy, not its only enforcement.
 fn edge_permitted(parent_role: Option<Role>, edge: &str) -> bool {
+    if edge == UI_COMMAND_EDGE {
+        return parent_role == Some(Role::FrontDoor);
+    }
     !(parent_role == Some(Role::Broker) && edge == GLOBAL_DELEGATION_EDGE)
 }
 
@@ -335,6 +340,7 @@ pub(crate) fn enforce_and_mark(raw_args: &[String], compiler_callback: bool) -> 
     // entry; leaving it set would hand the same exemption to every descendant,
     // since env vars are inherited transitively.
     std::env::remove_var(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR);
+    std::env::remove_var(UI_COMMAND_EDGE);
 
     // Stamp unconditionally, after judgment: children inherit OUR pid, and
     // a wrapper-shaped entry refreshes ownership to itself exactly as
@@ -984,5 +990,21 @@ mod tests {
             GLOBAL_DELEGATION_EDGE,
             "the opt-out and the edge marker must stay distinct variables"
         );
+    }
+}
+
+#[cfg(test)]
+mod ui_edge_tests {
+    use super::*;
+
+    #[test]
+    fn ui_children_have_a_scoped_consumed_edge() {
+        assert!(SANCTIONED_EDGE_ENV_VARS.contains(&UI_COMMAND_EDGE));
+        assert!(edge_permitted(Some(Role::FrontDoor), UI_COMMAND_EDGE));
+        assert!(!edge_permitted(Some(Role::Broker), UI_COMMAND_EDGE));
+        assert!(!edge_permitted(Some(Role::Wrapper), UI_COMMAND_EDGE));
+        assert!(!edge_permitted(None, UI_COMMAND_EDGE));
+        #[cfg(feature = "ui")]
+        assert_eq!(UI_COMMAND_EDGE, soldr_ui::COMMAND_EDGE_ENV);
     }
 }

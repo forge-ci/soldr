@@ -380,3 +380,30 @@ fn the_agent_capability_verb_parses_to_its_own_variant() {
         _ => panic!("expected Commands::Agent"),
     }
 }
+
+#[test]
+fn soldr_ui_help_and_options_parse_without_the_gui() {
+    let help = Cli::try_parse_from(["soldr", "ui", "--help"])
+        .err()
+        .expect("UI help");
+    assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+    let cli = Cli::try_parse_from([
+        "soldr",
+        "ui",
+        "--window",
+        "--screenshot",
+        "out.png",
+        "--fixture",
+        "state.json",
+    ])
+    .unwrap();
+    let Commands::Ui(args) = cli.command else {
+        panic!("expected built-in UI command")
+    };
+    assert!(args.window);
+    assert_eq!(
+        args.screenshot.unwrap(),
+        std::path::PathBuf::from("out.png")
+    );
+    assert!(Cli::try_parse_from(["soldr", "ui", "--screenshot", "out.png"]).is_err());
+}

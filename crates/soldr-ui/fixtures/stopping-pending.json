@@ -1,0 +1,49 @@
+{
+  "sources": {
+    "status": {
+      "stdout": "{\"schema_version\": 1, \"soldr_version\": \"0.9.54\", \"zccache\": {\"status_lines\": []}}",
+      "stderr": "",
+      "success": true
+    },
+    "daemon": {
+      "stdout": "{\"running\": true, \"in_flight_compiles\": 12, \"pid\": 1234}",
+      "stderr": "",
+      "success": true
+    },
+    "doctor": {
+      "stdout": "{\"schema_version\": 1, \"drift\": false, \"cache_health\": {\"zero_hit_storm\": false, \"daemon_churn\": false}}",
+      "stderr": "",
+      "success": true
+    },
+    "logs": {
+      "stdout": "{\"schema_version\": 1, \"root\": \"/home/developer/.soldr\", \"paths\": [{\"name\": \"logs\", \"path\": \"/home/developer/.soldr/logs\", \"exists\": true}]}",
+      "stderr": "",
+      "success": true
+    },
+    "builds": {
+      "stdout": "{\"schema_version\": 1, \"launches\": [{\"repo_root\": \"/work/soldr\", \"duration_ms\": 12400, \"cache\": {\"hits\": 142, \"misses\": 3}}, {\"repo_root\": \"/work/lokr\", \"duration_ms\": 18300, \"cache\": {\"hits\": 88, \"misses\": 12, \"hit_rate\": 0.88}}, {\"repo_root\": \"/work/bosn\", \"duration_ms\": 31600, \"cache\": {\"hits\": 163, \"misses\": 37, \"hit_rate\": 0.815}}, {\"repo_root\": \"/work/kernal-api\", \"duration_ms\": 45200, \"cache\": {\"hits\": 176, \"misses\": 74, \"hit_rate\": 0.704}}]}",
+      "stderr": "",
+      "success": true
+    },
+    "session": {
+      "stdout": "{\"schema_version\": 1, \"last_session\": {\"hits\": 142, \"misses\": 3, \"hit_rate\": 0.9793103448275862}}",
+      "stderr": "",
+      "success": true
+    },
+    "cache": {
+      "stdout": "{\"schema_version\": 1, \"on_disk_bytes\": 4509715660, \"budget_bytes\": 26843545600}",
+      "stderr": "",
+      "success": true
+    },
+    "dist": {
+      "stdout": "{\"role\": \"client\", \"nodes\": [{\"name\": \"Studio \\u00b7 Linux x64\", \"slots_used\": 6, \"slots_total\": 12, \"rtt_ms\": 2, \"connected\": true}, {\"name\": \"Build server\", \"slots_used\": 4, \"slots_total\": 16, \"rtt_ms\": 18, \"connected\": true}], \"joblets_local\": 2, \"joblets_remote\": 10, \"bytes_transferred\": 214748365, \"bytes_saved\": 3865470566, \"host_mode\": \"shared\", \"sharing_enabled\": false}",
+      "stderr": "",
+      "success": true
+    }
+  },
+  "now": 1700000000,
+  "action": {
+    "state": "pending",
+    "action": "stop"
+  }
+}

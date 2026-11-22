@@ -325,6 +325,8 @@ pub(crate) use crate::builtin_verbs::{
 
 #[derive(clap::Subcommand)]
 pub(crate) enum Commands {
+    /// Open the desktop quick-launch panel or full dashboard
+    Ui(crate::ui_cmd::UiArgs),
     /// Build the workspace via soldr's blessed cross-compile path
     ///
     /// `soldr build --target X` is the **blessed-default surface** for

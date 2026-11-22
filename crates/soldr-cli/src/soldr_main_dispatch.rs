@@ -169,6 +169,7 @@ async fn dispatch_toolchain_command(
 /// families hand back.
 async fn dispatch_state_command(command: Commands, flags: DispatchFlags) -> Result<(), SoldrError> {
     match command {
+        Commands::Ui(args) => exit_with(crate::ui_cmd::run(args)),
         Commands::Save(args) => guarded_exit(save_load::run_save(args)),
         Commands::Hydrate(args) => guarded_exit(save_load::run_load(args)),
         Commands::Status { json } => run_status_command(json, flags.cache_enabled),

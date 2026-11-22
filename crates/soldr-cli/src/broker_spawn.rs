@@ -174,7 +174,10 @@ pub(crate) fn front_door_command_shape(raw_args: &[String]) -> bool {
     // Don't spawn a broker to service a direct `soldr broker ...`
     // invocation -- that command IS the broker; spawning another one to
     // watch it start would just race its own singleton bind pointlessly.
-    if matches!(first_positional.as_str(), "broker" | "replay-nextest") {
+    if matches!(
+        first_positional.as_str(),
+        "broker" | "replay-nextest" | "ui"
+    ) {
         return false;
     }
     true
@@ -197,7 +200,7 @@ pub(crate) fn front_door_command_shape(raw_args: &[String]) -> bool {
 /// `soldr --zccache-mode copy cargo build` against a cold root read
 /// `--zccache-mode` as the command, started no broker, and every compile
 /// failed with "could not connect to the soldr daemon".
-fn first_command_positional(raw_args: &[String]) -> Option<&String> {
+pub(crate) fn first_command_positional(raw_args: &[String]) -> Option<&String> {
     let mut iter = raw_args.iter().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {

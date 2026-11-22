@@ -422,6 +422,7 @@ pub mod toolchain_readiness;
 pub(crate) mod toolchain_std_libs;
 pub(crate) mod toolchain_store;
 pub mod trampoline;
+mod ui_cmd;
 /// soldr#3894 — verdict ledger: skip a check whose exact inputs already passed.
 pub mod verdict;
 /// soldr#2024 — the `--as <version>` trampoline, split out of

@@ -842,12 +842,7 @@ pub(crate) fn current_soldr_binary() -> Result<std::path::PathBuf, SoldrError> {
 pub(crate) fn rustc_wrapper_shim_binary(
     paths: &SoldrPaths,
 ) -> Result<std::path::PathBuf, SoldrError> {
-    let target = paths
-        .versioned_shims_dir()
-        .join(format!("rustc{}", std::env::consts::EXE_SUFFIX));
-    let source = crate::shim_materialize::soldr_binary_source()?;
-    crate::shim_materialize::materialize_executable(&source, &target)?;
-    Ok(target)
+    versioned_alias(paths, "rustc")
 }
 
 /// Materialize the dedicated Dylint wrapper identity used when cargo-dylint
@@ -855,12 +850,28 @@ pub(crate) fn rustc_wrapper_shim_binary(
 pub(crate) fn dylint_wrapper_shim_binary(
     paths: &SoldrPaths,
 ) -> Result<std::path::PathBuf, SoldrError> {
+    versioned_alias(paths, "soldr-dylint")
+}
+
+/// Materialize the GUI argv[0] identity from the single soldr image.
+#[cfg(feature = "ui")]
+pub(crate) fn ui_shim_binary(paths: &SoldrPaths) -> Result<std::path::PathBuf, SoldrError> {
+    versioned_alias(paths, "soldr-ui")
+}
+
+fn versioned_alias(paths: &SoldrPaths, stem: &str) -> Result<PathBuf, SoldrError> {
     let target = paths
         .versioned_shims_dir()
-        .join(format!("soldr-dylint{}", std::env::consts::EXE_SUFFIX));
+        .join(format!("{stem}{}", std::env::consts::EXE_SUFFIX));
     let source = crate::shim_materialize::soldr_binary_source()?;
     crate::shim_materialize::materialize_executable(&source, &target)?;
     Ok(target)
+}
+
+/// Canonical CLI identity used by UI child commands, including from an alias.
+#[cfg(feature = "ui")]
+pub(crate) fn ui_cli_binary(paths: &SoldrPaths) -> Result<PathBuf, SoldrError> {
+    versioned_alias(paths, "soldr")
 }
 
 /// Materialize the daemon's stable process/service identity next to soldr.

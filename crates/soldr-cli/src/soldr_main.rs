@@ -325,6 +325,21 @@ fn run_main(
     };
     let pinned_version = pinned_version.or_else(soldr_as_env_pin);
 
+    // UI fixture rendering must never probe another soldr or start a broker.
+    // Keep explicit version pins authoritative, then dispatch on the main thread.
+    let mut unpinned_ui = vec![raw_args[0].clone()];
+    unpinned_ui.extend(trampoline_args.iter().cloned());
+    if crate::ui_cmd::is_invocation(&unpinned_ui) {
+        if let Some(version) = pinned_version.as_ref().filter(|v| should_trampoline(v)) {
+            return block_on_exit_code(version_trampoline::run(version, &trampoline_args));
+        }
+        return block_on_exit_code(run_with_args(
+            &raw_args[0],
+            &trampoline_args,
+            inherited_provenance,
+        ));
+    }
+
     // Hand off to a newer global soldr BEFORE touching the broker. The broker
     // is a stable singleton that is never replaced automatically (soldr#2549),
     // so an older soldr that spawned it and then delegated would pin every
