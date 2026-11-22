@@ -8,6 +8,7 @@
 mod common;
 
 mod cli_cargo_basic;
+mod cli_cargo_canonical;
 mod cli_cargo_clippy_fixture;
 mod cli_cargo_doc_routes;
 mod cli_cargo_dylint_link;

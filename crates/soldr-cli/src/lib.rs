@@ -255,6 +255,7 @@ pub mod cache;
 pub(crate) mod cache_health;
 pub mod cargo_diagnostics;
 pub mod cargo_front_door;
+mod cargo_metadata_canonical;
 pub mod cargo_metadata_soldr;
 pub(crate) mod cargo_toolchain_shim;
 mod cc_clang_cross;
