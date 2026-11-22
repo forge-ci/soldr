@@ -46,6 +46,9 @@ pub struct Offer {
     pub job: Option<DistJob>,
     #[prost(string, repeated, tag = "2")]
     pub speculative: Vec<String>,
+    /// Session-scoped id that routes this job's blob streams on a shared connection.
+    #[prost(uint64, tag = "3")]
+    pub job_token: u64,
 }
 #[derive(Clone, PartialEq, Message)]
 pub struct Need {
@@ -62,6 +65,9 @@ pub struct Blob {
     pub digest: String,
     #[prost(uint64, tag = "2")]
     pub size: u64,
+    /// The `Offer::job_token` of the job this stream belongs to.
+    #[prost(uint64, tag = "3")]
+    pub job_token: u64,
 }
 #[derive(Clone, PartialEq, Message)]
 pub struct Accepted {}

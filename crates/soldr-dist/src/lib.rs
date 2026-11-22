@@ -1,4 +1,5 @@
 //! One-joblet Dist transport, independent of zccache's executor API.
+pub mod blob_router;
 pub mod cas;
 pub mod cli;
 pub mod client;

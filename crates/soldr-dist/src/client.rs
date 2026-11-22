@@ -1,7 +1,9 @@
-//! Trusted single-worker execution; transport loss is a visible local-fallback decision.
+//! Trusted single-worker execution over a pooled session; transport loss is a
+//! visible local-fallback decision.
 use crate::{
+    blob_router::BlobInbox,
     cas::Cas,
-    client_connections::ClientConnections,
+    client_connections::{ClientConnections, Session},
     proto::*,
     transport::{self, VERSION},
     trust::Trust,
@@ -111,22 +113,25 @@ impl DistClient {
                 reason: "untrusted worker".into(),
             });
         }
-        let conn = self
+        // The session outlives this joblet: no handshake for the next one.
+        let session = self
             .connections
-            .connect(&self.worker, self.reverse_only)
+            .session(&self.worker, self.reverse_only)
             .await?;
-        let before = conn.stats();
-        let result = self.exchange(&conn, job, metrics).await;
-        metrics.capture(&conn, (before.udp_tx.bytes, before.udp_rx.bytes));
-        conn.close(0u32.into(), b"client complete");
+        let result = self.exchange(&session, job, metrics).await;
+        metrics.capture(&session.conn);
         result
     }
     async fn exchange(
         &self,
-        conn: &iroh::endpoint::Connection,
+        session: &Session,
         job: &DistJob,
         metrics: &mut JobMetrics,
     ) -> Result<DistOutcome> {
+        let conn = &session.conn;
+        // Claim the token before any stream for it can exist.
+        let mut inbox = session.router.register(session.next_token())?;
+        let token = inbox.token();
         let (mut send, mut recv) = conn.open_bi().await?;
         if let Some(reason) = hello(&mut send, &mut recv, &job.compiler_identity).await? {
             return Ok(DistOutcome::Declined {
@@ -151,12 +156,13 @@ impl DistClient {
             &Offer {
                 job: Some(job.clone()),
                 speculative: speculative.iter().cloned().collect(),
+                job_token: token,
             },
         )
         .await?;
         metrics.speculative_blobs = speculative.len() as u64;
         let mut transfers = JoinSet::new();
-        self.upload(conn, job, &speculative, &mut transfers)?;
+        self.upload(conn, token, job, &speculative, &mut transfers)?;
         let reply: Reply = transport::recv(&mut recv).await?;
         if let Some(declined) = reply.declined {
             return Ok(DistOutcome::Declined {
@@ -175,9 +181,9 @@ impl DistClient {
         } else {
             0
         };
-        self.upload(conn, job, &requested, &mut transfers)?;
+        self.upload(conn, token, job, &requested, &mut transfers)?;
         while let Some(result) = transfers.join_next().await {
-            result??;
+            metrics.bytes_sent += result??;
             metrics.uploaded_blobs += 1;
         }
         let reply: Reply = transport::recv(&mut recv).await?;
@@ -190,14 +196,15 @@ impl DistClient {
             .extend(job.inputs.iter().map(|i| i.blake3.clone()));
         // No compile wall-clock timeout: QUIC keepalive bounds worker loss without killing live work.
         let reply: Reply = transport::recv(&mut recv).await?;
-        self.complete(conn, job, reply, &mut send).await
+        self.complete(&mut inbox, job, reply, &mut send, metrics).await
     }
     async fn complete(
         &self,
-        conn: &iroh::endpoint::Connection,
+        inbox: &mut BlobInbox,
         job: &DistJob,
         reply: Reply,
         send: &mut iroh::endpoint::SendStream,
+        metrics: &mut JobMetrics,
     ) -> Result<DistOutcome> {
         if let Some(declined) = reply.declined {
             return Ok(DistOutcome::Declined {
@@ -209,7 +216,7 @@ impl DistClient {
         if let Some(declined) = crate::dep_info::decline(job, &done, &self.worker.id.to_string()) {
             return Ok(declined);
         }
-        let outputs = self.fetch(conn, job, &done, send).await?;
+        let outputs = self.fetch(inbox, job, &done, send, metrics).await?;
         transport::send(send, &Accepted {}).await?;
         send.finish()?;
         // After publication starts, errors must not permit a local fallback over
@@ -236,9 +243,10 @@ impl DistClient {
     fn upload(
         &self,
         conn: &iroh::endpoint::Connection,
+        token: u64,
         job: &DistJob,
         digests: &HashSet<String>,
-        transfers: &mut JoinSet<Result<()>>,
+        transfers: &mut JoinSet<Result<u64>>,
     ) -> Result<()> {
         for digest in digests {
             let input = job
@@ -254,17 +262,18 @@ impl DistClient {
             transfers.spawn(async move {
                 let _slot = slots.acquire_owned().await?;
                 let file = fs::File::open(path)?;
-                transport::upload(&conn, digest, file).await
+                transport::upload(&conn, token, digest, file).await
             });
         }
         Ok(())
     }
     async fn fetch(
         &self,
-        conn: &iroh::endpoint::Connection,
+        inbox: &mut BlobInbox,
         job: &DistJob,
         done: &Done,
         send: &mut iroh::endpoint::SendStream,
+        metrics: &mut JobMetrics,
     ) -> Result<Vec<(OutputFile, Vec<u8>)>> {
         if done.exit_code == 0
             && (done.outputs.len() != job.outputs.len()
@@ -297,7 +306,8 @@ impl DistClient {
             .map(|o| (o.blake3.clone(), o.size))
             .collect();
         while !missing.is_empty() {
-            let digest = transport::receive_blob(conn, &self.cas, &expected).await?;
+            let (digest, size) = inbox.receive(&self.cas, &expected).await?;
+            metrics.bytes_received += size;
             if !missing.remove(&digest) {
                 return Err("duplicate output blob".into());
             }

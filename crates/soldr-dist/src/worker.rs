@@ -1,5 +1,6 @@
 //! Worker lifecycle. In-flight compilation is independent of connection lifetime.
 use crate::{
+    blob_router::{BlobInbox, BlobRouter},
     cas::Cas,
     compiler::{self, Compiler},
     proto::*,
@@ -98,15 +99,14 @@ impl Worker {
         });
         let mut jobs = JoinSet::new();
         for client in self.clients {
-            // Bound warm sockets, not compiler admission; each carries one joblet.
-            for _ in 0..self.slots.min(64) {
-                jobs.spawn(outbound::dial(
-                    state.clone(),
-                    self.endpoint.clone(),
-                    client.clone(),
-                    shutdown.clone(),
-                ));
-            }
+            // One warm session per client multiplexes every joblet; slots bound
+            // compiler admission, not sockets.
+            jobs.spawn(outbound::dial(
+                state.clone(),
+                self.endpoint.clone(),
+                client,
+                shutdown.clone(),
+            ));
         }
         write_status(&state)?;
         loop {
@@ -115,7 +115,7 @@ impl Worker {
                 incoming = self.endpoint.accept() => {
                     let Some(incoming) = incoming else { break; };
                     if self.outbound_only { incoming.refuse(); continue; }
-                    jobs.spawn(outbound::incoming(state.clone(), incoming));
+                    jobs.spawn(outbound::incoming(state.clone(), incoming, shutdown.clone()));
                 }
                 result = jobs.join_next(), if !jobs.is_empty() => {
                     report_join(result);
@@ -194,12 +194,47 @@ async fn decline(send: &mut iroh::endpoint::SendStream, reason: &str) -> Result<
     )
     .await
 }
-async fn handle(state: &State, conn: &Connection) -> Result<()> {
-    handle_job(state, conn, conn.accept_bi().await?).await
+/// Serves every joblet a client multiplexes onto one session until the session
+/// ends or the worker shuts down; in-flight joblets then finish (the caller's
+/// drain deadline bounds them).
+async fn serve_connection(
+    state: Arc<State>,
+    conn: Connection,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    let router = BlobRouter::spawn(conn.clone());
+    let mut jobs = JoinSet::new();
+    loop {
+        tokio::select! {
+            streams = conn.accept_bi() => {
+                let Ok(streams) = streams else { break };
+                // Trust is rechecked per joblet, so revocation needs no restart.
+                if !Trust::load(&state.root.join("trusted_clients.toml"))?.contains(conn.remote_id()) {
+                    conn.close(1u32.into(), b"client trust revoked");
+                    return Err("client trust revoked".into());
+                }
+                let (state, conn, router) = (state.clone(), conn.clone(), router.clone());
+                jobs.spawn(async move {
+                    let result = handle_job(&state, &conn, &router, streams).await;
+                    write_status(&state)?;
+                    state.cas.evict()?;
+                    result
+                });
+            }
+            _ = shutdown.changed() => break,
+            result = jobs.join_next(), if !jobs.is_empty() => report_join(result),
+        }
+    }
+    while let Some(result) = jobs.join_next().await {
+        report_join(Some(result));
+    }
+    conn.close(0u32.into(), b"worker session complete");
+    Ok(())
 }
 async fn handle_job(
     state: &State,
     conn: &Connection,
+    router: &BlobRouter,
     (mut send, mut recv): (SendStream, RecvStream),
 ) -> Result<()> {
     let hello: Hello = transport::recv(&mut recv).await?;
@@ -223,6 +258,9 @@ async fn handle_job(
         .into());
     }
     let offer: Offer = transport::recv(&mut recv).await?;
+    // Register before any decline: it also finishes the token, so speculative
+    // uploads for a declined joblet are stopped rather than parked.
+    let mut inbox = router.register(offer.job_token)?;
     let job = offer.job.ok_or("missing job manifest")?;
     let Some(compiler) = state
         .compilers
@@ -245,7 +283,7 @@ async fn handle_job(
     };
     let mut lease = state.cas.lease(job.inputs.iter().map(|i| i.blake3.clone()));
     write_status(state)?;
-    receive_inputs(state, conn, &job, &offer.speculative, &mut send).await?;
+    receive_inputs(state, &mut inbox, &job, &offer.speculative, &mut send).await?;
     state.cas.evict()?;
     let sandbox = tempfile::tempdir_in(&state.root)?;
     sandbox::materialise(sandbox.path(), &job, &state.cas)?;
@@ -280,8 +318,8 @@ async fn handle_job(
             return Err("undeclared output requested".into());
         }
         let file = state.cas.open(&digest)?;
-        let conn = conn.clone();
-        transfers.spawn(async move { transport::upload(&conn, digest, file).await });
+        let (conn, token) = (conn.clone(), offer.job_token);
+        transfers.spawn(async move { transport::upload(&conn, token, digest, file).await });
     }
     while let Some(result) = transfers.join_next().await {
         result??;
@@ -344,7 +382,7 @@ fn expected_inputs(job: &DistJob) -> Result<Vec<(String, u64)>> {
 
 async fn receive_inputs(
     state: &State,
-    conn: &Connection,
+    inbox: &mut BlobInbox,
     job: &DistJob,
     speculative: &[String],
     send: &mut iroh::endpoint::SendStream,
@@ -381,7 +419,7 @@ async fn receive_inputs(
     .await?;
     incoming.extend(need);
     while !incoming.is_empty() {
-        let digest = transport::receive_blob(conn, &state.cas, &expected).await?;
+        let (digest, _) = inbox.receive(&state.cas, &expected).await?;
         if !incoming.remove(&digest) {
             return Err("duplicate input blob".into());
         }

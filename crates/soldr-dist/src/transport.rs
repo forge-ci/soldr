@@ -8,7 +8,7 @@ use prost::Message;
 use std::{path::Path, time::Duration};
 
 pub const ALPN: &[u8] = b"soldr-dist/0";
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 pub const DEFAULT_RELAY_URL: &str = "https://signal.forge-ci.com";
 pub const CONTROL_LIMIT: usize = 8 * 1024 * 1024;
 pub const BLOB_LIMIT: u64 = 16 * 1024 * 1024 * 1024;
@@ -169,32 +169,29 @@ pub async fn recv<M: Message + Default>(stream: &mut RecvStream) -> Result<M> {
     stream.read_exact(&mut bytes).await?;
     Ok(M::decode(bytes.as_slice())?)
 }
-pub async fn upload(conn: &Connection, digest: String, file: std::fs::File) -> Result<()> {
+/// Sends one blob on its own stream, tagged with the joblet it belongs to.
+/// Returns the payload size.
+pub async fn upload(
+    conn: &Connection,
+    job_token: u64,
+    digest: String,
+    file: std::fs::File,
+) -> Result<u64> {
     let size = file.metadata()?.len();
     let mut send_stream = conn.open_uni().await?;
-    send(&mut send_stream, &Blob { digest, size }).await?;
+    send(
+        &mut send_stream,
+        &Blob {
+            digest,
+            size,
+            job_token,
+        },
+    )
+    .await?;
     let mut file = tokio::fs::File::from_std(file);
     tokio::io::copy(&mut file, &mut send_stream).await?;
     send_stream.finish()?;
-    Ok(())
-}
-pub async fn receive_blob(
-    conn: &Connection,
-    cas: &Cas,
-    expected: &[(String, u64)],
-) -> Result<String> {
-    let mut stream = conn.accept_uni().await?;
-    let blob: Blob = recv(&mut stream).await?;
-    if blob.size > BLOB_LIMIT
-        || !expected
-            .iter()
-            .any(|(d, s)| d == &blob.digest && *s == blob.size)
-    {
-        return Err("unsolicited blob or incorrect size".into());
-    }
-    cas.receive_stream(&blob.digest, blob.size, &mut stream)
-        .await?;
-    Ok(blob.digest)
+    Ok(size)
 }
 
 /// Hold while a CLI endpoint uses this persistent identity. Separate processes

@@ -24,6 +24,8 @@ message Hello {
 message Offer {
   DistJob job = 1;
   repeated string speculative = 2;
+  // Session-scoped id that routes this job's blob streams on a shared connection.
+  uint64 job_token = 3;
 }
 message Need {
   repeated string digests = 1;
@@ -33,6 +35,8 @@ message Need {
 message Blob {
   string digest = 1;
   uint64 size = 2;
+  // The Offer.job_token of the job this stream belongs to.
+  uint64 job_token = 3;
 }
 message Accepted {
 }

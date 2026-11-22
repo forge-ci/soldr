@@ -16,7 +16,6 @@ mod namespace;
 struct Executor {
     clients: Vec<DistClient>,
     next: AtomicUsize,
-    compiler_program: std::path::PathBuf,
     _lease: transport::EndpointLease,
     root: std::path::PathBuf,
     inputs: tokio::sync::Mutex<soldr_dist::cas::DigestMemo>,
@@ -78,12 +77,10 @@ pub(crate) async fn register(
                 .map(|client| client.with_reverse_only(reverse_only))
         })
         .collect::<soldr_dist::Result<Vec<_>>>()?;
-    let compiler_program = Compiler::soldr_program(&root, &std::env::current_exe()?)?;
     tracing::info!(peers = clients.len(), root = %root.display(), "soldr dist miss executor enabled");
     Ok(service.with_executor(Arc::new(Executor {
         clients,
         next: AtomicUsize::new(0),
-        compiler_program,
         inputs: tokio::sync::Mutex::new(soldr_dist::cas::DigestMemo::default()),
         _lease: lease,
         root,
@@ -197,13 +194,7 @@ impl CompileExecutor for Executor {
             if let Err(reason) = namespace::check(&manifest, true) {
                 return self.declined(job, reason);
             }
-            let manifest = match soldr_dist::rust_inputs::construct_with_soldr(
-                manifest,
-                &self.inputs,
-                &self.compiler_program,
-            )
-            .await
-            {
+            let manifest = match soldr_dist::rust_inputs::construct(manifest, &self.inputs).await {
                 Ok(manifest) => manifest,
                 Err(error) => {
                     return self.declined(job, format!("dist input construction: {error}"))

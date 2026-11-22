@@ -23,12 +23,13 @@ impl JobMetrics {
         }
     }
 
-    pub(crate) fn capture(&mut self, conn: &Connection, before: (u64, u64)) {
+    /// Records the session's path and totals. `bytes_sent` / `bytes_received`
+    /// are this joblet's own blob payloads, counted as they move: the session is
+    /// shared, so its counters include every other joblet's traffic.
+    pub(crate) fn capture(&mut self, conn: &Connection) {
         let stats = conn.stats();
         self.connection_bytes_sent = stats.udp_tx.bytes;
         self.connection_bytes_received = stats.udp_rx.bytes;
-        self.bytes_sent = stats.udp_tx.bytes.saturating_sub(before.0);
-        self.bytes_received = stats.udp_rx.bytes.saturating_sub(before.1);
         self.connection_side = format!("{:?}", conn.side());
         let (mut direct, mut relay) = (false, false);
         let paths = conn.paths();

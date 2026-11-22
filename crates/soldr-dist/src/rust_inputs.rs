@@ -1,6 +1,5 @@
 //! Construct Rust inputs before a cold cache miss; never require a prior local compile.
 use crate::{cas::DigestMemo, sandbox, DistJob, Result};
-use running_process::AsyncProcessBuilder;
 mod env;
 use std::{
     collections::BTreeSet,
@@ -8,15 +7,7 @@ use std::{
 };
 
 /// Enlarge a hook manifest from package membership, compiler search paths and generated files.
-pub async fn construct(job: DistJob, memo: &tokio::sync::Mutex<DigestMemo>) -> Result<DistJob> {
-    construct_with_soldr(job, memo, Path::new("soldr")).await
-}
-
-pub async fn construct_with_soldr(
-    mut job: DistJob,
-    memo: &tokio::sync::Mutex<DigestMemo>,
-    soldr: &Path,
-) -> Result<DistJob> {
+pub async fn construct(mut job: DistJob, memo: &tokio::sync::Mutex<DigestMemo>) -> Result<DistJob> {
     let original_inputs = job.inputs.clone();
     let cwd = Path::new(&job.cwd);
     let mut paths = job
@@ -25,7 +16,7 @@ pub async fn construct_with_soldr(
         .map(|i| PathBuf::from(&i.abs_path))
         .collect::<BTreeSet<_>>();
     let package = package_root(&job)?;
-    paths.extend(package_files(&package, soldr).await?);
+    paths.extend(package_files(&package)?);
     search_files(&job.argv, cwd, &mut paths)?;
     if let Some(out) = job.env.get("OUT_DIR").filter(|p| !p.is_empty()) {
         tree(
@@ -72,35 +63,22 @@ fn package_root(job: &DistJob) -> Result<PathBuf> {
     Err("Rust unit has no CARGO_MANIFEST_DIR or discoverable package".into())
 }
 
-async fn package_files(package: &Path, soldr: &Path) -> Result<BTreeSet<PathBuf>> {
-    let git = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        AsyncProcessBuilder::new("git")
-            .kill_on_drop(true)
-            .args(["rev-parse", "--show-toplevel"])
-            .current_dir(package)
-            .capture(),
-    )
-    .await
-    .map_err(|_| "git package root deadline")??;
-    if git.status.success() {
-        let root = PathBuf::from(std::str::from_utf8(&git.stdout)?.trim());
-        let files = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            AsyncProcessBuilder::new("git")
-                .kill_on_drop(true)
-                .args(["ls-files", "--cached", "--full-name", "-z", "--", "."])
-                .current_dir(package)
-                .capture(),
-        )
-        .await
-        .map_err(|_| "git package files deadline")??;
-        if !files.status.success() {
-            return Err("git package source listing failed".into());
-        }
-        return file_list(&root, package, &files.stdout, 0);
-    }
-    // Cargo stores the packaged file list for registry sources; avoid nested Cargo locks.
+/// Most files a package may contribute before construction declines the unit.
+const PACKAGE_FILE_LIMIT: usize = 20_000;
+/// Most bytes a package may contribute before construction declines the unit.
+const PACKAGE_BYTE_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+
+/// The package's source files, listed in-process: no `git` or `cargo` child, so
+/// construction cannot depend on the daemon's PATH and costs no process spawn
+/// per unit.
+///
+/// Registry sources carry Cargo's exact packaged list. Anything else is walked
+/// the way Cargo lists a package outside version control: everything under the
+/// package root except the root `target/`, dot-entries and nested packages.
+/// `include`/`exclude` are not applied; shipping extra files is safe because
+/// the worker's digest store deduplicates them and the dep-info proof checks
+/// what the compiler actually read.
+fn package_files(package: &Path) -> Result<BTreeSet<PathBuf>> {
     let checksum = package.join(".cargo-checksum.json");
     if checksum.is_file() {
         let value: serde_json::Value = serde_json::from_slice(&std::fs::read(checksum)?)?;
@@ -111,29 +89,50 @@ async fn package_files(package: &Path, soldr: &Path) -> Result<BTreeSet<PathBuf>
         let listed = files.keys().cloned().collect::<Vec<_>>().join("\n");
         return file_list(package, package, listed.as_bytes(), b'\n');
     }
-    // Unpacked source archives use Cargo's package rules, offline and with a deadline.
-    let files = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        AsyncProcessBuilder::new(soldr)
-            .env(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR, "1")
-            .kill_on_drop(true)
-            .args([
-                "cargo",
-                "package",
-                "--list",
-                "--allow-dirty",
-                "--no-verify",
-                "--offline",
-            ])
-            .current_dir(package)
-            .capture(),
-    )
-    .await
-    .map_err(|_| "Cargo package listing deadline")??;
-    if !files.status.success() {
-        return Err("Cargo package source listing failed".into());
+    let mut paths = BTreeSet::new();
+    let mut bytes = 0;
+    walk_package(package, package, &mut paths, &mut bytes)?;
+    if paths.is_empty() {
+        return Err("package source listing is empty".into());
     }
-    file_list(package, package, &files.stdout, b'\n')
+    Ok(paths)
+}
+
+fn walk_package(
+    package: &Path,
+    dir: &Path,
+    paths: &mut BTreeSet<PathBuf>,
+    bytes: &mut u64,
+) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        // file_type does not follow symlinks: a linked directory is not walked.
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            let nested = dir != package && path.join("Cargo.toml").is_file();
+            if (dir == package && name == "target") || nested {
+                continue;
+            }
+            walk_package(package, &path, paths, bytes)?;
+        } else if path.is_file() {
+            *bytes += entry.metadata()?.len();
+            paths.insert(path);
+            if paths.len() > PACKAGE_FILE_LIMIT || *bytes > PACKAGE_BYTE_LIMIT {
+                return Err(format!(
+                    "package {} exceeds the dist input limit ({PACKAGE_FILE_LIMIT} files / {} GiB)",
+                    package.display(),
+                    PACKAGE_BYTE_LIMIT >> 30
+                )
+                .into());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn file_list(
@@ -218,6 +217,37 @@ pub fn validate_environment(job: &mut DistJob) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_walk_skips_target_dotfiles_and_nested_packages() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for (path, body) in [
+            ("Cargo.toml", "[package]\nname=\"p\"\nversion=\"0.0.0\"\n"),
+            ("src/lib.rs", "pub fn f() {}\n"),
+            ("src/data/table.txt", "1\n"),
+            ("build.rs", "fn main() {}\n"),
+            ("target/debug/junk", "x"),
+            (".git/HEAD", "ref"),
+            ("src/.hidden.rs", "x"),
+            ("nested/Cargo.toml", "[package]\nname=\"n\"\nversion=\"0.0.0\"\n"),
+            ("nested/src/lib.rs", "x"),
+            ("sub/target/keep.rs", "kept: only the root target is build output"),
+        ] {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        let listed: Vec<_> = package_files(root)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.strip_prefix(root).unwrap().to_str().unwrap().replace('\\', "/"))
+            .collect();
+        assert_eq!(
+            listed,
+            ["Cargo.toml", "build.rs", "src/data/table.txt", "src/lib.rs", "sub/target/keep.rs"]
+        );
+    }
     #[test]
     fn construction_rejects_changes_to_inputs_already_in_the_cache_key() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
