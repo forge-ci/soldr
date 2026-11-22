@@ -88,11 +88,7 @@ pub(super) fn inspect(job: &mut DistJob) -> Result<BTreeSet<String>> {
     // files took 8.4 s of 8.8 s); fall back to the full parse in those cases.
     let relevant = sources
         .iter()
-        .filter(|text| {
-            ["env", "include", "macro_rules"]
-                .iter()
-                .any(|w| text.contains(w))
-        })
+        .filter(|text| may_matter(text))
         .collect::<Vec<_>>();
     let mut uses = analyse(&relevant)?;
     if relevant.len() != sources.len()
@@ -133,6 +129,27 @@ pub(super) fn inspect(job: &mut DistJob) -> Result<BTreeSet<String>> {
     // Keep original exec_env, including aliased/dynamically supplied env dependencies.
     // Worker runtime overrides are validated against these original values by dep-info.
     Ok(uses.keys)
+}
+
+/// Whether a file could read an env var, alias `env`, include a path or define
+/// a macro. `env` counts only as a whole identifier (or `option_env`) followed,
+/// after any whitespace, by `!` or `as`, so libc's `environ`/`getenv` do not.
+fn may_matter(text: &str) -> bool {
+    if text.contains("include") || text.contains("macro_rules") {
+        return true;
+    }
+    let bytes = text.as_bytes();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    text.match_indices("env").any(|(at, _)| {
+        let starts = at == 0 || !ident(bytes[at - 1]) || text[..at].ends_with("option_");
+        let after = &text[at + 3..];
+        if !starts || after.as_bytes().first().is_some_and(|b| ident(*b)) {
+            return false;
+        }
+        let rest = after.trim_start();
+        rest.starts_with('!')
+            || (rest.starts_with("as") && !rest.as_bytes().get(2).is_some_and(|b| ident(*b)))
+    })
 }
 
 fn analyse(sources: &[&String]) -> Result<Uses> {
@@ -309,6 +326,24 @@ mod tests {
         ));
         inspect(&mut job).unwrap();
         assert_eq!(job.rewrite_env, ["OUT_DIR"]);
+    }
+    #[test]
+    fn may_matter_ignores_c_env_names_but_not_env_macros() {
+        use super::may_matter;
+        assert!(!may_matter(
+            "extern { fn getenv(); static environ: u8; } fn f(env: u8) {}"
+        ));
+        for text in [
+            "env!(\"X\")",
+            "env ! (\"X\")",
+            "option_env!(\"X\")",
+            "use std::env as e;",
+            "use core::{env\n  as e};",
+            "include_str!(\"a\")",
+            "macro_rules! m {}",
+        ] {
+            assert!(may_matter(text), "{text}");
+        }
     }
     #[test]
     fn fast_path_still_sees_macros_in_files_without_env_words() {
