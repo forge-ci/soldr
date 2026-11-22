@@ -73,7 +73,9 @@ impl DistClient {
         paths.iter().map(|path| self.memo.input(path)).collect()
     }
     pub async fn execute(&self, job: DistJob) -> DistOutcome {
-        self.execute_inner(job, None).await
+        // Boxed: the joblet future is large, and nesting it unboxed doubled
+        // its stack frame and overflowed the daemon's worker thread (debug).
+        Box::pin(self.execute_inner(job, None)).await
     }
 
     /// For a job `rust_inputs::construct` built. `construct` is the time spent
@@ -84,7 +86,7 @@ impl DistClient {
         job: DistJob,
         construct: std::time::Duration,
     ) -> DistOutcome {
-        self.execute_inner(job, Some(construct)).await
+        Box::pin(self.execute_inner(job, Some(construct))).await
     }
 
     async fn execute_inner(
