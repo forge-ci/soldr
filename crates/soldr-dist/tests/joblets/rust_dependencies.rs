@@ -108,13 +108,11 @@ fn cold_rust_unit_with_two_dependencies_and_host_proc_macro_is_byte_identical() 
             "--crate-type=rlib",
             // As Cargo does: the worker then reuses this dep-info as its input proof
             // instead of adding an output type, which would change the crate hash.
-            "--emit=dep-info,link",
+            "--emit=dep-info=out.d,link=out.rlib",
             "lib.rs",
             "--extern=b=deps/libb.rlib",
             &external,
             "-Ldependency=deps",
-            "-o",
-            "out.rlib",
         ];
         local(&compiler, &cwd, &args).await;
         let expected = fs::read(cwd.join("out.rlib")).unwrap();
@@ -125,6 +123,9 @@ fn cold_rust_unit_with_two_dependencies_and_host_proc_macro_is_byte_identical() 
             &cwd.join("lib.rs"),
             &cwd.join("out.rlib"),
         );
+        manifest
+            .outputs
+            .push(cwd.join("out.d").to_str().unwrap().into());
         manifest
             .env
             .insert("CARGO_MANIFEST_DIR".into(), cwd.to_str().unwrap().into());
