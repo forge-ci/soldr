@@ -63,7 +63,11 @@ The CI commit-trailer verification under `ci-attestations.yml` uses a
 different format.
 
 When launching the server inside a Bosn job configured with
-`bosn ci run --github-proxy`, the runner-side command inherits Bosn's
-stand-in `GITHUB_TOKEN`, proxy settings, and CA bundle. Keep the server
-inside that job's network and lifetime so GitHub requests stay within
-Bosn's per-run allowlist.
+`bosn ci run --github-proxy`, set `GITHUB_TOKEN` in the server's workflow step
+environment to `${{ secrets.GITHUB_TOKEN }}`. Bosn supplies the stand-in token
+as that secret and installs its proxy settings and CA bundle in the job
+environment. The server passes those settings to the runner-side command.
+Keep the server inside that job's network and lifetime. The SSH relay must
+reach the job's loopback address so builds can connect to the server.
+GitHub API calls using the stand-in token remain subject to Bosn's per-run
+allowlist.

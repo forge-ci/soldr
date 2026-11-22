@@ -145,6 +145,30 @@ fn env_duration(name: &str, default_ms: u64) -> Duration {
     )
 }
 
+pub(crate) fn handshake_timeout_reason(
+    awaiting_handoff: bool,
+    reached_ceiling: bool,
+    awaiting_first_response: bool,
+    limit: Duration,
+) -> String {
+    if awaiting_handoff {
+        return "broker did not confirm either handoff ownership or same-connection proxy fallback"
+            .into();
+    }
+    let class = if reached_ceiling {
+        "route acquisition ceiling"
+    } else if awaiting_first_response {
+        "first-response deadline"
+    } else {
+        "progress-silence deadline"
+    };
+    format!(
+        "broker {class} exceeded (limit {}ms; raise {} if the broker is only busy)",
+        limit.as_millis(),
+        deadline_env_var(class)
+    )
+}
+
 pub(crate) fn handshake_context(
     request_id: u64,
     elapsed: Duration,

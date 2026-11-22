@@ -753,22 +753,12 @@ where
             }
             Ok(Ok(n)) => n,
             Err(_) => {
-                let reason = if pending_handoff.is_some() {
-                    "broker did not confirm either handoff ownership or same-connection proxy fallback".into()
-                } else {
-                    let class = if deadline == route_ceiling {
-                        "route acquisition ceiling"
-                    } else if response_deadline == started + deadlines.first_response {
-                        "first-response deadline"
-                    } else {
-                        "progress-silence deadline"
-                    };
-                    format!(
-                        "broker {class} exceeded (limit {}ms; raise {} if the broker is only busy)",
-                        (deadline - started).as_millis(),
-                        crate::broker_deadlines::deadline_env_var(class)
-                    )
-                };
+                let reason = crate::broker_deadlines::handshake_timeout_reason(
+                    pending_handoff.is_some(),
+                    deadline == route_ceiling,
+                    response_deadline == started + deadlines.first_response,
+                    deadline - started,
+                );
                 let message = format!("{reason} ({})", context());
                 eprintln!("soldr: {message}");
                 return Err(io::Error::new(io::ErrorKind::TimedOut, message));
