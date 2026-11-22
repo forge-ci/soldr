@@ -16,6 +16,8 @@ use prost::Message;
 
 use crate::platform::{fs::permissions, wait};
 
+use super::manifest;
+use super::slots;
 use super::snapshot::{digest, relative_path};
 use super::wire::{self, Action, Artifact, Artifacts, Blob, Fetch, ResultFrame, Session, Start};
 
@@ -23,6 +25,7 @@ pub(super) async fn serve(
     listen: std::net::SocketAddr,
     root: PathBuf,
     token: &str,
+    slot_limit: Option<u32>,
 ) -> io::Result<i32> {
     if !listen.ip().is_loopback() {
         return Err(io::Error::other(
@@ -37,6 +40,7 @@ pub(super) async fn serve(
         .with_state((
             root.canonicalize()?,
             digest(format!("Bearer {token}").as_bytes()),
+            slot_limit,
         ));
     let listener = tokio::net::TcpListener::bind(listen).await?;
     eprintln!(
@@ -48,7 +52,7 @@ pub(super) async fn serve(
 }
 
 async fn handle(
-    State((root, expected)): State<(PathBuf, String)>,
+    State((root, expected, slot_limit)): State<(PathBuf, String, Option<u32>)>,
     RoutePath(operation): RoutePath<String>,
     headers: HeaderMap,
     body: Bytes,
@@ -66,7 +70,8 @@ async fn handle(
     if provided.as_ref() != Some(&expected) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    match tokio::task::spawn_blocking(move || dispatch(&root, &operation, &body)).await {
+    match tokio::task::spawn_blocking(move || dispatch(&root, &operation, &body, slot_limit)).await
+    {
         Ok(Ok(data)) => (
             StatusCode::OK,
             [("content-type", "application/x-protobuf+zstd")],
@@ -90,12 +95,22 @@ fn key(value: &str, len: usize) -> io::Result<&str> {
     }
 }
 
-fn dispatch(root: &Path, operation: &str, body: &[u8]) -> io::Result<Vec<u8>> {
+fn dispatch(
+    root: &Path,
+    operation: &str,
+    body: &[u8],
+    slot_limit: Option<u32>,
+) -> io::Result<Vec<u8>> {
     let parts: Vec<_> = operation.split('/').collect();
     match parts.as_slice() {
         ["start"] => start(root, wire::decode(body)?),
         ["blob", hash] => store_blob(root, hash, wire::decode(body)?),
-        ["run", id] => run(root, &root.join("sessions").join(key(id, 32)?), id),
+        ["run", id] => run(
+            root,
+            &root.join("sessions").join(key(id, 32)?),
+            id,
+            slot_limit,
+        ),
         ["fetch", id] => fetch(
             &root.join("sessions").join(key(id, 32)?),
             wire::decode(body)?,
@@ -109,6 +124,7 @@ fn start(root: &Path, request: Start) -> io::Result<Vec<u8>> {
         return Err(io::Error::other("invalid commit ID"));
     }
     key(&request.commit, request.commit.len())?;
+    let manifest = manifest::decode(request.manifest_json.as_deref(), &request.commit)?;
     Action::try_from(request.action).map_err(io::Error::other)?;
     let mut missing = std::collections::BTreeSet::new();
     let paths: std::collections::BTreeSet<_> = request
@@ -141,10 +157,15 @@ fn start(root: &Path, request: Start) -> io::Result<Vec<u8>> {
     let id = hex::encode(random);
     let directory = root.join("sessions").join(&id);
     fs::create_dir(&directory)?;
+    fs::write(
+        directory.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
     fs::write(directory.join("start.pb"), request.encode_to_vec())?;
     wire::encode(&Session {
         id,
         missing: missing.into_iter().collect(),
+        manifest_accepted: manifest.is_some(),
     })
 }
 
@@ -160,28 +181,250 @@ fn store_blob(root: &Path, hash: &str, blob: Blob) -> io::Result<Vec<u8>> {
     wire::encode(&Blob::default())
 }
 
-fn run(root: &Path, session: &Path, id: &str) -> io::Result<Vec<u8>> {
-    let request = Start::decode(fs::read(session.join("start.pb"))?.as_slice())?;
-    let runner_lock = fs::OpenOptions::new()
+fn lock_session(root: &Path, session: &Path) -> io::Result<fs::File> {
+    let lock = fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
         .open(root.join("build.lock"))?;
-    wait::lock_exclusive_announced(&runner_lock, wait::LONG_LOCK, "remote build runner")?;
+    wait::lock_exclusive_announced(&lock, wait::LONG_LOCK, "remote build runner")?;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(session.join("started"))
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                io::Error::other("remote build session was already started")
+            } else {
+                error
+            }
+        })?;
+    Ok(lock)
+}
+
+fn run(root: &Path, session: &Path, id: &str, slot_limit: Option<u32>) -> io::Result<Vec<u8>> {
+    let request = Start::decode(fs::read(session.join("start.pb"))?.as_slice())?;
+    let _runner_lock = lock_session(root, session)?;
     let cache_root = root.join("compiler");
     let cache_dir = crate::core::SoldrPaths::with_root(cache_root.clone()).cache;
-    let source = session.join("source");
+    let manifest = manifest::decode(request.manifest_json.as_deref(), &request.commit)?;
+    let lease = manifest
+        .as_ref()
+        .filter(|_| slot_limit != Some(0))
+        .map(|manifest| slots::Lease::acquire(root, id, manifest, slot_limit))
+        .transpose()?;
+    let workspace = lease
+        .as_ref()
+        .map_or(session, |lease| lease.workspace.as_path());
+    let source = workspace.join("source");
     let output = session.join("output");
-    fs::create_dir(&source)?;
-    fs::create_dir(&output)?;
+    let build_output = workspace.join("output");
+    prepare_sources(
+        root,
+        session,
+        &source,
+        &build_output,
+        &request,
+        lease.is_some(),
+    )?;
+
+    let action = Action::try_from(request.action).map_err(io::Error::other)?;
+    let arguments = compile_args(action, &request.args, &build_output)?;
+    let full_lint = action == Action::Lint && arguments == ["rust", "--check"];
+    let action = match action {
+        Action::Build => "build",
+        Action::Test => "test",
+        Action::Dylint => "dylint",
+        Action::Lint => "lint",
+    };
+    let soldr = std::env::current_exe()?;
+    let result = wait::output_for(
+        runner_soldr(&soldr, &cache_root)
+            .current_dir(&source)
+            .env("CARGO_TARGET_DIR", build_output.join("target"))
+            .arg(action)
+            .args(&arguments),
+        wait::WHOLE_COMMAND,
+    )?;
+    let exit_code = result.status.code().unwrap_or(1);
+    let mut stderr = result.stderr;
+    let run_cook = lease.is_some() && exit_code == 0 && full_lint;
+    let mut cook_archive_sha256 = None;
+    if let Some(lease) = &lease {
+        cook_archive_sha256 =
+            collect_slot_output(root, lease, &soldr, &output, run_cook, &mut stderr)?;
+    }
+    let cook_ready = run_cook.then_some(cook_archive_sha256.is_some());
+    fs::write(
+        output.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
+    let cache_saved = request.cache_zstd_level.map(|level| {
+        save_cache(
+            &soldr,
+            &cache_root,
+            &source,
+            &cache_dir,
+            &output,
+            level,
+            &mut stderr,
+        )
+    });
+    let attestation = serde_json::to_vec_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "session": id,
+        "commit": request.commit,
+        "manifest": manifest,
+        "slot": lease.as_ref().map(|lease| lease.slot),
+        "action": action,
+        "args": request.args,
+        "exit_code": exit_code,
+        "cache_saved": cache_saved,
+        "cook_ready": cook_ready,
+        "cook_archive_sha256": cook_archive_sha256,
+        "runner": sysinfo::System::host_name(),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "source": request.files.iter().map(|file| (&file.path, &file.digest)).collect::<std::collections::BTreeMap<_, _>>(),
+    }))?;
+    let result_code = if exit_code == 0 && (cache_saved == Some(false) || cook_ready == Some(false))
+    {
+        1
+    } else {
+        exit_code
+    };
+    if let Some(lease) = &lease {
+        lease.finish(Some(result_code))?;
+    }
+    publish_attestation(&output, &attestation)?;
+    wire::encode(&ResultFrame {
+        exit_code: result_code,
+        stdout: result.stdout,
+        stderr,
+        attestation,
+    })
+}
+
+fn publish_attestation(output: &Path, attestation: &[u8]) -> io::Result<()> {
+    // Fetch uses the atomically published attestation as its readiness signal.
+    let mut staging = tempfile::NamedTempFile::new_in(output)?;
+    staging.write_all(attestation)?;
+    staging.persist(output.join("attestation.json"))?;
+    Ok(())
+}
+
+fn collect_slot_output(
+    root: &Path,
+    lease: &slots::Lease,
+    soldr: &Path,
+    output: &Path,
+    run_cook: bool,
+    stderr: &mut Vec<u8>,
+) -> io::Result<Option<String>> {
+    fs::create_dir(output)?;
+    slots::snapshot_output(&lease.workspace.join("output"), output)?;
+    let hash = if run_cook {
+        warm_cook(
+            root,
+            lease,
+            soldr,
+            &root.join("compiler"),
+            &lease.workspace.join("source"),
+            stderr,
+        )
+    } else {
+        None
+    };
+    if let Some(hash) = &hash {
+        let archive = root.join("cook").join(format!("{hash}.tar.zst"));
+        slots::reflink(&archive, &output.join("cook.tar.zst"))?;
+    }
+    Ok(hash)
+}
+
+fn warm_cook(
+    root: &Path,
+    lease: &slots::Lease,
+    soldr: &Path,
+    cache_root: &Path,
+    source: &Path,
+    stderr: &mut Vec<u8>,
+) -> Option<String> {
+    use crate::cache_lib::cook_archive;
+
+    let run = || -> io::Result<String> {
+        let recipe = cook_archive::compute_recipe_hash_proxy(source)
+            .ok_or_else(|| io::Error::other("cannot identify the workspace cook recipe"))?;
+        let recipe = hex::encode(recipe);
+        let archives = root.join("cook");
+        let marker = lease.workspace.join(format!("cook-{recipe}"));
+        if let Ok(hash) = fs::read_to_string(&marker) {
+            if key(&hash, 64).is_ok() && archives.join(format!("{hash}.tar.zst")).is_file() {
+                return Ok(hash);
+            }
+        }
+        let target = lease.workspace.join("cook-target");
+        let result = wait::output_for(
+            runner_soldr(soldr, cache_root)
+                .current_dir(source)
+                .env("CARGO_TARGET_DIR", &target)
+                .args(["cook", "--workspace", "--no-index"]),
+            wait::WHOLE_COMMAND,
+        )?;
+        if !result.status.success() {
+            return Err(io::Error::other(format!(
+                "soldr cook exited with {}: {}",
+                result.status,
+                String::from_utf8_lossy(&result.stderr)
+            )));
+        }
+        fs::create_dir_all(&archives)?;
+        let packed = cook_archive::pack_cook_archive(&target.join("debug"), &archives)
+            .map_err(io::Error::other)?;
+        let hash = hex::encode(packed.sha256);
+        fs::write(marker, &hash)?;
+        Ok(hash)
+    };
+    match run() {
+        Ok(hash) => Some(hash),
+        Err(error) => {
+            stderr.extend_from_slice(
+                format!("\nsoldr remote: cook archive unavailable: {error}\n").as_bytes(),
+            );
+            None
+        }
+    }
+}
+
+fn prepare_sources(
+    root: &Path,
+    session: &Path,
+    source: &Path,
+    build_output: &Path,
+    request: &Start,
+    slotted: bool,
+) -> io::Result<()> {
+    if source.exists() {
+        fs::rename(source, session.join("previous-source"))?;
+    }
+    fs::create_dir(source)?;
+    fs::create_dir_all(build_output)?;
+    materialize(root, source, request, slotted)
+}
+
+fn materialize(root: &Path, source: &Path, request: &Start, reflink: bool) -> io::Result<()> {
     for file in request.files.iter().filter(|file| !file.symlink) {
         let path = source.join(relative_path(&file.path)?);
         fs::create_dir_all(parent(&path)?)?;
-        write_file(
-            &path,
-            &fs::read(root.join("blobs").join(key(&file.digest, 64)?))?,
-            file.executable,
-        )?;
+        let blob = root.join("blobs").join(key(&file.digest, 64)?);
+        if reflink {
+            slots::reflink(&blob, &path)?;
+            if file.executable {
+                permissions::make_executable(&path)?;
+            }
+        } else {
+            write_file(&path, &fs::read(blob)?, file.executable)?;
+        }
     }
     for file in request.files.iter().filter(|file| file.symlink) {
         let relative = relative_path(&file.path)?;
@@ -191,74 +434,41 @@ fn run(root: &Path, session: &Path, id: &str) -> io::Result<Vec<u8>> {
         create_link(&path, &data)?;
     }
 
-    let action = Action::try_from(request.action).map_err(io::Error::other)?;
-    let arguments = compile_args(action, &request.args, &output)?;
-    let action = match action {
-        Action::Build => "build",
-        Action::Test => "test",
-        Action::Dylint => "dylint",
-    };
-    let soldr = std::env::current_exe()?;
-    let result = wait::output_for(
-        runner_soldr(&soldr, &cache_root)
-            .current_dir(&source)
-            .env("CARGO_TARGET_DIR", output.join("target"))
-            .arg(action)
-            .args(&arguments),
-        wait::WHOLE_COMMAND,
-    )?;
-    let exit_code = result.status.code().unwrap_or(1);
-    let mut stderr = result.stderr;
-    let cache_saved = request.cache_zstd_level.map(|level| {
-        let cache = wait::output_for(
-            runner_soldr(&soldr, &cache_root)
-                .current_dir(&source)
-                .args(["save", "--zstd-level"])
-                .arg(level.to_string())
-                .arg("--cache-dir")
-                .arg(&cache_dir)
-                .arg("--out")
-                .arg(output.join("cache.tar.zst")),
-            wait::LONG_CHILD,
-        );
-        match cache {
-            Ok(cache) if cache.status.success() => true,
-            Ok(cache) => {
-                stderr.extend_from_slice(b"\nRemote soldr save failed:\n");
-                stderr.extend_from_slice(&cache.stderr);
-                false
-            }
-            Err(error) => {
-                stderr
-                    .extend_from_slice(format!("\nRemote soldr save failed: {error}\n").as_bytes());
-                false
-            }
+    Ok(())
+}
+
+fn save_cache(
+    soldr: &Path,
+    cache_root: &Path,
+    source: &Path,
+    cache_dir: &Path,
+    output: &Path,
+    level: i32,
+    stderr: &mut Vec<u8>,
+) -> bool {
+    let cache = wait::output_for(
+        runner_soldr(soldr, cache_root)
+            .current_dir(source)
+            .args(["save", "--zstd-level"])
+            .arg(level.to_string())
+            .arg("--cache-dir")
+            .arg(cache_dir)
+            .arg("--out")
+            .arg(output.join("cache.tar.zst")),
+        wait::LONG_CHILD,
+    );
+    match cache {
+        Ok(cache) if cache.status.success() => true,
+        Ok(cache) => {
+            stderr.extend_from_slice(b"\nRemote soldr save failed:\n");
+            stderr.extend_from_slice(&cache.stderr);
+            false
         }
-    });
-    let attestation = serde_json::to_vec_pretty(&serde_json::json!({
-        "schema_version": 1,
-        "session": id,
-        "commit": request.commit,
-        "action": action,
-        "args": request.args,
-        "exit_code": exit_code,
-        "cache_saved": cache_saved,
-        "runner": sysinfo::System::host_name(),
-        "os": std::env::consts::OS,
-        "arch": std::env::consts::ARCH,
-        "source": request.files.iter().map(|file| (&file.path, &file.digest)).collect::<std::collections::BTreeMap<_, _>>(),
-    }))?;
-    fs::write(output.join("attestation.json"), &attestation)?;
-    wire::encode(&ResultFrame {
-        exit_code: if cache_saved == Some(false) && exit_code == 0 {
-            1
-        } else {
-            exit_code
-        },
-        stdout: result.stdout,
-        stderr,
-        attestation,
-    })
+        Err(error) => {
+            stderr.extend_from_slice(format!("\nRemote soldr save failed: {error}\n").as_bytes());
+            false
+        }
+    }
 }
 
 fn runner_soldr(executable: &Path, cache_root: &Path) -> Command {
@@ -271,6 +481,20 @@ fn runner_soldr(executable: &Path, cache_root: &Path) -> Command {
 
 fn compile_args(action: Action, original: &[String], output: &Path) -> io::Result<Vec<String>> {
     let mut args = original.to_vec();
+    if action == Action::Lint {
+        if args.is_empty() {
+            args.push("rust".into());
+        }
+        if args.iter().any(|arg| arg == "--attest") {
+            return Err(io::Error::other(
+                "remote lint uses the remote session attestation; lint --attest requires a Git checkout",
+            ));
+        }
+        if matches!(args[0].as_str(), "rust" | "all") && !args.iter().any(|arg| arg == "--check") {
+            args.push("--check".into());
+        }
+        return Ok(args);
+    }
     let mut cargo_separator = action == Action::Dylint;
     let mut index = 0;
     while index < args.len() {
@@ -380,4 +604,43 @@ fn fetch(session: &Path, request: Fetch) -> io::Result<Vec<u8>> {
         });
     }
     wire::encode(&Artifacts { files })
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::*;
+
+    #[test]
+    fn every_session_persists_its_manifest_before_source_upload() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("sessions")).unwrap();
+        let commit = "a".repeat(40);
+        let populated = serde_json::json!({
+            "github": {"url": "https://github.com/forge-ci/soldr"},
+            "user_id": 1234,
+            "parent-commit-hash": "b".repeat(40),
+            "last-commit-hash": commit,
+        });
+        for (value, accepted) in [(serde_json::Value::Null, false), (populated, true)] {
+            let response = start(
+                root.path(),
+                Start {
+                    commit: commit.clone(),
+                    manifest_json: accepted.then(|| serde_json::to_vec(&value).unwrap()),
+                    ..Start::default()
+                },
+            )
+            .unwrap();
+            let session: Session = wire::decode(&response).unwrap();
+            assert_eq!(session.manifest_accepted, accepted);
+            let path = root
+                .path()
+                .join("sessions")
+                .join(session.id)
+                .join("manifest.json");
+            let stored: serde_json::Value =
+                serde_json::from_reader(fs::File::open(path).unwrap()).unwrap();
+            assert_eq!(stored, value);
+        }
+    }
 }

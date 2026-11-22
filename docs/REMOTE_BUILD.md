@@ -36,7 +36,7 @@ soldr remote --token-file "$HOME/.soldr-remote-token" fetch --out target/remote-
 ```
 
 Use the session ID printed by `remote run`. The same command accepts
-`test` or `dylint` in place of `build` and forwards arguments to that
+`test`, `dylint`, or `lint` in place of `build` and forwards arguments to that
 Soldr command from the repository root. To export the runner's Soldr cache,
 pass `--cache-zstd-level 3` before the action and include `cache.tar.zst`
 among the fetch globs. The runner serializes builds and cache exports
@@ -61,6 +61,68 @@ to choose a different client path. The JSON records the requested commit, source
 command, and exit code. It is an unsigned record from the trusted runner.
 The CI commit-trailer verification under `ci-attestations.yml` uses a
 different format.
+
+### Session manifests and warm slots
+
+Pass `--manifest /path/to/session.json` before the action. Keep this file
+outside the worktree or in an ignored directory so the clean-tree check
+still applies. With no manifest or a JSON `null`, the runner creates an
+anonymous session. Every session records `manifest.json`, which is fetchable
+alongside its attestation. A populated manifest has this shape:
+
+```json
+{
+  "github": {"url": "https://github.com/forge-ci/soldr"},
+  "user_id": 1234,
+  "parent-commit-hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "parent-branch": "main",
+  "last-commit-hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
+```
+
+Use the exact Git commit and first parent. For a root commit, use `null`
+for the parent. The client checks both hashes against Git. The runner
+checks the manifest against the request and records the supplied repository
+and user for accounting. The shared bearer token grants access to this
+trusted runner. The user ID routes builds to a warm slot and does not
+authenticate an individual user.
+
+A new slot lives at `<root>/github/repo/<owner>/<repo>/<DATE>_<PARENT_BRANCH>_<commit>/`.
+`DATE` is the UTC allocation timestamp, and `commit` is the full hash of the
+commit used to allocate the slot. `parent-branch` is optional and defaults
+to `unknown`. Names such as `release/stable` are escaped into a single path
+component, `release%2Fstable`. A warm slot keeps its original path so later
+commits can reuse the incremental target tree.
+
+Put the runner root on Btrfs so the blob store, slot worktrees, and artifact
+snapshots can share file extents through reflinks. Manifested requests
+require cross-directory reflinking within that root. Copies are writable
+and isolated. The SQLite ledger `slots.sqlite3` records slot ownership,
+session start and finish times, and exit status. Slots are allocated on demand
+up to one per 32 GiB of runner volume capacity, rounded down with a minimum
+of one and a maximum of 1,024. Set `remote serve --slots N` to override the
+calculated count, or `--slots 0` to record manifests without using warm slots.
+New slots need five percent of the volume free, with a
+5 GiB minimum. An explicit cap uses the 5 GiB floor. At the cap, the least recently used idle slot
+gets a new workspace generation when needed by another user. An interrupted run's generation stays
+isolated from future users. Retired generations remain on disk for operator
+cleanup.
+
+Each run creates fresh source files from the committed blob store at the
+slot's stable path. The stable target tree carries incremental state for
+that user and repository, and finished session artifacts are reflinked into
+their own fetch directory. A client disconnect leaves the build running
+until its child exits or times out, so a slot cannot be reused while a
+detached build is writing to it. Build execution remains serialized.
+
+For a manifested session, `lint` defaults to `soldr lint rust --check`.
+After a successful full Rust lint, the runner attempts a separate
+`soldr cook` and stores a content-addressed archive under `cook/` in its
+state root. The attestation reports `cook_ready` and `cook_archive_sha256`.
+Fetch the archive as `cook.tar.zst` from the completed lint session.
+The same dependency recipe reuses its archive on subsequent requests in
+that slot. The runner materializes a committed source snapshot without Git
+history. Use the remote session attestation for this workflow.
 
 When launching the server inside a Bosn job configured with
 `bosn ci run --github-proxy`, set `GITHUB_TOKEN` in the server's workflow step

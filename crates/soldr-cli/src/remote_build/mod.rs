@@ -1,6 +1,8 @@
 //! Whole-workspace builds on a trusted runner reached over an SSH tunnel.
 
+mod manifest;
 mod server;
+mod slots;
 mod snapshot;
 mod wire;
 
@@ -31,6 +33,9 @@ enum RemoteCommand {
         listen: SocketAddr,
         #[arg(long)]
         root: PathBuf,
+        /// Override the automatic slot count. Zero disables warm slots.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(0..=1024))]
+        slots: Option<u32>,
     },
     /// Run a command against the current Git commit on the runner.
     Run {
@@ -38,6 +43,9 @@ enum RemoteCommand {
         endpoint: SocketAddr,
         #[arg(long, default_value = "target/attestation.json")]
         attestation: PathBuf,
+        /// Optional JSON identifying a repository, user, and commit lineage.
+        #[arg(long)]
+        manifest: Option<PathBuf>,
         #[arg(long, allow_negative_numbers = true, value_parser = crate::cache_lib::zstd_level::parse_zstd_level)]
         cache_zstd_level: Option<i32>,
         #[arg(value_enum)]
@@ -62,6 +70,7 @@ enum BuildAction {
     Build,
     Test,
     Dylint,
+    Lint,
 }
 
 pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
@@ -73,21 +82,34 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
         ));
     }
     match args.command {
-        RemoteCommand::Serve { listen, root } => server::serve(listen, root, token).await,
+        RemoteCommand::Serve {
+            listen,
+            root,
+            slots,
+        } => server::serve(listen, root, token, slots).await,
         RemoteCommand::Run {
             endpoint,
             attestation,
+            manifest,
             cache_zstd_level,
             action,
             args,
         } => {
-            let snapshot = snapshot::capture(&std::env::current_dir()?)?;
+            let directory = std::env::current_dir()?;
+            let snapshot = snapshot::capture(&directory)?;
+            let manifest = manifest::read(manifest.as_deref(), &snapshot.commit)?;
+            if let Some(manifest) = &manifest {
+                snapshot::verify_parent(&directory, &snapshot.commit, manifest.parent())?;
+            }
+            let manifest_json = manifest.as_ref().map(serde_json::to_vec).transpose()?;
             let client = Client::new(endpoint, token)?;
             let action = match action {
                 BuildAction::Build => Action::Build,
                 BuildAction::Test => Action::Test,
                 BuildAction::Dylint => Action::Dylint,
+                BuildAction::Lint => Action::Lint,
             };
+            let wants_manifest = manifest_json.is_some();
             let session: Session = client
                 .post(
                     "start",
@@ -97,9 +119,15 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
                         action: action as i32,
                         args,
                         cache_zstd_level,
+                        manifest_json,
                     },
                 )
                 .await?;
+            if wants_manifest && !session.manifest_accepted {
+                return Err(io::Error::other(
+                    "remote runner does not support session manifests; upgrade the runner",
+                ));
+            }
             let mut blobs = snapshot.blobs;
             for hash in session.missing {
                 let data = blobs

@@ -16,6 +16,8 @@ pub(super) struct Start {
     pub args: Vec<String>,
     #[prost(sint32, optional, tag = "5")]
     pub cache_zstd_level: Option<i32>,
+    #[prost(bytes = "vec", optional, tag = "6")]
+    pub manifest_json: Option<Vec<u8>>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -36,6 +38,7 @@ pub(super) enum Action {
     Build = 0,
     Test = 1,
     Dylint = 2,
+    Lint = 3,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -44,6 +47,8 @@ pub(super) struct Session {
     pub id: String,
     #[prost(string, repeated, tag = "2")]
     pub missing: Vec<String>,
+    #[prost(bool, tag = "3")]
+    pub manifest_accepted: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]

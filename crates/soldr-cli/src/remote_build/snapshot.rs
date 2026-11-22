@@ -39,6 +39,27 @@ fn utf8(bytes: &[u8]) -> io::Result<&str> {
     std::str::from_utf8(bytes).map_err(io::Error::other)
 }
 
+pub(super) fn verify_parent(
+    directory: &Path,
+    commit: &str,
+    expected: Option<&str>,
+) -> io::Result<()> {
+    // Read the object itself so a shallow boundary cannot hide its parent.
+    let object = git(directory, &["cat-file", "commit", commit])?;
+    let parent = object
+        .split(|byte| *byte == b'\n')
+        .take_while(|line| !line.is_empty())
+        .find_map(|line| line.strip_prefix(b"parent "))
+        .map(utf8)
+        .transpose()?;
+    if parent != expected {
+        return Err(io::Error::other(
+            "remote manifest parent-commit-hash does not match the first Git parent",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
