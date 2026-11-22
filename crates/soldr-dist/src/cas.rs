@@ -198,10 +198,15 @@ impl Cas {
     }
 }
 
+/// Remembers input digests by (path, mtime, size, file identity).
+///
+/// Shareable: the map lock covers only lookup and insert. Reading and hashing a
+/// file happen unlocked, so concurrent constructions hash in parallel.
 #[derive(Default)]
 pub struct DigestMemo {
-    entries: HashMap<PathBuf, MemoEntry>,
+    entries: soldr_platform::sync::Mutex<HashMap<PathBuf, MemoEntry>>,
 }
+#[derive(Clone)]
 struct MemoEntry {
     modified: SystemTime,
     size: u64,
@@ -209,7 +214,7 @@ struct MemoEntry {
     digest: String,
 }
 impl DigestMemo {
-    pub fn input(&mut self, path: &Path) -> Result<InputFile> {
+    pub fn input(&self, path: &Path) -> Result<InputFile> {
         let manifest_path = crate::sandbox::absolute(&std::env::current_dir()?, path)?;
         let path = fs::canonicalize(path)?;
         let before = fs::metadata(&path)?;
@@ -217,8 +222,10 @@ impl DigestMemo {
         let id = identity::file_identity(&path);
         let cached = self
             .entries
+            .lock()
             .get(&path)
-            .filter(|e| e.modified == modified && e.size == before.len() && e.identity == id);
+            .filter(|e| e.modified == modified && e.size == before.len() && e.identity == id)
+            .cloned();
         let digest = if let Some(entry) = cached {
             entry.digest.clone()
         } else {
@@ -232,7 +239,7 @@ impl DigestMemo {
                 return Err("input changed while hashing".into());
             }
             let digest = hasher.finalize().to_hex().to_string();
-            self.entries.insert(
+            self.entries.lock().insert(
                 path.clone(),
                 MemoEntry {
                     modified,

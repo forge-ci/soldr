@@ -8,7 +8,7 @@ use std::{
 };
 
 /// Digest memo shared by every construction in a process.
-pub type SharedMemo = Arc<soldr_platform::sync::Mutex<DigestMemo>>;
+pub type SharedMemo = Arc<DigestMemo>;
 
 /// Enlarge a hook manifest from package membership, compiler search paths and generated files.
 ///
@@ -22,7 +22,7 @@ pub async fn construct(job: DistJob, memo: &SharedMemo) -> Result<DistJob> {
         .map_err(|error| format!("dist input construction task failed: {error}"))?
 }
 
-fn construct_blocking(mut job: DistJob, memo: &soldr_platform::sync::Mutex<DigestMemo>) -> Result<DistJob> {
+fn construct_blocking(mut job: DistJob, memo: &DigestMemo) -> Result<DistJob> {
     let original_inputs = job.inputs.clone();
     let cwd = Path::new(&job.cwd);
     let mut paths = job
@@ -41,10 +41,9 @@ fn construct_blocking(mut job: DistJob, memo: &soldr_platform::sync::Mutex<Diges
         )?;
     }
     paths.retain(|path| !job.outputs.iter().any(|output| Path::new(output) == path));
-    // Lock per file so concurrent constructions interleave instead of queueing.
     job.inputs = paths
         .into_iter()
-        .map(|p| memo.lock().input(&p))
+        .map(|p| memo.input(&p))
         .collect::<Result<_>>()?;
     for known in &original_inputs {
         if !job.inputs.iter().any(|input| input == known) {

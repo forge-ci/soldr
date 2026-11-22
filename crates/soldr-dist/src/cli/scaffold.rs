@@ -84,7 +84,7 @@ pub async fn job(argv: &[String], root: &Path) -> Result<DistJob> {
     let text = std::fs::read_to_string(depfile)?;
     let mut paths = dep_paths(&text, &cwd)?;
     extra_inputs(args, &cwd, &mut paths)?;
-    let mut memo = DigestMemo::default();
+    let memo = DigestMemo::default();
     let inputs = paths
         .iter()
         .map(|path| memo.input(path))

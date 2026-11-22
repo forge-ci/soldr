@@ -101,7 +101,7 @@ fn materialisation_and_digest_memo() {
     let cas = Cas::new(temp.path(), u64::MAX).unwrap();
     let source = temp.path().join("source.rs");
     fs::write(&source, b"source").unwrap();
-    let mut memo = DigestMemo::default();
+    let memo = DigestMemo::default();
     let input = memo.input(&source).unwrap();
     assert_eq!(memo.input(&source).unwrap(), input);
     assert_eq!(cas.put(b"source").unwrap(), input.blake3);
