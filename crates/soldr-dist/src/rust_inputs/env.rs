@@ -117,15 +117,16 @@ pub(super) fn inspect(job: &mut DistJob) -> Result<BTreeSet<String>> {
         )
         .into());
     }
-    let external_macros = job.inputs.iter().any(|input| {
-        std::path::Path::new(&input.abs_path)
-            .extension()
-            .is_some_and(|extension| {
-                ["rlib", "rmeta", "so", "dylib", "dll"]
-                    .iter()
-                    .any(|value| extension == *value)
-            })
-    });
+    // Only a crate the unit actually imports can supply macros: one named by
+    // `--extern`, or an `extern crate` resolved from a search path. Counting
+    // every library under `-L dependency=` made the verdict depend on which
+    // unrelated crates had finished first (target_lexicon flipped between
+    // remote and declined across identical cold builds).
+    let external_macros = job
+        .argv
+        .iter()
+        .any(|arg| arg == "--extern" || arg.starts_with("--extern="))
+        || sources.iter().any(|text| text.contains("extern crate"));
     if !uses.includes.is_empty() && (uses.ambiguous_macros || external_macros) {
         return Err(
             "path env rewrite with unresolved macro expansion requires filesystem namespace".into(),
@@ -270,6 +271,21 @@ mod tests {
         ));
         inspect(&mut job).unwrap();
         assert_eq!(job.rewrite_env, ["OUT_DIR"]);
+    }
+    #[test]
+    fn unrelated_search_path_libraries_do_not_block_the_rewrite() {
+        // A library sitting in -L dependency= that the unit never imports
+        // cannot supply a macro; only --extern / extern crate can.
+        let (root, mut job) = job_for(&format!("{INCLUDE} fn f() {{ assert!(true); }}"));
+        let lib = root.path().join("libother.rlib");
+        std::fs::write(&lib, b"rlib").unwrap();
+        job.inputs
+            .push(crate::cas::DigestMemo::default().input(&lib).unwrap());
+        inspect(&mut job).unwrap();
+        assert_eq!(job.rewrite_env, ["OUT_DIR"]);
+        job.argv = vec!["--extern".into(), format!("other={}", lib.display())];
+        let error = inspect(&mut job).unwrap_err().to_string();
+        assert!(error.contains("unresolved macro expansion"), "{error}");
     }
     #[test]
     fn unknown_or_shadowed_macros_still_block_the_rewrite() {
