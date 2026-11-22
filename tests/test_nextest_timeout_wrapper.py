@@ -84,6 +84,32 @@ def _start_wrapper(child: str, env: dict[str, str]) -> subprocess.Popen[str]:
     )
 
 
+@pytest.mark.skipif(os.name != "posix", reason="uses the Unix Nextest wrapper")
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_output_watchdog_allows_progress_then_stops_silent_child(stream: str) -> None:
+    env = os.environ.copy()
+    env["SOLDR_NEXTEST_OUTPUT_IDLE_SECS"] = "2"
+    child = f"""
+import sys
+import time
+
+for step in range(6):
+    print(f"progress {{step}}", file=sys.{stream}, flush=True)
+    time.sleep(0.5)
+time.sleep(30)
+"""
+    with _start_wrapper(child, env) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=15)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+    assert "progress 5" in (stdout if stream == "stdout" else stderr)
+    assert "nextest hang: no stdout or stderr" in stderr
+    assert process.returncode == 124
+
+
 @pytest.mark.skipif(
     os.name != "posix", reason="Nextest has no Windows timeout grace hook"
 )

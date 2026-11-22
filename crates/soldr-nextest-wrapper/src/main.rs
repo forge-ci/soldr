@@ -15,8 +15,8 @@
 //! * it refuses toolchain downloads and names its own binary for the
 //!   target-dir tripwire (soldr#3195, soldr#3203);
 //! * it runs in its own session, dies with the wrapper, and may be traced;
-//! * Nextest's SIGTERM dumps its threads, terminates its process group, and
-//!   drains both pipes before the grace period forces an exit;
+//! * silence on both output streams triggers a thread dump and termination;
+//!   external termination uses the same process-group cleanup and pipe drain;
 //! * soldr#2885's memory admission and per-test ceiling apply (`guard`).
 
 mod dump;
@@ -32,6 +32,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tail::OutputTail;
 
@@ -45,6 +46,9 @@ const FORBID_TARGET_CONTAINING_ENV: &str = "SOLDR_TEST_FORBID_TARGET_CONTAINING"
 const NATIVE_WRAPPER_ENV: &str = "SOLDR_NEXTEST_NATIVE_WRAPPER";
 /// Exit status when the test cannot be isolated (as `nextest_wrapper.sh`).
 const ISOLATION_REFUSED: i32 = 97;
+const OUTPUT_IDLE_LIMIT: Duration = Duration::from_secs(300);
+const OUTPUT_IDLE_ENV: &str = "SOLDR_NEXTEST_OUTPUT_IDLE_SECS";
+const OUTPUT_IDLE_EXIT: i32 = 124;
 const POLL: Duration = Duration::from_millis(20);
 const DRAIN_SLICE: Duration = Duration::from_millis(100);
 
@@ -63,6 +67,15 @@ fn child_exit_grace() -> Duration {
             Duration::from_secs_f64(CHILD_EXIT_GRACE_SECS),
             Duration::from_secs_f64,
         )
+}
+
+fn output_idle_limit() -> Duration {
+    std::env::var(OUTPUT_IDLE_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+        .filter(|duration| !duration.is_zero())
+        .unwrap_or(OUTPUT_IDLE_LIMIT)
 }
 
 /// This test's private directory: its soldr state root everywhere, and its
@@ -119,12 +132,19 @@ fn set_default(command: &mut Command, name: &str, value: impl AsRef<std::ffi::Os
     }
 }
 
-fn pump(mut source: impl Read, mut sink: impl Write, tail: OutputTail, done: mpsc::Sender<()>) {
+fn pump(
+    mut source: impl Read,
+    mut sink: impl Write,
+    tail: OutputTail,
+    done: mpsc::Sender<()>,
+    last_output: Arc<Mutex<Instant>>,
+) {
     let mut buffer = vec![0; 64 * 1024];
     while let Ok(read) = source.read(&mut buffer) {
         if read == 0 {
             break;
         }
+        *last_output.lock().unwrap_or_else(|err| err.into_inner()) = Instant::now();
         let _ = sink.write_all(&buffer[..read]);
         let _ = sink.flush();
         tail.feed(&buffer[..read]);
@@ -136,15 +156,31 @@ fn pump(mut source: impl Read, mut sink: impl Write, tail: OutputTail, done: mps
 /// signal to the test's process group.
 struct Termination {
     started: Option<Instant>,
+    idle: bool,
 }
 
 impl Termination {
-    fn poll(&mut self, pid: u32) {
+    fn poll(&mut self, pid: u32, last_output: &Mutex<Instant>, idle_limit: Duration) {
         if self.started.is_some() {
             return;
         }
-        let Some(signal) = test_child::received_termination() else {
-            return;
+        let signal = match test_child::received_termination() {
+            Some(signal) => signal,
+            None => {
+                let idle = last_output
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .elapsed();
+                if idle < idle_limit {
+                    return;
+                }
+                self.idle = true;
+                write_stderr(&format!(
+                    "nextest hang: no stdout or stderr for {:.1}s; terminating test\n",
+                    idle.as_secs_f64()
+                ));
+                TestSignal::Terminate
+            }
         };
         if signal == TestSignal::Terminate {
             dump::dump_threads(pid);
@@ -171,10 +207,11 @@ fn run(argv: &[std::ffi::OsString]) -> i32 {
     };
     let parent_pid = std::process::id();
     let grace = child_exit_grace();
+    let idle_limit = output_idle_limit();
     test_child::install_termination_flag();
     let mut guard = ProcessGuard::new(&command);
     let mut child_command = Command::new(program);
-    child_command.args(args);
+    child_command.args(args).env_remove(OUTPUT_IDLE_ENV);
     for name in CONTROL_ENVS.iter().chain([&NATIVE_WRAPPER_ENV]) {
         child_command.env_remove(name);
     }
@@ -211,6 +248,9 @@ fn run(argv: &[std::ffi::OsString]) -> i32 {
         parent_pid,
         guard.cgroup_procs().as_deref(),
     );
+    // Let the watchdog see libtest output as it is produced. Nextest still
+    // captures the wrapper's pipes and uses its usual output display policy.
+    child_command.env("RUST_TEST_NOCAPTURE", "1");
     child_command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match child_command.spawn() {
         Ok(child) => child,
@@ -222,16 +262,19 @@ fn run(argv: &[std::ffi::OsString]) -> i32 {
     let pid = child.id();
     guard.after_spawn(pid);
 
+    let last_output = Arc::new(Mutex::new(Instant::now()));
     let (done_tx, done_rx) = mpsc::channel();
     let mut pumps = 0;
     if let Some(stdout) = child.stdout.take() {
         let (tail, done) = (guard.stdout_tail.clone(), done_tx.clone());
-        std::thread::spawn(move || pump(stdout, std::io::stdout(), tail, done));
+        let activity = Arc::clone(&last_output);
+        std::thread::spawn(move || pump(stdout, std::io::stdout(), tail, done, activity));
         pumps += 1;
     }
     if let Some(stderr) = child.stderr.take() {
         let (tail, done) = (guard.stderr_tail.clone(), done_tx.clone());
-        std::thread::spawn(move || pump(stderr, std::io::stderr(), tail, done));
+        let activity = Arc::clone(&last_output);
+        std::thread::spawn(move || pump(stderr, std::io::stderr(), tail, done, activity));
         pumps += 1;
     }
     drop(done_tx);
@@ -242,11 +285,14 @@ fn run(argv: &[std::ffi::OsString]) -> i32 {
         let _ = status_tx.send(code);
     });
 
-    let mut termination = Termination { started: None };
+    let mut termination = Termination {
+        started: None,
+        idle: false,
+    };
     let mut forced = false;
     let mut returncode = None;
     loop {
-        termination.poll(pid);
+        termination.poll(pid, &last_output, idle_limit);
         let slice = match termination.remaining(grace) {
             Some(remaining) if remaining.is_zero() => {
                 write_stderr("nextest timeout: child ignored termination; forcing exit\n");
@@ -271,7 +317,7 @@ fn run(argv: &[std::ffi::OsString]) -> i32 {
     });
 
     while pumps > 0 {
-        termination.poll(pid);
+        termination.poll(pid, &last_output, idle_limit);
         let slice = match termination.remaining(grace) {
             Some(remaining) if remaining.is_zero() => {
                 if !forced {
@@ -306,6 +352,11 @@ fn run(argv: &[std::ffi::OsString]) -> i32 {
         });
     }
     remove_private_dir(&private);
+    let returncode = if termination.idle {
+        OUTPUT_IDLE_EXIT
+    } else {
+        returncode
+    };
     guard.finish(returncode, termination.started.is_some())
 }
 
