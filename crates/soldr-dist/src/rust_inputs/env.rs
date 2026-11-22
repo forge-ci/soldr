@@ -67,7 +67,6 @@ pub(super) fn select(job: &mut DistJob) -> Result<()> {
 }
 
 pub(super) fn inspect(job: &mut DistJob) -> Result<BTreeSet<String>> {
-    let mut uses = Uses::default();
     let mut sources = Vec::new();
     for input in &job.inputs {
         if !input.abs_path.ends_with(".rs") {
@@ -82,27 +81,24 @@ pub(super) fn inspect(job: &mut DistJob) -> Result<BTreeSet<String>> {
     if !job.stdin.is_empty() {
         sources.push(std::str::from_utf8(&job.stdin)?.to_owned());
     }
-    let tokens = sources
+    // Fast path: a file that never spells `env`, `include` or `macro_rules`
+    // cannot read an env var, include a path or shadow a std macro, so it adds
+    // nothing unless an include rewrite (or a new alias) makes every macro call
+    // matter. Parsing every file dominated dist input construction (libc's ~400
+    // files took 8.4 s of 8.8 s); fall back to the full parse in those cases.
+    let relevant = sources
         .iter()
-        .map(|text| {
-            text.parse::<TokenStream>()
-                .map_err(|_| crate::Error::from("cannot inspect Rust env macros"))
+        .filter(|text| {
+            ["env", "include", "macro_rules"]
+                .iter()
+                .any(|w| text.contains(w))
         })
-        .collect::<Result<Vec<_>>>()?;
-    loop {
-        let before = uses.aliases.len();
-        for source in &tokens {
-            aliases(source.clone(), &mut uses.aliases);
-        }
-        if uses.aliases.len() == before {
-            break;
-        }
-    }
-    for source in &tokens {
-        local_macros(source.clone(), &mut uses.local_macros);
-    }
-    for source in tokens {
-        scan(source, false, &mut uses)?;
+        .collect::<Vec<_>>();
+    let mut uses = analyse(&relevant)?;
+    if relevant.len() != sources.len()
+        && (!uses.includes.is_empty() || uses.aliases != Uses::default().aliases)
+    {
+        uses = analyse(&sources.iter().collect::<Vec<_>>())?;
     }
     if let Some(key) = uses
         .keys
@@ -137,6 +133,33 @@ pub(super) fn inspect(job: &mut DistJob) -> Result<BTreeSet<String>> {
     // Keep original exec_env, including aliased/dynamically supplied env dependencies.
     // Worker runtime overrides are validated against these original values by dep-info.
     Ok(uses.keys)
+}
+
+fn analyse(sources: &[&String]) -> Result<Uses> {
+    let mut uses = Uses::default();
+    let tokens = sources
+        .iter()
+        .map(|text| {
+            text.parse::<TokenStream>()
+                .map_err(|_| crate::Error::from("cannot inspect Rust env macros"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    loop {
+        let before = uses.aliases.len();
+        for source in &tokens {
+            aliases(source.clone(), &mut uses.aliases);
+        }
+        if uses.aliases.len() == before {
+            break;
+        }
+    }
+    for source in &tokens {
+        local_macros(source.clone(), &mut uses.local_macros);
+    }
+    for source in tokens {
+        scan(source, false, &mut uses)?;
+    }
+    Ok(uses)
 }
 
 fn aliases(tokens: TokenStream, known: &mut BTreeSet<String>) {
@@ -286,6 +309,25 @@ mod tests {
         ));
         inspect(&mut job).unwrap();
         assert_eq!(job.rewrite_env, ["OUT_DIR"]);
+    }
+    #[test]
+    fn fast_path_still_sees_macros_in_files_without_env_words() {
+        // lib.rs includes OUT_DIR; other.rs calls a custom macro and never
+        // spells env/include, so the fast path alone would miss it.
+        let (root, mut job) = job_for(INCLUDE);
+        let other = root.path().join("other.rs");
+        std::fs::write(&other, "fn g() { custom!(); }").unwrap();
+        job.inputs
+            .push(crate::cas::DigestMemo::default().input(&other).unwrap());
+        let error = inspect(&mut job).unwrap_err().to_string();
+        assert!(error.contains("unresolved macro expansion"), "{error}");
+        // Without any include, the macro-only file is irrelevant.
+        let (root, mut job) = job_for("fn f() {}");
+        let other = root.path().join("other.rs");
+        std::fs::write(&other, "fn g() { custom!(); }").unwrap();
+        job.inputs
+            .push(crate::cas::DigestMemo::default().input(&other).unwrap());
+        assert!(inspect(&mut job).unwrap().is_empty());
     }
     #[test]
     fn unrelated_search_path_libraries_do_not_block_the_rewrite() {
