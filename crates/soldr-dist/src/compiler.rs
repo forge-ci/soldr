@@ -40,11 +40,37 @@ impl Compiler {
     pub async fn rustc_from_soldr(root: &Path, image: &Path) -> Result<Self> {
         Self::rustc_with_program(Self::soldr_program(root, image)?).await
     }
-    async fn rustc_with_program(program: PathBuf) -> Result<Self> {
-        let resolved = soldr_command(&program)
-            .args(["rustup", "which", "rustc"])
+    /// A worker compiler for one named toolchain (`1.95.0`, `nightly-2026-08-15`),
+    /// installed through Soldr's own rustup front door when absent, so it lands
+    /// in the same homes later resolution reads.
+    pub async fn rustc_toolchain_from_soldr(root: &Path, image: &Path, channel: &str) -> Result<Self> {
+        let program = Self::soldr_program(root, image)?;
+        if let Ok(compiler) = Self::rustc_with(program.clone(), Some(channel)).await {
+            return Ok(compiler);
+        }
+        let install = soldr_command(&program)
+            .args(["rustup", "toolchain", "install", channel])
+            .args(["--profile", "minimal", "--no-self-update"])
             .capture()
             .await?;
+        if !install.status.success() {
+            return Err(format!(
+                "installing dist toolchain {channel} failed: {}",
+                String::from_utf8_lossy(&install.stderr)
+            )
+            .into());
+        }
+        Self::rustc_with(program, Some(channel)).await
+    }
+    async fn rustc_with_program(program: PathBuf) -> Result<Self> {
+        Self::rustc_with(program, None).await
+    }
+    async fn rustc_with(program: PathBuf, channel: Option<&str>) -> Result<Self> {
+        let mut which = soldr_command(&program).args(["rustup", "which", "rustc"]);
+        if let Some(channel) = channel {
+            which = which.env("RUSTUP_TOOLCHAIN", channel);
+        }
+        let resolved = which.capture().await?;
         if !resolved.status.success() {
             return Err(format!(
                 "rustc resolution failed: {}",

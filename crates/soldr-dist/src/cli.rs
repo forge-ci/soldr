@@ -204,6 +204,17 @@ async fn serve(root: &Path, relay: Option<&str>, config: ServeConfig) -> Result<
         return Err("dist direct LAN endpoint has no reachable interface addresses".into());
     }
     let mut compilers = vec![Compiler::rustc_from_soldr(root, &std::env::current_exe()?).await?];
+    // Every toolchain clients use must be offered by identity; a worker that only
+    // offers its own default declines every unit built with another version.
+    for channel in served_toolchains(root)? {
+        let compiler =
+            Compiler::rustc_toolchain_from_soldr(root, &std::env::current_exe()?, &channel).await?;
+        let first = |c: &Compiler| c.identity.lines().next().map(str::to_owned);
+        if !compilers.iter().any(|c| first(c) == first(&compiler)) {
+            eprintln!("Dist worker serves rustc toolchain {channel}");
+            compilers.push(compiler);
+        }
+    }
     if let Some(cc) = scaffold::find_program("cc") {
         compilers.push(Compiler::cc(&cc)?);
     }
@@ -253,4 +264,42 @@ fn status(root: &Path, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Toolchain names listed one per line in `<root>/toolchains` (`#` comments allowed).
+fn served_toolchains(root: &std::path::Path) -> crate::Result<Vec<String>> {
+    let path = root.join("toolchains");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(error) => return Err(format!("{}: {error}", path.display()).into()),
+    };
+    let mut channels = vec![];
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        if line.is_empty() {
+            continue;
+        }
+        if !line
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        {
+            return Err(format!("{}: invalid toolchain name {line:?}", path.display()).into());
+        }
+        channels.push(line.to_owned());
+    }
+    Ok(channels)
+}
+
+#[cfg(test)]
+mod served_toolchain_tests {
+    #[test]
+    fn toolchain_list_skips_comments_and_rejects_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(super::served_toolchains(temp.path()).unwrap().is_empty());
+        std::fs::write(temp.path().join("toolchains"), "# client pins\n1.95.0\n\nnightly-2026-08-15 # dylint\n").unwrap();
+        assert_eq!(super::served_toolchains(temp.path()).unwrap(), ["1.95.0", "nightly-2026-08-15"]);
+        std::fs::write(temp.path().join("toolchains"), "../evil\n").unwrap();
+        assert!(super::served_toolchains(temp.path()).is_err());
+    }
 }
