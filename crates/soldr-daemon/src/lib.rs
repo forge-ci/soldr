@@ -15,7 +15,6 @@
 // level deeper; proving it `Send` for `tokio::spawn` then exceeds the default
 // limit of 128 (E0275 at daemon/session_endpoint.rs).
 #![recursion_limit = "256"]
-
 #![allow(dead_code)]
 
 /// Neutral host-platform facade (#2493): the single selection site lives
