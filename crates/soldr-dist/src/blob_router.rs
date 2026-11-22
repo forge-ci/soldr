@@ -201,7 +201,11 @@ impl BlobInbox {
 
     /// Receives the next blob into `cas`, accepting only digests in `expected`.
     /// Returns the digest and its size.
-    pub async fn receive(&mut self, cas: &Cas, expected: &[(String, u64)]) -> Result<(String, u64)> {
+    pub async fn receive(
+        &mut self,
+        cas: &Cas,
+        expected: &[(String, u64)],
+    ) -> Result<(String, u64)> {
         let (blob, mut stream) = self
             .receive
             .recv()

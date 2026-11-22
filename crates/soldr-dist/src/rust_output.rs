@@ -73,9 +73,11 @@ pub(crate) fn proof_args(
         .iter()
         .any(|kind| kind == "link" || kind == "metadata")
     {
-        return Err("rustc job emits metadata without dep-info: adding the input proof \
+        return Err(
+            "rustc job emits metadata without dep-info: adding the input proof \
                     would change its crate hash, so it cannot be built remotely"
-            .into());
+                .into(),
+        );
     }
     let proof = root.join("rust-input-proof.d");
     let mode = format!("dep-info={}", proof.display());
@@ -149,7 +151,11 @@ fn emitted_kinds(args: &[String]) -> Vec<String> {
         if let Some(spec) = spec {
             seen_emit = true;
             for mode in spec.split(',') {
-                kinds.push(mode.split_once('=').map_or(mode, |(kind, _)| kind).to_owned());
+                kinds.push(
+                    mode.split_once('=')
+                        .map_or(mode, |(kind, _)| kind)
+                        .to_owned(),
+                );
             }
         }
     }
@@ -254,7 +260,10 @@ mod tests {
             &["--emit", "link=/w/out.rlib", "lib.rs"][..],
         ] {
             let error = proof_args(&rustc(argv, &["/w/out.rlib"]), root).unwrap_err();
-            assert!(error.to_string().contains("crate hash"), "{argv:?}: {error}");
+            assert!(
+                error.to_string().contains("crate hash"),
+                "{argv:?}: {error}"
+            );
         }
         // An object-only unit carries no metadata hash, so the proof may be added.
         let (args, proof) = proof_args(&rustc(&["--emit=obj", "a.rs"], &["/w/a.o"]), root).unwrap();
@@ -262,7 +271,10 @@ mod tests {
         assert!(proof.is_some());
         // Cargo's own dep-info is reused untouched.
         let (args, _) = proof_args(
-            &rustc(&["--emit=dep-info=/w/a.d,metadata,link", "lib.rs"], &["/w/a.d", "/w/a.rlib"]),
+            &rustc(
+                &["--emit=dep-info=/w/a.d,metadata,link", "lib.rs"],
+                &["/w/a.d", "/w/a.rlib"],
+            ),
             root,
         )
         .unwrap();

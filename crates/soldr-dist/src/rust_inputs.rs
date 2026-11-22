@@ -244,9 +244,15 @@ mod tests {
             ("target/debug/junk", "x"),
             (".git/HEAD", "ref"),
             ("src/.hidden.rs", "x"),
-            ("nested/Cargo.toml", "[package]\nname=\"n\"\nversion=\"0.0.0\"\n"),
+            (
+                "nested/Cargo.toml",
+                "[package]\nname=\"n\"\nversion=\"0.0.0\"\n",
+            ),
             ("nested/src/lib.rs", "x"),
-            ("sub/target/keep.rs", "kept: only the root target is build output"),
+            (
+                "sub/target/keep.rs",
+                "kept: only the root target is build output",
+            ),
         ] {
             let path = root.join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -255,11 +261,23 @@ mod tests {
         let listed: Vec<_> = package_files(root)
             .unwrap()
             .into_iter()
-            .map(|p| p.strip_prefix(root).unwrap().to_str().unwrap().replace('\\', "/"))
+            .map(|p| {
+                p.strip_prefix(root)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .replace('\\', "/")
+            })
             .collect();
         assert_eq!(
             listed,
-            ["Cargo.toml", "build.rs", "src/data/table.txt", "src/lib.rs", "sub/target/keep.rs"]
+            [
+                "Cargo.toml",
+                "build.rs",
+                "src/data/table.txt",
+                "src/lib.rs",
+                "sub/target/keep.rs"
+            ]
         );
     }
     #[test]

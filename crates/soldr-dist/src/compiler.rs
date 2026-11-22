@@ -43,7 +43,11 @@ impl Compiler {
     /// A worker compiler for one named toolchain (`1.95.0`, `nightly-2026-08-15`),
     /// installed through Soldr's own rustup front door when absent, so it lands
     /// in the same homes later resolution reads.
-    pub async fn rustc_toolchain_from_soldr(root: &Path, image: &Path, channel: &str) -> Result<Self> {
+    pub async fn rustc_toolchain_from_soldr(
+        root: &Path,
+        image: &Path,
+        channel: &str,
+    ) -> Result<Self> {
         let program = Self::soldr_program(root, image)?;
         if let Ok(compiler) = Self::rustc_with(program.clone(), Some(channel)).await {
             return Ok(compiler);

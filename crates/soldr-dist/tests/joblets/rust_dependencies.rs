@@ -247,7 +247,10 @@ fn assert_same_archive(actual: &[u8], expected: &[u8]) {
         while at + 60 <= bytes.len() {
             let header = &bytes[at..at + 60];
             let name = String::from_utf8_lossy(&header[..16]).trim().to_string();
-            let size: usize = String::from_utf8_lossy(&header[48..58]).trim().parse().unwrap_or(0);
+            let size: usize = String::from_utf8_lossy(&header[48..58])
+                .trim()
+                .parse()
+                .unwrap_or(0);
             let body = &bytes[at + 60..(at + 60 + size).min(bytes.len())];
             out.push((name, body));
             at += 60 + size + (size % 2);
@@ -280,11 +283,17 @@ fn assert_same_archive(actual: &[u8], expected: &[u8]) {
             Some((local_name, local)) if local_name == name && local == body => {}
             Some((local_name, local)) => {
                 let offset = body.iter().zip(local.iter()).position(|(x, y)| x != y);
-                let differing = body.iter().zip(local.iter()).filter(|(x, y)| x != y).count();
+                let differing = body
+                    .iter()
+                    .zip(local.iter())
+                    .filter(|(x, y)| x != y)
+                    .count();
                 let window = |bytes: &[u8]| {
                     let at = offset.unwrap_or(0);
                     let range = at.saturating_sub(48)..(at + 48).min(bytes.len());
-                    String::from_utf8_lossy(&bytes[range]).escape_debug().to_string()
+                    String::from_utf8_lossy(&bytes[range])
+                        .escape_debug()
+                        .to_string()
                 };
                 report += &format!(
                     "  {differing} differing byte(s)\n    remote around: {}\n    local around:  {}\n",

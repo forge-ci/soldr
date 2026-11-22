@@ -297,8 +297,15 @@ mod served_toolchain_tests {
     fn toolchain_list_skips_comments_and_rejects_paths() {
         let temp = tempfile::tempdir().unwrap();
         assert!(super::served_toolchains(temp.path()).unwrap().is_empty());
-        std::fs::write(temp.path().join("toolchains"), "# client pins\n1.95.0\n\nnightly-2026-08-15 # dylint\n").unwrap();
-        assert_eq!(super::served_toolchains(temp.path()).unwrap(), ["1.95.0", "nightly-2026-08-15"]);
+        std::fs::write(
+            temp.path().join("toolchains"),
+            "# client pins\n1.95.0\n\nnightly-2026-08-15 # dylint\n",
+        )
+        .unwrap();
+        assert_eq!(
+            super::served_toolchains(temp.path()).unwrap(),
+            ["1.95.0", "nightly-2026-08-15"]
+        );
         std::fs::write(temp.path().join("toolchains"), "../evil\n").unwrap();
         assert!(super::served_toolchains(temp.path()).is_err());
     }

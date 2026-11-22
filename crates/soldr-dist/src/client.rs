@@ -231,7 +231,8 @@ impl DistClient {
             .extend(job.inputs.iter().map(|i| i.blake3.clone()));
         // No compile wall-clock timeout: QUIC keepalive bounds worker loss without killing live work.
         let reply: Reply = transport::recv(&mut recv).await?;
-        self.complete(&mut inbox, job, reply, &mut send, metrics).await
+        self.complete(&mut inbox, job, reply, &mut send, metrics)
+            .await
     }
     async fn complete(
         &self,
