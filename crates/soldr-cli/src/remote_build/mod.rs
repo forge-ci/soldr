@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
 use prost::Message;
+use soldr_fetch::fetch::LoopbackPostClient;
 
 use self::wire::{Action, Artifacts, Blob, Fetch, ResultFrame, Session, Start};
 
@@ -35,7 +36,7 @@ enum RemoteCommand {
     Run {
         #[arg(long, default_value = "127.0.0.1:7744")]
         endpoint: SocketAddr,
-        #[arg(long, default_value = "attestation.json")]
+        #[arg(long, default_value = "target/attestation.json")]
         attestation: PathBuf,
         #[arg(long, allow_negative_numbers = true, value_parser = crate::cache_lib::zstd_level::parse_zstd_level)]
         cache_zstd_level: Option<i32>,
@@ -110,6 +111,12 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             let result: ResultFrame = client
                 .post(&format!("run/{}", session.id), &Blob::default())
                 .await?;
+            if let Some(parent) = attestation
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent)?;
+            }
             std::fs::write(attestation, result.attestation)?;
             io::stdout().write_all(&result.stdout)?;
             io::stderr().write_all(&result.stderr)?;
@@ -140,27 +147,14 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
 }
 
 struct Client<'a> {
+    http: LoopbackPostClient,
     token: &'a str,
-    http: reqwest::Client,
-    endpoint: SocketAddr,
 }
 
 impl<'a> Client<'a> {
     fn new(endpoint: SocketAddr, token: &'a str) -> io::Result<Self> {
-        if !endpoint.ip().is_loopback() {
-            return Err(io::Error::other(
-                "Remote build endpoint must be a loopback SSH tunnel.",
-            ));
-        }
-        let http = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(io::Error::other)?;
         Ok(Self {
-            http,
-            endpoint,
+            http: LoopbackPostClient::new(endpoint)?,
             token,
         })
     }
@@ -170,29 +164,16 @@ impl<'a> Client<'a> {
         operation: &str,
         message: &impl Message,
     ) -> io::Result<T> {
-        let mut response = self
+        let data = self
             .http
-            .post(format!("http://{}/v1/{operation}", self.endpoint))
-            .header("content-type", "application/x-protobuf+zstd")
-            .bearer_auth(self.token)
-            .body(wire::encode(message)?)
-            .send()
-            .await
-            .map_err(io::Error::other)?;
-        let mut data = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(io::Error::other)? {
-            if data.len() + chunk.len() > wire::MAX_FRAME + 1024 * 1024 {
-                return Err(io::Error::other("remote build response exceeds 256 MiB"));
-            }
-            data.extend_from_slice(&chunk);
-        }
-        if !response.status().is_success() {
-            return Err(io::Error::other(format!(
-                "remote build {}: {}",
-                response.status(),
-                String::from_utf8_lossy(&data)
-            )));
-        }
+            .post(
+                &format!("/v1/{operation}"),
+                self.token,
+                "application/x-protobuf+zstd",
+                wire::encode(message)?,
+                wire::MAX_FRAME + 1024 * 1024,
+            )
+            .await?;
         wire::decode(&data)
     }
 }

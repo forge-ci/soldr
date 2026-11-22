@@ -29,8 +29,7 @@ ssh -N -L 127.0.0.1:7744:127.0.0.1:7744 build-runner
 From a clean checkout of this repository, build the standalone example.
 
 ```sh
-mkdir -p target
-soldr remote --token-file "$HOME/.soldr-remote-token" run --attestation target/attestation.json build -- \
+soldr remote --token-file "$HOME/.soldr-remote-token" run build -- \
   --locked --manifest-path examples/remote-build-demo/Cargo.toml
 soldr remote --token-file "$HOME/.soldr-remote-token" fetch --out target/remote-demo SESSION_ID \
   'target/debug/soldr-remote-demo' 'attestation.json'
@@ -43,6 +42,9 @@ pass `--cache-zstd-level 3` before the action and include `cache.tar.zst`
 among the fetch globs. The runner serializes builds and cache exports
 against its dedicated compiler cache. The fetch destination must be a new
 directory with an existing parent. Artifact paths retain their relative layout.
+An explicit Cargo `--target-dir` is relative to the session's fetchable
+output directory. For example, `--target-dir target/special` makes
+`target/special/**` available for fetch.
 
 The client requires a commit and a clean Git status, including untracked
 files. Ignored build outputs stay local. The client reads sources from the
@@ -54,7 +56,8 @@ decoded data. The prototype supports UTF-8 paths and regular files,
 including executable files. Unix runners also support relative symlinks
 whose targets contain no parent traversal.
 
-`attestation.json` records the requested commit, source digests, runner,
+`run` writes `target/attestation.json` by default. Pass `--attestation`
+to choose a different client path. The JSON records the requested commit, source digests, runner,
 command, and exit code. It is an unsigned record from the trusted runner.
 The CI commit-trailer verification under `ci-attestations.yml` uses a
 different format.

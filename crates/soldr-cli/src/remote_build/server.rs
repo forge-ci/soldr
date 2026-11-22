@@ -191,7 +191,9 @@ fn run(root: &Path, session: &Path, id: &str) -> io::Result<Vec<u8>> {
         create_link(&path, &data)?;
     }
 
-    let action = match Action::try_from(request.action).map_err(io::Error::other)? {
+    let action = Action::try_from(request.action).map_err(io::Error::other)?;
+    let arguments = compile_args(action, &request.args, &output)?;
+    let action = match action {
         Action::Build => "build",
         Action::Test => "test",
         Action::Dylint => "dylint",
@@ -202,7 +204,7 @@ fn run(root: &Path, session: &Path, id: &str) -> io::Result<Vec<u8>> {
             .current_dir(&source)
             .env("CARGO_TARGET_DIR", output.join("target"))
             .arg(action)
-            .args(&request.args),
+            .args(&arguments),
         wait::WHOLE_COMMAND,
     )?;
     let exit_code = result.status.code().unwrap_or(1);
@@ -265,6 +267,39 @@ fn runner_soldr(executable: &Path, cache_root: &Path) -> Command {
         .env(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR, "1")
         .env("SOLDR_CACHE_DIR", cache_root);
     command
+}
+
+fn compile_args(action: Action, original: &[String], output: &Path) -> io::Result<Vec<String>> {
+    let mut args = original.to_vec();
+    let mut cargo_separator = action == Action::Dylint;
+    let mut index = 0;
+    while index < args.len() {
+        let argument = &args[index];
+        if argument == "--" {
+            if !cargo_separator {
+                break;
+            }
+            cargo_separator = false;
+        } else if argument == "--target-dir" {
+            index += 1;
+            let value = args
+                .get_mut(index)
+                .ok_or_else(|| io::Error::other("--target-dir requires a relative path"))?;
+            *value = output_path(output, value)?;
+        } else if let Some(value) = argument.strip_prefix("--target-dir=") {
+            args[index] = format!("--target-dir={}", output_path(output, value)?);
+        }
+        index += 1;
+    }
+    Ok(args)
+}
+
+fn output_path(output: &Path, value: &str) -> io::Result<String> {
+    output
+        .join(relative_path(value)?)
+        .into_os_string()
+        .into_string()
+        .map_err(|_| io::Error::other("remote output path must be UTF-8"))
 }
 
 pub(super) fn parent(path: &Path) -> io::Result<&Path> {

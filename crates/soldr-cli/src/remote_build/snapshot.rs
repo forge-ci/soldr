@@ -16,10 +16,7 @@ pub(super) struct Snapshot {
 }
 
 fn git(directory: &Path, args: &[&str]) -> io::Result<Vec<u8>> {
-    let result = wait::output_for(
-        Command::new("git").current_dir(directory).args(args),
-        wait::PROBE,
-    )?;
+    let result = wait::output_for(git_command(directory).args(args), wait::PROBE)?;
     if !result.status.success() {
         return Err(io::Error::other(format!(
             "git {} failed: {}",
@@ -28,6 +25,14 @@ fn git(directory: &Path, args: &[&str]) -> io::Result<Vec<u8>> {
         )));
     }
     Ok(result.stdout)
+}
+
+fn git_command(directory: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
+        .current_dir(directory)
+        .env("GIT_NO_REPLACE_OBJECTS", "1");
+    command
 }
 
 fn utf8(bytes: &[u8]) -> io::Result<&str> {
@@ -75,9 +80,7 @@ pub(super) fn capture(directory: &Path) -> io::Result<Snapshot> {
 
     let tree = git(&root, &["ls-tree", "-r", "-z", "--full-tree", &commit])?;
     let mut reader = running_process::spawn(
-        Command::new("git")
-            .current_dir(root)
-            .args(["cat-file", "--batch"]),
+        git_command(&root).args(["cat-file", "--batch"]),
         running_process::SpawnStdio {
             stdin: running_process::StdioSource::Pipe,
             stdout: running_process::StdioSource::Pipe,
