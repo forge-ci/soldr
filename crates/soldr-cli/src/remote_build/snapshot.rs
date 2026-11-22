@@ -181,7 +181,7 @@ fn read_blob(object: &str, mut input: impl Write, mut output: impl BufRead) -> i
     output.read_exact(&mut data)?;
     let mut terminator = [0];
     output.read_exact(&mut terminator)?;
-    if terminator != [b'\n'] {
+    if terminator != *b"\n" {
         return Err(io::Error::other("missing Git blob terminator"));
     }
     Ok(data)
