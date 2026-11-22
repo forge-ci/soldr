@@ -73,20 +73,29 @@ impl DistClient {
         paths.iter().map(|path| self.memo.input(path)).collect()
     }
     pub async fn execute(&self, job: DistJob) -> DistOutcome {
-        self.execute_constructed(job, std::time::Duration::ZERO)
-            .await
+        self.execute_inner(job, None).await
     }
 
-    /// `construct` is the time already spent listing and hashing the inputs,
-    /// recorded so per-joblet metrics show the client-side overhead too.
+    /// For a job `rust_inputs::construct` built. `construct` is the time spent
+    /// listing and hashing its inputs; construct already ran the env inspection
+    /// (`env::select`), so the sources are not parsed a second time.
     pub async fn execute_constructed(
         &self,
-        mut job: DistJob,
+        job: DistJob,
         construct: std::time::Duration,
     ) -> DistOutcome {
+        self.execute_inner(job, Some(construct)).await
+    }
+
+    async fn execute_inner(
+        &self,
+        mut job: DistJob,
+        constructed: Option<std::time::Duration>,
+    ) -> DistOutcome {
+        let construct = constructed.unwrap_or_default();
         let started = std::time::Instant::now();
         let mut metrics = JobMetrics::for_job(self.worker.id.to_string(), &job);
-        let validation = if job.compiler_kind == "rustc" {
+        let validation = if job.compiler_kind == "rustc" && constructed.is_none() {
             crate::rust_inputs::validate_environment(&mut job)
         } else {
             Ok(())
