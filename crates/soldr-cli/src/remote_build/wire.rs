@@ -16,6 +16,8 @@ pub(super) struct Start {
     pub args: Vec<String>,
     #[prost(sint32, optional, tag = "5")]
     pub cache_zstd_level: Option<i32>,
+    #[prost(bytes = "vec", optional, tag = "6")]
+    pub manifest_json: Option<Vec<u8>>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -36,6 +38,7 @@ pub(super) enum Action {
     Build = 0,
     Test = 1,
     Dylint = 2,
+    Lint = 3,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -44,11 +47,27 @@ pub(super) struct Session {
     pub id: String,
     #[prost(string, repeated, tag = "2")]
     pub missing: Vec<String>,
+    #[prost(bool, tag = "3")]
+    pub manifest_accepted: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]
 pub(super) struct Blob {
     #[prost(bytes = "vec", tag = "1")]
+    pub data: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct WorkspaceBatch {
+    #[prost(message, repeated, tag = "1")]
+    pub blobs: Vec<WorkspaceBlob>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct WorkspaceBlob {
+    #[prost(string, tag = "1")]
+    pub digest: String,
+    #[prost(bytes = "vec", tag = "2")]
     pub data: Vec<u8>,
 }
 
@@ -87,18 +106,27 @@ pub(super) struct Artifacts {
 }
 
 pub(super) fn encode(message: &impl Message) -> io::Result<Vec<u8>> {
+    encode_at_level(message, 3)
+}
+
+pub(super) fn encode_at_level(message: &impl Message, level: i32) -> io::Result<Vec<u8>> {
     if message.encoded_len() > MAX_FRAME {
         return Err(io::Error::other("remote build message exceeds 256 MiB"));
     }
-    zstd::stream::encode_all(message.encode_to_vec().as_slice(), 3)
+    zstd::stream::encode_all(message.encode_to_vec().as_slice(), level)
 }
 
 pub(super) fn decode<M: Message + Default>(compressed: &[u8]) -> io::Result<M> {
+    let data = decompress(compressed)?;
+    M::decode(data.as_slice()).map_err(io::Error::other)
+}
+
+pub(super) fn decompress(compressed: &[u8]) -> io::Result<Vec<u8>> {
     let decoder = zstd::stream::Decoder::new(compressed)?;
     let mut data = Vec::new();
     decoder.take(MAX_FRAME as u64 + 1).read_to_end(&mut data)?;
     if data.len() > MAX_FRAME {
         return Err(io::Error::other("remote build message exceeds 256 MiB"));
     }
-    M::decode(data.as_slice()).map_err(io::Error::other)
+    Ok(data)
 }

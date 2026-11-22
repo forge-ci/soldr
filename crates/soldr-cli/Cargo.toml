@@ -32,7 +32,8 @@ soldr-fetch = { path = "../soldr-fetch" }
 soldr-platform = { path = "../soldr-platform" }
 cap-fs-ext = { workspace = true }
 cap-std = { workspace = true }
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "query", "tokio"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 blake3 = "1"
 clap = { workspace = true }
 filetime = { workspace = true }

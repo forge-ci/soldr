@@ -263,17 +263,26 @@ pub struct LoopbackPostClient {
 impl LoopbackPostClient {
     /// Use a literal loopback address and keep credentials on that endpoint.
     pub fn new(endpoint: std::net::SocketAddr) -> std::io::Result<Self> {
+        Self::with_http2(endpoint, false)
+    }
+
+    /// Select cleartext HTTP/2 for a loopback endpoint reached via SSH.
+    pub fn with_http2(endpoint: std::net::SocketAddr, http2: bool) -> std::io::Result<Self> {
         if !endpoint.ip().is_loopback() {
             return Err(std::io::Error::other(
                 "Remote build endpoint must be a loopback SSH tunnel.",
             ));
         }
-        let http = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .map_err(std::io::Error::other)?;
+            .connect_timeout(Duration::from_secs(10));
+        let builder = if http2 {
+            builder.http2_prior_knowledge()
+        } else {
+            builder
+        };
+        let http = builder.build().map_err(std::io::Error::other)?;
         Ok(Self { http, endpoint })
     }
 
@@ -286,18 +295,46 @@ impl LoopbackPostClient {
         body: Vec<u8>,
         max_response: usize,
     ) -> std::io::Result<Vec<u8>> {
+        let response = self.post_stream(path, token, content_type, body).await?;
+        Self::read_response(response, max_response).await
+    }
+
+    /// Fetch a resource with a bounded response body.
+    pub async fn get(
+        &self,
+        path: &str,
+        token: &str,
+        query: &[(&str, &str)],
+        max_response: usize,
+    ) -> std::io::Result<Vec<u8>> {
+        let response = self.get_stream(path, token, query).await?;
+        Self::read_response(response, max_response).await
+    }
+
+    /// Issue an authenticated GET and return its streaming response body.
+    pub async fn get_stream(
+        &self,
+        path: &str,
+        token: &str,
+        query: &[(&str, &str)],
+    ) -> std::io::Result<reqwest::Response> {
         if !path.starts_with('/') {
             return Err(std::io::Error::other("HTTP service path must begin with /"));
         }
-        let mut response = self
-            .http
-            .post(format!("http://{}{path}", self.endpoint))
-            .header("content-type", content_type)
+        self.http
+            .get(format!("http://{}{path}", self.endpoint))
+            .query(query)
+            .header("accept-encoding", "zstd")
             .bearer_auth(token)
-            .body(body)
             .send()
             .await
-            .map_err(std::io::Error::other)?;
+            .map_err(std::io::Error::other)
+    }
+
+    async fn read_response(
+        mut response: reqwest::Response,
+        max_response: usize,
+    ) -> std::io::Result<Vec<u8>> {
         let mut data = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(std::io::Error::other)? {
             if chunk.len() > max_response - data.len() {
@@ -315,6 +352,27 @@ impl LoopbackPostClient {
             )));
         }
         Ok(data)
+    }
+
+    /// Post a request and leave response streaming to the caller.
+    pub async fn post_stream(
+        &self,
+        path: &str,
+        token: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> std::io::Result<reqwest::Response> {
+        if !path.starts_with('/') {
+            return Err(std::io::Error::other("HTTP service path must begin with /"));
+        }
+        self.http
+            .post(format!("http://{}{path}", self.endpoint))
+            .header("content-type", content_type)
+            .bearer_auth(token)
+            .body(body)
+            .send()
+            .await
+            .map_err(std::io::Error::other)
     }
 }
 
