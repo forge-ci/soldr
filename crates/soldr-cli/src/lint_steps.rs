@@ -114,8 +114,13 @@ pub(crate) fn extra_command(extra: &ExtraCommand) -> Command {
 }
 
 /// Run a repo command with the caller's stdio (the non-porcelain path).
-pub(crate) fn run_extra_inherited(extra: &ExtraCommand) -> Result<i32, SoldrError> {
+pub(crate) fn run_extra_inherited(
+    extra: &ExtraCommand,
+    cache_enabled: bool,
+) -> Result<i32, SoldrError> {
+    let _capacity = acquire_external_lint_capacity(cache_enabled)?;
     let mut command = extra_command(extra);
+    mark_resident_child(&mut command, _capacity.as_ref());
     // The child inherits our stdio and explains its own failure.
     crate::exit_guard::mark_spoke();
     let status = spawn_guarded(&mut command)
@@ -124,6 +129,54 @@ pub(crate) fn run_extra_inherited(extra: &ExtraCommand) -> Result<i32, SoldrErro
         })
         .map_err(|error| start_error(extra, &error))?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// Admit the actual external tool, leaving a slot for any wrapped compiler
+/// it may start. Dropping the connection releases the lease on every exit.
+pub(crate) fn acquire_external_lint_capacity(
+    cache_enabled: bool,
+) -> Result<Option<crate::daemon::client::ResidentCapacityLease>, SoldrError> {
+    if !cache_enabled || shares_resident_capacity() {
+        return Ok(None);
+    }
+    let sock = crate::daemon::client::default_sock_path(&SoldrPaths::new()?);
+    crate::rustfmt_admission::acquire_starting_daemon(
+        || crate::daemon::client::acquire_lint_capacity(&sock, 1),
+        || {
+            crate::soldr_main::start_daemon_route(crate::soldr_main::DAEMON_START_ROUTE_BUDGET)
+                .map_err(|error| error.to_string())
+        },
+    )
+    .map(Some)
+    .map_err(|error| SoldrError::Other(format!("lint: external tool admission failed: {error}")))
+}
+
+pub(crate) fn shares_resident_capacity() -> bool {
+    matches_capacity_root(crate::core::lint_priority::RESIDENT_ENV)
+}
+
+pub(crate) fn matches_capacity_root(key: &str) -> bool {
+    std::env::var(key).is_ok_and(|root| {
+        SoldrPaths::new().is_ok_and(|paths| {
+            crate::core::lint_priority::root_marker(&paths.root).is_ok_and(|marker| marker == root)
+        })
+    })
+}
+
+/// Children share the outer resident lease. In particular a configured
+/// linter may call Soldr's own formatter or toolchain preparation.
+pub(crate) fn mark_resident_child(
+    command: &mut Command,
+    lease: Option<&crate::daemon::client::ResidentCapacityLease>,
+) {
+    if !lease.is_some_and(|lease| lease.permits() > 0) {
+        return;
+    }
+    if let Ok(marker) = SoldrPaths::new().and_then(|paths| {
+        crate::core::lint_priority::root_marker(&paths.root).map_err(SoldrError::from)
+    }) {
+        command.env(crate::core::lint_priority::RESIDENT_ENV, marker);
+    }
 }
 
 fn start_error(extra: &ExtraCommand, error: &std::io::Error) -> SoldrError {
@@ -148,6 +201,10 @@ pub(crate) fn run_porcelain(
     let mut failure_output = None;
     let mut autofixed = Vec::new();
     for step in &steps {
+        let _capacity = match step {
+            PlannedStep::Extra(_) => acquire_external_lint_capacity(cache_enabled)?,
+            PlannedStep::Cargo { .. } => None,
+        };
         let mut command = match step {
             PlannedStep::Cargo { args, .. } => {
                 prepare_cargo_step(args)?;
@@ -155,6 +212,7 @@ pub(crate) fn run_porcelain(
             }
             PlannedStep::Extra(extra) => extra_command(extra),
         };
+        mark_resident_child(&mut command, _capacity.as_ref());
         let sink = log.begin_step(step.label(), &describe(&command))?;
         let mark = sink.mark;
         command
@@ -249,7 +307,7 @@ pub(crate) async fn run_planned_steps(
             PlannedStep::Cargo { args, .. } => {
                 run_cargo_step(args, cache_enabled, trust_inherited_soldr_env).await?
             }
-            PlannedStep::Extra(extra) => run_extra_inherited(extra)?,
+            PlannedStep::Extra(extra) => run_extra_inherited(extra, cache_enabled)?,
         };
         if code != 0 {
             return Ok(code);

@@ -225,21 +225,21 @@ fn build_and_install_driver_from_source(
     command.arg("build").current_dir(package);
     crate::binaries::apply_resolved_toolchain_homes(&mut command, &cargo);
     crate::binaries::apply_managed_cargo_home_if_available(&mut command);
-    // This build must never re-enter Soldr's own rustc wrapper: a wrapper
-    // inherited from an ambient `soldr cargo` session would route this
-    // build's rustc invocations back through `wrapper.rs`, and
-    // `nested_dylint_driver_build` refuses exactly this crate name unless
-    // the tier-3 opt-in is set (soldr#2432/#2484). This build *is* the
-    // sanctioned, cached, one-time source build that opt-in exists to gate
-    // — it does not need to pass through that guard a second time, so it
-    // runs outside the wrapper entirely rather than setting the opt-in
-    // globally, which would also loosen unrelated nested builds elsewhere
-    // in the same process.
+    // Clear ambient wrappers. In a managed lint invocation this sanctioned
+    // source build uses Soldr's own wrapper and permits driver compilation
+    // only in this Cargo child's environment (soldr#2432/#2484).
     command
         .env_remove("RUSTC_WRAPPER")
         .env_remove("RUSTC_WORKSPACE_WRAPPER");
+    if crate::core::flag(crate::core::lint_priority::ENV) {
+        let wrapper = crate::binaries::rustc_wrapper_shim_binary(&SoldrPaths::new()?)?;
+        command
+            .env("RUSTC_WRAPPER", wrapper)
+            .env(crate::wrapper::ALLOW_DYLINT_DRIVER_BUILD_ENV_VAR, "1");
+    }
     let rustc = resolve_toolchain_binary_for_channel("rustc", Some(&plan.channel))?;
-    pin_driver_build_toolchain(&mut command, &plan.channel, &rustc);
+    // Dylint's build script requires the host triple in RUSTUP_TOOLCHAIN.
+    pin_driver_build_toolchain(&mut command, qualified_channel, &rustc);
     // Unix only: bake the *local* toolchain's lib directory into the
     // driver's rpath, mirroring upstream's own `-C link-args=-Wl,-rpath,...`
     // RUSTFLAGS. Unlike the catalogue-fetched driver — built on a CI machine

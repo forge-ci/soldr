@@ -70,14 +70,22 @@ struct CargoPrepareFingerprint<'a> {
 
 /// Run a rustup-managed toolchain binary with pass-through args.
 pub(crate) fn run_toolchain_passthrough(tool: &str, args: &[String]) -> Result<i32, SoldrError> {
+    let mut command = toolchain_passthrough_command(tool, args)?;
+    let status = run_toolchain_command(&mut command, &format!("{tool} passthrough"))?;
+    Ok(status.code().unwrap_or(1))
+}
+
+fn toolchain_passthrough_command(
+    tool: &str,
+    args: &[String],
+) -> Result<std::process::Command, SoldrError> {
     let binary = resolve_dylint_scoped_binary(tool)?;
     crate::fallback_detach::detach_outputs_for_toolchain(tool, args)?;
     let mut command = std::process::Command::new(&binary);
     command.args(args);
     crate::binaries::apply_resolved_toolchain_homes(&mut command, &binary);
     suppress_windows_console_window(&mut command);
-    let status = run_toolchain_command(&mut command, &format!("{tool} passthrough"))?;
-    Ok(status.code().unwrap_or(1))
+    Ok(command)
 }
 
 /// Route cached rustc-like calls through the wrapper, otherwise run them
@@ -106,8 +114,24 @@ pub(crate) fn run_rustc_like(
 /// Run rustfmt directly for non-cacheable invocations, otherwise route
 /// cacheable file-formatting calls through zccache's formatter path.
 pub(crate) fn run_rustfmt(args: &[String], cache_enabled: bool) -> Result<i32, SoldrError> {
-    if !cache_enabled || rustfmt_invocation_bypasses_format_cache(args) {
+    if !cache_enabled {
         return run_toolchain_passthrough("rustfmt", args);
+    }
+    let controller = crate::rustfmt_admission::DaemonRustfmtLeaseController {
+        permits: crate::rustfmt_admission::RUSTFMT_RESIDENT_PERMITS,
+    };
+    if rustfmt_invocation_bypasses_format_cache(args) {
+        if args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--help" | "-h" | "--version" | "-V" | "--print-config"
+            )
+        }) {
+            return run_toolchain_passthrough("rustfmt", args);
+        }
+        return crate::rustfmt_admission::with_rustfmt_lease(&controller, || {
+            run_toolchain_passthrough("rustfmt", args)
+        });
     }
 
     let rustfmt = resolve_dylint_scoped_binary("rustfmt")?;
@@ -125,18 +149,15 @@ pub(crate) fn run_rustfmt(args: &[String], cache_enabled: bool) -> Result<i32, S
     // lease is acquired, so a killed formatter child cannot be mistaken for
     // a clean failure.
     let snapshot = crate::rustfmt_admission::SourceSnapshot::capture(args, &cwd);
-    let controller = crate::rustfmt_admission::DaemonRustfmtLeaseController {
-        permits: crate::rustfmt_admission::RUSTFMT_RESIDENT_PERMITS,
-    };
     // soldr#2899: the daemon-free `formatter` API, not the CLI dispatcher.
     // Soldr keeps ownership of child-process policy through the runner.
-    let result = crate::rustfmt_admission::with_rustfmt_lease(&controller, || {
-        zccache::formatter::run_rustfmt_cached_with_runner(
-            &rustfmt,
-            args,
-            &cwd,
-            Some(&cache_root),
-            |command| {
+    let result = zccache::formatter::run_rustfmt_cached_with_runner(
+        &rustfmt,
+        args,
+        &cwd,
+        Some(&cache_root),
+        |command| {
+            crate::rustfmt_admission::with_rustfmt_lease(&controller, || {
                 crate::binaries::apply_resolved_toolchain_homes(command, &rustfmt);
                 apply_zccache_child_env(command)
                     .map_err(|err| std::io::Error::other(err.to_string()))?;
@@ -144,9 +165,9 @@ pub(crate) fn run_rustfmt(args: &[String], cache_enabled: bool) -> Result<i32, S
                 let status = run_toolchain_command(command, "embedded rustfmt formatter")
                     .map_err(|err| std::io::Error::other(err.to_string()))?;
                 Ok(status.code().unwrap_or(1))
-            },
-        )
-    });
+            })
+        },
+    );
 
     let succeeded = matches!(result, Ok(0));
     if let Err(err) = snapshot.restore_if_damaged(succeeded) {
@@ -162,8 +183,15 @@ pub(crate) fn run_rustfmt(args: &[String], cache_enabled: bool) -> Result<i32, S
 /// compile routes and a rustfmt formatter route, but no rustdoc driver
 /// route. Cargo doc/doctest still cache their rustc compile units via
 /// the cargo front door's `RUSTC_WRAPPER=soldr` injection.
-pub(crate) fn run_rustdoc(args: &[String]) -> Result<i32, SoldrError> {
-    run_toolchain_passthrough("rustdoc", args)
+pub(crate) fn run_rustdoc(args: &[String], cache_enabled: bool) -> Result<i32, SoldrError> {
+    if !cache_enabled || !args.iter().any(|arg| arg == "--test") {
+        return run_toolchain_passthrough("rustdoc", args);
+    }
+    let mut command = toolchain_passthrough_command("rustdoc", args)?;
+    let capacity = crate::test_capacity_runner::acquire_test_capacity()?;
+    crate::lint_steps::mark_resident_child(&mut command, capacity.as_ref());
+    let status = run_toolchain_command(&mut command, "rustdoc doctests")?;
+    Ok(status.code().unwrap_or(1))
 }
 
 /// Run rust-analyzer itself as a direct rustup-managed LSP passthrough.
@@ -936,6 +964,9 @@ pub(crate) fn rustup_toolchain_install_with_profile(
     profile: Option<&str>,
 ) -> Result<i32, SoldrError> {
     crate::core::forbid_toolchain_install_tripwire(&format!("rustup toolchain install {channel}"))?;
+    let _capacity = crate::lint_steps::acquire_external_lint_capacity(crate::core::flag(
+        crate::core::lint_priority::ENV,
+    ))?;
     let mut command = std::process::Command::new(rustup_binary());
     command.args([
         "toolchain",
@@ -956,6 +987,9 @@ pub(crate) fn rustup_component_add(channel: &str, component: &str) -> Result<i32
     crate::core::forbid_toolchain_install_tripwire(&format!(
         "rustup component add {component} --toolchain {channel}"
     ))?;
+    let _capacity = crate::lint_steps::acquire_external_lint_capacity(crate::core::flag(
+        crate::core::lint_priority::ENV,
+    ))?;
     let mut command = std::process::Command::new(rustup_binary());
     command.args(["component", "add", "--toolchain", channel, component]);
     apply_implicit_toolchain_homes(&mut command);
@@ -970,6 +1004,9 @@ pub(crate) fn rustup_component_add(channel: &str, component: &str) -> Result<i32
 pub(crate) fn rustup_target_add(channel: &str, target: &str) -> Result<i32, SoldrError> {
     crate::core::forbid_toolchain_install_tripwire(&format!(
         "rustup target add {target} --toolchain {channel}"
+    ))?;
+    let _capacity = crate::lint_steps::acquire_external_lint_capacity(crate::core::flag(
+        crate::core::lint_priority::ENV,
     ))?;
     let mut command = std::process::Command::new(rustup_binary());
     command.args(["target", "add", "--toolchain", channel, target]);

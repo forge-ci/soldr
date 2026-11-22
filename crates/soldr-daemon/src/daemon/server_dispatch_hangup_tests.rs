@@ -71,7 +71,10 @@ fn mutating_and_lease_requests_are_never_cancelled() {
         Request::Shutdown,
         Request::FlushCaches,
         Request::ReleaseResidentCapacity,
-        Request::AcquireResidentCapacity { permits: 1 },
+        Request::AcquireResidentCapacity {
+            permits: 1,
+            lint: false,
+        },
     ] {
         assert!(!request_is_cancel_safe(&request));
     }

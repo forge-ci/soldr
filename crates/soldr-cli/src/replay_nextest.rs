@@ -25,7 +25,7 @@ impl InheritedProvenance {
         }
     }
 
-    fn restore_to(&self, command: &mut Command) {
+    pub(crate) fn restore_to(&self, command: &mut Command) {
         for (name, value) in [
             (crate::reentrancy_guard::IN_SOLDR_PID_ENV, &self.pid),
             (crate::reentrancy_guard::IN_SOLDR_ROLE_ENV, &self.role),

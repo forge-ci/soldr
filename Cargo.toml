@@ -20,7 +20,7 @@ members = [
 # into soldr's workspace and mis-version them. They are exact crates.io
 # dependencies now (`zccache = { version = "=1.15.18" }` in
 # `[workspace.dependencies]`, the single pin every member inherits;
-# `running-process = { version = "=4.10.20" }`), so there is no nested
+# `running-process = { version = "=4.10.21" }`), so there is no nested
 # workspace left to exclude. Neither has a `[patch]`: cargo strips `[patch]`
 # from a published package, so a patched zccache (zccache#1955 vendored one
 # until soldr ingested the published 1.15.12) meant soldr built and tested

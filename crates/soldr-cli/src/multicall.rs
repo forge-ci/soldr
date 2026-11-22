@@ -37,6 +37,7 @@ enum ShimIdentity {
     ZccacheSoldr,
     SoldrDaemon,
     SoldrDylint,
+    TestCapacityRunner,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +116,11 @@ pub(crate) fn maybe_dispatch(raw_args: &[String]) -> Option<MulticallDispatch> {
         ShimIdentity::ZccacheSoldr => Some(MulticallDispatch::Exit(run_zccache_soldr())),
         ShimIdentity::SoldrDaemon => Some(MulticallDispatch::Exit(crate::daemon_entry::run())),
         ShimIdentity::SoldrDylint => Some(MulticallDispatch::Exit(run_soldr_dylint(raw_args))),
+        ShimIdentity::TestCapacityRunner => {
+            let mut args = raw_args.to_vec();
+            args[0] = crate::test_capacity_runner::SHIM_NAME.into();
+            Some(MulticallDispatch::SoldrArgs(args))
+        }
     }
 }
 
@@ -153,6 +159,7 @@ fn classify_argv0(argv0: &str) -> Option<ShimIdentity> {
         ZCCACHE_SOLDR => Some(ShimIdentity::ZccacheSoldr),
         SOLDR_DAEMON => Some(ShimIdentity::SoldrDaemon),
         SOLDR_DYLINT => Some(ShimIdentity::SoldrDylint),
+        crate::test_capacity_runner::SHIM_NAME => Some(ShimIdentity::TestCapacityRunner),
         _ => None,
     }
 }

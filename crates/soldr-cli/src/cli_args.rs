@@ -496,6 +496,11 @@ pub(crate) enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         args: Vec<String>,
     },
+    #[command(hide = true)]
+    TestCapacityRunner {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        args: Vec<String>,
+    },
     /// Replay prebuilt nextest archives with the specified native runner.
     ///
     /// This path does not install a toolchain or fetch a runner. Only version

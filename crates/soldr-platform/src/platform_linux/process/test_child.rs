@@ -149,6 +149,19 @@ pub fn returncode(status: &std::process::ExitStatus) -> i32 {
         .unwrap_or(1)
 }
 
+pub fn forward_exit_status(status: &std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    if let Some(signal) = status.signal() {
+        // SAFETY: the kernel supplied the child's signal number. Only this runner is signalled.
+        unsafe {
+            libc::signal(signal, libc::SIG_DFL);
+            libc::raise(signal);
+        }
+        return 128 + signal;
+    }
+    status.code().unwrap_or(1)
+}
+
 /// Every live process whose environment carries `name=value` exactly.
 ///
 /// soldr#3739: the wrapper gives each test a private `TMPDIR`, so a process

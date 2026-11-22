@@ -207,7 +207,7 @@ where
             });
             let _ = write_frame_async(&mut stream, &response).await;
         }
-        Request::AcquireResidentCapacity { permits } => {
+        Request::AcquireResidentCapacity { permits, lint } => {
             if permits == 0 {
                 let _ = write_frame_async(
                     &mut stream,
@@ -220,16 +220,14 @@ where
             }
 
             // The embedded service owns the canonical compile-capacity
-            // semaphore. Retaining this opaque guard in the connection task
+            // queue. Retaining this opaque guard in the connection task
             // makes both explicit release and transport disconnect release the
             // same permits with no polling or daemon-global lease registry.
-            // The semaphore is FIFO, so a waiting multi-permit request holds
-            // every later single-permit compile behind it. A client sends
-            // nothing until it is granted, so any read completing here means
+            // A client sends nothing until it is granted, so any read completing here means
             // it hung up (or broke protocol): leave the queue at once rather
             // than blocking compiles for a request nobody will use (soldr#3836
             // audit).
-            let acquire = state.compile_service.acquire_resident_capacity(permits);
+            let acquire = state.compile_service.acquire_resident_capacity(permits, lint);
             let mut probe = [0_u8; 1];
             let acquired = tokio::select! {
                 acquired = acquire => acquired,
@@ -238,7 +236,7 @@ where
                     return Ok(());
                 }
             };
-            let resident_capacity = match acquired {
+            let (acquired_permits, resident_capacity) = match acquired {
                 Ok(capacity) => capacity,
                 Err(error) => {
                     let _ = write_frame_async(
@@ -257,7 +255,7 @@ where
             // served request. Written as `if let` because `-D warnings`
             // promotes clippy::single_match to an error.
             if let Ok(true) =
-                serve_resident_capacity_lease(&mut stream, permits, resident_capacity).await
+                serve_resident_capacity_lease(&mut stream, acquired_permits, resident_capacity).await
             {
                 state.request_count.fetch_add(1, Ordering::Relaxed);
                 state.touch_activity();

@@ -100,6 +100,7 @@ async fn prepare_child_cargo(
         args: &args,
         cargo: &cargo,
         rustc: &rustc,
+        test_admission: cache_enabled,
         trust_inherited_soldr_env: setup.trust_inherited_soldr_env,
         build_like_cargo,
         explicit_toolchain,
@@ -318,6 +319,7 @@ struct ChildCargoSpec<'a> {
     args: &'a [String],
     cargo: &'a Path,
     rustc: &'a Path,
+    test_admission: bool,
     trust_inherited_soldr_env: bool,
     build_like_cargo: bool,
     explicit_toolchain: Option<&'a str>,
@@ -344,8 +346,19 @@ fn build_child_cargo_command(
     let subcommand_env_overrides = compute_subcommand_env_overrides(args);
 
     let mut command = std::process::Command::new(spec.cargo);
-    command.args(crate::target_alias::args_without_glibc_floor(args).iter());
     crate::binaries::apply_resolved_toolchain_homes(&mut command, spec.cargo);
+    let runner = if spec.test_admission {
+        crate::test_capacity_runner::config_option(&command, args)?
+    } else {
+        None
+    };
+    let runner_args = runner.map(|value| ["--config".to_string(), value]);
+    let args_with_runner = runner_args
+        .as_ref()
+        .map(|options| insert_cargo_global_args(args, options));
+    command.args(crate::target_alias::args_without_glibc_floor(
+        args_with_runner.as_deref().unwrap_or(args),
+    ).iter());
     suppress_windows_console_window(&mut command);
     // These Soldr control variables are consumed by this front-door
     // process. Letting Cargo inherit them leaks daemon lifecycle or retry
@@ -377,6 +390,9 @@ fn build_child_cargo_command(
     let _ = codegen_units::apply(&mut command, args);
 
     apply_child_cargo_toolchain_env(&mut command, spec);
+    if spec.test_admission {
+        crate::test_capacity_runner::configure_rustdoc(&mut command, args)?;
+    }
 
     // Apply subcommand-derived env overrides (e.g. CC_<triple>=clang-cl
     // for `cargo xwin build --target *-pc-windows-msvc`). Honor a

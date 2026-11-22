@@ -523,7 +523,11 @@ pub(crate) async fn run_lint(
             }
             lint_steps::run_planned_steps(steps, cache_enabled, trust_inherited_soldr_env).await
         }
-        LintMode::Deps => run_dependency_steps(plan.dependency_steps()?, trust_inherited_soldr_env),
+        LintMode::Deps => run_dependency_steps(
+            plan.dependency_steps()?,
+            cache_enabled,
+            trust_inherited_soldr_env,
+        ),
         LintMode::Ci => run_ci_suite(plan.ci_format),
         LintMode::All => {
             // soldr#2038 — run the pure-filesystem CI policy scan first so a
@@ -543,7 +547,11 @@ pub(crate) async fn run_lint(
             if code != 0 {
                 return Ok(code);
             }
-            let code = run_dependency_steps(plan.dependency_steps()?, trust_inherited_soldr_env)?;
+            let code = run_dependency_steps(
+                plan.dependency_steps()?,
+                cache_enabled,
+                trust_inherited_soldr_env,
+            )?;
             if code != 0 {
                 return Ok(code);
             }
@@ -574,13 +582,16 @@ fn run_ci_suite(format: OutputFormat) -> Result<i32, SoldrError> {
 
 fn run_dependency_steps(
     steps: Vec<Vec<String>>,
+    cache_enabled: bool,
     trust_inherited_soldr_env: bool,
 ) -> Result<i32, SoldrError> {
+    let _capacity = lint_steps::acquire_external_lint_capacity(cache_enabled)?;
     let soldr = current_soldr_binary()?;
     let mut children = Vec::with_capacity(steps.len());
     for args in steps {
         let label = format!("cargo {}", args.join(" "));
         let mut command = Command::new(&soldr);
+        lint_steps::mark_resident_child(&mut command, _capacity.as_ref());
         command.arg("--no-cache");
         if trust_inherited_soldr_env {
             command.arg("--trust-inherited-soldr-env");

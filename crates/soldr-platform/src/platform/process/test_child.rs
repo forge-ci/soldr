@@ -14,6 +14,10 @@ pub use crate::platform_imp::process::test_child::{
     pid_alive, pids_with_env, received_termination, returncode, signal_group, signal_process,
 };
 
+/// Return a supervised executable's exit code, or reproduce its Unix signal
+/// on this runner so Cargo and Nextest retain the original crash classification.
+pub use crate::platform_imp::process::test_child::forward_exit_status;
+
 /// The signals the wrapper sends or reacts to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TestSignal {

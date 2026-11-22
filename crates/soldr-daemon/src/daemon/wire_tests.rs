@@ -77,11 +77,17 @@ fn flush_caches_request_round_trips() {
 
 #[test]
 fn resident_capacity_control_frames_round_trip() {
-    let acquire = Request::AcquireResidentCapacity { permits: 3 };
+    let acquire = Request::AcquireResidentCapacity {
+        permits: 3,
+        lint: true,
+    };
     let bytes = encode_request(&acquire);
     assert!(matches!(
         decode_request(&bytes).expect("decode acquire"),
-        Request::AcquireResidentCapacity { permits: 3 }
+        Request::AcquireResidentCapacity {
+            permits: 3,
+            lint: true
+        }
     ));
 
     let release = Request::ReleaseResidentCapacity;

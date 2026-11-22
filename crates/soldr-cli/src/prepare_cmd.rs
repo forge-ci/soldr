@@ -971,6 +971,9 @@ fn run_rustup_target_add(
     triple: &str,
 ) -> Result<std::process::ExitStatus, SoldrError> {
     crate::core::forbid_toolchain_install_tripwire(&format!("rustup target add {triple}"))?;
+    let _capacity = crate::lint_steps::acquire_external_lint_capacity(crate::core::flag(
+        crate::core::lint_priority::ENV,
+    ))?;
     crate::exit_guard::run_child_command(
         command,
         &format!("rustup target add {triple}"),

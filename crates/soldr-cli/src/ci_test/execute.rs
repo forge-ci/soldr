@@ -177,6 +177,7 @@ fn run_nextest_and_dylint_branches(
         admission: &factory.nextest_admission,
         lease_controller: nextest_resident_lease::DaemonResidentLeaseController {
             permits: nextest_resident_lease::NEXTEST_RESIDENT_LEASE_PERMITS,
+            enabled: !factory.nextest_uses_test_capacity(),
         },
         lease: None,
         pressure: None,
@@ -637,6 +638,7 @@ struct StageCommandFactory {
     soldr_jobs: Option<String>,
     host_triple: String,
     nextest_test_cargo_runner: Option<PathBuf>,
+    nextest_per_test_capacity: bool,
     dylint: crate::dylint_toolchain::DylintToolchainPlan,
     dylint_bin_dirs: Vec<PathBuf>,
     dylint_env: Vec<(String, String)>,
@@ -719,6 +721,8 @@ impl StageCommandFactory {
             host_triple: plan.host_triple.clone(),
             nextest_test_cargo_runner: std::env::var_os(CI_TEST_CARGO_RUNNER_ENV)
                 .map(PathBuf::from),
+            nextest_per_test_capacity: cache_enabled
+                && has_native_nextest_wrapper(std::path::Path::new(&plan.workspace_root)),
             // Reconstructed from the frozen plan document rather than
             // re-derived, so it carries no precedence tier (soldr#2945).
             dylint: crate::dylint_toolchain::DylintToolchainPlan::identity(
@@ -742,6 +746,12 @@ impl StageCommandFactory {
         self.dylint_env = prepared.env;
     }
 
+    fn nextest_uses_test_capacity(&self) -> bool {
+        // The workspace's native run-wrapper is selected for Unix test
+        // executables. Keep stage admission for other test runners.
+        self.nextest_per_test_capacity
+    }
+
     fn spawn(&self, stage: &Stage) -> Result<Child, SoldrError> {
         let mut command = Command::new(&self.soldr);
         if !self.cache_enabled {
@@ -762,6 +772,12 @@ impl StageCommandFactory {
             &self.ci_test_report_path,
         );
         command.env(crate::core::CI_TEST_STAGE_ENV_VAR, &stage.name);
+        let lint = stage.name == "clippy"
+            || matches!(stage.domain, "dylint-libraries" | "dylint-analysis");
+        command.env(
+            crate::core::lint_priority::ENV,
+            if lint && self.cache_enabled { "1" } else { "0" },
+        );
         configure_stage_cache_lifecycle(&mut command);
         configure_nextest_test_cargo_runner(
             &mut command,
@@ -770,6 +786,19 @@ impl StageCommandFactory {
             self.nextest_test_cargo_runner.as_deref(),
         )?;
         configure_nextest_admission(&mut command, stage, &self.nextest_admission);
+        if stage.name == "nextest" {
+            let paths = crate::core::SoldrPaths::new()?;
+            command.env(
+                crate::core::lint_priority::NEXTEST_STAGE_ROOT_ENV,
+                crate::core::lint_priority::root_marker(&paths.root)?,
+            );
+            if self.nextest_uses_test_capacity() {
+                command.env(
+                    crate::core::lint_priority::NEXTEST_DAEMON_ADMISSION_ENV,
+                    "1",
+                );
+            }
+        }
         if stage.domain.starts_with("dylint-") {
             for (key, value) in &self.dylint_env {
                 command.env(key, value);
@@ -818,6 +847,44 @@ impl StageCommandFactory {
                 ))
             })
     }
+}
+
+fn has_native_nextest_wrapper(workspace: &std::path::Path) -> bool {
+    const SCRIPT: &str = ".github/scripts/nextest_wrapper.sh";
+    const WRAPPER: &str = "timeout-diagnostics";
+    if std::env::consts::FAMILY != "unix"
+        || !workspace.join(SCRIPT).is_file()
+        || std::env::var("NEXTEST_PROFILE")
+            .is_ok_and(|value| !value.is_empty() && value != "default")
+        || std::env::var_os("NEXTEST_CONFIG_FILE").is_some()
+    {
+        return false;
+    }
+    let Ok(config) = std::fs::read_to_string(workspace.join(".config/nextest.toml")) else {
+        return false;
+    };
+    let Ok(config) = config.parse::<toml::Table>() else {
+        return false;
+    };
+    let wrapper = config
+        .get("scripts")
+        .and_then(|scripts| scripts.get("wrapper"))
+        .and_then(|wrappers| wrappers.get(WRAPPER))
+        .and_then(|wrapper| wrapper.get("command"))
+        .and_then(|command| command.get("command-line"))
+        .and_then(toml::Value::as_str);
+    let overrides = config
+        .get("profile")
+        .and_then(|profiles| profiles.get("default"))
+        .and_then(|profile| profile.get("scripts"))
+        .and_then(toml::Value::as_array);
+    wrapper == Some(SCRIPT)
+        && overrides.is_some_and(|scripts| {
+            scripts.iter().any(|script| {
+                script.get("run-wrapper").and_then(toml::Value::as_str) == Some(WRAPPER)
+                    && script.get("filter").and_then(toml::Value::as_str) == Some("all()")
+            })
+        })
 }
 
 fn configure_nextest_test_cargo_runner(

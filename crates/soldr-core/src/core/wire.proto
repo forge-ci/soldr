@@ -67,6 +67,7 @@ message WireRequest {
 
 message WireAcquireResidentCapacity {
   uint32 permits = 1;
+  bool lint = 2;
 }
 
 message WireBuildLogInputsRequest {
