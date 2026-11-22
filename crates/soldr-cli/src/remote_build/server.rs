@@ -234,7 +234,7 @@ fn run(root: &Path, session: &Path, id: &str) -> io::Result<Vec<u8>> {
         "args": request.args,
         "exit_code": exit_code,
         "cache_saved": cache_saved,
-        "runner": fs::read_to_string("/etc/hostname").ok().map(|name| name.trim().to_owned()),
+        "runner": sysinfo::System::host_name(),
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
         "source": request.files.iter().map(|file| (&file.path, &file.digest)).collect::<std::collections::BTreeMap<_, _>>(),
