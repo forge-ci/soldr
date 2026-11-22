@@ -194,19 +194,17 @@ fn run(root: &Path, session: &Path, id: &str) -> io::Result<Vec<u8>> {
         Action::Dylint => "dylint",
     };
     let soldr = std::env::current_exe()?;
-    let result = Command::new(&soldr)
+    let result = runner_soldr(&soldr, &cache_root)
         .current_dir(&source)
         .env("CARGO_TARGET_DIR", output.join("target"))
-        .env("SOLDR_CACHE_DIR", &cache_root)
         .arg(action)
         .args(&request.args)
         .output()?;
     let exit_code = result.status.code().unwrap_or(1);
     let mut stderr = result.stderr;
     let cache_saved = request.cache_zstd_level.map(|level| {
-        let cache = Command::new(soldr)
+        let cache = runner_soldr(&soldr, &cache_root)
             .current_dir(&source)
-            .env("SOLDR_CACHE_DIR", &cache_root)
             .args(["save", "--zstd-level"])
             .arg(level.to_string())
             .arg("--cache-dir")
@@ -252,6 +250,14 @@ fn run(root: &Path, session: &Path, id: &str) -> io::Result<Vec<u8>> {
         stderr,
         attestation,
     })
+}
+
+fn runner_soldr(executable: &Path, cache_root: &Path) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .env(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR, "1")
+        .env("SOLDR_CACHE_DIR", cache_root);
+    command
 }
 
 pub(super) fn parent(path: &Path) -> io::Result<&Path> {
