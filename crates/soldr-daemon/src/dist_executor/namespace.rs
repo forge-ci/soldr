@@ -15,38 +15,16 @@ pub(super) fn check(job: &DistJob, _complete: bool) -> Result<(), String> {
     }) {
         return Err("custom compiler runtime options require namespace isolation".into());
     }
-    let host = job
-        .compiler_identity
-        .lines()
-        .find_map(|line| line.strip_prefix("host: "));
-    for (index, arg) in job.argv.iter().enumerate() {
-        let target = if arg == "--target" {
-            Some(
-                job.argv
-                    .get(index + 1)
-                    .ok_or("missing target value")?
-                    .as_str(),
-            )
-        } else {
-            arg.strip_prefix("--target=")
-        };
-        if target.is_some() && target != host {
-            return Err("non-host targets require independently verified target resources".into());
-        }
-    }
     Ok(())
 }
 
 #[test]
 fn external_crates_and_cold_manifests_are_eligible_with_host_toolchain() {
-    let mut job = DistJob {
+    let job = DistJob {
         compiler_identity: "commit-hash: abc\nhost: x86_64-unknown-linux-gnu".into(),
         inputs: vec![soldr_dist::InputFile::default()],
         argv: vec!["--extern".into(), "dep=/build/libdep.rlib".into()],
         ..Default::default()
     };
     assert!(check(&job, false).is_ok());
-    job.argv
-        .extend(["--target".into(), "aarch64-unknown-linux-gnu".into()]);
-    assert!(check(&job, true).unwrap_err().contains("non-host"));
 }

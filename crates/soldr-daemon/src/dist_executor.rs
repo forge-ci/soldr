@@ -1,6 +1,9 @@
 //! Static peers for zccache's post-lookup miss executor. No discovery or registry.
 use crate::core::{SoldrConfig, SoldrPaths};
-use soldr_dist::{compiler::Compiler, transport, DistClient, DistJob, DistOutcome, InputFile};
+use soldr_dist::{
+    client_connections::ClientConnections, compiler::Compiler, transport, DistClient, DistJob,
+    DistOutcome, InputFile,
+};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -13,8 +16,7 @@ mod namespace;
 struct Executor {
     clients: Vec<DistClient>,
     next: AtomicUsize,
-    compiler: Compiler,
-    cache_identity: [u8; 32],
+    compiler_program: std::path::PathBuf,
     _lease: transport::EndpointLease,
     root: std::path::PathBuf,
     inputs: tokio::sync::Mutex<soldr_dist::cas::DigestMemo>,
@@ -36,17 +38,23 @@ pub(crate) async fn register(
         .map(std::path::PathBuf::from)
         .or(config.root)
         .unwrap_or_else(|| paths.root.join("dist"));
-    let relay_disabled = std::env::var("SOLDR_DIST_RELAY").ok().as_deref() == Some("none");
-    let relay = if relay_disabled {
-        None
-    } else {
+    std::fs::create_dir_all(&root)?;
+    let root = std::fs::canonicalize(root)?;
+    let mode = std::env::var("SOLDR_DIST_RELAY").ok();
+    let relay_disabled = mode.as_deref() == Some("none");
+    let relay = relay_config(
+        mode.as_deref(),
         std::env::var("SOLDR_DIST_RELAY_URL")
             .ok()
-            .or(config.relay_url)
-    };
+            .or(config.relay_url),
+    )?;
+    let reverse_only = reverse_mode(
+        std::env::var("SOLDR_DIST_REVERSE_ONLY").ok().as_deref(),
+        config.reverse_only,
+    )?;
     let addresses = peers
         .iter()
-        .map(|peer| transport::parse_peer(peer, relay.as_deref()))
+        .map(|peer| transport::parse_worker(peer, relay.as_deref(), reverse_only))
         .collect::<soldr_dist::Result<Vec<_>>>()?;
     let relay = if relay_disabled {
         None
@@ -62,22 +70,20 @@ pub(crate) async fn register(
     let identity = soldr_dist::trust::node_key(&root)?;
     let lease = transport::EndpointLease::acquire_with_key(&root, &root.join("node.key"))?;
     let endpoint = transport::endpoint_with_identity(identity, false, relay.as_deref()).await?;
+    let connections = ClientConnections::new(endpoint, &root)?;
     let clients = addresses
         .into_iter()
-        .map(|peer| DistClient::new(endpoint.clone(), peer, &root))
+        .map(|peer| {
+            DistClient::with_connections(connections.clone(), peer, &root)
+                .map(|client| client.with_reverse_only(reverse_only))
+        })
         .collect::<soldr_dist::Result<Vec<_>>>()?;
-    let compiler = Compiler::rustc().await?;
-    let output = compiler.command().arg("-vV").capture().await?;
-    if !output.status.success() || output.stdout.is_empty() {
-        return Err("dist executor could not verify the local rustc cache identity".into());
-    }
-    let cache_identity = *zccache::hash::hash_bytes(&output.stdout).as_bytes();
+    let compiler_program = Compiler::soldr_program(&root, &std::env::current_exe()?)?;
     tracing::info!(peers = clients.len(), root = %root.display(), "soldr dist miss executor enabled");
     Ok(service.with_executor(Arc::new(Executor {
         clients,
         next: AtomicUsize::new(0),
-        compiler,
-        cache_identity,
+        compiler_program,
         inputs: tokio::sync::Mutex::new(soldr_dist::cas::DigestMemo::default()),
         _lease: lease,
         root,
@@ -131,15 +137,12 @@ fn peer_list(value: Option<&str>, configured: Vec<String>) -> soldr_dist::Result
     }
 }
 
-fn manifest(job: &CompileJob, compiler: &Compiler, identity: &[u8; 32]) -> Result<DistJob, String> {
+fn manifest(job: &CompileJob) -> Result<DistJob, String> {
     if job.compiler_kind != zccache::compiler::CompilerFamily::Rustc {
         return Err("dist miss bring-up currently supports rustc only".into());
     }
     if job.compiler_name != "rustc" && job.compiler_name != "rustc.exe" {
         return Err("dist miss adapter requires the plain rustc driver".into());
-    }
-    if &job.compiler_identity != identity {
-        return Err("requested rustc differs from the dist client's resolved toolchain".into());
     }
     let path = |p: &std::path::Path| {
         p.to_str()
@@ -160,8 +163,8 @@ fn manifest(job: &CompileJob, compiler: &Compiler, identity: &[u8; 32]) -> Resul
         .collect::<Result<Vec<_>, String>>()?;
     Ok(DistJob {
         rewrite_env: vec![],
-        compiler_kind: compiler.kind.clone(),
-        compiler_identity: compiler.identity.clone(),
+        compiler_kind: "rustc".into(),
+        compiler_identity: Compiler::request_identity(&job.compiler_identity),
         argv: job.args.clone(),
         env: execution_env(job),
         cwd: path(job.cwd.as_path())?,
@@ -187,14 +190,20 @@ impl CompileExecutor for Executor {
 
     fn execute<'a>(&'a self, job: &'a CompileJob) -> ExecutorFuture<'a> {
         Box::pin(async move {
-            let manifest = match manifest(job, &self.compiler, &self.cache_identity) {
+            let manifest = match manifest(job) {
                 Ok(job) => job,
                 Err(reason) => return self.declined(job, reason),
             };
             if let Err(reason) = namespace::check(&manifest, true) {
                 return self.declined(job, reason);
             }
-            let manifest = match soldr_dist::rust_inputs::construct(manifest, &self.inputs).await {
+            let manifest = match soldr_dist::rust_inputs::construct_with_soldr(
+                manifest,
+                &self.inputs,
+                &self.compiler_program,
+            )
+            .await
+            {
                 Ok(manifest) => manifest,
                 Err(error) => {
                     return self.declined(job, format!("dist input construction: {error}"))
@@ -270,15 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_accepts_cold_inputs_and_requires_matching_cache_identity() {
-        use super::manifest;
-        let compiler = soldr_dist::compiler::Compiler {
-            kind: "rustc".into(),
-            identity: "commit-hash: same\nhost: same".into(),
-            program: "soldr".into(),
-            prefix: vec![],
-            toolchain: None,
-        };
+    fn cold_manifest_preserves_the_hooks_exact_compiler_identity() {
         let mut job = zccache::embedded::CompileJob {
             compiler_kind: zccache::compiler::CompilerFamily::Rustc,
             compiler_name: "rustc".into(),
@@ -293,17 +294,17 @@ mod tests {
             inputs_complete: false,
             outputs: vec![std::path::PathBuf::from("/tmp/test.rmeta").into()],
         };
-        assert!(manifest(&job, &compiler, &[7; 32]).is_ok());
-        job.inputs_complete = true;
-        assert!(manifest(&job, &compiler, &[8; 32])
-            .unwrap_err()
-            .contains("toolchain"));
-        let mapped = manifest(&job, &compiler, &[7; 32]).unwrap();
-        assert_eq!(mapped.compiler_identity, compiler.identity);
-        assert_eq!(mapped.outputs, ["/tmp/test.rmeta"]);
-        job.compiler_kind = zccache::compiler::CompilerFamily::Gcc;
-        assert!(manifest(&job, &compiler, &[7; 32])
-            .unwrap_err()
-            .contains("rustc only"));
+        let first = super::manifest(&job).unwrap();
+        assert_eq!(
+            first.compiler_identity,
+            soldr_dist::compiler::Compiler::request_identity(&[7; 32])
+        );
+        job.compiler_identity = [8; 32];
+        assert_ne!(
+            super::manifest(&job).unwrap().compiler_identity,
+            first.compiler_identity
+        );
+        job.compiler_name = "clippy-driver".into();
+        assert!(super::manifest(&job).is_err());
     }
 }

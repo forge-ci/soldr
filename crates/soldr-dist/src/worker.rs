@@ -81,9 +81,10 @@ impl Worker {
         root_lock
             .try_lock_exclusive()
             .map_err(|e| format!("Dist worker root already in use: {e}"))?;
+        let root = std::fs::canonicalize(&self.root)?;
         let state = Arc::new(State {
-            cas: Cas::new(&self.root, self.cas_budget)?,
-            root: self.root,
+            cas: Cas::new(&root, self.cas_budget)?,
+            root,
             compilers: self.compilers,
             slots: Arc::new(Semaphore::new(self.slots)),
             uploaded: self.uploaded_blobs,
@@ -226,7 +227,7 @@ async fn handle_job(
     let Some(compiler) = state
         .compilers
         .iter()
-        .find(|c| c.kind == job.compiler_kind && c.identity == job.compiler_identity)
+        .find(|c| c.kind == job.compiler_kind && c.matches_identity(&job.compiler_identity))
     else {
         decline(&mut send, "toolchain mismatch").await?;
         send.finish()?;

@@ -61,7 +61,8 @@ pub(crate) fn proof_args(
     if args.iter().any(|arg| arg.starts_with("--remap-path-scope")) {
         return Err("custom remap scope requires separate input proof support".into());
     }
-    args.push("--remap-path-scope=object,diagnostics".into());
+    // Keep rustc's default all scope: narrower scopes retain physical paths in rmeta.
+    // Dep-info paths are validated physically before any textual restoration.
     if let Some(path) = depfiles(job)?.into_iter().next() {
         return Ok((args, Some(sandbox::mirrored(root, &path)?)));
     }

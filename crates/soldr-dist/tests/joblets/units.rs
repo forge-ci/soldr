@@ -813,3 +813,35 @@ fn contended_metrics_writer_fails_without_waiting_for_the_lock() {
     drop(lock);
     assert!(soldr_dist::status::record_job(root.path(), &metrics).is_ok());
 }
+
+#[test]
+fn original_and_sandbox_remaps_both_cover_imported_dependency_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let job = DistJob {
+        compiler_kind: "rustc".into(),
+        argv: vec![
+            "--remap-path-prefix=/client=.".into(),
+            "--remap-path-prefix".into(),
+            "/dependency=/virtual".into(),
+        ],
+        ..Default::default()
+    };
+    let args = soldr_dist::sandbox::argv(root.path(), &job).unwrap();
+    assert_eq!(args.len(), 4);
+    assert_eq!(args[0], "--remap-path-prefix=/client=.");
+    assert_eq!(args[2], "--remap-path-prefix=/dependency=/virtual");
+    assert_eq!(
+        args[1],
+        format!(
+            "--remap-path-prefix={}/root/client=.",
+            root.path().display()
+        )
+    );
+    assert_eq!(
+        args[3],
+        format!(
+            "--remap-path-prefix={}/root/dependency=/virtual",
+            root.path().display()
+        )
+    );
+}

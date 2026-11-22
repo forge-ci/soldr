@@ -813,8 +813,8 @@ macros that require unavailable host paths may decline to local execution.
 
 Every remote Rust invocation emits dep-info, reusing Cargo's existing depfile or
 a private sidecar. Done carries the proof bytes. The worker first requires physical dependency paths to stay under the sandbox
-and verifies their bytes against shipped digests with dep-info remapping disabled
-(object/diagnostic remaps remain active). The client validates all escaped
+and verifies their bytes against shipped digests before textual path restoration
+(the compiler keeps its default all remap scope). The client validates all escaped
 file dependencies against shipped absolute paths and all env-dep lines against
 the supplied values before fetching/publishing outputs. Missing/invalid proof or
 an outside path discards the remote result and reports a decline; the cache
@@ -846,3 +846,23 @@ include, and original execution environment values. Source/listing enumeration
 has bounded offline fallbacks; Cargo-generated registry checksum membership
 avoids nested Cargo locks. Arbitrary proc-macro side effects remain an explicit
 trusted-input/hermeticity assumption, not a capability guaranteed by dep-info.
+
+- 2026-11-22 Runtime pilot exposed daemon PATH missing Soldr in fresh private
+  roots. Compiler initialisation and offline package listing now use a canonical
+  `soldr` alias of the exact running image under `<root>/runtime/compiler/<sha256>/`.
+  This preserves multicall dispatch even when the parent is named soldr-daemon,
+  avoids dependence on broker-rebuilt PATH, and stays inside the writable root.
+  It materialises the existing executable bytes, not another compiled binary.
+
+- 2026-11-22 Map the hook's already-verified opaque rustc identity directly to
+  a strong wire identity. Nodes advertise the full-vV blake3 digest alongside
+  commit-hash and host, and accept a request only when that digest matches. No
+  client-side compiler probing occurs inside the daemon; its scrubbed PATH/cwd
+  cannot select a different Rust toolchain or prevent dist registration.
+
+- 2026-11-22 The two-dependency/proc-macro regression exposed extra physical
+  sandbox paths in lib.rmeta (object and rmeta-link members were identical). Keep
+  rustc's default all remap scope, rather than narrowing it to object,diagnostics.
+  Preserve original client remaps as well as translated sandbox remaps so imported
+  dependency metadata receives the same mapping as a local compile. Exact
+  artifact equality remains mandatory; no binary metadata is rewritten afterward.

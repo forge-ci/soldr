@@ -11,12 +11,12 @@ pub fn find_program(name: &str) -> Option<PathBuf> {
         .map(|dir| dir.join(name))
         .find(|path| path.is_file())
 }
-pub async fn job(argv: &[String]) -> Result<DistJob> {
+pub async fn job(argv: &[String], root: &Path) -> Result<DistJob> {
     let (program, args) = argv.split_first().ok_or("compiler argv required")?;
     let cwd = std::env::current_dir()?;
     let rust = Path::new(program).file_stem().is_some_and(|s| s == "rustc");
     let compiler = if rust {
-        Compiler::rustc().await?
+        Compiler::rustc_from_soldr(root, &std::env::current_exe()?).await?
     } else {
         Compiler::cc(&find_program(program).unwrap_or_else(|| PathBuf::from(program)))?
     };

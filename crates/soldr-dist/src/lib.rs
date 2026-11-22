@@ -4,6 +4,7 @@ pub mod cli;
 pub mod client;
 pub mod client_connections;
 pub mod compiler;
+mod compiler_image;
 pub mod dep_info;
 pub mod host_load;
 pub mod metrics;

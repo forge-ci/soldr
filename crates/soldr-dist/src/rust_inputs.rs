@@ -8,7 +8,15 @@ use std::{
 };
 
 /// Enlarge a hook manifest from package membership, compiler search paths and generated files.
-pub async fn construct(mut job: DistJob, memo: &tokio::sync::Mutex<DigestMemo>) -> Result<DistJob> {
+pub async fn construct(job: DistJob, memo: &tokio::sync::Mutex<DigestMemo>) -> Result<DistJob> {
+    construct_with_soldr(job, memo, Path::new("soldr")).await
+}
+
+pub async fn construct_with_soldr(
+    mut job: DistJob,
+    memo: &tokio::sync::Mutex<DigestMemo>,
+    soldr: &Path,
+) -> Result<DistJob> {
     let original_inputs = job.inputs.clone();
     let cwd = Path::new(&job.cwd);
     let mut paths = job
@@ -17,7 +25,7 @@ pub async fn construct(mut job: DistJob, memo: &tokio::sync::Mutex<DigestMemo>) 
         .map(|i| PathBuf::from(&i.abs_path))
         .collect::<BTreeSet<_>>();
     let package = package_root(&job)?;
-    paths.extend(package_files(&package).await?);
+    paths.extend(package_files(&package, soldr).await?);
     search_files(&job.argv, cwd, &mut paths)?;
     if let Some(out) = job.env.get("OUT_DIR").filter(|p| !p.is_empty()) {
         tree(
@@ -64,7 +72,7 @@ fn package_root(job: &DistJob) -> Result<PathBuf> {
     Err("Rust unit has no CARGO_MANIFEST_DIR or discoverable package".into())
 }
 
-async fn package_files(package: &Path) -> Result<BTreeSet<PathBuf>> {
+async fn package_files(package: &Path, soldr: &Path) -> Result<BTreeSet<PathBuf>> {
     let git = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         AsyncProcessBuilder::new("git")
@@ -106,7 +114,7 @@ async fn package_files(package: &Path) -> Result<BTreeSet<PathBuf>> {
     // Unpacked source archives use Cargo's package rules, offline and with a deadline.
     let files = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        AsyncProcessBuilder::new("soldr")
+        AsyncProcessBuilder::new(soldr)
             .env(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR, "1")
             .kill_on_drop(true)
             .args([

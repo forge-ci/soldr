@@ -100,6 +100,7 @@ pub async fn run(args: DistArgs) -> Result<i32> {
     observe::init_tracing();
     let root = args.root.map(Ok).unwrap_or_else(default_root)?;
     std::fs::create_dir_all(&root)?;
+    let root = std::fs::canonicalize(root)?;
     let relay_disabled = args.relay.as_deref() == Some("none");
     let relay_url = transport::relay_config(args.relay.as_deref(), args.relay_url)?;
     match args.command {
@@ -137,7 +138,7 @@ pub async fn run(args: DistArgs) -> Result<i32> {
             let identity = trust::node_key(&root)?;
             let _endpoint_lease =
                 transport::EndpointLease::acquire_with_key(&root, &root.join("node.key"))?;
-            let job = scaffold::job(&argv).await?;
+            let job = scaffold::job(&argv, &root).await?;
             let worker = transport::parse_worker(&worker, relay_url.as_deref(), reverse_only)?;
             let relay = if relay_disabled {
                 None
@@ -202,7 +203,7 @@ async fn serve(root: &Path, relay: Option<&str>, config: ServeConfig) -> Result<
     } else if endpoint.addr().ip_addrs().next().is_none() {
         return Err("dist direct LAN endpoint has no reachable interface addresses".into());
     }
-    let mut compilers = vec![Compiler::rustc().await?];
+    let mut compilers = vec![Compiler::rustc_from_soldr(root, &std::env::current_exe()?).await?];
     if let Some(cc) = scaffold::find_program("cc") {
         compilers.push(Compiler::cc(&cc)?);
     }

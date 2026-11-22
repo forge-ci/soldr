@@ -32,7 +32,16 @@ pub struct Compiler {
 impl Compiler {
     /// Rust always enters the Soldr front door, which resolves the pinned compiler.
     pub async fn rustc() -> Result<Self> {
-        let resolved = soldr_command()
+        Self::rustc_with_program("soldr".into()).await
+    }
+    pub fn soldr_program(root: &Path, image: &Path) -> Result<PathBuf> {
+        crate::compiler_image::materialize(root, image)
+    }
+    pub async fn rustc_from_soldr(root: &Path, image: &Path) -> Result<Self> {
+        Self::rustc_with_program(Self::soldr_program(root, image)?).await
+    }
+    async fn rustc_with_program(program: PathBuf) -> Result<Self> {
+        let resolved = soldr_command(&program)
             .args(["rustup", "which", "rustc"])
             .capture()
             .await?;
@@ -49,7 +58,7 @@ impl Compiler {
             .and_then(Path::parent)
             .ok_or("invalid resolved rustc path")?
             .to_path_buf();
-        let output = soldr_command()
+        let output = soldr_command(&program)
             .env("RUSTUP_TOOLCHAIN", &toolchain)
             .args(["--no-cache", "rustc", "-vV"])
             .capture()
@@ -61,25 +70,33 @@ impl Compiler {
             )
             .into());
         }
+        let digest = Self::request_identity(blake3::hash(&output.stdout).as_bytes());
         let text = String::from_utf8(output.stdout)?;
-        let identity = text
+        let details = text
             .lines()
             .filter(|s| s.starts_with("commit-hash:") || s.starts_with("host:"))
             .collect::<Vec<_>>()
             .join("\n");
-        if identity.lines().count() != 2 {
+        if details.lines().count() != 2 {
             return Err("rustc -vV missing commit-hash/host".into());
         }
         Ok(Self {
             kind: "rustc".into(),
-            identity,
-            program: "soldr".into(),
+            identity: format!("{digest}\n{details}"),
+            program,
             // Remote joblets execute as owned children after the client's cache miss.
             // Disable nested cache/executor routing; worker slots and host-load
             // admission govern these direct children without a global Cargo cap.
             prefix: vec!["--no-cache".into(), "rustc".into()],
             toolchain: Some(toolchain),
         })
+    }
+    /// Same opaque blake3(-vV) identity the cache hook already verified locally.
+    pub fn request_identity(digest: &[u8; 32]) -> String {
+        format!("rustc-vv-blake3:{}", blake3::Hash::from(*digest).to_hex())
+    }
+    pub fn matches_identity(&self, requested: &str) -> bool {
+        identity_matches(&self.identity, requested)
     }
     pub fn cc(path: &Path) -> Result<Self> {
         let program = std::fs::canonicalize(path)?;
@@ -95,28 +112,9 @@ impl Compiler {
     }
     /// Runtime/toolchain environment cannot be relocated as an arbitrary Rust string.
     pub fn environment_decline(&self, job: &DistJob) -> Option<String> {
-        if self.kind == "rustc"
-            && job.inputs.iter().any(|input| {
-                Path::new(&input.abs_path).extension().is_some_and(|ext| {
-                    ["so", "dylib", "dll"]
-                        .iter()
-                        .any(|candidate| ext == *candidate)
-                })
-            })
-        {
-            let host = self
-                .identity
-                .lines()
-                .find_map(|line| line.strip_prefix("host: "));
-            for (index, arg) in job.argv.iter().enumerate() {
-                let target = if arg == "--target" {
-                    job.argv.get(index + 1).map(String::as_str)
-                } else {
-                    arg.strip_prefix("--target=")
-                };
-                if target.is_some() && target != host {
-                    return Some("cross-triple proc macro input".into());
-                }
+        if self.kind == "rustc" {
+            if let Some(reason) = target_decline(self, job) {
+                return Some(reason);
             }
         }
         if job
@@ -252,6 +250,7 @@ impl Compiler {
                 .any(|arg| arg.starts_with("--remap-path-prefix"))
         {
             let cwd = sandbox::mirrored(root, &job.cwd)?;
+            command = command.arg(format!("--remap-path-prefix={}=.", job.cwd));
             command = command.arg(format!("--remap-path-prefix={}=.", cwd.display()));
         }
         let mut child = command
@@ -297,6 +296,69 @@ pub fn outputs(
     Ok(outputs)
 }
 
-fn soldr_command() -> AsyncProcessBuilder {
-    AsyncProcessBuilder::new("soldr").env(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR, "1")
+fn soldr_command(program: &Path) -> AsyncProcessBuilder {
+    AsyncProcessBuilder::new(program).env(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR, "1")
+}
+
+/// Full identities serve local debugging; a cache digest matches only its exact first line.
+pub fn identity_matches(offered: &str, requested: &str) -> bool {
+    offered == requested
+        || (requested.starts_with("rustc-vv-blake3:")
+            && requested.len() == "rustc-vv-blake3:".len() + 64
+            && requested["rustc-vv-blake3:".len()..]
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
+            && offered.lines().next() == Some(requested))
+}
+
+fn target_decline(compiler: &Compiler, job: &DistJob) -> Option<String> {
+    let host = compiler
+        .identity
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "));
+    for (index, arg) in job.argv.iter().enumerate() {
+        let target = if arg == "--target" {
+            job.argv.get(index + 1).map(String::as_str)
+        } else {
+            arg.strip_prefix("--target=")
+        };
+        if target.is_some() && target != host {
+            let proc_macro = job.inputs.iter().any(|input| {
+                Path::new(&input.abs_path).extension().is_some_and(|ext| {
+                    ["so", "dylib", "dll"]
+                        .iter()
+                        .any(|candidate| ext == *candidate)
+                })
+            });
+            return Some(
+                if proc_macro {
+                    "cross-triple proc macro input"
+                } else {
+                    "non-host target requires verified target resources"
+                }
+                .into(),
+            );
+        }
+    }
+    None
+}
+
+#[test]
+fn opaque_cache_identity_matches_only_the_exact_advertised_digest() {
+    let requested = Compiler::request_identity(&[7; 32]);
+    let offered = format!("{requested}\ncommit-hash: expected\nhost: x86_64-unknown-linux-gnu");
+    assert!(identity_matches(&offered, &requested));
+    assert!(identity_matches(&offered, &offered));
+    assert!(!identity_matches(
+        &offered,
+        &Compiler::request_identity(&[8; 32])
+    ));
+    assert!(!identity_matches(
+        &offered,
+        &requested[..requested.len() - 1]
+    ));
+    assert!(!identity_matches(
+        &offered,
+        &format!("{requested}\nhost: injected")
+    ));
 }

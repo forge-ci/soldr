@@ -164,17 +164,33 @@ pub fn rewrite(root: &Path, job: &DistJob, value: &str) -> Result<String> {
 
 /// Handle rustc's paired --emit form as well as ordinary path-bearing arguments.
 pub fn argv(root: &Path, job: &DistJob) -> Result<Vec<String>> {
-    job.argv
-        .iter()
-        .enumerate()
-        .map(|(index, arg)| {
+    let mut args = Vec::new();
+    let mut index = 0;
+    while index < job.argv.len() {
+        let arg = &job.argv[index];
+        if job.compiler_kind == "rustc" && arg == "--remap-path-prefix" {
+            let value = job.argv.get(index + 1).ok_or("missing path remap value")?;
+            let original = format!("--remap-path-prefix={value}");
+            args.push(original.clone());
+            args.push(rewrite(root, job, &original)?);
+            index += 2;
+            continue;
+        }
+        if job.compiler_kind == "rustc" && arg.starts_with("--remap-path-prefix=") {
+            // Imported dependency metadata can retain original client paths; preserve its
+            // mapping alongside the sandbox equivalent used by this invocation's sources.
+            args.push(arg.clone());
+        }
+        args.push(
             if job.compiler_kind == "rustc" && index > 0 && job.argv[index - 1] == "--emit" {
-                emit(root, job, arg)
+                emit(root, job, arg)?
             } else {
-                rewrite(root, job, arg)
-            }
-        })
-        .collect()
+                rewrite(root, job, arg)?
+            },
+        );
+        index += 1;
+    }
+    Ok(args)
 }
 
 fn emit(root: &Path, job: &DistJob, value: &str) -> Result<String> {
