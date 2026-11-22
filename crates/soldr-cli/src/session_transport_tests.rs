@@ -201,7 +201,11 @@ fn continuous_progress_is_still_bounded_by_route_ceiling() {
         .expect_err("progress must not defeat the absolute ceiling");
         writer.abort();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(error.to_string().contains("route acquisition ceiling"));
+        let text = error.to_string();
+        assert!(text.contains("route acquisition ceiling"), "{text}");
+        assert!(text.contains("request_id=2476"), "{text}");
+        assert!(text.contains("stage=probe attempt=3"), "{text}");
+        assert!(text.contains("daemon still starting"), "{text}");
     });
 }
 

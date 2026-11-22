@@ -145,6 +145,33 @@ fn env_duration(name: &str, default_ms: u64) -> Duration {
     )
 }
 
+pub(crate) fn handshake_context(
+    request_id: u64,
+    elapsed: Duration,
+    last_progress: Option<&crate::broker_server::RouteProgress>,
+    handoff: Option<(u64, &str, &str)>,
+) -> String {
+    let phase = handoff.map_or_else(
+        || "phase=route-acquisition".into(),
+        |(id, backend, version)| {
+            format!("phase=handoff connection_id={id} backend={backend} daemon_version={version}")
+        },
+    );
+    let progress = last_progress.map_or_else(
+        || "no progress received".into(),
+        |last| {
+            format!(
+                "stage={} attempt={} broker_elapsed_ms={} result={}",
+                last.stage, last.attempt, last.elapsed_ms, last.latest_result
+            )
+        },
+    );
+    format!(
+        "request_id={request_id} {phase} elapsed_ms={} last_progress=[{progress}]",
+        elapsed.as_millis()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

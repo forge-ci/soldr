@@ -589,7 +589,7 @@ where
     let route_ceiling = started + deadlines.route_ceiling;
     let mut response_deadline = started + deadlines.first_response;
     let mut pending_handoff: Option<(Vec<u8>, u64, ReadyRoute)> = None;
-    let mut last_progress_elapsed_ms = 0_u64;
+    let mut last_progress: Option<crate::broker_server::RouteProgress> = None;
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
@@ -616,11 +616,12 @@ where
                 if progress.stage.is_empty()
                     || progress.latest_result.is_empty()
                     || progress.attempt == 0
-                    || progress.elapsed_ms < last_progress_elapsed_ms
+                    || last_progress
+                        .as_ref()
+                        .is_some_and(|last| progress.elapsed_ms < last.elapsed_ms)
                 {
                     return Err(io::Error::other("broker returned invalid route progress"));
                 }
-                last_progress_elapsed_ms = progress.elapsed_ms;
                 if session_debug_enabled() {
                     eprintln!(
                         "soldr: broker route progress stage={} attempt={} elapsed_ms={} result={}",
@@ -630,6 +631,7 @@ where
                         progress.latest_result
                     );
                 }
+                last_progress = Some(progress);
                 response_deadline = tokio::time::Instant::now() + deadlines.progress_silence;
                 continue;
             }
@@ -720,36 +722,58 @@ where
         } else {
             response_deadline.min(route_ceiling)
         };
-        let n = tokio::time::timeout_at(deadline, stream.read(&mut chunk))
-            .await
-            .map_err(|_| {
-                if pending_handoff.is_some() {
-                    return io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "broker did not confirm either handoff ownership or same-connection proxy fallback",
-                    );
-                }
-                let class = if deadline == route_ceiling {
-                    "route acquisition ceiling"
-                } else if response_deadline == started + deadlines.first_response {
-                    "first-response deadline"
+        let context = || {
+            crate::broker_deadlines::handshake_context(
+                expected_request_id,
+                started.elapsed(),
+                last_progress.as_ref(),
+                pending_handoff.as_ref().map(|(_, id, route)| {
+                    (
+                        *id,
+                        route.backend_pipe.as_str(),
+                        route.daemon_version.as_str(),
+                    )
+                }),
+            )
+        };
+        let n = match tokio::time::timeout_at(deadline, stream.read(&mut chunk)).await {
+            Ok(Ok(0)) => {
+                eprintln!(
+                    "soldr: broker closed before handshake completed ({})",
+                    context()
+                );
+                return Err(io::Error::other("broker closed before Hello reply"));
+            }
+            Ok(Err(error)) => {
+                eprintln!(
+                    "soldr: broker handshake read failed: {error} ({})",
+                    context()
+                );
+                return Err(error);
+            }
+            Ok(Ok(n)) => n,
+            Err(_) => {
+                let reason = if pending_handoff.is_some() {
+                    "broker did not confirm either handoff ownership or same-connection proxy fallback".into()
                 } else {
-                    "progress-silence deadline"
-                };
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
+                    let class = if deadline == route_ceiling {
+                        "route acquisition ceiling"
+                    } else if response_deadline == started + deadlines.first_response {
+                        "first-response deadline"
+                    } else {
+                        "progress-silence deadline"
+                    };
                     format!(
-                        "broker {class} exceeded after {}ms (limit {}ms; raise {} if the broker is only busy)",
-                        started.elapsed().as_millis(),
+                        "broker {class} exceeded (limit {}ms; raise {} if the broker is only busy)",
                         (deadline - started).as_millis(),
-                        crate::broker_deadlines::deadline_env_var(class),
-                    ),
-                )
-            });
-        let n = n??;
-        if n == 0 {
-            return Err(io::Error::other("broker closed before Hello reply"));
-        }
+                        crate::broker_deadlines::deadline_env_var(class)
+                    )
+                };
+                let message = format!("{reason} ({})", context());
+                eprintln!("soldr: {message}");
+                return Err(io::Error::new(io::ErrorKind::TimedOut, message));
+            }
+        };
         buf.extend_from_slice(&chunk[..n]);
     }
 }
