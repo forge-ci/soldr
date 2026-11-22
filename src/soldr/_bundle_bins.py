@@ -59,7 +59,13 @@ BUNDLE_BINS_KEY = "bundle-bins"
 DEFAULT_DEST = "scripts"
 WHEEL_SCHEMES = ("scripts", "platlib", "purelib", "data", "headers")
 _SECTION = "tool.soldr.pep517"
-_ENTRY_KEYS = {"bin", "package", "dest"}
+_ENTRY_KEYS = {"bin", "package", "dest", "features", "linux-libc"}
+# `linux-libc = "musl"`: on a Linux wheel, build the bin for the same
+# architecture's `-unknown-linux-musl` triple and require a static executable,
+# so the CLI runs on any Linux while the PyO3 extension keeps the
+# interpreter's glibc. Darwin and Windows wheels are unaffected.
+LINUX_LIBCS = ("musl",)
+_FEATURE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_+./-]*")
 _BIN_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
 
 
@@ -74,6 +80,8 @@ class BundleBin:
     bin: str
     package: Optional[str] = None
     dest: str = DEFAULT_DEST
+    features: "tuple[str, ...]" = ()
+    linux_libc: Optional[str] = None
 
 
 def read_bundle_bins(pyproject: Path) -> "list[BundleBin]":
@@ -171,10 +179,16 @@ def _fallback_entries(text: str) -> "list[Any]":  # noqa: C901
         )
     entries: "list[Any]" = []
     for table in re.findall(r"\{([^{}]*)\}", body):
-        entry: dict[str, str] = {}
+        entry: "dict[str, Any]" = {}
         for match in re.finditer(
-            r"([A-Za-z0-9_-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", table
+            r"([A-Za-z0-9_-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|\[([^\]]*)\])", table
         ):
+            if match.group(4) is not None:
+                entry[match.group(1)] = [
+                    a if a is not None else b
+                    for a, b in re.findall(r"\"([^\"]*)\"|'([^']*)'", match.group(4))
+                ]
+                continue
             value = match.group(2) if match.group(2) is not None else match.group(3)
             entry[match.group(1)] = value
         entries.append(entry)
@@ -200,10 +214,26 @@ def _parse_entry(index: int, raw: Any) -> BundleBin:
     dest = raw.get("dest", DEFAULT_DEST)
     if not isinstance(dest, str):
         raise BundleBinsError(f"{where} `dest` must be a string")
+    features = raw.get("features", [])
+    if not isinstance(features, list) or not all(
+        isinstance(feature, str) and _FEATURE_NAME.fullmatch(feature)
+        for feature in features
+    ):
+        raise BundleBinsError(
+            f"{where} `features` must be an array of Cargo feature names"
+        )
+    linux_libc = raw.get("linux-libc")
+    if linux_libc is not None and linux_libc not in LINUX_LIBCS:
+        raise BundleBinsError(
+            f"{where} `linux-libc` must be one of {', '.join(LINUX_LIBCS)}; "
+            f"got {linux_libc!r}"
+        )
     return BundleBin(
         bin=name,
         package=package.strip() if package else None,
         dest=_normalize_dest(where, dest),
+        features=tuple(features),
+        linux_libc=linux_libc,
     )
 
 
@@ -240,9 +270,76 @@ def cargo_build_command(
     ]
     if entry.package:
         command += ["--package", entry.package]
+    if entry.features:
+        command += ["--features", ",".join(entry.features)]
     if manifest_path is not None:
         command += ["--manifest-path", str(manifest_path)]
-    return [*command, *profile_args, *target_args]
+    return [*command, *profile_args, *entry_target_args(entry, target_args)]
+
+
+def _host_linux_triple() -> Optional[str]:
+    if not sys.platform.startswith("linux"):
+        return None
+    machine = os.uname().machine
+    machine = {"arm64": "aarch64", "amd64": "x86_64"}.get(machine, machine)
+    return f"{machine}-unknown-linux-gnu"
+
+
+def entry_target_args(entry: BundleBin, target_args: Sequence[str]) -> "list[str]":
+    """The ``--target`` for one bin: the wheel's, retargeted to musl for a
+    ``linux-libc = "musl"`` entry on a Linux wheel."""
+    if entry.linux_libc != "musl":
+        return list(target_args)
+    wheel_target = (
+        target_args[1]
+        if len(target_args) == 2 and target_args[0] == "--target"
+        else _host_linux_triple() if not target_args else None
+    )
+    if wheel_target is None:
+        return list(target_args)
+    for gnu in ("-linux-gnu", "-linux-musl"):
+        if wheel_target.endswith(gnu):
+            return ["--target", wheel_target[: -len(gnu)] + "-linux-musl"]
+    # A Darwin or Windows wheel: the bin keeps the wheel's own target.
+    return list(target_args)
+
+
+_ELF_PT_DYNAMIC = 2
+_ELF_PT_INTERP = 3
+_ELF_DT_NEEDED = 1
+
+
+def assert_static_elf(entry: BundleBin, executable: Path) -> None:
+    """Refuse a ``linux-libc = "musl"`` bin that needs an interpreter or a
+    shared library. static-pie keeps PT_DYNAMIC for its own relocations, so
+    the test is the absence of PT_INTERP and of every DT_NEEDED entry."""
+    import struct  # pylint: disable=import-outside-toplevel
+
+    data = executable.read_bytes()
+    if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        raise BundleBinsError(
+            f"bundled bin `{entry.bin}` is not a little-endian ELF64 executable"
+        )
+    (phoff,) = struct.unpack_from("<Q", data, 0x20)
+    phentsize, phnum = struct.unpack_from("<HH", data, 0x36)
+    for index in range(phnum):
+        kind, _flags, offset, _vaddr, _paddr, size = struct.unpack_from(
+            "<IIQQQQ", data, phoff + index * phentsize
+        )
+        if kind == _ELF_PT_INTERP:
+            raise BundleBinsError(
+                f"bundled bin `{entry.bin}` (linux-libc = musl) is dynamically linked"
+            )
+        if kind == _ELF_PT_DYNAMIC:
+            for cursor in range(offset, offset + size - 15, 16):
+                tag, _value = struct.unpack_from("<qQ", data, cursor)
+                if tag == 0:
+                    break
+                if tag == _ELF_DT_NEEDED:
+                    raise BundleBinsError(
+                        f"bundled bin `{entry.bin}` (linux-libc = musl) needs a "
+                        "shared library"
+                    )
 
 
 def executable_from_messages(stdout: str, bin_name: str) -> Path:
@@ -308,6 +405,8 @@ def build_bundle_bin(
         raise BundleBinsError(
             f"bundled bin `{entry.bin}` was reported at {executable}, which is not a file"
         )
+    if entry.linux_libc == "musl" and "-linux-musl" in " ".join(command):
+        assert_static_elf(entry, executable)
     return executable
 
 
