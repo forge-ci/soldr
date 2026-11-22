@@ -582,3 +582,49 @@ fn shared_key_lease_excludes_endpoints_with_different_roots() {
     assert_eq!(soldr_platform::fs::permissions::mode(&key), mode);
     drop(second);
 }
+
+#[test]
+fn static_peer_accepts_ticket_or_node_id_with_explicit_relay() {
+    use soldr_dist::transport::{parse_peer, ticket};
+    let id = iroh::SecretKey::generate().public();
+    let relay = "https://relay.example.com";
+    let expected = iroh::EndpointAddr::new(id).with_relay_url(relay.parse().unwrap());
+    assert_eq!(parse_peer(&id.to_string(), Some(relay)).unwrap(), expected);
+    assert_eq!(
+        parse_peer(&ticket(&expected).unwrap(), None).unwrap(),
+        expected
+    );
+    assert!(parse_peer(&id.to_string(), None)
+        .unwrap_err()
+        .to_string()
+        .contains("relay"));
+    assert!(parse_peer(&id.to_string(), Some("http://relay.example.com")).is_err());
+    assert!(parse_peer("not-a-peer", Some(relay)).is_err());
+}
+
+#[test]
+fn worker_alias_is_the_same_native_serve_command() {
+    use clap::{CommandFactory, Parser};
+    use soldr_dist::cli::{DistArgs, DistCommand};
+    #[derive(Parser)]
+    struct Command {
+        #[command(flatten)]
+        args: DistArgs,
+    }
+    let parsed = Command::try_parse_from(["dist", "worker", "--slots", "4"]).unwrap();
+    assert!(matches!(
+        parsed.args.command,
+        DistCommand::Serve { slots: 4, .. }
+    ));
+    // Exercise the exact production env binding without changing process-global env.
+    let mut command = Command::command();
+    let exec = command.find_subcommand_mut("exec").unwrap();
+    let worker = exec
+        .get_arguments()
+        .find(|arg| arg.get_id() == "worker")
+        .unwrap();
+    assert_eq!(
+        worker.get_env().unwrap(),
+        std::ffi::OsStr::new("SOLDR_DIST_PEERS")
+    );
+}

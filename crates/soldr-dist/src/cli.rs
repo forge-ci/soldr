@@ -25,6 +25,7 @@ pub struct DistArgs {
 #[derive(Subcommand)]
 pub enum DistCommand {
     /// Lend compiler capacity to explicitly trusted clients.
+    #[command(visible_alias = "worker")]
     Serve {
         #[arg(long, default_value_t = 1)]
         slots: usize,
@@ -45,7 +46,8 @@ pub enum DistCommand {
     },
     /// Run one debug compiler invocation on an explicitly trusted worker.
     Exec {
-        #[arg(long)]
+        /// One static node ID (with relay URL) or a printed JSON ticket.
+        #[arg(long, env = "SOLDR_DIST_PEERS")]
         worker: String,
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         argv: Vec<String>,
@@ -105,7 +107,7 @@ pub async fn run(args: DistArgs) -> Result<i32> {
             let _endpoint_lease =
                 transport::EndpointLease::acquire_with_key(&root, &root.join("node.key"))?;
             let job = scaffold::job(&argv).await?;
-            let worker = transport::parse_ticket(&worker)?;
+            let worker = transport::parse_peer(&worker, args.relay_url.as_deref())?;
             let relay = args
                 .relay_url
                 .or_else(|| worker.relay_urls().next().map(ToString::to_string));

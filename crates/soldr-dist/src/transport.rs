@@ -71,6 +71,21 @@ pub fn parse_ticket(ticket: &str) -> Result<EndpointAddr> {
     Ok(serde_json::from_str(ticket)?)
 }
 
+/// A static peer needs either a full ticket or a node ID plus an explicit relay.
+pub fn parse_peer(value: &str, relay_url: Option<&str>) -> Result<EndpointAddr> {
+    if let Ok(id) = value.parse::<iroh::EndpointId>() {
+        let relay: iroh::RelayUrl = relay_url
+            .ok_or("a node-id peer needs --relay-url or SOLDR_DIST_RELAY_URL; alternatively use the printed ticket")?
+            .parse()?;
+        if relay.scheme() != "https" {
+            return Err("dist relay URL must use HTTPS".into());
+        }
+        return Ok(EndpointAddr::new(id).with_relay_url(relay));
+    }
+    parse_ticket(value)
+        .map_err(|e| format!("expected one static node ID or printed JSON ticket: {e}").into())
+}
+
 pub async fn send<M: Message>(stream: &mut SendStream, message: &M) -> Result<()> {
     let bytes = message.encode_to_vec();
     if bytes.len() > CONTROL_LIMIT {

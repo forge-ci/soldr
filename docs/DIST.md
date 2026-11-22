@@ -217,6 +217,51 @@ soldr dist exec --worker '<printed-ticket>' -- rustc --emit=obj hello.rs -o hell
 soldr dist status --json
 ```
 
+### Static E640 bring-up (no registry)
+
+The existing `serve` command prints the node ID and a JSON dial ticket. `worker`
+is an alias for `serve`. Run trust commands as the account that owns `--root`;
+pre-create the service state as that account before root polls its status.
+Both machines need the same Soldr-resolved rustc commit and host triple.
+Set `RELAY_URL` to an operational HTTPS iroh relay; the signal URL is not a relay.
+
+```sh
+# Workstation: initialise identity, then give node_id to the node operator.
+CLIENT_ROOT="$PWD/target/dist-client"
+soldr dist status --root "$CLIENT_ROOT" --json
+
+# Dell: run as the soldr-dist service account, after provisioning its state dir.
+ROOT=/var/lib/soldr-dist/state
+soldr dist status --root "$ROOT" --json
+soldr dist trust add "$CLIENT_ID" --role client --root "$ROOT"
+RUSTUP_TOOLCHAIN=1.98.1 soldr dist serve --root "$ROOT" --slots 4 \
+  --cas-budget 10737418240 --relay-url "$RELAY_URL" \
+  --host-load-file /run/forge/host-load.json
+
+# Workstation: copy the printed node ID and ticket into these variables.
+soldr dist trust add "$WORKER_ID" --role worker --root "$CLIENT_ROOT"
+SMOKE="$PWD/target/dist-smoke"
+mkdir -p "$SMOKE"
+printf 'pub fn answer() -> u32 { 42 }\n' > "$SMOKE/smoke.rs"
+RUSTUP_TOOLCHAIN=1.98.1 soldr --no-cache rustc --crate-name dist_smoke \
+  --crate-type lib --emit=obj --remap-path-prefix="$PWD=." \
+  "$SMOKE/smoke.rs" -o "$SMOKE/smoke.o"
+cp "$SMOKE/smoke.o" "$SMOKE/local.o"
+safe-rm "$SMOKE/smoke.o"
+RUSTUP_TOOLCHAIN=1.98.1 soldr dist exec --root "$CLIENT_ROOT" \
+  --worker "$DIST_TICKET" -- rustc --crate-name dist_smoke --crate-type lib \
+  --emit=obj --remap-path-prefix="$PWD=." "$SMOKE/smoke.rs" -o "$SMOKE/smoke.o"
+cmp "$SMOKE/local.o" "$SMOKE/smoke.o"
+```
+
+For repeated commands, `SOLDR_DIST_PEERS="$WORKER_ID"` plus
+`SOLDR_DIST_RELAY_URL="$RELAY_URL"` replaces `--worker`. This accepts exactly one
+static peer, or a full printed ticket (which already includes relay routing).
+There is no peer scheduler or registry call. A decline fails the debug command;
+it never falls back to a local object compile. The local dep-info probe still
+runs as input-discovery scaffolding. Normal `soldr cargo` offload requires the
+released zccache hook and a later adapter; this crate builds on zccache 1.15.14.
+
 Direct-only loopback tests disable relay/address lookup and bind localhost;
 no rendezvous, DNS discovery or external network is needed by those endpoints.
 
@@ -350,3 +395,7 @@ reuse an existing iroh Endpoint and give the client a dedicated CAS/trust root.
   key in addition to the root lease. Two roots selecting the same key file cannot silently replace that
   identity's relay registration. Ordinary key reads/signing by phone-home stay
   available; no shared-key permissions or contents are changed by the lease.
+
+- 2026-11-21 Static bring-up accepts one `SOLDR_DIST_PEERS` node ID with an explicit
+  HTTPS relay, or a printed ticket; `worker` aliases `serve`. This enables the
+  first remote joblet without adding registry discovery or unreleased hook APIs.
