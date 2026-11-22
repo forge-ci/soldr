@@ -55,6 +55,9 @@ struct State {
     total_cpus: usize,
     host_load_file: Option<PathBuf>,
     admission: soldr_platform::sync::Mutex<()>,
+    /// The build session holding this worker: one client at a time, released
+    /// after `SESSION_IDLE` without a joblet from it.
+    session: soldr_platform::sync::Mutex<Option<(String, std::time::Instant)>>,
     /// Wakes the maintenance task (eviction + status). Never done inline on a joblet.
     maintenance: tokio::sync::Notify,
 }
@@ -132,6 +135,7 @@ impl Worker {
             total_cpus: self.total_cpus,
             host_load_file: self.host_load_file,
             admission: soldr_platform::sync::Mutex::new(()),
+            session: soldr_platform::sync::Mutex::new(None),
             maintenance: tokio::sync::Notify::new(),
         });
         let mut jobs = JoinSet::new();
@@ -321,6 +325,12 @@ async fn handle_job(
         return Ok(());
     };
     if let Some(reason) = compiler.environment_decline(&job) {
+        decline(&mut send, &reason).await?;
+        send.finish()?;
+        return Ok(());
+    }
+    if let Some(holder) = claim_session(state, &conn.remote_id().to_string()) {
+        let reason = format!("worker is in a build session with client {holder}");
         decline(&mut send, &reason).await?;
         send.finish()?;
         return Ok(());
@@ -529,6 +539,52 @@ async fn receive_inputs(
         state.uploaded.fetch_add(1, Ordering::Relaxed);
     }
     Ok(())
+}
+
+/// A build session is idle-released: this long without a joblet from its client.
+const SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Claims or refreshes the worker's build session for `client`. Returns the
+/// holder when another client's session is still live.
+fn claim_session(state: &State, client: &str) -> Option<String> {
+    claim(&mut state.session.lock(), client, std::time::Instant::now())
+}
+
+fn claim(
+    session: &mut Option<(String, std::time::Instant)>,
+    client: &str,
+    now: std::time::Instant,
+) -> Option<String> {
+    match session {
+        Some((holder, seen))
+            if holder != client && now.saturating_duration_since(*seen) < SESSION_IDLE =>
+        {
+            Some(holder.clone())
+        }
+        _ => {
+            if !matches!(session, Some((holder, _)) if holder == client) {
+                eprintln!("Dist worker build session started for client {client}");
+            }
+            *session = Some((client.to_owned(), now));
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::{claim, SESSION_IDLE};
+    #[test]
+    fn one_client_holds_the_worker_until_idle() {
+        let t0 = std::time::Instant::now();
+        let mut session = None;
+        assert_eq!(claim(&mut session, "a", t0), None);
+        assert_eq!(claim(&mut session, "b", t0), Some("a".into()));
+        assert_eq!(claim(&mut session, "a", t0 + SESSION_IDLE), None, "refresh");
+        let later = t0 + SESSION_IDLE * 2 + std::time::Duration::from_secs(1);
+        assert_eq!(claim(&mut session, "b", later), None, "idle session released");
+        assert_eq!(claim(&mut session, "a", later), Some("b".into()));
+    }
 }
 
 fn admit(state: &State) -> Option<tokio::sync::OwnedSemaphorePermit> {
