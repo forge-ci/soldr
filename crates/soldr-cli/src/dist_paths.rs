@@ -18,12 +18,12 @@ pub(crate) const PORTABLE_PATHS_ENV: &str = "SOLDR_DIST_PORTABLE_PATHS";
 /// Remap arguments to put *before* the crate's own arguments. rustc lets a
 /// later remap win, so zccache's workspace remap and any user remap still
 /// take precedence where they overlap.
-pub(crate) fn portable_path_remaps(cwd: &Path) -> Vec<String> {
+pub(crate) fn portable_path_remaps() -> Vec<String> {
     let dist_client = std::env::var_os("SOLDR_DIST_PEERS").is_some_and(|v| !v.is_empty());
     if !(dist_client || env_flag::flag(PORTABLE_PATHS_ENV)) {
         return vec![];
     }
-    remaps_for(cargo_home().as_deref(), cwd)
+    remaps_for(cargo_home().as_deref())
 }
 
 /// `argv` (`[compiler, args...]`) with the portable remaps inserted after the
@@ -32,7 +32,7 @@ pub(crate) fn with_portable_paths(argv: &[String]) -> Option<Vec<String>> {
     if !argv.iter().any(|arg| arg == "--crate-name") {
         return None;
     }
-    let remaps = portable_path_remaps(&std::env::current_dir().ok()?);
+    let remaps = portable_path_remaps();
     if remaps.is_empty() {
         return None;
     }
@@ -43,11 +43,13 @@ pub(crate) fn with_portable_paths(argv: &[String]) -> Option<Vec<String>> {
     Some(out)
 }
 
-fn remaps_for(cargo_home: Option<&Path>, cwd: &Path) -> Vec<String> {
+/// Independent of the working directory on purpose: Cargo compiles a registry
+/// crate with its cwd *inside* `CARGO_HOME`, which is exactly the case this
+/// remap exists for. A workspace under `CARGO_HOME` still gets its own remap,
+/// because rustc applies the last matching `--remap-path-prefix`.
+fn remaps_for(cargo_home: Option<&Path>) -> Vec<String> {
     match cargo_home {
-        // A workspace inside CARGO_HOME (e.g. a git checkout being built) keeps
-        // its own workspace remap; an identity remap there would be redundant.
-        Some(home) if home.is_absolute() && !cwd.starts_with(home) => {
+        Some(home) if home.is_absolute() => {
             vec![format!("--remap-path-prefix={0}={0}", home.display())]
         }
         _ => vec![],
@@ -67,14 +69,14 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn identity_remap_covers_cargo_home_outside_the_workspace() {
-        let home = Path::new("/home/u/.cargo");
+    fn identity_remap_covers_cargo_home_whatever_the_cwd() {
+        // Registry crates compile with their cwd inside CARGO_HOME; the remap
+        // must not depend on it (an earlier cwd guard silently disabled it).
         assert_eq!(
-            remaps_for(Some(home), Path::new("/home/u/dev/app")),
+            remaps_for(Some(Path::new("/home/u/.cargo"))),
             ["--remap-path-prefix=/home/u/.cargo=/home/u/.cargo"]
         );
-        assert!(remaps_for(Some(home), Path::new("/home/u/.cargo/git/checkouts/x")).is_empty());
-        assert!(remaps_for(Some(Path::new("relative")), Path::new("/w")).is_empty());
-        assert!(remaps_for(None, Path::new("/w")).is_empty());
+        assert!(remaps_for(Some(Path::new("relative"))).is_empty());
+        assert!(remaps_for(None).is_empty());
     }
 }
