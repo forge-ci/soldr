@@ -24,7 +24,7 @@ publish = false
 # exactly one mimalloc in the binary and the dependency ownership lives with
 # the embedded crate that hosts the daemon. See `crates/soldr-cli/src/lib.rs`
 # for the `#[global_allocator]` declaration.
-running-process = { version = "=4.10.20", default-features = false, features = ["client", "client-async"] }
+running-process = { version = "=4.10.21", default-features = false, features = ["client", "client-async"] }
 soldr-cache = { path = "../soldr-cache" }
 soldr-daemon = { path = "../soldr-daemon" }
 soldr-core = { path = "../soldr-core" }
@@ -52,7 +52,7 @@ sha2 = { workspace = true }
 # Same exact pin as crates/soldr-platform: pre-1.0 kernal-api resolves to one
 # release across the fleet (guard: version_lockstep.rs). Feature-gated so the
 # facade stays cheap; `text-similarity` provides `kernal_api::text`.
-kernal-api = { version = "=0.1.33", default-features = false, features = ["text-similarity"] }
+kernal-api = { version = "=0.1.40", default-features = false, features = ["text-similarity"] }
 sysinfo = "0.30"
 tar = { workspace = true }
 tempfile = { workspace = true }
