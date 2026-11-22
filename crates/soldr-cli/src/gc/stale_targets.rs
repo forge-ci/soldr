@@ -58,7 +58,13 @@ fn run_stale_target_pass(
         );
     }
     if let Some(age_secs) = age_secs.filter(|_| !targets.is_empty()) {
-        let outcome = run_soldr_target_purge_background(paths, &targets, discovered, age_secs);
+        let outcome = run_soldr_target_purge_background(
+            paths,
+            &targets,
+            discovered,
+            age_secs,
+            Some(log_path),
+        );
         let _ = append_auto_gc_log_line(
             log_path,
             &format!(

@@ -74,7 +74,7 @@ struct SoldrTargetsSummary {
 
 /// `soldr gc cargo` — shell out to nightly cargo's `-Zgc clean gc`.
 pub(crate) fn run_gc_cargo_command(args: GcCargoArgs) -> Result<(), SoldrError> {
-    let outcome = invoke_cargo_native_gc(&args, false)?;
+    let outcome = invoke_cargo_native_gc(&args, false, crate::platform::wait::LONG_CHILD)?;
     if args.json {
         print_json(&outcome)?;
     }
@@ -103,6 +103,7 @@ pub(crate) fn run_gc_cargo_command(args: GcCargoArgs) -> Result<(), SoldrError> 
 pub(super) fn invoke_cargo_native_gc(
     args: &GcCargoArgs,
     skip_when_missing: bool,
+    timeout: std::time::Duration,
 ) -> Result<GcCargoOutput, SoldrError> {
     let toolchain = resolve_gc_cargo_toolchain(args.toolchain.as_deref());
 
@@ -197,12 +198,11 @@ pub(super) fn invoke_cargo_native_gc(
         cargo_argv.join(" ")
     );
 
-    let output = crate::platform::wait::output_for(&mut command, crate::platform::wait::LONG_CHILD)
-        .map_err(|e| {
-            SoldrError::Other(format!(
-                "failed to invoke rustup run {toolchain} cargo: {e}"
-            ))
-        })?;
+    let output = crate::platform::wait::output_for(&mut command, timeout).map_err(|e| {
+        SoldrError::Other(format!(
+            "failed to invoke rustup run {toolchain} cargo: {e}"
+        ))
+    })?;
 
     // Stream cargo's output through to the user's terminal.
     use std::io::Write as _;
@@ -430,7 +430,11 @@ pub(crate) fn run_gc_sweep_command(args: GcSweepArgs) -> Result<(), SoldrError> 
             max_download_size: None,
             json: args.json,
         };
-        Some(invoke_cargo_native_gc(&cargo_args, true)?)
+        Some(invoke_cargo_native_gc(
+            &cargo_args,
+            true,
+            crate::platform::wait::LONG_CHILD,
+        )?)
     } else {
         None
     };
@@ -454,7 +458,11 @@ pub(crate) fn run_gc_sweep_command(args: GcSweepArgs) -> Result<(), SoldrError> 
             .map_err(|error| SoldrError::Other(error.to_string()))?;
         let floor = cfg.auto_gc.min_age_secs;
         let aggressive_args = aggressive_cargo_args(args.json, args.dry_run, floor);
-        Some(invoke_cargo_native_gc(&aggressive_args, true)?)
+        Some(invoke_cargo_native_gc(
+            &aggressive_args,
+            true,
+            crate::platform::wait::LONG_CHILD,
+        )?)
     } else {
         None
     };
