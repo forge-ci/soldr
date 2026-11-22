@@ -112,6 +112,47 @@ fn job(
         rewrite_env: vec![],
     }
 }
+/// The local control compile; returns its output bytes and removes the file.
+async fn compile_locally(compiler: &Compiler, cwd: &Path, args: &[String], out: &Path) -> Vec<u8> {
+    let mut local = compiler
+        .command()
+        .args(args)
+        .current_dir(cwd)
+        .env("DIST_TAG", format!("{}/tag", cwd.display()));
+    if let Some(toolchain) = &compiler.toolchain {
+        local = local.env("RUSTUP_TOOLCHAIN", toolchain);
+    }
+    if compiler.kind == "rustc" {
+        local = local.arg(format!("--remap-path-prefix={}=.", cwd.display()));
+    }
+    let local = local.capture().await.unwrap();
+    assert!(
+        local.status.success(),
+        "{}",
+        String::from_utf8_lossy(&local.stderr)
+    );
+    let expected = fs::read(out).unwrap();
+    fs::remove_file(out).unwrap();
+    expected
+}
+
+/// A cold first joblet: one upload, no CAS hits, and the expected connection direction.
+fn assert_first_job_metrics(fixture: &Fixture, metrics: &soldr_dist::JobMetrics, reverse: bool) {
+    assert_eq!(metrics.worker_id, fixture.endpoint.id().to_string());
+    assert_eq!(metrics.path, "direct");
+    assert!(metrics.rtt_known);
+    assert!(metrics.bytes_sent > 0 && metrics.bytes_received > 0);
+    assert_eq!(metrics.uploaded_blobs, 1);
+    assert!(metrics.cas_hits_known);
+    assert_eq!(metrics.cas_hits, 0);
+    assert_eq!(fixture.client.uploaded_blobs.load(Ordering::Relaxed), 1);
+    assert_eq!(fixture.uploaded.load(Ordering::Relaxed), 1);
+    if reverse {
+        assert_eq!(fixture.client.connections.outbound_connections(), 0);
+        assert!(fixture.client.connections.incoming_connections() >= 1);
+    }
+}
+
 async fn compare(
     compiler: Compiler,
     source_name: &str,
@@ -134,25 +175,7 @@ async fn compare(
         .map(|s| (*s).into())
         .chain([source_name.into(), "-o".into(), "hello.o".into()])
         .collect();
-    let mut local = compiler
-        .command()
-        .args(&args)
-        .current_dir(&cwd)
-        .env("DIST_TAG", format!("{}/tag", cwd.display()));
-    if let Some(toolchain) = &compiler.toolchain {
-        local = local.env("RUSTUP_TOOLCHAIN", toolchain);
-    }
-    if compiler.kind == "rustc" {
-        local = local.arg(format!("--remap-path-prefix={}=.", cwd.display()));
-    }
-    let local = local.capture().await.unwrap();
-    assert!(
-        local.status.success(),
-        "{}",
-        String::from_utf8_lossy(&local.stderr)
-    );
-    let expected = fs::read(&out).unwrap();
-    fs::remove_file(&out).unwrap();
+    let expected = compile_locally(&compiler, &cwd, &args, &out).await;
     let mut job = job(&compiler, &cwd, args, &src, &out);
     job.env
         .insert("DIST_TAG".into(), format!("{}/tag", cwd.display()));
@@ -166,21 +189,8 @@ async fn compare(
         expected,
         "remote output differs from local"
     );
-    let metrics = outcome.metrics();
-    assert_eq!(metrics.worker_id, fixture.endpoint.id().to_string());
-    assert_eq!(metrics.path, "direct");
-    assert!(metrics.rtt_known);
-    assert!(metrics.bytes_sent > 0 && metrics.bytes_received > 0);
-    assert_eq!(metrics.uploaded_blobs, 1);
-    assert!(metrics.cas_hits_known);
-    assert_eq!(metrics.cas_hits, 0);
+    assert_first_job_metrics(&fixture, outcome.metrics(), reverse);
     let uploaded = fixture.client.uploaded_blobs.load(Ordering::Relaxed);
-    assert_eq!(uploaded, 1);
-    assert_eq!(fixture.uploaded.load(Ordering::Relaxed), 1);
-    if reverse {
-        assert_eq!(fixture.client.connections.outbound_connections(), 0);
-        assert!(fixture.client.connections.incoming_connections() >= 1);
-    }
     let second = fixture.client.execute(job).await;
     assert!(matches!(
         &second,
