@@ -43,6 +43,10 @@ skip = [
     # built against 0.30). Pin the exception to the newer side so a third
     # version still fails the ratchet.
     { name = "sysinfo", version = "=0.39.6" },
+    # zccache 1.15.18 and notify 8 bring toml 1.x, whose parser uses winnow
+    # 1.x, while soldr's own toml 0.8 / toml_edit 0.22 still use winnow 0.7.
+    # Pinned to the newer side so a third version still fails the ratchet.
+    { name = "winnow", version = "=1.0.5" },
     { name = "digest", version = "=0.11.3" },
     { name = "sha2", version = "=0.11.0" },
     # errno/rustix/tempfile still cap at 0.52, reached only through
