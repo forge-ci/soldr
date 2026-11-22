@@ -28,11 +28,12 @@ mod tail;
 
 use guard::{ProcessGuard, CONTROL_ENVS};
 use soldr_platform::process::test_child::{self, TestSignal};
+use soldr_platform::sync::Mutex;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tail::OutputTail;
 
@@ -144,7 +145,7 @@ fn pump(
         if read == 0 {
             break;
         }
-        *last_output.lock().unwrap_or_else(|err| err.into_inner()) = Instant::now();
+        *last_output.lock() = Instant::now();
         let _ = sink.write_all(&buffer[..read]);
         let _ = sink.flush();
         tail.feed(&buffer[..read]);
@@ -167,10 +168,7 @@ impl Termination {
         let signal = match test_child::received_termination() {
             Some(signal) => signal,
             None => {
-                let idle = last_output
-                    .lock()
-                    .unwrap_or_else(|err| err.into_inner())
-                    .elapsed();
+                let idle = last_output.lock().elapsed();
                 if idle < idle_limit {
                     return;
                 }
