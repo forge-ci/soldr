@@ -257,7 +257,7 @@ fn toolchain_mismatch_declined_and_untrusted_rejected() {
             compiler_identity: "wrong".into(),
             ..DistJob::default()
         };
-        assert!(matches!(fixture.client.execute(job.clone()).await, DistOutcome::Declined { reason, .. } if reason == "toolchain mismatch"));
+        assert!(matches!(fixture.client.execute(job.clone()).await, DistOutcome::Declined { reason, .. } if reason.starts_with("toolchain mismatch: rustc requested ")));
         fs::write(
             fixture._temp.path().join("client/trusted_workers.toml"),
             "peers = []\n",

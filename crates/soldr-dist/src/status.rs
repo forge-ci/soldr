@@ -56,6 +56,9 @@ pub fn json(status: &Status) -> serde_json::Value {
     })
 }
 
+/// Lock attempts (10 ms apart) before a joblet's metrics are reported as lost.
+const METRICS_LOCK_ATTEMPTS: u32 = 50;
+
 pub fn record_job(root: &Path, metrics: &JobMetrics) -> Result<()> {
     use fs2::FileExt;
     use std::io::Write;
@@ -64,9 +67,17 @@ pub fn record_job(root: &Path, metrics: &JobMetrics) -> Result<()> {
         .write(true)
         .truncate(false)
         .open(root.join("metrics.lock"))?;
-    // Called on the blocking pool; concurrent joblets serialize here briefly
-    // instead of failing with EWOULDBLOCK and dropping their metrics.
-    lock.lock_exclusive()?;
+    // Called on the blocking pool. Concurrent joblets hold this lock only for a
+    // small write, so retry briefly rather than drop their metrics; a holder that
+    // keeps it longer must not stall result publication, so the wait is bounded.
+    let mut attempts = 0;
+    while let Err(error) = lock.try_lock_exclusive() {
+        attempts += 1;
+        if attempts >= METRICS_LOCK_ATTEMPTS {
+            return Err(error.into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let path = root.join("last-job.pb");
     if path.exists() {
         let previous = JobMetrics::decode(std::fs::read(&path)?.as_slice())?;
