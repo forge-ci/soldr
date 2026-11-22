@@ -148,14 +148,18 @@ fn toolchain_bin_memo_lookup(
     tool: &str,
 ) -> Option<PathBuf> {
     let key = (scope.clone(), channel.to_string(), tool.to_string());
-    let mut memo = toolchain_bin_memo().lock();
-    let candidate = memo.get(&key).cloned()?;
+    let candidate = toolchain_bin_memo().lock().get(&key).cloned()?;
+    // The stat runs with the memo lock released: the lock is a
+    // watchdog-bounded critical section (soldr#3836), and filesystem calls
+    // can stall on a loaded host (soldr#4198).
     if candidate.is_file() {
-        Some(candidate)
-    } else {
-        memo.remove(&key);
-        None
+        return Some(candidate);
     }
+    let mut memo = toolchain_bin_memo().lock();
+    if memo.get(&key) == Some(&candidate) {
+        memo.remove(&key);
+    }
+    None
 }
 
 fn toolchain_bin_memo_store(
