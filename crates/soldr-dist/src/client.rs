@@ -5,7 +5,7 @@ use crate::{
     proto::*,
     transport::{self, VERSION},
     trust::Trust,
-    DistJob, DistOutcome, Result,
+    DistJob, DistOutcome, JobMetrics, Result,
 };
 use iroh::{Endpoint, EndpointAddr};
 use soldr_platform::sync::AsyncMutex as Mutex;
@@ -66,7 +66,9 @@ impl DistClient {
         paths.iter().map(|path| self.memo.input(path)).collect()
     }
     pub async fn execute(&self, job: DistJob) -> DistOutcome {
-        match self.try_execute(&job).await {
+        let started = std::time::Instant::now();
+        let mut metrics = JobMetrics::for_job(self.worker.id.to_string(), &job);
+        let mut outcome = match self.try_execute(&job, &mut metrics).await {
             Ok(outcome) => outcome,
             Err(error) => {
                 eprintln!(
@@ -74,14 +76,23 @@ impl DistClient {
                     self.worker.id
                 );
                 DistOutcome::Declined {
+                    metrics: JobMetrics::default(),
                     reason: "worker lost".into(),
                 }
             }
+        };
+        metrics.elapsed_millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        metrics.finish(&outcome);
+        outcome.set_metrics(metrics);
+        if let Err(error) = crate::status::record_job(&self.root, outcome.metrics()) {
+            eprintln!("soldr dist: WARNING cannot persist job metrics: {error}");
         }
+        outcome
     }
-    async fn try_execute(&self, job: &DistJob) -> Result<DistOutcome> {
+    async fn try_execute(&self, job: &DistJob, metrics: &mut JobMetrics) -> Result<DistOutcome> {
         if !Trust::load(&self.root.join("trusted_workers.toml"))?.contains(self.worker.id) {
             return Ok(DistOutcome::Declined {
+                metrics: JobMetrics::default(),
                 reason: "untrusted worker".into(),
             });
         }
@@ -89,7 +100,9 @@ impl DistClient {
             .connections
             .connect(&self.worker, self.reverse_only)
             .await?;
-        let result = self.exchange(&conn, job).await;
+        let before = conn.stats();
+        let result = self.exchange(&conn, job, metrics).await;
+        metrics.capture(&conn, (before.udp_tx.bytes, before.udp_rx.bytes));
         conn.close(0u32.into(), b"client complete");
         result
     }
@@ -97,23 +110,13 @@ impl DistClient {
         &self,
         conn: &iroh::endpoint::Connection,
         job: &DistJob,
+        metrics: &mut JobMetrics,
     ) -> Result<DistOutcome> {
         let (mut send, mut recv) = conn.open_bi().await?;
-        transport::send(
-            &mut send,
-            &Hello {
-                version: VERSION,
-                toolchains: vec![job.compiler_identity.clone()],
-            },
-        )
-        .await?;
-        let hello: Hello = transport::recv(&mut recv).await?;
-        if hello.version != VERSION {
+        if let Some(reason) = hello(&mut send, &mut recv, &job.compiler_identity).await? {
             return Ok(DistOutcome::Declined {
-                reason: format!(
-                    "protocol version mismatch: peer {}, local {VERSION}",
-                    hello.version
-                ),
+                reason,
+                metrics: JobMetrics::default(),
             });
         }
         let total: u64 = job.inputs.iter().map(|i| i.size).sum();
@@ -136,23 +139,31 @@ impl DistClient {
             },
         )
         .await?;
+        metrics.speculative_blobs = speculative.len() as u64;
         let mut transfers = JoinSet::new();
         self.upload(conn, job, &speculative, &mut transfers)?;
         let reply: Reply = transport::recv(&mut recv).await?;
         if let Some(declined) = reply.declined {
             return Ok(DistOutcome::Declined {
+                metrics: JobMetrics::default(),
                 reason: declined.reason,
             });
         }
         let need = reply.need.ok_or("expected Need")?;
-        self.upload(
-            conn,
-            job,
-            &need.digests.into_iter().collect(),
-            &mut transfers,
-        )?;
+        let requested: HashSet<_> = need.digests.into_iter().collect();
+        metrics.need_digests = requested.len() as u64;
+        metrics.cas_hits_known = need.cas_hits_known || speculative.is_empty();
+        metrics.cas_hits = if need.cas_hits_known {
+            need.cas_hits
+        } else if speculative.is_empty() {
+            metrics.input_digests.saturating_sub(metrics.need_digests)
+        } else {
+            0
+        };
+        self.upload(conn, job, &requested, &mut transfers)?;
         while let Some(result) = transfers.join_next().await {
             result??;
+            metrics.uploaded_blobs += 1;
         }
         let reply: Reply = transport::recv(&mut recv).await?;
         if reply.accepted.is_none() {
@@ -176,12 +187,14 @@ impl DistClient {
                 format!("\nsoldr dist: output publication failed: {error}\n").as_bytes(),
             );
             return Ok(DistOutcome::Executed {
+                metrics: JobMetrics::default(),
                 exit_code: 1,
                 stdout: done.stdout,
                 stderr,
             });
         }
         Ok(DistOutcome::Executed {
+            metrics: JobMetrics::default(),
             exit_code: done.exit_code,
             stdout: done.stdout,
             stderr: done.stderr,
@@ -301,4 +314,26 @@ fn preparing_all_outputs_before_publication_preserves_existing_files_on_error() 
     ])
     .is_err());
     assert_eq!(fs::read(output).unwrap(), b"old");
+}
+
+async fn hello(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    identity: &str,
+) -> Result<Option<String>> {
+    transport::send(
+        send,
+        &Hello {
+            version: VERSION,
+            toolchains: vec![identity.to_owned()],
+        },
+    )
+    .await?;
+    let hello: Hello = transport::recv(recv).await?;
+    Ok((hello.version != VERSION).then(|| {
+        format!(
+            "protocol version mismatch: peer {}, local {VERSION}",
+            hello.version
+        )
+    }))
 }

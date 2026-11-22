@@ -26,6 +26,8 @@ message Offer {
 }
 message Need {
   repeated string digests = 1;
+  uint64 cas_hits = 2;
+  bool cas_hits_known = 3;
 }
 message Blob {
   string digest = 1;
@@ -61,10 +63,37 @@ message Status {
   uint64 pid = 7;
   string build_id = 8;
   string signal_url = 9;
+  JobMetrics last_job = 10;
 }
 message Reply {
   Accepted accepted = 1;
   Declined declined = 2;
   Done done = 3;
   Need need = 4;
+}
+
+message JobMetrics {
+  string worker_id = 1;
+  string path = 2;
+  string remote_addr = 3;
+  uint64 rtt_micros = 4;
+  bool rtt_known = 5;
+  uint64 bytes_sent = 6;
+  uint64 bytes_received = 7;
+  uint64 connection_bytes_sent = 8;
+  uint64 connection_bytes_received = 9;
+  uint64 input_files = 10;
+  uint64 input_digests = 11;
+  uint64 need_digests = 12;
+  uint64 cas_hits = 13;
+  uint64 uploaded_blobs = 14;
+  uint64 dedup_inputs = 15;
+  uint64 speculative_blobs = 16;
+  string outcome = 17;
+  string decline_reason = 18;
+  int32 exit_code = 19;
+  uint64 elapsed_millis = 20;
+  string connection_side = 21;
+  bool cas_hits_known = 22;
+  uint64 completed_unix_millis = 23;
 }

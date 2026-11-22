@@ -609,3 +609,135 @@ the full client ticket supplies routing in the worker-to-client direction.
 - 2026-11-21 Static worker-to-client warm connections provide a reverse path;
   one joblet per connection retains blob isolation without changing protobuf.
   Published client tickets are human-copyable configuration, not a registry.
+
+### Updated miss-path bundle: public relay and reverse-only bootstrap
+
+The updated `feat/dist-miss-path` stack shares one ClientConnections listener
+across all configured workers. `SOLDR_DIST_RELAY=default` explicitly selects n0
+public relays, `none` disables them, and other values fail clearly.
+`SOLDR_DIST_REVERSE_ONLY=true` requires worker-originated connections; false
+permits normal dialing too. `[dist] reverse_only = true` is the file equivalent,
+with the environment taking precedence. A reverse-only peers entry may contain
+just the trusted worker node ID; the worker's full client ticket supplies routing.
+
+```sh
+# Workstation: use the updated miss-path binary on PATH, with a separate identity.
+export SOLDR_CACHE_DIR="$PWD/target/dist-miss-cache"
+export SOLDR_DIST_ROOT="$PWD/target/dist-miss-client"
+export SOLDR_DIST_RELAY=default
+export SOLDR_DIST_REVERSE_ONLY=true
+export SOLDR_DIST_PEERS="$WORKER_ID"
+soldr dist status --root "$SOLDR_DIST_ROOT" --json
+soldr dist trust add "$WORKER_ID" --role worker --root "$SOLDR_DIST_ROOT"
+# Give this client's node_id to the node operator for trusted_clients.toml.
+CARGO_INCREMENTAL=0 RUSTUP_TOOLCHAIN=1.98.1 soldr cargo build --release \
+  --manifest-path "$LIB_MANIFEST"
+# Initial missing reverse connection/manifest may decline into a local build.
+# The daemon remains alive and publishes its latest client-ticket.json.
+```
+
+Copy the current ticket, including its relay URL after connection, to the node.
+Restart only the dist service with --relay default --outbound-only and
+--client-ticket '<client-ticket.json contents>'. Keep the node's persisted key
+so WORKER_ID stays unchanged. Run the next eligible library miss and verify
+`soldr dist remote cache miss executed` in daemon logs or the zccache execution
+journal; Cargo exit zero alone may reflect a local fallback. The initial
+namespace/input-completeness restrictions of the miss adapter remain in force.
+
+- 2026-11-21 Carry direct2 transport into the miss-path adapter with one shared
+  reverse listener, explicit relay-mode parsing and file/env reverse-only policy.
+  This adds routing without changing the zccache hook or compiler admission.
+- 2026-11-21 Direct2's narrow local Clippy was stopped while dependency compilation
+  stalled under workstation load; no source verdict was reached. Following the
+  owner directive, E640 builds/tests validate these new bundle changes. The
+  earlier 1ee6c6a1 all-target check result does not cover this transport update.
+
+## Cargo miss-path milestone and per-joblet observability
+
+The workstation-to-E640 Rust object proof passed through a public n0 relay:
+remote output bytes matched the local compile. Plain direct LAN required inbound
+UDP on the Dell and failed under fleet firewall policy; the client declined and
+fell back locally in about 11 seconds. Use `--relay default` (explicit n0 opt-in)
+or an explicit HTTPS relay URL for no-inbound nodes. Relayed QUIC remains
+end-to-end encrypted; no node firewall opening or registry is required.
+
+The current miss adapter can offload a **cold single-file Rust library** without
+first producing a local object. The merged hook marks input completeness from
+a dependency-graph hit, so edited/cold requests often carry inputs_complete=false.
+For exactly one declared source, the adapter independently verifies that argv
+names that source and its bounded bytes match the declared digest. Existing
+namespace/runtime guards apply, and any `mod` substring also declines an
+incomplete graph. Thus includes, module files, external crates/proc macros,
+environment macros, identifier pasting, assembly, custom sysroots/backends and
+non-host targets cannot introduce unshipped compile inputs in this narrow path.
+Other incomplete manifests still decline. Use a tiny release-profile library
+whose source is only `pub fn answer() -> u32 { 42 }` for the first Cargo proof;
+Cargo's generated test module is deliberately outside the cold proof subset.
+
+Every attempted client joblet returns JobMetrics in DistOutcome, including
+Declined results. Immediately before connection close the client samples iroh
+1.5's selected PathList entries (the replacement for older ConnectionType APIs),
+actual direct/relay/mixed/unknown path, remote address, selected-path QUIC RTT,
+and QUIC byte counters. Job byte deltas exclude earlier connection traffic;
+separate connection totals include handshake/idle keepalives. These are QUIC
+counters, not physical HTTPS/TCP wire-byte accounting. Unknown selected paths or
+RTTs stay explicitly unknown; they are never inferred from tickets or flags.
+
+Input metrics distinguish logical input files, distinct digests, duplicate
+manifest inputs, unique Need digests, worker CAS hits, completed upload streams,
+and planned speculative blobs. Need excludes speculative transfers. Worker CAS
+hits are measured before receiving input blobs; older workers report unknown
+when speculation prevents reliable inference. Successful repeated jobs on the
+same retained client/node can report Need=0, uploaded=0 and CAS hits>0.
+
+```sh
+soldr dist exec --root "$CLIENT_ROOT" --relay default --worker "$DIST_TICKET" \
+  --verbose -- rustc --crate-type lib --emit=obj hello.rs -o hello.o
+soldr dist exec --root "$CLIENT_ROOT" --relay default --worker "$DIST_TICKET" \
+  --json -- rustc --crate-type lib --emit=obj hello.rs -o hello.o
+soldr dist status --root "$CLIENT_ROOT" --json
+```
+
+Verbose metrics go to stderr. Exec JSON contains outcome, exit/reason, raw
+stdout/stderr byte arrays and metrics. Status includes `last_job`, read from
+atomic protobuf `<client-root>/last-job.pb`. A per-root nonblocking lock prevents an older
+completion timestamp overwriting a newer record. Contention warns and skips the
+best-effort snapshot update; the returned outcome still carries current metrics. Timestamps identify stale
+records/cache hits: cache hits bypass dist and do not update this file. Adapter
+policy declines also update it, so the previous remote success cannot masquerade
+as the latest attempted offload. Metrics persistence failure warns and preserves
+the executed outcome; it cannot cause fallback after outputs were published.
+
+Dist CLI tracing uses EnvFilter precedence RUST_LOG, then SOLDR_LOG, then warn,
+and writes to stderr. Example: `RUST_LOG=iroh=debug,soldr_dist=info soldr dist serve
+--relay default ...`. The daemon's existing rolling log respects this filter when
+feature dist is enabled; prefer SOLDR_LOG for Cargo since the broker forwards
+the SOLDR namespace. Set it before starting the fresh daemon generation.
+
+For the simplest first Cargo proof, use ordinary relay mode (no --outbound-only
+or reverse-only flag), a full worker ticket, and the current miss-path binary
+on **both** hosts. On the client select fresh isolated cache/identity roots,
+set SOLDR_DIST_PEERS to the full ticket, SOLDR_DIST_RELAY=default,
+SOLDR_DIST_REVERSE_ONLY=false, and SOLDR_LOG=info. Run the tiny release library
+with CARGO_INCREMENTAL=0. Verify that the client's status last_job has a new
+completion timestamp, outcome=executed, exit_code=0 and a measured path; Cargo
+exit zero alone can still be local fallback. Reverse static routing remains
+available after this simplest path is proven.
+
+- 2026-11-21 Record the successful public-relay byte-equality milestone and
+  explicitly document relay mode as the Dell no-inbound-firewall path.
+- 2026-11-21 Independently prove the cold one-file Rust source closure so the
+  hook's graph-hit completeness flag does not force all new Cargo work local.
+  Broader unknown input closures still decline.
+- 2026-11-21 Add client-observed path/RTT/QUIC bytes and Need/CAS/dedup counters
+  to both outcomes and protobuf status. Need counters are additive/version-1
+  compatible; unknown old-peer CAS-hit values remain marked unknown.
+- 2026-11-21 Initialise EnvFilter tracing for the native dist CLI and preserve
+  the daemon log's warn default while allowing explicit info/iroh traces.
+
+Current metrics/cold-miss handoff validation: protobuf drift checks passed for all
+registered pairs; dependency inventory regenerated (two reused tracing edges),
+formatting passed, and review is clean. The narrow `soldr cargo clippy -p
+soldr-dist` stalled in dependency compilation with 300-second no-progress dumps
+and was stopped; no new source-build/test result is claimed. E640 validation
+remains authoritative for this bundle; no local gate or push was run.

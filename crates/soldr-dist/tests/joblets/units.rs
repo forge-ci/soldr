@@ -717,3 +717,73 @@ fn public_relays_are_explicit_and_reverse_peers_can_use_only_a_node_id() {
     assert!(Command::try_parse_from(["dist", "serve", "--outbound-only"]).is_err());
     assert!(Command::try_parse_from(["dist", "serve", "--relay", "auto"]).is_err());
 }
+
+#[test]
+fn job_metrics_round_trip_and_status_report_the_recorded_outcome() {
+    use prost::Message;
+    let root = tempfile::tempdir().unwrap();
+    let job = soldr_dist::DistJob {
+        inputs: ["a", "a", "b"]
+            .into_iter()
+            .map(|digest| soldr_dist::InputFile {
+                blake3: digest.into(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let mut metrics = soldr_dist::JobMetrics::for_job("worker".into(), &job);
+    assert_eq!(
+        (
+            metrics.input_files,
+            metrics.input_digests,
+            metrics.dedup_inputs
+        ),
+        (3, 2, 1)
+    );
+    metrics.outcome = "executed".into();
+    metrics.path = "relay".into();
+    metrics.rtt_known = true;
+    metrics.rtt_micros = 500;
+    metrics.cas_hits_known = true;
+    metrics.cas_hits = 2;
+    metrics.completed_unix_millis = 10;
+    let decoded = soldr_dist::JobMetrics::decode(metrics.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(decoded, metrics);
+    soldr_dist::status::record_job(root.path(), &metrics).unwrap();
+    let mut older = metrics.clone();
+    older.completed_unix_millis = 9;
+    older.path = "direct".into();
+    soldr_dist::status::record_job(root.path(), &older).unwrap();
+    let status = soldr_dist::status::load(root.path()).unwrap();
+    assert_eq!(status.last_job, Some(metrics.clone()));
+    let json = soldr_dist::status::json(&status);
+    assert_eq!(json["last_job"]["path"], "relay");
+    assert_eq!(json["last_job"]["cas_hits"], 2);
+    let outcome = soldr_dist::DistOutcome::Executed {
+        exit_code: 0,
+        stdout: vec![0, 255],
+        stderr: vec![],
+        metrics,
+    };
+    let json = serde_json::to_value(&outcome).unwrap();
+    assert_eq!(json["outcome"], "executed");
+    assert_eq!(json["stdout"], serde_json::json!([0, 255]));
+}
+
+#[test]
+fn contended_metrics_writer_fails_without_waiting_for_the_lock() {
+    use fs2::FileExt;
+    let root = tempfile::tempdir().unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(root.path().join("metrics.lock"))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+    let metrics = soldr_dist::JobMetrics::default();
+    assert!(soldr_dist::status::record_job(root.path(), &metrics).is_err());
+    drop(lock);
+    assert!(soldr_dist::status::record_job(root.path(), &metrics).is_ok());
+}

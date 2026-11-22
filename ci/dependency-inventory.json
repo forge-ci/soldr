@@ -104,7 +104,9 @@
       "sha2",
       "tempfile",
       "tokio",
-      "toml"
+      "toml",
+      "tracing",
+      "tracing-subscriber"
     ],
     "soldr-fetch": [
       "bzip2",

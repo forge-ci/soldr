@@ -4,7 +4,7 @@ use crate::{
     transport,
     trust::{self, Trust},
     worker::Worker,
-    DistClient, DistOutcome, Result,
+    DistClient, Result,
 };
 use clap::{Args, Subcommand};
 use std::{
@@ -12,7 +12,9 @@ use std::{
     sync::{atomic::AtomicU64, Arc},
 };
 
+mod observe;
 mod scaffold;
+pub use observe::trace_filter;
 #[derive(Args)]
 pub struct DistArgs {
     #[arg(long, global = true)]
@@ -61,6 +63,12 @@ pub enum DistCommand {
         /// Wait only for an authenticated worker-originated connection.
         #[arg(long, env = "SOLDR_DIST_REVERSE_ONLY")]
         reverse_only: bool,
+        /// Print transport and CAS counters to stderr.
+        #[arg(long)]
+        verbose: bool,
+        /// Emit outcome/metrics JSON, preserving streams as byte arrays.
+        #[arg(long)]
+        json: bool,
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         argv: Vec<String>,
     },
@@ -89,6 +97,7 @@ pub fn default_root() -> Result<PathBuf> {
     Ok(home.join(".soldr/dist"))
 }
 pub async fn run(args: DistArgs) -> Result<i32> {
+    observe::init_tracing();
     let root = args.root.map(Ok).unwrap_or_else(default_root)?;
     std::fs::create_dir_all(&root)?;
     let relay_disabled = args.relay.as_deref() == Some("none");
@@ -126,6 +135,8 @@ pub async fn run(args: DistArgs) -> Result<i32> {
             worker,
             argv,
             reverse_only,
+            verbose,
+            json,
         } => {
             let identity = trust::node_key(&root)?;
             let _endpoint_lease =
@@ -142,19 +153,7 @@ pub async fn run(args: DistArgs) -> Result<i32> {
             let client = DistClient::new(endpoint, worker, &root)?.with_reverse_only(reverse_only);
             let outcome = client.execute(job).await;
             client.endpoint.close().await;
-            match outcome {
-                DistOutcome::Executed {
-                    exit_code,
-                    stdout,
-                    stderr,
-                } => {
-                    use std::io::Write;
-                    std::io::stdout().write_all(&stdout)?;
-                    std::io::stderr().write_all(&stderr)?;
-                    Ok(exit_code)
-                }
-                DistOutcome::Declined { reason } => Err(format!("Dist declined: {reason}").into()),
-            }
+            observe::render(outcome, verbose, json)
         }
         DistCommand::Trust {
             command: TrustCommand::Add { node_id, role },
@@ -252,6 +251,9 @@ fn status(root: &Path, json: bool) -> Result<()> {
         println!("{}", crate::status::json(&status));
     } else {
         println!("Dist {} ({})\nBuild: {}\nSignal: {}\nCAS: {} bytes; running joblets: {}\nTrusted clients: {:?}\nTrusted workers: {:?}", status.node_id, status.role, status.build_id, status.signal_url, status.cas_bytes, status.running_joblets, status.trusted_clients, status.trusted_workers);
+        if let Some(metrics) = &status.last_job {
+            println!("Last job: {}", metrics.summary());
+        }
     }
     Ok(())
 }

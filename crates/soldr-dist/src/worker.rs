@@ -173,6 +173,7 @@ fn write_status(state: &State) -> Result<()> {
         pid: std::process::id() as u64,
         build_id: state.build_id.clone(),
         signal_url: state.signal_url.clone(),
+        last_job: None,
     };
     let mut temp = tempfile::NamedTempFile::new_in(&state.root)?;
     temp.write_all(&status.encode_to_vec())?;
@@ -333,8 +334,11 @@ async fn receive_inputs(
         return Err("invalid speculative manifest".into());
     }
     let mut need = vec![];
+    let mut cas_hits = 0;
     for (digest, _) in &expected {
-        if !incoming.contains(digest) && !state.cas.contains(digest)? {
+        if state.cas.contains(digest)? {
+            cas_hits += 1;
+        } else if !incoming.contains(digest) {
             need.push(digest.clone());
         }
     }
@@ -343,6 +347,8 @@ async fn receive_inputs(
         &Reply {
             need: Some(Need {
                 digests: need.clone(),
+                cas_hits,
+                cas_hits_known: true,
             }),
             ..Reply::default()
         },

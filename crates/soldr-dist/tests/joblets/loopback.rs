@@ -165,6 +165,14 @@ async fn compare(
         expected,
         "remote output differs from local"
     );
+    let metrics = outcome.metrics();
+    assert_eq!(metrics.worker_id, fixture.endpoint.id().to_string());
+    assert_eq!(metrics.path, "direct");
+    assert!(metrics.rtt_known);
+    assert!(metrics.bytes_sent > 0 && metrics.bytes_received > 0);
+    assert_eq!(metrics.uploaded_blobs, 1);
+    assert!(metrics.cas_hits_known);
+    assert_eq!(metrics.cas_hits, 0);
     let uploaded = fixture.client.uploaded_blobs.load(Ordering::Relaxed);
     assert_eq!(uploaded, 1);
     assert_eq!(fixture.uploaded.load(Ordering::Relaxed), 1);
@@ -172,10 +180,17 @@ async fn compare(
         assert_eq!(fixture.client.connections.outbound_connections(), 0);
         assert!(fixture.client.connections.incoming_connections() >= 1);
     }
+    let second = fixture.client.execute(job).await;
     assert!(matches!(
-        fixture.client.execute(job).await,
+        &second,
         DistOutcome::Executed { exit_code: 0, .. }
     ));
+    assert_eq!(second.metrics().uploaded_blobs, 0);
+    assert_eq!(second.metrics().need_digests, 0);
+    assert!(second.metrics().cas_hits_known);
+    assert_eq!(second.metrics().cas_hits, 1);
+    let status = soldr_dist::status::load(&fixture._temp.path().join("client")).unwrap();
+    assert_eq!(status.last_job.as_ref(), Some(second.metrics()));
     assert_eq!(
         fixture.client.uploaded_blobs.load(Ordering::Relaxed),
         uploaded,
@@ -241,31 +256,16 @@ fn toolchain_mismatch_declined_and_untrusted_rejected() {
             compiler_identity: "wrong".into(),
             ..DistJob::default()
         };
-        assert_eq!(
-            fixture.client.execute(job.clone()).await,
-            DistOutcome::Declined {
-                reason: "toolchain mismatch".into()
-            }
-        );
+        assert!(matches!(fixture.client.execute(job.clone()).await, DistOutcome::Declined { reason, .. } if reason == "toolchain mismatch"));
         fs::write(
             fixture._temp.path().join("client/trusted_workers.toml"),
             "peers = []\n",
         )
         .unwrap();
-        assert_eq!(
-            fixture.client.execute(job.clone()).await,
-            DistOutcome::Declined {
-                reason: "untrusted worker".into()
-            }
-        );
+        assert!(matches!(fixture.client.execute(job.clone()).await, DistOutcome::Declined { reason, .. } if reason == "untrusted worker"));
         fixture.stop().await;
         let fixture = Fixture::new(vec![], false).await;
-        assert_eq!(
-            fixture.client.execute(job).await,
-            DistOutcome::Declined {
-                reason: "worker lost".into()
-            }
-        );
+        assert!(matches!(fixture.client.execute(job).await, DistOutcome::Declined { reason, .. } if reason == "worker lost"));
         fixture.stop().await;
     });
 }
@@ -319,12 +319,7 @@ fn worker_loss_during_job_is_bounded() {
         })
         .await
         .unwrap();
-        assert_eq!(
-            outcome,
-            DistOutcome::Declined {
-                reason: "worker lost".into()
-            }
-        );
+        assert!(matches!(outcome, DistOutcome::Declined { reason, .. } if reason == "worker lost"));
         assert!(start.elapsed() < Duration::from_secs(10));
         fixture.task.abort();
         fixture.client.endpoint.close().await;
@@ -359,12 +354,7 @@ fn reserved_host_capacity_declines_joblets() {
             cwd: "/dist-test".into(),
             ..DistJob::default()
         };
-        assert_eq!(
-            fixture.client.execute(job).await,
-            DistOutcome::Declined {
-                reason: "worker busy".into()
-            }
-        );
+        assert!(matches!(fixture.client.execute(job).await, DistOutcome::Declined { reason, .. } if reason == "worker busy"));
         fixture.stop().await;
     });
 }

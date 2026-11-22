@@ -373,7 +373,6 @@ async fn run_async_recording(
     bringup.compile_service_breakdown(&compile_service.start_timings());
     bringup.phase(crate::daemon::bringup::phase::COMPILE_SERVICE);
 
-
     let state = Arc::new(State {
         db_path,
         paths: paths.clone(),
@@ -781,10 +780,7 @@ fn arm_shutdown_watchdog(paths: SoldrPaths) {
             // graceful path may never run if teardown is genuinely wedged,
             // so without this line a watchdog-forced exit and a clean one
             // are indistinguishable in the log.
-            crate::daemon::lifecycle::append_lifecycle_event(
-                &paths,
-                "shutdown-watchdog-expired",
-            );
+            crate::daemon::lifecycle::append_lifecycle_event(&paths, "shutdown-watchdog-expired");
             std::process::exit(SHUTDOWN_WATCHDOG_EXIT_CODE);
         })
         .ok();
@@ -853,11 +849,15 @@ fn init_embedded_service_file_tracing(paths: &SoldrPaths) {
         return;
     }
     let appender = tracing_appender::rolling::daily(log_dir, "embedded-zccache.warn.log");
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
+    let subscriber = tracing_subscriber::fmt()
         .with_ansi(false)
-        .with_writer(appender)
+        .with_writer(appender);
+    #[cfg(feature = "dist")]
+    let _ = subscriber
+        .with_env_filter(soldr_dist::cli::trace_filter())
         .try_init();
+    #[cfg(not(feature = "dist"))]
+    let _ = subscriber.with_max_level(tracing::Level::WARN).try_init();
 }
 
 fn embedded_service_log_dir(paths: &SoldrPaths) -> PathBuf {

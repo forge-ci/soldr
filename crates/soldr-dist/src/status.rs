@@ -1,5 +1,5 @@
 //! Local protobuf snapshot: report the serving image, not the querying image.
-use crate::{cas::Cas, proto::Status, trust::Trust, Result};
+use crate::{cas::Cas, proto::Status, trust::Trust, JobMetrics, Result};
 use prost::Message;
 use sha2::{Digest, Sha256};
 use std::{io::Read, path::Path};
@@ -39,6 +39,10 @@ pub fn load(root: &Path) -> Result<Status> {
     status.trusted_clients = Trust::load(&root.join("trusted_clients.toml"))?.peers;
     status.trusted_workers = Trust::load(&root.join("trusted_workers.toml"))?.peers;
     status.cas_bytes = Cas::new(root, u64::MAX)?.size()?;
+    let last_job = root.join("last-job.pb");
+    if last_job.exists() {
+        status.last_job = Some(JobMetrics::decode(std::fs::read(last_job)?.as_slice())?);
+    }
     Ok(status)
 }
 
@@ -48,5 +52,29 @@ pub fn json(status: &Status) -> serde_json::Value {
         "trusted_clients": status.trusted_clients, "trusted_workers": status.trusted_workers,
         "cas_bytes": status.cas_bytes, "running_joblets": status.running_joblets,
         "pid": status.pid, "build_id": status.build_id, "signal_url": status.signal_url,
+        "last_job": status.last_job,
     })
+}
+
+pub fn record_job(root: &Path, metrics: &JobMetrics) -> Result<()> {
+    use fs2::FileExt;
+    use std::io::Write;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(root.join("metrics.lock"))?;
+    // Telemetry cannot wait indefinitely after compiler outputs are published.
+    lock.try_lock_exclusive()?;
+    let path = root.join("last-job.pb");
+    if path.exists() {
+        let previous = JobMetrics::decode(std::fs::read(&path)?.as_slice())?;
+        if previous.completed_unix_millis > metrics.completed_unix_millis {
+            return Ok(());
+        }
+    }
+    let mut file = tempfile::NamedTempFile::new_in(root)?;
+    file.write_all(&metrics.encode_to_vec())?;
+    file.persist(path)?;
+    Ok(())
 }

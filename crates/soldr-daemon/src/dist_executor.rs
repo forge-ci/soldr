@@ -16,6 +16,7 @@ struct Executor {
     compiler: Compiler,
     cache_identity: [u8; 32],
     _lease: transport::EndpointLease,
+    root: std::path::PathBuf,
 }
 
 pub(crate) async fn register(
@@ -77,7 +78,51 @@ pub(crate) async fn register(
         compiler,
         cache_identity,
         _lease: lease,
+        root,
     }))?)
+}
+
+impl Executor {
+    fn declined(&self, job: &CompileJob, reason: String) -> ExecutorOutcome {
+        let digests: std::collections::HashSet<_> =
+            job.inputs.iter().map(|input| input.digest).collect();
+        let metrics = soldr_dist::JobMetrics {
+            outcome: "declined".into(),
+            completed_unix_millis: soldr_dist::metrics::unix_millis(),
+            path: "unknown".into(),
+            decline_reason: reason.clone(),
+            exit_code: -1,
+            input_files: job.inputs.len() as u64,
+            input_digests: digests.len() as u64,
+            dedup_inputs: job.inputs.len().saturating_sub(digests.len()) as u64,
+            ..Default::default()
+        };
+        if let Err(error) = soldr_dist::status::record_job(&self.root, &metrics) {
+            tracing::warn!(%error, "soldr dist cannot persist policy decline metrics");
+        }
+        ExecutorOutcome::Declined { reason }
+    }
+}
+
+fn relay_config(
+    mode: Option<&str>,
+    configured: Option<String>,
+) -> soldr_dist::Result<Option<String>> {
+    match mode {
+        None => Ok(configured),
+        Some("none") => Ok(None),
+        Some("default") => Ok(Some("default".into())),
+        Some(_) => Err("SOLDR_DIST_RELAY must be none or default".into()),
+    }
+}
+
+fn reverse_mode(value: Option<&str>, configured: bool) -> soldr_dist::Result<bool> {
+    match value {
+        None => Ok(configured),
+        Some("true" | "1") => Ok(true),
+        Some("false" | "0") => Ok(false),
+        Some(_) => Err("SOLDR_DIST_REVERSE_ONLY must be true or false".into()),
+    }
 }
 
 fn peer_list(value: Option<&str>, configured: Vec<String>) -> soldr_dist::Result<Vec<String>> {
@@ -99,7 +144,7 @@ fn manifest(job: &CompileJob, compiler: &Compiler, identity: &[u8; 32]) -> Resul
     if &job.compiler_identity != identity {
         return Err("requested rustc differs from the dist client's resolved toolchain".into());
     }
-    if !job.inputs_complete {
+    if !job.inputs_complete && job.inputs.len() != 1 {
         return Err(
             "incomplete input manifest; compile locally to populate dependency discovery".into(),
         );
@@ -147,19 +192,18 @@ impl CompileExecutor for Executor {
         Box::pin(async move {
             let manifest = match manifest(job, &self.compiler, &self.cache_identity) {
                 Ok(job) => job,
-                Err(reason) => return ExecutorOutcome::Declined { reason },
+                Err(reason) => return self.declined(job, reason),
             };
+            let complete = job.inputs_complete;
             let manifest = match tokio::task::spawn_blocking(move || {
-                namespace::check(&manifest).map(|()| manifest)
+                namespace::check(&manifest, complete).map(|()| manifest)
             })
             .await
             {
                 Ok(Ok(manifest)) => manifest,
-                Ok(Err(reason)) => return ExecutorOutcome::Declined { reason },
+                Ok(Err(reason)) => return self.declined(job, reason),
                 Err(error) => {
-                    return ExecutorOutcome::Declined {
-                        reason: format!("dist input inspection: {error}"),
-                    };
+                    return self.declined(job, format!("dist input inspection: {error}"));
                 }
             };
             let index = self.next.fetch_add(1, Ordering::Relaxed) % self.clients.len();
@@ -168,15 +212,19 @@ impl CompileExecutor for Executor {
                     exit_code,
                     stdout,
                     stderr,
+                    metrics,
                 } => {
-                    tracing::info!(exit_code, "soldr dist remote cache miss executed");
+                    tracing::info!(exit_code, path = %metrics.path, rtt_micros = metrics.rtt_micros,
+                        sent = metrics.bytes_sent, received = metrics.bytes_received,
+                        need = metrics.need_digests, cas_hits = metrics.cas_hits,
+                        "soldr dist remote cache miss executed");
                     ExecutorOutcome::Executed {
                         exit_code,
                         stdout,
                         stderr,
                     }
                 }
-                DistOutcome::Declined { reason } => {
+                DistOutcome::Declined { reason, .. } => {
                     tracing::warn!(%reason, "soldr dist declined cache miss; executing locally");
                     ExecutorOutcome::Declined { reason }
                 }

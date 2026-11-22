@@ -49,6 +49,10 @@ pub struct Offer {
 pub struct Need {
     #[prost(string, repeated, tag = "1")]
     pub digests: Vec<String>,
+    #[prost(uint64, tag = "2")]
+    pub cas_hits: u64,
+    #[prost(bool, tag = "3")]
+    pub cas_hits_known: bool,
 }
 #[derive(Clone, PartialEq, Message)]
 pub struct Blob {
@@ -111,6 +115,8 @@ pub struct Status {
     pub build_id: String,
     #[prost(string, tag = "9")]
     pub signal_url: String,
+    #[prost(message, optional, tag = "10")]
+    pub last_job: Option<JobMetrics>,
 }
 #[derive(Clone, PartialEq, Message)]
 pub struct Reply {
@@ -122,4 +128,54 @@ pub struct Reply {
     pub done: Option<Done>,
     #[prost(message, optional, tag = "4")]
     pub need: Option<Need>,
+}
+
+#[derive(Clone, PartialEq, Eq, Message, serde::Serialize)]
+pub struct JobMetrics {
+    #[prost(string, tag = "1")]
+    pub worker_id: String,
+    #[prost(string, tag = "2")]
+    pub path: String,
+    #[prost(string, tag = "3")]
+    pub remote_addr: String,
+    #[prost(uint64, tag = "4")]
+    pub rtt_micros: u64,
+    #[prost(bool, tag = "5")]
+    pub rtt_known: bool,
+    #[prost(uint64, tag = "6")]
+    pub bytes_sent: u64,
+    #[prost(uint64, tag = "7")]
+    pub bytes_received: u64,
+    #[prost(uint64, tag = "8")]
+    pub connection_bytes_sent: u64,
+    #[prost(uint64, tag = "9")]
+    pub connection_bytes_received: u64,
+    #[prost(uint64, tag = "10")]
+    pub input_files: u64,
+    #[prost(uint64, tag = "11")]
+    pub input_digests: u64,
+    #[prost(uint64, tag = "12")]
+    pub need_digests: u64,
+    #[prost(uint64, tag = "13")]
+    pub cas_hits: u64,
+    #[prost(uint64, tag = "14")]
+    pub uploaded_blobs: u64,
+    #[prost(uint64, tag = "15")]
+    pub dedup_inputs: u64,
+    #[prost(uint64, tag = "16")]
+    pub speculative_blobs: u64,
+    #[prost(string, tag = "17")]
+    pub outcome: String,
+    #[prost(string, tag = "18")]
+    pub decline_reason: String,
+    #[prost(int32, tag = "19")]
+    pub exit_code: i32,
+    #[prost(uint64, tag = "20")]
+    pub elapsed_millis: u64,
+    #[prost(string, tag = "21")]
+    pub connection_side: String,
+    #[prost(bool, tag = "22")]
+    pub cas_hits_known: bool,
+    #[prost(uint64, tag = "23")]
+    pub completed_unix_millis: u64,
 }
