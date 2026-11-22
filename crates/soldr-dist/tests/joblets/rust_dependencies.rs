@@ -251,7 +251,9 @@ fn assert_same_archive(actual: &[u8], expected: &[u8]) {
     fn paths(body: &[u8]) -> Vec<String> {
         let mut found: Vec<String> = body
             .split(|b| !(b.is_ascii_graphic()))
-            .filter(|run| run.len() > 4 && run.starts_with(b"/"))
+            // rmeta length-prefixes strings, so the prefix byte may be printable.
+            .filter_map(|run| run.iter().position(|b| *b == b'/').map(|at| &run[at..]))
+            .filter(|run| run.len() > 4)
             .map(|run| String::from_utf8_lossy(run).into_owned())
             .collect();
         found.sort();
@@ -272,6 +274,17 @@ fn assert_same_archive(actual: &[u8], expected: &[u8]) {
             Some((local_name, local)) if local_name == name && local == body => {}
             Some((local_name, local)) => {
                 let offset = body.iter().zip(local.iter()).position(|(x, y)| x != y);
+                let differing = body.iter().zip(local.iter()).filter(|(x, y)| x != y).count();
+                let window = |bytes: &[u8]| {
+                    let at = offset.unwrap_or(0);
+                    let range = at.saturating_sub(48)..(at + 48).min(bytes.len());
+                    String::from_utf8_lossy(&bytes[range]).escape_debug().to_string()
+                };
+                report += &format!(
+                    "  {differing} differing byte(s)\n    remote around: {}\n    local around:  {}\n",
+                    window(body),
+                    window(local)
+                );
                 report += &format!(
                     "  member {index} remote `{name}` ({} B) vs local `{local_name}` ({} B); first difference at {offset:?}\n    remote paths: {:?}\n    local paths:  {:?}\n",
                     body.len(),
