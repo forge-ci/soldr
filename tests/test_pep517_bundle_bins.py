@@ -112,9 +112,13 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(self.helper._fallback_entries(text), [{"bin": "x"}])
 
     def test_absent_configuration_is_empty(self) -> None:
-        self.assertEqual(self._read('[tool.soldr.pep517]\ndelegate-backend = "x"\n'), [])
+        self.assertEqual(
+            self._read('[tool.soldr.pep517]\ndelegate-backend = "x"\n'), []
+        )
         with tempfile.TemporaryDirectory() as raw:
-            self.assertEqual(self.helper.read_bundle_bins(Path(raw) / "missing.toml"), [])
+            self.assertEqual(
+                self.helper.read_bundle_bins(Path(raw) / "missing.toml"), []
+            )
 
     def test_invalid_entries_are_refused_by_name(self) -> None:
         cases = {
@@ -223,8 +227,12 @@ class WheelTest(unittest.TestCase):
 
     def test_arcname_follows_wheel_install_schemes(self) -> None:
         arcname = self.helper.wheel_arcname
-        self.assertEqual(arcname("demo-0.1.0", "scripts", "x", False), "demo-0.1.0.data/scripts/x")
-        self.assertEqual(arcname("demo-0.1.0", "platlib/demo/_bin", "x", False), "demo/_bin/x")
+        self.assertEqual(
+            arcname("demo-0.1.0", "scripts", "x", False), "demo-0.1.0.data/scripts/x"
+        )
+        self.assertEqual(
+            arcname("demo-0.1.0", "platlib/demo/_bin", "x", False), "demo/_bin/x"
+        )
         self.assertEqual(
             arcname("demo-0.1.0", "platlib/demo", "x", True),
             "demo-0.1.0.data/platlib/demo/x",
@@ -253,13 +261,17 @@ class WheelTest(unittest.TestCase):
                     ),
                 ],
             )
-            self.assertEqual(added, ["demo-0.1.0.data/scripts/demo-cli", "demo/_bin/helper.exe"])
+            self.assertEqual(
+                added, ["demo-0.1.0.data/scripts/demo-cli", "demo/_bin/helper.exe"]
+            )
             with zipfile.ZipFile(wheel) as archive:
                 self.assertIsNone(archive.testzip())
                 names = archive.namelist()
                 self.assertEqual(names[-1], "demo-0.1.0.dist-info/RECORD")
                 for name in added:
-                    self.assertEqual((archive.getinfo(name).external_attr >> 16) & 0o777, 0o755)
+                    self.assertEqual(
+                        (archive.getinfo(name).external_attr >> 16) & 0o777, 0o755
+                    )
                 self.assertEqual(archive.read("demo/_bin/helper.exe"), b"MZ helper")
                 rows = list(csv.reader(io.StringIO(archive.read(names[-1]).decode())))
                 recorded = {row[0]: row for row in rows}
@@ -267,7 +279,9 @@ class WheelTest(unittest.TestCase):
                 self.assertEqual(recorded["demo-0.1.0.dist-info/RECORD"][1:], ["", ""])
                 for name in names[:-1]:
                     data = archive.read(name)
-                    self.assertEqual(recorded[name][1:], [_record_hash(data), str(len(data))])
+                    self.assertEqual(
+                        recorded[name][1:], [_record_hash(data), str(len(data))]
+                    )
             self.assertEqual(
                 sorted(p.name for p in Path(raw).iterdir()),
                 sorted([WHEEL_NAME, "demo-cli", "helper.exe"]),
@@ -423,14 +437,18 @@ class _BackendHarness(unittest.TestCase):
     """A loaded backend over a scratch project; `_build` runs one hook."""
 
     def setUp(self) -> None:
-        self.backend = load_script_module(SRC / "__init__.py", "soldr_bundle_bins_backend")
+        self.backend = load_script_module(
+            SRC / "__init__.py", "soldr_bundle_bins_backend"
+        )
         self.helper = self.backend._sibling_module("_bundle_bins")
         self.scratch = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.scratch, ignore_errors=True)
         self.root = self.scratch / "project"
         self.root.mkdir()
         (self.root / "pyproject.toml").write_text(PYPROJECT, encoding="utf-8")
-        (self.root / "Cargo.toml").write_text("[package]\nname = 'demo'\n", encoding="utf-8")
+        (self.root / "Cargo.toml").write_text(
+            "[package]\nname = 'demo'\n", encoding="utf-8"
+        )
         self.out = self.scratch / "out"
         self.out.mkdir()
 
@@ -468,7 +486,9 @@ class _BackendHarness(unittest.TestCase):
 
         def build_bin(entry: Any, command: list[str], env: dict[str, str]) -> Path:
             calls.append(
-                BinBuildCall(entry, command, env.get("RUSTC_WRAPPER"), env.get("PYO3_PYTHON"))
+                BinBuildCall(
+                    entry, command, env.get("RUSTC_WRAPPER"), env.get("PYO3_PYTHON")
+                )
             )
             path = self.scratch / entry.bin
             path.write_bytes(entry.bin.encode())
@@ -490,14 +510,20 @@ class BackendIntegrationTest(_BackendHarness):
         command = calls[0].command
         self.assertEqual(command[:4], ["soldr", "build", "--bin", "demo-cli"])
         self.assertIn("--package", command)
-        self.assertEqual(command[-4:], ["--profile", "dev", "--target", "x86_64-unknown-linux-gnu"])
-        self.assertEqual(calls[0].rustc_wrapper, os.environ.get("RUSTC_WRAPPER", "soldr"))
+        self.assertEqual(
+            command[-4:], ["--profile", "dev", "--target", "x86_64-unknown-linux-gnu"]
+        )
+        self.assertEqual(
+            calls[0].rustc_wrapper, os.environ.get("RUSTC_WRAPPER", "soldr")
+        )
         self.assertIsNone(
             calls[0].pyo3_python,
             "a cross target must not inherit the host interpreter",
         )
         with zipfile.ZipFile(self.out / WHEEL_NAME) as archive:
-            self.assertEqual(archive.read("demo-0.1.0.data/scripts/demo-cli"), b"demo-cli")
+            self.assertEqual(
+                archive.read("demo-0.1.0.data/scripts/demo-cli"), b"demo-cli"
+            )
             self.assertEqual(archive.read("demo/_bin/helper"), b"helper")
 
     def test_maturin_default_profile_is_mirrored_when_soldr_profile_is_disabled(
@@ -539,9 +565,7 @@ class BackendIntegrationTest(_BackendHarness):
             self.assertEqual(subcommand, "write-sdist")
             root_cargo = '[workspace]\nmembers = [\n    "crates/demo",\n]\n'
             extension_cargo = '[package]\nname = "demo"\n'
-            cli_cargo = (
-                '[package]\nname = "demo-cli"\n\n[[bin]]\nname = "demo-cli"\npath = "src/main.rs"\n'
-            )
+            cli_cargo = '[package]\nname = "demo-cli"\n\n[[bin]]\nname = "demo-cli"\npath = "src/main.rs"\n'
             with tarfile.open(self.out / sdist_name, "w:gz") as archive:
                 for name, text in (
                     ("demo-0.1.0/Cargo.toml", root_cargo),
@@ -595,7 +619,9 @@ class BackendIntegrationTest(_BackendHarness):
         self.assertIn("bundle-bins", str(raised.exception))
 
     def test_projects_without_bundle_bins_are_untouched(self) -> None:
-        (self.root / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+        (self.root / "pyproject.toml").write_text(
+            "[project]\nname = 'demo'\n", encoding="utf-8"
+        )
         self.assertEqual(self._build("build_wheel"), [])
         with zipfile.ZipFile(self.out / WHEEL_NAME) as archive:
             self.assertFalse(any(".data/" in name for name in archive.namelist()))
@@ -738,10 +764,14 @@ def _elf64(*, interpreter: bytes | None = None, needed: bool = False) -> bytes:
     headers, payload = [], b""
     base = 64 + 56 * (2 if interpreter else 1)
     if interpreter is not None:
-        headers.append(struct.pack("<IIQQQQQQ", 3, 4, base, 0, 0, len(interpreter) + 1, 0, 1))
+        headers.append(
+            struct.pack("<IIQQQQQQ", 3, 4, base, 0, 0, len(interpreter) + 1, 0, 1)
+        )
         payload += interpreter + b"\0"
     dynamic = (struct.pack("<qQ", 1, 0) if needed else b"") + struct.pack("<qQ", 0, 0)
-    headers.append(struct.pack("<IIQQQQQQ", 2, 6, base + len(payload), 0, 0, len(dynamic), 0, 8))
+    headers.append(
+        struct.pack("<IIQQQQQQ", 2, 6, base + len(payload), 0, 0, len(dynamic), 0, 8)
+    )
     ident = b"\x7fELF" + bytes([2, 1, 1]) + bytes(9)
     header = ident + struct.pack(
         "<HHIQQQIHHHHHH", 3, 62, 1, 0, 64, 0, 0, 64, 56, len(headers), 64, 0, 0
@@ -789,7 +819,9 @@ class MuslBundleBinTest(unittest.TestCase):
                 self.assertIn(message, str(raised.exception))
 
     def test_command_passes_features_and_retargets_only_linux(self) -> None:
-        musl = self.helper.BundleBin(bin="demo-cli", features=("wheel",), linux_libc="musl")
+        musl = self.helper.BundleBin(
+            bin="demo-cli", features=("wheel",), linux_libc="musl"
+        )
         plain = self.helper.BundleBin(bin="helper")
         retarget = self.helper.entry_target_args
         self.assertEqual(
@@ -814,7 +846,9 @@ class MuslBundleBinTest(unittest.TestCase):
                 return_value=os.uname_result(("Linux", "h", "6", "#1", "x86_64")),
             ),
         ):
-            self.assertEqual(retarget(musl, []), ["--target", "x86_64-unknown-linux-musl"])
+            self.assertEqual(
+                retarget(musl, []), ["--target", "x86_64-unknown-linux-musl"]
+            )
         with mock.patch.object(self.helper.sys, "platform", "darwin"):
             self.assertEqual(retarget(musl, []), [])
         command = self.helper.cargo_build_command(
@@ -825,7 +859,13 @@ class MuslBundleBinTest(unittest.TestCase):
         )
         self.assertEqual(
             command[5:],
-            ["--features", "wheel", "--release", "--target", "x86_64-unknown-linux-musl"],
+            [
+                "--features",
+                "wheel",
+                "--release",
+                "--target",
+                "x86_64-unknown-linux-musl",
+            ],
         )
 
     def test_a_musl_bin_must_be_static(self) -> None:
@@ -845,9 +885,14 @@ class MuslBundleBinTest(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, stdout=message)
 
             executable.write_bytes(_elf64())
-            self.assertEqual(self.helper.build_bundle_bin(entry, command, {}, run=run), executable)
+            self.assertEqual(
+                self.helper.build_bundle_bin(entry, command, {}, run=run), executable
+            )
             for image, reason in (
-                (_elf64(interpreter=b"/lib64/ld-linux-x86-64.so.2"), "dynamically linked"),
+                (
+                    _elf64(interpreter=b"/lib64/ld-linux-x86-64.so.2"),
+                    "dynamically linked",
+                ),
                 (_elf64(needed=True), "needs a shared library"),
             ):
                 executable.write_bytes(image)
@@ -869,7 +914,8 @@ class RenameTest(unittest.TestCase):
         plain = self.helper.BundleBin(bin="tool.v2")
         self.assertEqual(plain.staged_name(Path("/t/tool.v2")), "tool.v2")
         self.assertEqual(
-            self.helper.BundleBin(bin="a.b", rename="c").staged_name(Path("/t/a.b")), "c"
+            self.helper.BundleBin(bin="a.b", rename="c").staged_name(Path("/t/a.b")),
+            "c",
         )
 
     def test_renamed_bin_is_staged_under_its_new_name(self) -> None:
@@ -882,7 +928,9 @@ class RenameTest(unittest.TestCase):
             self.helper.bundle_into_wheel(wheel, [entry], lambda _entry: built)
             with zipfile.ZipFile(wheel) as archive:
                 self.assertEqual(archive.read("demo-0.1.0.data/scripts/tool"), b"cli")
-                self.assertNotIn("demo-0.1.0.data/scripts/tool-native", archive.namelist())
+                self.assertNotIn(
+                    "demo-0.1.0.data/scripts/tool-native", archive.namelist()
+                )
 
     def test_rename_must_be_a_plain_name(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
