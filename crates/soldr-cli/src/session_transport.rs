@@ -32,6 +32,10 @@ use running_process::broker::protocol_v2::{
 };
 use running_process::broker::session_codec::{encode_session_frame, try_decode_session_frame};
 
+mod connection_failure;
+pub(crate) use connection_failure::ConnectionFailure;
+use connection_failure::{is_connection_failure, BrokerResponseDeadline};
+
 static NEXT_BROKER_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 fn broker_hello_frame(payload: Vec<u8>) -> Frame {
@@ -129,7 +133,7 @@ pub fn session_hot_path(rustc_argv: &[String]) -> SessionHotPathOutcome {
         }
         Err(err) if is_connection_failure(&err) => {
             use std::io::IsTerminal;
-            SessionHotPathOutcome::HardFail(io::Error::other(connection_failure_message(
+            SessionHotPathOutcome::HardFail(io::Error::other(ConnectionFailure::new(
                 &err,
                 &service_name,
                 started.elapsed(),
@@ -154,60 +158,6 @@ pub(crate) fn session_setup_timeout(route_ceiling: Duration, explicit: Option<&s
         .map_or(route_ceiling, |secs| {
             route_ceiling.min(Duration::from_secs(secs))
         })
-}
-
-/// Is this failure about reaching or keeping the daemon connection, as
-/// opposed to the compiler's own result?
-fn is_connection_failure(err: &SessionError) -> bool {
-    use io::ErrorKind::{
-        BrokenPipe, ConnectionAborted, ConnectionRefused, ConnectionReset, NotFound, TimedOut,
-        UnexpectedEof,
-    };
-    if err.broker_unreachable {
-        return true;
-    }
-    let reply_timeout = err.source.to_string().contains("reply did not complete");
-    !reply_timeout
-        && matches!(
-            err.source.kind(),
-            BrokenPipe
-                | ConnectionAborted
-                | ConnectionRefused
-                | ConnectionReset
-                | NotFound
-                | TimedOut
-                | UnexpectedEof
-        )
-}
-
-/// The loud, stand-alone failure printed when the daemon connection cannot be
-/// established or re-established in time (soldr#3815). Red on a terminal; the
-/// text reads the same without colour.
-fn connection_failure_message(
-    err: &SessionError,
-    service_name: &str,
-    elapsed: Duration,
-    color: bool,
-) -> String {
-    let what = if err.broker_unreachable || err.source.kind() == io::ErrorKind::TimedOut {
-        "could not connect to the soldr daemon"
-    } else {
-        "lost the connection to the soldr daemon"
-    };
-    let text = format!(
-        "soldr: ERROR: {what} (route {service_name}) after {:.1}s: {}\n\
-         soldr: the compile was not completed; this build cannot continue. Recover with:\n\
-         soldr:   soldr daemon status\n\
-         soldr:   soldr daemon stop && soldr daemon start\n\
-         soldr:   soldr logs paths   (daemon and broker logs)",
-        elapsed.as_secs_f64(),
-        err.source
-    );
-    if color {
-        format!("\x1b[1;31m{text}\x1b[0m")
-    } else {
-        text
-    }
 }
 
 /// Did the relay close before the terminal `Exit` frame and before any
@@ -589,7 +539,7 @@ where
     let route_ceiling = started + deadlines.route_ceiling;
     let mut response_deadline = started + deadlines.first_response;
     let mut pending_handoff: Option<(Vec<u8>, u64, ReadyRoute)> = None;
-    let mut last_progress_elapsed_ms = 0_u64;
+    let mut last_progress_elapsed_ms = None;
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
@@ -616,11 +566,11 @@ where
                 if progress.stage.is_empty()
                     || progress.latest_result.is_empty()
                     || progress.attempt == 0
-                    || progress.elapsed_ms < last_progress_elapsed_ms
+                    || last_progress_elapsed_ms.is_some_and(|previous| progress.elapsed_ms < previous)
                 {
                     return Err(io::Error::other("broker returned invalid route progress"));
                 }
-                last_progress_elapsed_ms = progress.elapsed_ms;
+                last_progress_elapsed_ms = Some(progress.elapsed_ms);
                 if session_debug_enabled() {
                     eprintln!(
                         "soldr: broker route progress stage={} attempt={} elapsed_ms={} result={}",
@@ -724,15 +674,16 @@ where
             .await
             .map_err(|_| {
                 if pending_handoff.is_some() {
-                    return io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "broker did not confirm either handoff ownership or same-connection proxy fallback",
-                    );
+                    return BrokerResponseDeadline::Handoff.into_io();
                 }
                 let class = if deadline == route_ceiling {
                     "route acquisition ceiling"
-                } else if response_deadline == started + deadlines.first_response {
-                    "first-response deadline"
+                } else if last_progress_elapsed_ms.is_none() {
+                    return BrokerResponseDeadline::FirstResponse {
+                        elapsed_ms: started.elapsed().as_millis(),
+                        limit_ms: deadlines.first_response.as_millis(),
+                    }
+                    .into_io();
                 } else {
                     "progress-silence deadline"
                 };

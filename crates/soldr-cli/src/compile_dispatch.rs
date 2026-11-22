@@ -164,17 +164,25 @@ fn fatal_refusal_message_with(
     if refusal.repeat {
         return Some(refusal.text.clone());
     }
+    Some(record_fatal_route_failure(&refusal.text, paths, build_id))
+}
+
+fn record_fatal_route_failure(
+    message: &str,
+    paths: Option<&crate::core::SoldrPaths>,
+    build_id: Option<u64>,
+) -> String {
     let recorded = match paths {
         Some(paths) => crate::route_refusal_sentinel::record(paths, build_id),
         None => crate::route_refusal_sentinel::Recorded::Unkeyed,
     };
-    Some(match recorded {
+    match recorded {
         crate::route_refusal_sentinel::Recorded::Repeat => {
             crate::route_refusal_sentinel::REPEAT_LINE.to_string()
         }
         crate::route_refusal_sentinel::Recorded::First
-        | crate::route_refusal_sentinel::Recorded::Unkeyed => refusal.text.clone(),
-    })
+        | crate::route_refusal_sentinel::Recorded::Unkeyed => message.to_string(),
+    }
 }
 
 /// Does this error mean the peer went away mid-request, rather than refusing
@@ -222,6 +230,20 @@ fn peer_vanished(kind: std::io::ErrorKind) -> bool {
 /// that the blamed unit is a bystander, points at the daemon log where the
 /// real subject is recorded (soldr#2781).
 fn session_failure_message(error: &std::io::Error) -> String {
+    if let Some(failure) = error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<crate::session_transport::ConnectionFailure>())
+    {
+        return if failure.broker_deadline {
+            record_fatal_route_failure(
+                &failure.message,
+                crate::core::SoldrPaths::new().ok().as_ref(),
+                crate::wrapper_target::read_build_session_id_env(),
+            )
+        } else {
+            failure.message.clone()
+        };
+    }
     let mut message = format!("broker SESSION compile failed: {error}");
     if peer_vanished(error.kind()) {
         message.push_str(concat!(
@@ -306,6 +328,16 @@ mod tests {
         let error = Error::new(ErrorKind::PermissionDenied, "permission denied");
         let message = session_failure_message(&error);
         assert_eq!(message, "broker SESSION compile failed: permission denied");
+    }
+
+    #[test]
+    fn a_control_plane_failure_reaches_the_wrapper_without_a_compile_prefix() {
+        let message = "soldr: ERROR: control-plane failure";
+        let failure = Error::other(crate::session_transport::ConnectionFailure {
+            message: message.to_string(),
+            broker_deadline: false,
+        });
+        assert_eq!(session_failure_message(&failure), message);
     }
 }
 

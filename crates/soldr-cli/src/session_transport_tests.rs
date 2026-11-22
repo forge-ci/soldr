@@ -1,6 +1,7 @@
 //! Unit tests for `session_transport`, split out to keep that file under the
 //! 1,000-line production-source ceiling.
 
+use super::connection_failure::{connection_failure_message, BrokerIdentity};
 use super::*;
 
 #[test]
@@ -140,6 +141,10 @@ fn accepted_relay_that_never_negotiates_is_bounded() {
         .await
         .expect_err("a silent relay must not wait forever");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(matches!(
+            BrokerResponseDeadline::from_io(&error),
+            Some(BrokerResponseDeadline::FirstResponse { .. })
+        ));
         let text = error.to_string();
         assert!(text.contains("first-response deadline"), "{text}");
         assert!(text.contains("SOLDR_BROKER_FIRST_RESPONSE_MS"), "{text}");
@@ -339,12 +344,14 @@ fn connection_loss_is_a_loud_error_with_recovery_steps() {
         "nothing listening",
     ));
     assert!(is_connection_failure(&err));
-    let plain = connection_failure_message(&err, "soldr-daemon-x", Duration::from_secs(30), false);
+    let plain =
+        connection_failure_message(&err, "soldr-daemon-x", Duration::from_secs(30), false, None);
     assert!(plain.contains("could not connect") && plain.contains("soldr-daemon-x"));
     assert!(plain.contains("30.0s") && plain.contains("soldr daemon status"));
     assert!(plain.contains("soldr daemon stop") && plain.contains("soldr logs paths"));
     assert!(!plain.contains('\x1b'));
-    assert!(connection_failure_message(&err, "x", Duration::ZERO, true).starts_with("\x1b[1;31m"));
+    assert!(connection_failure_message(&err, "x", Duration::ZERO, true, None)
+        .starts_with("\x1b[1;31m"));
     let eof = SessionError {
         output_started: true,
         broker_unreachable: false,
@@ -353,8 +360,40 @@ fn connection_loss_is_a_loud_error_with_recovery_steps() {
             "SESSION relay closed before Exit",
         ),
     };
-    assert!(connection_failure_message(&eof, "x", Duration::ZERO, false)
+    assert!(connection_failure_message(&eof, "x", Duration::ZERO, false, None)
         .contains("lost the connection"));
+}
+
+#[test]
+fn handoff_deadline_reports_the_broker_identity_and_recovery_order() {
+    let err = SessionError::pre_output(BrokerResponseDeadline::Handoff.into_io());
+    let running = "soldr-0.9.55-running";
+    let local = "soldr-0.9.55-local";
+    let format = |running: Option<&str>| {
+        connection_failure_message(
+            &err,
+            "soldr-daemon-x",
+            Duration::from_millis(5200),
+            false,
+            Some(&BrokerIdentity {
+                running: running.map(str::to_owned),
+                local: Some(local.to_owned()),
+            }),
+        )
+    };
+    let text = format(Some(running));
+    assert!(text.contains("control-plane failure"));
+    assert!(text.contains("route soldr-daemon-x"));
+    assert!(text.contains("handoff ownership"));
+    assert!(text.contains(running));
+    assert!(text.contains(local));
+    assert!(text.contains("differs from this binary"));
+    assert!(
+        text.find("soldr broker remove").unwrap()
+            < text.find("soldr daemon stop && soldr daemon start").unwrap()
+    );
+    assert!(format(Some(local)).contains("matches this binary"));
+    assert!(format(None).contains("comparison unavailable"));
 }
 
 /// A long compile on a live daemon is not a connection failure.
