@@ -164,9 +164,10 @@ fn macro_use(text: &str, stem: &str) -> bool {
         }
         let rest = text[last..].trim_start();
         // A comment may sit between the name and `!`/`as` (`env/**/!`): the
-        // tokenizer drops it, so a following `/` must count as a use too.
+        // tokenizer drops it, so a following comment opener counts as a use too.
         rest.starts_with('!')
-            || rest.starts_with('/')
+            || rest.starts_with("/*")
+            || rest.starts_with("//")
             || (rest.starts_with("as") && !rest.as_bytes().get(2).is_some_and(|b| ident(*b)))
     })
 }
