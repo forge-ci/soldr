@@ -136,8 +136,7 @@ pub(super) fn inspect(job: &mut DistJob) -> Result<BTreeSet<String>> {
 /// after any whitespace, by `!` or `as`: libc's `environ`/`getenv` and C header
 /// paths in comments (`posix/include/...`) do not.
 fn may_matter(text: &str) -> bool {
-    text.contains("macro_rules")
-        || ["env", "include"].iter().any(|stem| macro_use(text, stem))
+    text.contains("macro_rules") || ["env", "include"].iter().any(|stem| macro_use(text, stem))
 }
 
 /// `stem`, `option_env` / `include_str` / `include_bytes` style spellings
@@ -350,7 +349,9 @@ mod tests {
         assert!(!may_matter(
             "extern { fn getenv(); static environ: u8; } fn f(env: u8) {}"
         ));
-        assert!(!may_matter("// uspace/lib/posix/include/posix/time.h\nfn f() {}"));
+        assert!(!may_matter(
+            "// uspace/lib/posix/include/posix/time.h\nfn f() {}"
+        ));
         for text in [
             "env!(\"X\")",
             "env ! (\"X\")",

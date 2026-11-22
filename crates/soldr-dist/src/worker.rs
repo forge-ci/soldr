@@ -582,7 +582,11 @@ mod session_tests {
         assert_eq!(claim(&mut session, "b", t0), Some("a".into()));
         assert_eq!(claim(&mut session, "a", t0 + SESSION_IDLE), None, "refresh");
         let later = t0 + SESSION_IDLE * 2 + std::time::Duration::from_secs(1);
-        assert_eq!(claim(&mut session, "b", later), None, "idle session released");
+        assert_eq!(
+            claim(&mut session, "b", later),
+            None,
+            "idle session released"
+        );
         assert_eq!(claim(&mut session, "a", later), Some("b".into()));
     }
 }
