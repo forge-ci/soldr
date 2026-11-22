@@ -52,13 +52,7 @@ fn closure_fingerprint(workspace_root: &Path, libraries: &[PathBuf]) -> Option<S
         let manifest_path = library.join(KEY_FILES[0]);
         let manifest = std::fs::read(&manifest_path).ok()?;
         let parsed: toml::Value = toml::from_str(std::str::from_utf8(&manifest).ok()?).ok()?;
-        if parsed
-            .get("workspace")
-            .and_then(toml::Value::as_table)
-            .is_none()
-        {
-            return None;
-        }
+        parsed.get("workspace").and_then(toml::Value::as_table)?;
         let lock = std::fs::read(manifest_path.with_extension("lock")).ok()?;
         let parsed_lock: toml::Value = toml::from_str(std::str::from_utf8(&lock).ok()?).ok()?;
         let packages = parsed_lock.get("package")?.as_array()?;
