@@ -9,6 +9,7 @@ use std::{path::Path, time::Duration};
 
 pub const ALPN: &[u8] = b"soldr-dist/0";
 pub const VERSION: u32 = 1;
+pub const DEFAULT_RELAY_URL: &str = "https://signal.forge-ci.com";
 pub const CONTROL_LIMIT: usize = 8 * 1024 * 1024;
 pub const BLOB_LIMIT: u64 = 16 * 1024 * 1024 * 1024;
 
@@ -50,8 +51,9 @@ pub async fn endpoint_with_identity(
             .bind_addr("127.0.0.1:0")?;
     }
     if !direct_only {
-        // Ephemeral UDP sockets allow outbound relay traffic and hole-punch return packets;
-        // no fixed listener, TCP service or router port-mapping is configured.
+        // Keep both UDP transports even with a relay: iroh coordinates simultaneous-open
+        // hole punching over the relay and can select a direct path after connection setup.
+        // No fixed listener, TCP service or router port-mapping is configured.
         builder = builder.bind_addr("0.0.0.0:0")?.bind_addr("[::]:0")?;
         if let Some(url) = relay_url {
             builder = builder.relay_mode(relay_mode(Some(url))?);
@@ -62,7 +64,26 @@ pub async fn endpoint_with_identity(
     Ok(builder.bind().await?)
 }
 
-/// Public n0 relays are enabled only through an explicit `default` selection.
+/// Resolve CLI/environment policy; low-level `None` still disables relays for tests.
+pub fn relay_config(mode: Option<&str>, configured: Option<String>) -> Result<Option<String>> {
+    let selected = mode
+        .map(str::to_owned)
+        .or(configured)
+        .unwrap_or_else(|| DEFAULT_RELAY_URL.to_owned());
+    if selected == "none" {
+        return Ok(None);
+    }
+    relay_mode(Some(&selected))?;
+    Ok(Some(selected))
+}
+
+/// Validate a CLI relay selection without enabling public discovery backends.
+pub fn parse_relay_selection(value: &str) -> Result<String> {
+    relay_config(Some(value), None)?;
+    Ok(value.to_owned())
+}
+
+/// Public n0 relays remain an explicit `default` selection.
 pub fn relay_mode(value: Option<&str>) -> Result<iroh::RelayMode> {
     match value {
         None => Ok(iroh::RelayMode::Disabled),

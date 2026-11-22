@@ -219,8 +219,8 @@ soldr dist status --json
 
 ### Direct LAN bundle bring-up
 
-`--relay none` disables relay transports and ignores an ambient relay URL. With
-no relay URL configured, serving also defaults to direct LAN mode. The printed
+`--relay none` disables relay transports and ignores an ambient relay URL. Without an explicit override, serving uses the Forge relay at
+`https://signal.forge-ci.com`. In explicit direct LAN mode, the printed
 JSON ticket carries interface IP addresses and ephemeral UDP ports; copy the
 whole ticket to the client. The workstation must reach one of those addresses
 (the hosts must permit that UDP traffic). This mode needs no DNS, relay, signal
@@ -302,9 +302,9 @@ relay readiness before printing its ticket. No public lookup service, default
 third-party relay, TCP listener, fixed UDP port or router port mapping is enabled.
 Ephemeral UDP sockets carry outbound traffic and hole-punch return packets; the
 host firewall continues to reject unsolicited inbound traffic in relay mode. Clients use the
-configured relay or the relay embedded in the worker ticket. Direct-only tests
-bind localhost with relays disabled. `--relay none`, or no configured relay,
-instead serves direct LAN tickets and requires reachable interface UDP ports.
+configured relay (default `https://signal.forge-ci.com`). Direct-only tests
+bind localhost with relays disabled. Explicit `--relay none` serves direct LAN
+tickets and requires reachable interface UDP ports.
 
 `--host-load-file PATH` consumes a dispatcher-owned JSON snapshot:
 `{"gh_jobs_running":2,"gh_cpus_reserved":16,"cap":6,"updated_at":1795290000.0}`.
@@ -458,13 +458,15 @@ Client configuration (loaded when this binary's daemon generation starts):
 [dist]
 peers = ['<full printed JSON ticket>']
 root = '/absolute/client/dist-root'
-# relay_url = 'https://operational-iroh-relay.example'
+# relay_url = 'https://signal.forge-ci.com' # default
 ```
 
 `SOLDR_DIST_PEERS` overrides the configured list. It accepts one full ticket or
 node ID, or a JSON array of such strings. Empty disables remote offers.
 `SOLDR_DIST_ROOT` overrides the client root. `SOLDR_DIST_RELAY=none` disables
-relay use; node IDs otherwise need `SOLDR_DIST_RELAY_URL` or `dist.relay_url`.
+relay use; otherwise the default is `https://signal.forge-ci.com`. Override it
+with `SOLDR_DIST_RELAY_URL`, `SOLDR_DIST_RELAY=<https-url>`, or `dist.relay_url`.
+A bare node ID uses that configured relay; full tickets remain the bring-up fallback.
 Multiple configured peers receive offers in rotation, with one offer per miss;
 a decline falls back locally rather than retrying another node.
 
@@ -541,9 +543,9 @@ separate `feat/dist-miss-path` adapter bundle; a successful ordinary Cargo build
 on direct2 alone is not evidence of remote execution.
 
 `--relay default` (or `SOLDR_DIST_RELAY=default`) explicitly enables iroh's
-production n0 public relay map. This is opt-in: no flag/URL still means direct
-LAN, and `--relay none` still disables relay transports. Existing explicit
-HTTPS `--relay-url` remains the self-hosted alternative. No public address
+production n0 public relay map. This is opt-in: no flag/URL now selects the Forge
+relay at `https://signal.forge-ci.com`, and `--relay none` disables relay transports.
+Both `--relay <https-url>` and `--relay-url <https-url>` select a custom relay. No public address
 lookup, registry, portmapper, or discovery backend is enabled. Relay traffic
 contains end-to-end encrypted QUIC payloads authenticated to the pinned peer
 identities; public relays can observe connection metadata. Iroh attempts direct
@@ -614,7 +616,8 @@ the full client ticket supplies routing in the worker-to-client direction.
 
 The updated `feat/dist-miss-path` stack shares one ClientConnections listener
 across all configured workers. `SOLDR_DIST_RELAY=default` explicitly selects n0
-public relays, `none` disables them, and other values fail clearly.
+public relays, `none` disables them, and an HTTPS URL selects a custom relay.
+Without a setting the CLI and Cargo adapter both use `https://signal.forge-ci.com`.
 `SOLDR_DIST_REVERSE_ONLY=true` requires worker-originated connections; false
 permits normal dialing too. `[dist] reverse_only = true` is the file equivalent,
 with the environment taking precedence. A reverse-only peers entry may contain
@@ -741,3 +744,36 @@ formatting passed, and review is clean. The narrow `soldr cargo clippy -p
 soldr-dist` stalled in dependency compilation with 300-second no-progress dumps
 and was stopped; no new source-build/test result is claimed. E640 validation
 remains authoritative for this bundle; no local gate or push was run.
+
+### Forge relay default and registry follow-up
+
+The default relay for `dist serve`, `dist exec`, and the Cargo miss adapter is
+`https://signal.forge-ci.com`. This is the expected Forge-operated iroh relay
+behind Caddy; bring-up depends on that service being deployed. Override it with
+`--relay https://other-relay.example`, `--relay-url`, `SOLDR_DIST_RELAY_URL`, or
+`[dist] relay_url`. `--relay` / `SOLDR_DIST_RELAY` wins over the URL setting.
+Explicit `default` retains the n0 public relay map fallback; `none` is direct-only.
+
+Both relay and ephemeral IPv4/IPv6 UDP transports remain enabled together. Iroh
+uses the relay to coordinate simultaneous-open hole punching, then prefers direct
+paths when connectivity permits; encrypted relay fallback remains available when
+it does not. No unsolicited inbound firewall rule is required. Existing per-joblet
+metrics sample the selected final path before connection close (`direct`, `relay`,
+or `mixed`), RTT and QUIC byte counters. A short job can finish before a direct
+upgrade; a relay result is not proof that hole punching was disabled.
+
+Static JSON tickets carrying node ID, direct addresses and relay URL remain the
+bring-up path in this miss-path PR. The next discovery PR will publish worker
+NodeAddr data to the signal registry via `/v1/dist/register` and resolve peers
+through the design's `/v1/dist/*` API before dialing. Registry discovery and
+transport relay are separate services even when they share the signal hostname.
+No registry requests are added in this bundle.
+
+Decision log:
+- 2026-11-22 Owner changes the default from direct-only to the Forge-operated
+  relay because Dell nodes accept no unsolicited inbound traffic. Share relay
+  selection between the CLI and Cargo adapter; preserve explicit n0 and LAN modes.
+- 2026-11-22 Accept HTTPS URLs directly through `--relay` / SOLDR_DIST_RELAY,
+  preserving dual-stack UDP so relay coordination can upgrade to direct QUIC.
+- 2026-11-22 Defer signal NodeAddr publication/resolution to the discovery follow-up
+  PR after the miss path; static tickets continue to support bring-up meanwhile.

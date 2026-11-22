@@ -108,12 +108,7 @@ fn relay_config(
     mode: Option<&str>,
     configured: Option<String>,
 ) -> soldr_dist::Result<Option<String>> {
-    match mode {
-        None => Ok(configured),
-        Some("none") => Ok(None),
-        Some("default") => Ok(Some("default".into())),
-        Some(_) => Err("SOLDR_DIST_RELAY must be none or default".into()),
-    }
+    transport::relay_config(mode, configured)
 }
 
 fn reverse_mode(value: Option<&str>, configured: bool) -> soldr_dist::Result<bool> {
@@ -236,6 +231,35 @@ impl CompileExecutor for Executor {
 #[cfg(test)]
 mod tests {
     use super::peer_list;
+    #[test]
+    fn reverse_and_public_relay_modes_are_explicit_overrides() {
+        assert_eq!(
+            super::relay_config(Some("default"), Some("https://custom.example".into()))
+                .unwrap()
+                .as_deref(),
+            Some("default")
+        );
+        assert!(
+            super::relay_config(Some("none"), Some("https://custom.example".into()))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            super::relay_config(None, None).unwrap().as_deref(),
+            Some(soldr_dist::transport::DEFAULT_RELAY_URL)
+        );
+        assert_eq!(
+            super::relay_config(Some("https://signal.forge-ci.com"), None)
+                .unwrap()
+                .as_deref(),
+            Some("https://signal.forge-ci.com")
+        );
+        assert!(super::relay_config(Some("auto"), None).is_err());
+        assert!(super::reverse_mode(None, true).unwrap());
+        assert!(super::reverse_mode(Some("true"), false).unwrap());
+        assert!(!super::reverse_mode(Some("false"), true).unwrap());
+        assert!(super::reverse_mode(Some("typo"), false).is_err());
+    }
     #[test]
     fn static_peers_preserve_json_tickets_and_env_precedence() {
         let ticket = r#"{"id":"node", "addrs":["127.0.0.1:7"]}"#;

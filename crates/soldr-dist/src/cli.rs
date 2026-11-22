@@ -21,8 +21,8 @@ pub struct DistArgs {
     pub root: Option<PathBuf>,
     #[arg(long, global = true, env = "SOLDR_DIST_RELAY_URL")]
     pub relay_url: Option<String>,
-    /// Explicit public n0 relays, or none for direct LAN; overrides relay URL.
-    #[arg(long, global = true, value_parser = ["none", "default"], env = "SOLDR_DIST_RELAY")]
+    /// HTTPS relay URL, default for public n0 relays, or none for direct LAN.
+    #[arg(long, global = true, value_parser = transport::parse_relay_selection, env = "SOLDR_DIST_RELAY")]
     pub relay: Option<String>,
     #[command(subcommand)]
     pub command: DistCommand,
@@ -101,11 +101,7 @@ pub async fn run(args: DistArgs) -> Result<i32> {
     let root = args.root.map(Ok).unwrap_or_else(default_root)?;
     std::fs::create_dir_all(&root)?;
     let relay_disabled = args.relay.as_deref() == Some("none");
-    let relay_url = match args.relay.as_deref() {
-        Some("none") => None,
-        Some("default") => Some("default".to_owned()),
-        _ => args.relay_url,
-    };
+    let relay_url = transport::relay_config(args.relay.as_deref(), args.relay_url)?;
     match args.command {
         DistCommand::Serve {
             slots,

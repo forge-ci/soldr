@@ -714,6 +714,19 @@ fn public_relays_are_explicit_and_reverse_peers_can_use_only_a_node_id() {
         .unwrap()
         .args;
     assert_eq!(args.relay.as_deref(), Some("default"));
+    let args = Command::try_parse_from(["dist", "serve", "--relay", "https://signal.forge-ci.com"])
+        .unwrap()
+        .args;
+    assert_eq!(args.relay.as_deref(), Some("https://signal.forge-ci.com"));
+    assert_eq!(
+        soldr_dist::transport::relay_config(None, None)
+            .unwrap()
+            .as_deref(),
+        Some(soldr_dist::transport::DEFAULT_RELAY_URL)
+    );
+    assert!(soldr_dist::transport::relay_config(Some("none"), None)
+        .unwrap()
+        .is_none());
     assert!(Command::try_parse_from(["dist", "serve", "--outbound-only"]).is_err());
     assert!(Command::try_parse_from(["dist", "serve", "--relay", "auto"]).is_err());
 }
