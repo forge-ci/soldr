@@ -29,6 +29,7 @@ fn proto_roundtrip() {
     let offer = Offer {
         job: Some(job),
         speculative: vec!["abc".into()],
+        job_token: 7,
     };
     assert_eq!(
         offer,

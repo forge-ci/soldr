@@ -1,5 +1,5 @@
 //! Bounded protobuf control frames and independent streaming blob transfers.
-use crate::{cas::Cas, proto::Blob, trust::node_key, Result};
+use crate::{proto::Blob, trust::node_key, Result};
 use iroh::{
     endpoint::{presets, Connection, QuicTransportConfig, RecvStream, SendStream},
     Endpoint, EndpointAddr, SecretKey,
