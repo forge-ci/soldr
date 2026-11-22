@@ -85,6 +85,10 @@ def _start_wrapper(child: str, env: dict[str, str]) -> subprocess.Popen[str]:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="uses the Unix Nextest wrapper")
+@pytest.mark.skipif(
+    not os.environ.get("SOLDR_NEXTEST_WRAPPER_UNDER_TEST"),
+    reason="requires the wrapper explicitly built by the tests lane",
+)
 @pytest.mark.parametrize("stream", ["stdout", "stderr"])
 def test_output_watchdog_allows_progress_then_stops_silent_child(stream: str) -> None:
     env = os.environ.copy()
