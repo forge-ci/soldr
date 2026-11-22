@@ -75,7 +75,11 @@ fn append_cargo_abort_log(request: CargoAbortLogRequest<'_>) -> Result<PathBuf, 
 }
 
 fn cargo_timeout_retry_allowed(cache_enabled_for_cargo: bool, args: &[String]) -> bool {
-    if !cache_enabled_for_cargo || env_flag_truthy(CARGO_TIMEOUT_RETRY_DISABLE_ENV_VAR) {
+    // A library timeout must fail through the managed route rather than
+    // silently recompiling its entire dependency graph with caching disabled.
+    if !cache_enabled_for_cargo || env_flag_truthy(CARGO_TIMEOUT_RETRY_DISABLE_ENV_VAR)
+        || env_flag_truthy(crate::dylint_library_cache::BUILDING_LIBRARIES)
+    {
         return false;
     }
     matches!(

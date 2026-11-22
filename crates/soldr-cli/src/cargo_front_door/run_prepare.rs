@@ -335,7 +335,9 @@ fn build_child_cargo_command(
     ),
     SoldrError,
 > {
-    let args = spec.args;
+    let library_args = env_flag_truthy(crate::dylint_library_cache::BUILDING_LIBRARIES)
+        .then(|| crate::dylint_library_cache::canonical_target_args(spec.args));
+    let args = library_args.as_deref().unwrap_or(spec.args);
     // Compute env-var overrides keyed off the subcommand + its
     // --target argument. Today this fixes ring's build.rs on
     // `cargo xwin build --target *-pc-windows-msvc` by routing cc-rs
@@ -377,6 +379,12 @@ fn build_child_cargo_command(
     let _ = codegen_units::apply(&mut command, args);
 
     apply_child_cargo_toolchain_env(&mut command, spec);
+    if spec.dylint_plan.is_some() {
+        if let Ok(paths) = SoldrPaths::new() {
+            let caller_home = std::env::var_os(crate::core::CARGO_HOME_ENV_VAR);
+            crate::dylint_library_cache::apply_homes(&mut command, spec.cargo, &paths, caller_home.as_deref());
+        }
+    }
 
     // Apply subcommand-derived env overrides (e.g. CC_<triple>=clang-cl
     // for `cargo xwin build --target *-pc-windows-msvc`). Honor a
@@ -659,6 +667,12 @@ async fn finalize_child_cache_plan(
             crate::binaries::dylint_wrapper_shim_binary(paths)?.as_os_str(),
             crate::wrapper_identity::WrapperOrigin::SoldrManaged,
         );
+    }
+    if cache_plan.uses_managed_zccache()
+        && env_flag_truthy(crate::dylint_library_cache::BUILDING_LIBRARIES)
+    {
+        let args = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        crate::dylint_library_cache::apply_target_remap(command, &args);
     }
     Ok(cache_plan)
 }
