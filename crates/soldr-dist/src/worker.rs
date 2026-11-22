@@ -136,6 +136,8 @@ impl Worker {
         });
         let mut jobs = JoinSet::new();
         let maintenance = tokio::spawn(maintain(state.clone(), shutdown.clone()));
+        // Ends with the endpoint; logs each relay disconnect and reconnect (soldr#4212).
+        let _relay_log = crate::link::watch_relay(&self.endpoint, "worker");
         for client in self.clients {
             // One warm session per client multiplexes every joblet; slots bound
             // compiler admission, not sockets.
@@ -192,7 +194,14 @@ fn report_join(result: Option<std::result::Result<Result<()>, tokio::task::JoinE
     if let Some(result) = result {
         match result {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => eprintln!("Dist connection error: {e}"),
+            // A client that drops mid-joblet re-leases it (soldr#4212): log that
+            // once, as information, with the real cause ("timed out", "closed
+            // by peer: ...") instead of a bare "connection lost" error.
+            Ok(Err(e)) if crate::link::is_connection_loss(e.as_ref()) => eprintln!(
+                "Dist client disconnected during a joblet ({}); the client re-leases it",
+                crate::link::describe(e.as_ref())
+            ),
+            Ok(Err(e)) => eprintln!("Dist joblet failed: {}", crate::link::describe(e.as_ref())),
             Err(e) => eprintln!("Dist task error: {e}"),
         }
     }

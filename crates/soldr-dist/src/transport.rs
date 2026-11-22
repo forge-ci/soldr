@@ -1,11 +1,11 @@
 //! Bounded protobuf control frames and independent streaming blob transfers.
-use crate::{proto::Blob, trust::node_key, Result};
+use crate::{link, proto::Blob, trust::node_key, Result};
 use iroh::{
     endpoint::{presets, Connection, QuicTransportConfig, RecvStream, SendStream},
     Endpoint, EndpointAddr, SecretKey,
 };
 use prost::Message;
-use std::{path::Path, time::Duration};
+use std::path::Path;
 
 pub const ALPN: &[u8] = b"soldr-dist/0";
 pub const VERSION: u32 = 3;
@@ -30,11 +30,12 @@ pub async fn endpoint_with_identity(
     direct_only: bool,
     relay_url: Option<&str>,
 ) -> Result<Endpoint> {
+    // soldr#4212: see `link` for why these outlast a relay restart.
     let config = QuicTransportConfig::builder()
-        .max_idle_timeout(Some(Duration::from_secs(5).try_into()?))
-        .keep_alive_interval(Duration::from_secs(1))
-        .default_path_max_idle_timeout(Duration::from_secs(5))
-        .default_path_keep_alive_interval(Duration::from_secs(1))
+        .max_idle_timeout(Some(link::IDLE_TIMEOUT.try_into()?))
+        .keep_alive_interval(link::KEEP_ALIVE)
+        .default_path_max_idle_timeout(link::PATH_IDLE_TIMEOUT)
+        .default_path_keep_alive_interval(link::KEEP_ALIVE)
         .build();
     let mut builder = Endpoint::builder(presets::Minimal)
         .secret_key(identity)

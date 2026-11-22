@@ -4,6 +4,7 @@ use crate::{
     blob_router::BlobInbox,
     cas::Cas,
     client_connections::{ClientConnections, Session},
+    link,
     proto::*,
     transport::{self, VERSION},
     trust::Trust,
@@ -84,19 +85,44 @@ impl DistClient {
                 reason: format!("Rust environment: {error}"),
                 metrics: Default::default(),
             },
-            Ok(()) => match self.try_execute(&job, &mut metrics).await {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    eprintln!(
-                        "\x1b[31msoldr dist: WARNING worker {} lost: {error}; run locally\x1b[0m",
-                        self.worker.id
-                    );
-                    DistOutcome::Declined {
-                        metrics: JobMetrics::default(),
-                        reason: "worker lost".into(),
+            Ok(()) => {
+                // A joblet whose connection drops is re-leasable: outputs are
+                // published only after all of them verify. Retry it on a fresh
+                // connection (first retry within 1 s) before running locally.
+                let mut retries = 0;
+                loop {
+                    match self.try_execute(&job, &mut metrics).await {
+                        Ok(outcome) => break outcome,
+                        Err(error)
+                            if retries < link::JOBLET_RETRIES
+                                && link::is_connection_loss(error.as_ref()) =>
+                        {
+                            let delay = link::reconnect_delay(retries);
+                            retries += 1;
+                            eprintln!(
+                                "soldr dist: worker {} link lost ({}); re-leasing joblet in {:.1}s (retry {retries}/{})",
+                                self.worker.id,
+                                link::describe(error.as_ref()),
+                                delay.as_secs_f64(),
+                                link::JOBLET_RETRIES
+                            );
+                            metrics = JobMetrics::for_job(self.worker.id.to_string(), &job);
+                            tokio::time::sleep(delay).await;
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "\x1b[31msoldr dist: WARNING worker {} lost: {}; run locally\x1b[0m",
+                                self.worker.id,
+                                link::describe(error.as_ref())
+                            );
+                            break DistOutcome::Declined {
+                                metrics: JobMetrics::default(),
+                                reason: "worker lost".into(),
+                            };
+                        }
                     }
                 }
-            },
+            }
         };
         metrics.elapsed_millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         metrics.finish(&outcome);

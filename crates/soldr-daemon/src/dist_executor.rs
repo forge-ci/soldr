@@ -69,6 +69,8 @@ pub(crate) async fn register(
     let identity = soldr_dist::trust::node_key(&root)?;
     let lease = transport::EndpointLease::acquire_with_key(&root, &root.join("node.key"))?;
     let endpoint = transport::endpoint_with_identity(identity, false, relay.as_deref()).await?;
+    // Ends with the endpoint; logs relay disconnects and reconnects (soldr#4212).
+    drop(soldr_dist::link::watch_relay(&endpoint, "client"));
     let connections = ClientConnections::new(endpoint, &root)?;
     let clients = addresses
         .into_iter()

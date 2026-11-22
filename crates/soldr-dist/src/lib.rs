@@ -8,6 +8,7 @@ pub mod compiler;
 mod compiler_image;
 pub mod dep_info;
 pub mod host_load;
+pub mod link;
 pub mod metrics;
 pub mod proto;
 pub mod rust_inputs;
