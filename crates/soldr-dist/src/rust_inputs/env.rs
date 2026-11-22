@@ -126,7 +126,7 @@ pub(super) fn inspect(job: &mut DistJob) -> Result<BTreeSet<String>> {
         .argv
         .iter()
         .any(|arg| arg == "--extern" || arg.starts_with("--extern="))
-        || sources.iter().any(|text| text.contains("extern crate"));
+        || sources.iter().any(|text| imports_non_sysroot_crate(text));
     if !uses.includes.is_empty() && (uses.ambiguous_macros || external_macros) {
         return Err(
             "path env rewrite with unresolved macro expansion requires filesystem namespace".into(),
@@ -171,6 +171,20 @@ fn local_macros(tokens: TokenStream, defined: &mut BTreeSet<String>) {
 }
 
 /// Whether calling `name` could hide an environment read from this scan.
+/// `extern crate x` for anything but a sysroot crate. Sysroot macros are the
+/// std/core macros `STD_MACROS` already vets (target-lexicon declares
+/// `extern crate alloc` / `extern crate std as alloc`).
+fn imports_non_sysroot_crate(text: &str) -> bool {
+    const SYSROOT: &[&str] = &["std", "core", "alloc", "proc_macro", "test"];
+    let words: Vec<&str> = text
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    words
+        .windows(3)
+        .any(|w| w[0] == "extern" && w[1] == "crate" && !SYSROOT.contains(&w[2]))
+}
+
 fn opaque_macro(name: &str, uses: &Uses) -> bool {
     !STD_MACROS.contains(&name) || uses.local_macros.contains(name)
 }
@@ -283,6 +297,12 @@ mod tests {
             .push(crate::cas::DigestMemo::default().input(&lib).unwrap());
         inspect(&mut job).unwrap();
         assert_eq!(job.rewrite_env, ["OUT_DIR"]);
+        let (_r2, mut sysroot) = job_for(&format!(
+            "extern crate alloc; extern crate std as alloc2; {INCLUDE} fn f() {{ assert!(true); }}"
+        ));
+        inspect(&mut sysroot).unwrap();
+        let (_r3, mut foreign) = job_for(&format!("extern crate other; {INCLUDE}"));
+        assert!(inspect(&mut foreign).is_err());
         job.argv = vec!["--extern".into(), format!("other={}", lib.display())];
         let error = inspect(&mut job).unwrap_err().to_string();
         assert!(error.contains("unresolved macro expansion"), "{error}");
