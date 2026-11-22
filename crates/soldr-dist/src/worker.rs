@@ -314,16 +314,7 @@ async fn handle_job(
         .iter()
         .find(|c| c.kind == job.compiler_kind && c.matches_identity(&job.compiler_identity))
     else {
-        let offered = state
-            .compilers
-            .iter()
-            .filter(|c| c.kind == job.compiler_kind)
-            .map(|c| c.identity.lines().next().unwrap_or_default().to_owned())
-            .collect::<Vec<_>>();
-        let reason = format!(
-            "toolchain mismatch: {} requested {}; worker offers {offered:?}",
-            job.compiler_kind, job.compiler_identity
-        );
+        let reason = toolchain_mismatch(state, &job);
         eprintln!("Dist joblet declined: {reason}");
         decline(&mut send, &reason).await?;
         send.finish()?;
@@ -371,7 +362,33 @@ async fn handle_job(
         })
         .await??
     };
+    // The lease pins the outputs in the store until delivery completes.
     let _lease = lease;
+    deliver(state, conn, offer.job_token, &done, (send, recv)).await
+}
+
+/// The decline reason naming the requested and every offered identity.
+fn toolchain_mismatch(state: &State, job: &DistJob) -> String {
+    let offered = state
+        .compilers
+        .iter()
+        .filter(|c| c.kind == job.compiler_kind)
+        .map(|c| c.identity.lines().next().unwrap_or_default().to_owned())
+        .collect::<Vec<_>>();
+    format!(
+        "toolchain mismatch: {} requested {}; worker offers {offered:?}",
+        job.compiler_kind, job.compiler_identity
+    )
+}
+
+/// Sends the result, then streams every output the client asks for.
+async fn deliver(
+    state: &State,
+    conn: &Connection,
+    token: u64,
+    done: &crate::proto::Done,
+    (mut send, mut recv): (SendStream, RecvStream),
+) -> Result<()> {
     // Disconnected clients keep the compile alive only through producing its result.
     transport::send(
         &mut send,
@@ -388,7 +405,7 @@ async fn handle_job(
             return Err("undeclared output requested".into());
         }
         let file = state.cas.open(&digest)?;
-        let (conn, token) = (conn.clone(), offer.job_token);
+        let conn = conn.clone();
         transfers.spawn(async move { transport::upload(&conn, token, digest, file).await });
     }
     while let Some(result) = transfers.join_next().await {
