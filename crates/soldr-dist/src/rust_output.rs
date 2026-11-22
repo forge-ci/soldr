@@ -66,6 +66,17 @@ pub(crate) fn proof_args(
     if let Some(path) = depfiles(job)?.into_iter().next() {
         return Ok((args, Some(sandbox::mirrored(root, &path)?)));
     }
+    // rustc hashes the set of emitted output types into the crate hash (SVH), so
+    // adding dep-info to a unit that emits metadata changes its rlib/rmeta bytes.
+    // Cargo always emits dep-info; only hand-built jobs reach this.
+    if emitted_kinds(&args)
+        .iter()
+        .any(|kind| kind == "link" || kind == "metadata")
+    {
+        return Err("rustc job emits metadata without dep-info: adding the input proof \
+                    would change its crate hash, so it cannot be built remotely"
+            .into());
+    }
     let proof = root.join("rust-input-proof.d");
     let mode = format!("dep-info={}", proof.display());
     if let Some(index) = args
@@ -123,6 +134,29 @@ pub(crate) fn proof(job: &DistJob, root: &Path, path: Option<&Path>) -> Result<V
     Ok(text
         .replace(prefix.to_str().ok_or("non-UTF8 sandbox root")?, "")
         .into_bytes())
+}
+
+/// Output types a rustc command line emits (`link` when `--emit` is absent).
+fn emitted_kinds(args: &[String]) -> Vec<String> {
+    let mut kinds = Vec::new();
+    let mut seen_emit = false;
+    for (index, arg) in args.iter().enumerate() {
+        let spec = if arg == "--emit" {
+            args.get(index + 1).map(String::as_str)
+        } else {
+            arg.strip_prefix("--emit=")
+        };
+        if let Some(spec) = spec {
+            seen_emit = true;
+            for mode in spec.split(',') {
+                kinds.push(mode.split_once('=').map_or(mode, |(kind, _)| kind).to_owned());
+            }
+        }
+    }
+    if !seen_emit {
+        kinds.push("link".into());
+    }
+    kinds
 }
 
 fn depfiles(job: &DistJob) -> Result<HashSet<String>> {
@@ -195,4 +229,43 @@ fn dep_info_and_artifact_json_use_client_paths_without_changing_binary_outputs()
         "/stage/a.rlib"
     );
     assert_eq!(std::fs::read(object).unwrap(), b"binary untouched");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rustc(argv: &[&str], outputs: &[&str]) -> DistJob {
+        DistJob {
+            compiler_kind: "rustc".into(),
+            cwd: "/w".into(),
+            argv: argv.iter().map(|s| (*s).into()).collect(),
+            outputs: outputs.iter().map(|s| (*s).into()).collect(),
+            ..DistJob::default()
+        }
+    }
+
+    #[test]
+    fn metadata_units_without_dep_info_are_refused_not_altered() {
+        let root = Path::new("/tmp/job");
+        for argv in [
+            &["--crate-type=rlib", "lib.rs"][..],
+            &["--emit=metadata,link", "lib.rs"][..],
+            &["--emit", "link=/w/out.rlib", "lib.rs"][..],
+        ] {
+            let error = proof_args(&rustc(argv, &["/w/out.rlib"]), root).unwrap_err();
+            assert!(error.to_string().contains("crate hash"), "{argv:?}: {error}");
+        }
+        // An object-only unit carries no metadata hash, so the proof may be added.
+        let (args, proof) = proof_args(&rustc(&["--emit=obj", "a.rs"], &["/w/a.o"]), root).unwrap();
+        assert!(args.iter().any(|a| a.contains("dep-info=")), "{args:?}");
+        assert!(proof.is_some());
+        // Cargo's own dep-info is reused untouched.
+        let (args, _) = proof_args(
+            &rustc(&["--emit=dep-info=/w/a.d,metadata,link", "lib.rs"], &["/w/a.d", "/w/a.rlib"]),
+            root,
+        )
+        .unwrap();
+        assert_eq!(args.iter().filter(|a| a.contains("dep-info=")).count(), 1);
+    }
 }

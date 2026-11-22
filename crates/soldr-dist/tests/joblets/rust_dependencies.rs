@@ -193,7 +193,8 @@ fn escaped_dep_info_input_declines_without_replacing_a_local_output() {
         fs::write(&source, format!("pub const TEXT: &str = include_str!({:?});\n", outside)).unwrap();
         let output = cwd.join("out.rlib");
         fs::write(&output, "existing local output").unwrap();
-        let manifest = job(&compiler, &cwd, vec!["--crate-type=rlib".into(), "lib.rs".into(), "-o".into(), "out.rlib".into()], &source, &output);
+        let mut manifest = job(&compiler, &cwd, vec!["--crate-type=rlib".into(), "lib.rs".into(), "--emit=dep-info=out.d,link=out.rlib".into()], &source, &output);
+        manifest.outputs.push(cwd.join("out.d").to_str().unwrap().into());
         let result = fixture.client.execute(manifest).await;
         assert!(matches!(result, DistOutcome::Declined { ref reason, .. } if reason.contains("Rust input backstop") && reason.contains("outside")), "{result:?}");
         assert_eq!(fs::read(output).unwrap(), b"existing local output");
@@ -223,7 +224,8 @@ fn shipped_absolute_include_cannot_read_different_original_host_bytes() {
         fs::write(&source, format!("include!({original:?});\n")).unwrap();
         let output = cwd.join("out.rlib");
         fs::write(&output, b"keep me").unwrap();
-        let mut manifest = job(&compiler, &cwd, vec!["--crate-type=rlib".into(), "lib.rs".into(), "-o".into(), "out.rlib".into()], &source, &output);
+        let mut manifest = job(&compiler, &cwd, vec!["--crate-type=rlib".into(), "lib.rs".into(), "--emit=dep-info=out.d,link=out.rlib".into()], &source, &output);
+        manifest.outputs.push(cwd.join("out.d").to_str().unwrap().into());
         manifest.inputs.push(declared);
         let result = fixture.client.execute(manifest).await;
         assert!(matches!(result, DistOutcome::Declined { ref reason, .. } if reason.contains("outside sandbox")), "{result:?}");
