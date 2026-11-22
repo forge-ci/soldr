@@ -217,6 +217,35 @@ soldr dist exec --worker '<printed-ticket>' -- rustc --emit=obj hello.rs -o hell
 soldr dist status --json
 ```
 
+### Direct LAN bundle bring-up
+
+`--relay none` disables relay transports and ignores an ambient relay URL. With
+no relay URL configured, serving also defaults to direct LAN mode. The printed
+JSON ticket carries interface IP addresses and ephemeral UDP ports; copy the
+whole ticket to the client. The workstation must reach one of those addresses
+(the hosts must permit that UDP traffic). This mode needs no DNS, relay, signal
+registry, port forwarding, or `online()` wait. Keep explicit HTTPS relay mode
+for hosts that require outbound-only connectivity across NAT.
+
+```sh
+# Dell, as soldr-dist; CLIENT_ID comes from workstation status --json.
+ROOT=/var/lib/soldr-dist/state
+soldr dist trust add "$CLIENT_ID" --role client --root "$ROOT"
+RUSTUP_TOOLCHAIN=1.98.1 soldr dist serve --root "$ROOT" --relay none \
+  --slots 8 --cas-budget 10737418240 --host-load-file /run/forge/host-load.json
+
+# Workstation, after copying the printed WORKER_ID and DIST_TICKET.
+CLIENT_ROOT="$PWD/target/dist-client"
+soldr dist trust add "$WORKER_ID" --role worker --root "$CLIENT_ROOT"
+RUSTUP_TOOLCHAIN=1.98.1 soldr dist exec --root "$CLIENT_ROOT" --relay none \
+  --worker "$DIST_TICKET" -- rustc --crate-name dist_smoke --crate-type lib \
+  --emit=obj "$PWD/target/dist-smoke/smoke.rs" -o "$PWD/target/dist-smoke/smoke.o"
+```
+
+Use the source creation and byte-comparison steps below for a complete smoke
+check. A bare node ID has no LAN routing information: direct mode requires a
+full ticket. `SOLDR_DIST_PEERS` may contain that ticket instead of `--worker`.
+
 ### Static E640 bring-up (no registry)
 
 The existing `serve` command prints the node ID and a JSON dial ticket. `worker`
@@ -267,14 +296,15 @@ no rendezvous, DNS discovery or external network is needed by those endpoints.
 
 ## Outbound relay and shared-host admission
 
-`dist serve` requires `--relay-url` or `SOLDR_DIST_RELAY_URL` (HTTPS). It
+With `--relay-url` or `SOLDR_DIST_RELAY_URL` (HTTPS), `dist serve`
 connects outbound to that configured relay and waits at most ten seconds for
 relay readiness before printing its ticket. No public lookup service, default
 third-party relay, TCP listener, fixed UDP port or router port mapping is enabled.
 Ephemeral UDP sockets carry outbound traffic and hole-punch return packets; the
-host firewall continues to reject unsolicited inbound traffic. Clients use the
+host firewall continues to reject unsolicited inbound traffic in relay mode. Clients use the
 configured relay or the relay embedded in the worker ticket. Direct-only tests
-bind localhost with relays disabled.
+bind localhost with relays disabled. `--relay none`, or no configured relay,
+instead serves direct LAN tickets and requires reachable interface UDP ports.
 
 `--host-load-file PATH` consumes a dispatcher-owned JSON snapshot:
 `{"gh_jobs_running":2,"gh_cpus_reserved":16,"cap":6,"updated_at":1795290000.0}`.
@@ -399,3 +429,8 @@ reuse an existing iroh Endpoint and give the client a dedicated CAS/trust root.
 - 2026-11-21 Static bring-up accepts one `SOLDR_DIST_PEERS` node ID with an explicit
   HTTPS relay, or a printed ticket; `worker` aliases `serve`. This enables the
   first remote joblet without adding registry discovery or unreleased hook APIs.
+
+- 2026-11-21 Owner-priority LAN bring-up makes relays optional: `--relay none`
+  disables relay transports and startup waits, retaining explicit interface
+  addresses in tickets. This requires LAN UDP reachability; outbound-only NAT
+  hosts still use explicit HTTPS relay mode.

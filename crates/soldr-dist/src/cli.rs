@@ -19,6 +19,9 @@ pub struct DistArgs {
     pub root: Option<PathBuf>,
     #[arg(long, global = true, env = "SOLDR_DIST_RELAY_URL")]
     pub relay_url: Option<String>,
+    /// Disable relays for direct LAN tickets; overrides SOLDR_DIST_RELAY_URL.
+    #[arg(long, global = true, value_parser = ["none"], env = "SOLDR_DIST_RELAY")]
+    pub relay: Option<String>,
     #[command(subcommand)]
     pub command: DistCommand,
 }
@@ -79,6 +82,8 @@ pub fn default_root() -> Result<PathBuf> {
 pub async fn run(args: DistArgs) -> Result<i32> {
     let root = args.root.map(Ok).unwrap_or_else(default_root)?;
     std::fs::create_dir_all(&root)?;
+    let relay_disabled = args.relay.as_deref() == Some("none");
+    let relay_url = if relay_disabled { None } else { args.relay_url };
     match args.command {
         DistCommand::Serve {
             slots,
@@ -87,16 +92,12 @@ pub async fn run(args: DistArgs) -> Result<i32> {
             signal_url,
             key,
         } => {
-            let relay = args
-                .relay_url
-                .as_deref()
-                .ok_or("dist serve requires --relay-url or SOLDR_DIST_RELAY_URL")?;
             serve(
                 &root,
                 slots,
                 cas_budget,
                 host_load_file,
-                relay,
+                relay_url.as_deref(),
                 signal_url,
                 key,
             )
@@ -107,10 +108,12 @@ pub async fn run(args: DistArgs) -> Result<i32> {
             let _endpoint_lease =
                 transport::EndpointLease::acquire_with_key(&root, &root.join("node.key"))?;
             let job = scaffold::job(&argv).await?;
-            let worker = transport::parse_peer(&worker, args.relay_url.as_deref())?;
-            let relay = args
-                .relay_url
-                .or_else(|| worker.relay_urls().next().map(ToString::to_string));
+            let worker = transport::parse_peer(&worker, relay_url.as_deref())?;
+            let relay = if relay_disabled {
+                None
+            } else {
+                relay_url.or_else(|| worker.relay_urls().next().map(ToString::to_string))
+            };
             let endpoint =
                 transport::endpoint_with_identity(identity, false, relay.as_deref()).await?;
             let client = DistClient::new(endpoint, worker, &root)?;
@@ -153,7 +156,7 @@ async fn serve(
     slots: usize,
     cas_budget: u64,
     host_load_file: Option<PathBuf>,
-    relay: &str,
+    relay: Option<&str>,
     signal_url: String,
     key: Option<PathBuf>,
 ) -> Result<i32> {
@@ -163,10 +166,14 @@ async fn serve(
         None => (trust::node_key(root)?, root.join("node.key")),
     };
     let _endpoint_lease = transport::EndpointLease::acquire_with_key(root, &key_path)?;
-    let endpoint = transport::endpoint_with_identity(identity, false, Some(relay)).await?;
-    tokio::time::timeout(std::time::Duration::from_secs(10), endpoint.online())
-        .await
-        .map_err(|_| "dist relay did not become online within 10 seconds")?;
+    let endpoint = transport::endpoint_with_identity(identity, false, relay).await?;
+    if relay.is_some() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), endpoint.online())
+            .await
+            .map_err(|_| "dist relay did not become online within 10 seconds")?;
+    } else if endpoint.addr().ip_addrs().next().is_none() {
+        return Err("dist direct LAN endpoint has no reachable interface addresses".into());
+    }
     let mut compilers = vec![Compiler::rustc().await?];
     if let Some(cc) = scaffold::find_program("cc") {
         compilers.push(Compiler::cc(&cc)?);

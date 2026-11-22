@@ -628,3 +628,33 @@ fn worker_alias_is_the_same_native_serve_command() {
         std::ffi::OsStr::new("SOLDR_DIST_PEERS")
     );
 }
+
+#[test]
+fn direct_lan_cli_and_ticket_need_no_relay() {
+    use clap::Parser;
+    #[derive(Parser)]
+    struct Command {
+        #[command(flatten)]
+        args: soldr_dist::cli::DistArgs,
+    }
+    let args = Command::try_parse_from(["dist", "serve", "--relay", "none"])
+        .unwrap()
+        .args;
+    assert_eq!(args.relay.as_deref(), Some("none"));
+    let root = tempfile::tempdir().unwrap();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let endpoint = soldr_dist::transport::endpoint(root.path(), false)
+            .await
+            .unwrap();
+        let addr = endpoint.addr();
+        assert!(addr.relay_urls().next().is_none());
+        assert!(addr.ip_addrs().next().is_some());
+        assert!(addr.ip_addrs().all(|a| !a.ip().is_unspecified()));
+        let ticket = soldr_dist::transport::ticket(&addr).unwrap();
+        assert_eq!(
+            soldr_dist::transport::parse_peer(&ticket, None).unwrap(),
+            addr
+        );
+        endpoint.close().await;
+    });
+}

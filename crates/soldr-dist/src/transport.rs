@@ -59,6 +59,8 @@ pub async fn endpoint_with_identity(
                 return Err("dist relay URL must use HTTPS".into());
             }
             builder = builder.relay_mode(iroh::RelayMode::custom([url]));
+        } else {
+            builder = builder.clear_relay_transports();
         }
     }
     Ok(builder.bind().await?)
