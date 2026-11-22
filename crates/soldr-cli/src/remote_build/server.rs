@@ -9,10 +9,12 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::Router;
+use cap_fs_ext::DirExt;
+use cap_std::{ambient_authority, fs::Dir};
 use globset::{GlobBuilder, GlobSetBuilder};
 use prost::Message;
 
-use crate::platform::wait;
+use crate::platform::{fs::permissions, wait};
 
 use super::snapshot::{digest, relative_path};
 use super::wire::{self, Action, Artifact, Artifacts, Blob, Fetch, ResultFrame, Session, Start};
@@ -273,15 +275,11 @@ pub(super) fn parent(path: &Path) -> io::Result<&Path> {
 fn create_link(path: &Path, data: &[u8]) -> io::Result<()> {
     let target = std::str::from_utf8(data).map_err(io::Error::other)?;
     let target = relative_path(target)?;
-    #[cfg(unix)]
-    return std::os::unix::fs::symlink(target, path);
-    #[cfg(not(unix))]
-    {
-        let _ = (path, target);
-        Err(io::Error::other(
-            "remote source symlinks require a Unix runner",
-        ))
-    }
+    let directory = Dir::open_ambient_dir(parent(path)?, ambient_authority())?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("missing remote symlink file name"))?;
+    DirExt::symlink(&directory, target, name)
 }
 
 pub(super) fn write_file(path: &Path, data: &[u8], executable: bool) -> io::Result<()> {
@@ -290,13 +288,9 @@ pub(super) fn write_file(path: &Path, data: &[u8], executable: bool) -> io::Resu
         .create_new(true)
         .open(path)?;
     file.write_all(data)?;
-    #[cfg(unix)]
     if executable {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o755))?;
+        permissions::make_executable(path)?;
     }
-    #[cfg(not(unix))]
-    let _ = executable;
     Ok(())
 }
 
@@ -334,11 +328,7 @@ fn fetch(session: &Path, request: Fetch) -> io::Result<Vec<u8>> {
                 "remote artifacts exceed 256 MiB. Fetch a narrower glob.",
             ));
         }
-        #[cfg(unix)]
-        let executable =
-            std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o111 != 0;
-        #[cfg(not(unix))]
-        let executable = false;
+        let executable = permissions::mode(&absolute).is_some_and(|mode| mode & 0o111 != 0);
         let path = path
             .components()
             .map(|part| {
