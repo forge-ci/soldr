@@ -196,11 +196,20 @@ is built.
 |---|---|---|
 | `--features`, `--all-features`, `--no-default-features` | **yes** | member `--cfg feature`; dependency features through unification |
 | `-p`/`--package`, `--workspace`, `--exclude` | **yes** | the unification set changes (2.1: 22 direct, 45 cascade) |
-| `--all-targets`, `--tests`, `--test X`, `--benches`, `--bench X`, `--examples`, `--example X` | **yes, when any dev-dependency enables a feature on a normal dependency** | dev-deps join unification only when a test, bench or example target is built |
+| `--all-targets`, `--tests`, `--benches`, `--examples` | **yes** | whole dev target kinds join the graph; dev-deps unify and `required-features` of examples/benches pull member features |
+| `--test X`, `--bench X`, `--example X` (one named target) | **yes, narrowly** | that target's `required-features` and its dev-deps; narrower than the whole-kind selector |
 | `--lib`, `--bins`, `--bin X` alone | no | selects units only; a lib or bin build never activates dev-deps |
 | `--target <host>` vs no `--target` | **yes, every target-kind unit** | Cargo passes `--target` to rustc only when given, and the output dir moves to `target/<triple>/` |
 | flags after `--` on `cargo clippy` | workspace members only | they reach `clippy-driver` through `CLIPPY_ARGS`. Cargo uses `RUSTC_WORKSPACE_WRAPPER` for members only; dependencies are not linted |
 | `check`/`clippy` vs `build`/`test` | yes, always | `--emit=metadata` vs `--emit=link`; disjoint by design |
+
+The profile's `dev-targets` field is exactly this axis, and it measures **target breadth**, not
+dev-dependency activation: it is true for `--all-targets`, for `--tests`/`--benches`/`--examples`,
+and for a bare test verb (which builds every test target), and false for any narrowing — including
+one named target. Dev-dependency activation is *why* the axis costs a rebuild, not what the axis
+measures: `cargo test --lib` activates dev-dependencies exactly as `--all-targets` does for that
+member and still resolves differently from the wide shape (measured: 76 of 458 dependency units
+between `--workspace --all-features --all-targets` and the same with `--lib --bins`).
 
 `--target` is a drift source the issue did not list, and it is live inside
 soldr. `soldr ci-test` always passes `--target <host>` (`ci_test/plan.rs:114`).
@@ -549,6 +558,26 @@ ship the table with `packages = "workspace"`, default features and
 - **Q4.** soldr#3731 (gate tests lane `-p` closure) was a speed win measured on
   an idle host. Re-measure it against `--workspace` compile plus nextest filter
   on a warm cache before flipping it.
+
+## 9b. Implementation status
+
+S2 (profile parse), S2b (`unify`), S3 (selection normaliser + drift) and S4 (front-door warn/refuse)
+are implemented on `feat/4195-canonical-profile`: `cargo_metadata_canonical.rs`,
+`cargo_front_door/canonical.rs` (+ the pure comparison), `cargo_front_door/canonical_runtime.rs`
+(profile lookup, toolchain-channel resolution, member list, diagnostic) and a hook in
+`cargo_front_door/run.rs`. 38 unit tests and 10 `cargo_front_door` integration tests pass; clippy
+`-p soldr-cli --lib -D warnings` is clean.
+
+Two implementation decisions worth recording:
+
+- `unify` is resolved from the real toolchain **before** the comparison, and the profile's `unify`
+  is rewritten to `Workspace`/`Off` first, so the "packages do not drift under unification" rule
+  only fires when `-Zfeature-unification` was actually emitted.
+- The member list comes from one `cargo metadata --no-deps` per process (cached), and an empty
+  `-p` set resolves to `workspace` only when the workspace has one member. A workspace that sets
+  `default-members` will therefore report a bare `soldr cargo test` as `default packages` rather
+  than as its default-member set — a false positive to fix by reading `workspace_default_members`
+  from the metadata that is already fetched, not by guessing.
 
 ## 10. Implementation slices (ordered)
 
