@@ -58,6 +58,20 @@ pub(super) struct Blob {
 }
 
 #[derive(Clone, PartialEq, Message)]
+pub(super) struct WorkspaceBatch {
+    #[prost(message, repeated, tag = "1")]
+    pub blobs: Vec<WorkspaceBlob>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct WorkspaceBlob {
+    #[prost(string, tag = "1")]
+    pub digest: String,
+    #[prost(bytes = "vec", tag = "2")]
+    pub data: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
 pub(super) struct ResultFrame {
     #[prost(int32, tag = "1")]
     pub exit_code: i32,
@@ -92,10 +106,14 @@ pub(super) struct Artifacts {
 }
 
 pub(super) fn encode(message: &impl Message) -> io::Result<Vec<u8>> {
+    encode_at_level(message, 3)
+}
+
+pub(super) fn encode_at_level(message: &impl Message, level: i32) -> io::Result<Vec<u8>> {
     if message.encoded_len() > MAX_FRAME {
         return Err(io::Error::other("remote build message exceeds 256 MiB"));
     }
-    zstd::stream::encode_all(message.encode_to_vec().as_slice(), 3)
+    zstd::stream::encode_all(message.encode_to_vec().as_slice(), level)
 }
 
 pub(super) fn decode<M: Message + Default>(compressed: &[u8]) -> io::Result<M> {

@@ -30,6 +30,12 @@ struct Entry {
     size_bytes: u64,
     sha256: String,
     executable: bool,
+    #[serde(default = "default_mime_type")]
+    mime_type: String,
+}
+
+fn default_mime_type() -> String {
+    "application/octet-stream".into()
 }
 
 #[derive(Deserialize, Serialize)]
@@ -76,6 +82,7 @@ pub(super) fn inventory(
         let mut hash = Sha256::new();
         let size_bytes = io::copy(&mut io::BufReader::new(file), &mut hash)?;
         entries.push(Entry {
+            mime_type: artifact_mime_type(&absolute).into(),
             path,
             size_bytes,
             sha256: hex::encode(hash.finalize()),
@@ -91,6 +98,23 @@ pub(super) fn inventory(
     })
 }
 
+fn artifact_mime_type(path: &Path) -> &'static str {
+    let extension = path.extension().and_then(|suffix| suffix.to_str());
+    match extension.map(str::to_ascii_lowercase).as_deref() {
+        Some("json") => "application/json",
+        Some("jsonl" | "ndjson") => "application/x-ndjson",
+        Some("zst") => "application/zstd",
+        Some("gz") => "application/gzip",
+        Some("zip") => "application/zip",
+        Some("tar") => "application/x-tar",
+        Some("txt" | "log") => "text/plain",
+        Some("html" | "htm") => "text/html",
+        Some("xml") => "application/xml",
+        Some("wasm") => "application/wasm",
+        _ => "application/octet-stream",
+    }
+}
+
 fn open_artifact(output: &Path, requested: &str) -> io::Result<File> {
     let path = output.join(relative_path(requested)?);
     if !fs::symlink_metadata(&path)?.is_file() || path.canonicalize()? != path {
@@ -104,6 +128,7 @@ fn open_artifact(output: &Path, requested: &str) -> io::Result<File> {
 pub(super) fn serve(output: &Path, body: &[u8]) -> io::Result<Response> {
     let request: Blob = wire::decode(body)?;
     let path = std::str::from_utf8(&request.data).map_err(io::Error::other)?;
+    let mime_type = artifact_mime_type(Path::new(path));
     let file = open_artifact(output, path)?;
     let (tx, rx) = mpsc::channel(CHUNK_QUEUE);
     let runtime = tokio::runtime::Handle::current();
@@ -120,7 +145,14 @@ pub(super) fn serve(output: &Path, body: &[u8]) -> io::Result<Response> {
     let body = Body::from_stream(stream::unfold(rx, |mut rx| async {
         rx.recv().await.map(|chunk| (chunk, rx))
     }));
-    Ok(([("content-type", "application/zstd")], body).into_response())
+    Ok((
+        [
+            ("content-type", "application/zstd"),
+            ("x-soldr-artifact-content-type", mime_type),
+        ],
+        body,
+    )
+        .into_response())
 }
 
 struct ChunkWriter<'a> {

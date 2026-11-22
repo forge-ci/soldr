@@ -155,3 +155,43 @@ Keep the server inside that job's network and lifetime. The SSH relay must
 reach the job's loopback address so builds can connect to the server.
 GitHub API calls using the stand-in token remain subject to Bosn's per-run
 allowlist.
+
+### Session protocol
+
+One logical session has a control stream and separate transfer streams.
+The control stream announces what to transfer and records the result.
+Workspace upload, Zstandard download, and rsync each use their own stream.
+A client can request up to eight concurrent downloads, subject to the
+runner's advertised limit.
+
+1. **Authenticate.** Use TLS 1.3 with mutual authentication inside the SSH
+   tunnel. Generate a fresh self-signed identity for each peer. Exchange
+   certificate fingerprints over authenticated SSH and bind the exchange
+   to a single connection. Verify the peer fingerprint and its TLS
+   proof of possession before negotiating HTTP/2.
+2. **Set up.** Send the repository URL, commit lineage, action, and patch
+   manifest on the control stream. The manifest identifies base and result
+   content by digest. The runner replies with missing digests. Send missing
+   content on a Zstandard upload stream, then materialize the workspace
+   after verifying the digest of each object. A complete workspace upload
+   is the fallback when no usable base is available.
+3. **Run.** Start only after setup completes. The runner emits JSON Lines
+   with elapsed seconds (`t`), stream code (`type`), and text (`v`).
+   `o` denotes stdout, and `e` denotes stderr.
+4. **Publish.** After output is published, send a timed return record and
+   the artifact index pointer. The index describes immutable files by
+   relative path, size, SHA-256, and `mime_type`. A failed build can still publish logs
+   and metadata.
+5. **Download.** On a Zstandard side stream, the client requests one path
+   and receives binary Zstandard at level 9. The response uses
+   `Content-Type: application/zstd` and reports the original file type in
+   `X-Soldr-Artifact-Content-Type`. On an rsync side stream, the
+   peers trade native rsync protocol bytes, using an older local copy as
+   the receiver's basis. The runner exposes only the selected files from
+   the finished session. Each transfer can fail and be retried independently.
+
+The runner supports the content-addressed setup and upload path today.
+Use `remote run --stream` or `--fetch-out` for live output and batches of
+missing workspace blobs compressed at Zstandard level 9. The finished
+session's artifact inventory is available from the `artifact-list` operation.
+Mutual TLS, Git patch application, and the rsync side channel are extensions.

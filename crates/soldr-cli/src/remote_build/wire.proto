@@ -35,6 +35,15 @@ message Blob {
   bytes data = 1;
 }
 
+message WorkspaceBatch {
+  repeated WorkspaceBlob blobs = 1;
+}
+
+message WorkspaceBlob {
+  string digest = 1;
+  bytes data = 2;
+}
+
 message ResultFrame {
   int32 exit_code = 1;
   bytes stdout = 2;

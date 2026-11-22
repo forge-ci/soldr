@@ -19,7 +19,7 @@ use crate::platform::{fs::permissions, wait};
 use super::slots;
 use super::snapshot::{digest, relative_path};
 use super::wire::{self, Action, Artifact, Artifacts, Blob, Fetch, ResultFrame, Session, Start};
-use super::{artifacts, manifest};
+use super::{artifacts, control, manifest};
 
 pub(super) async fn serve(
     listen: std::net::SocketAddr,
@@ -77,6 +77,22 @@ async fn handle(
     if provided.as_ref() != Some(&expected) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    if let Some(id) = operation.strip_prefix("run-stream/") {
+        let Ok(id) = key(id, 32) else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        let id = id.to_owned();
+        return control::stream_run(move |sink| {
+            run(
+                &root,
+                &root.join("sessions").join(&id),
+                &id,
+                slot_limit,
+                Some(sink),
+            )
+            .map(|_| ())
+        });
+    }
     match tokio::task::spawn_blocking(move || {
         if let Some(id) = operation.strip_prefix("artifact/") {
             return artifacts::serve(&finished_output(&root, id)?, &body);
@@ -125,12 +141,14 @@ fn dispatch(
     match parts.as_slice() {
         ["start"] => start(root, wire::decode(body)?),
         ["blob", hash] => store_blob(root, hash, wire::decode(body)?),
-        ["run", id] => run(
+        ["workspace", id] => store_workspace(root, key(id, 32)?, wire::decode(body)?),
+        ["run", id] => wire::encode(&run(
             root,
             &root.join("sessions").join(key(id, 32)?),
             id,
             slot_limit,
-        ),
+            None,
+        )?),
         ["artifact-list", id] => artifacts::inventory(
             &finished_output(root, id)?,
             wire::decode(body)?,
@@ -142,6 +160,25 @@ fn dispatch(
         ),
         _ => Err(io::Error::other("unknown remote build operation")),
     }
+}
+
+fn store_workspace(root: &Path, id: &str, batch: wire::WorkspaceBatch) -> io::Result<Vec<u8>> {
+    let request =
+        Start::decode(fs::read(root.join("sessions").join(id).join("start.pb"))?.as_slice())?;
+    let expected: std::collections::HashSet<_> = request
+        .files
+        .iter()
+        .map(|file| file.digest.as_str())
+        .collect();
+    for entry in batch.blobs {
+        if !expected.contains(entry.digest.as_str()) {
+            return Err(io::Error::other(
+                "workspace blob was not declared in the session",
+            ));
+        }
+        persist_blob(root, &entry.digest, &entry.data)?;
+    }
+    wire::encode(&Blob::default())
 }
 
 fn start(root: &Path, request: Start) -> io::Result<Vec<u8>> {
@@ -195,18 +232,33 @@ fn start(root: &Path, request: Start) -> io::Result<Vec<u8>> {
 }
 
 fn store_blob(root: &Path, hash: &str, blob: Blob) -> io::Result<Vec<u8>> {
+    persist_blob(root, hash, &blob.data)?;
+    wire::encode(&Blob::default())
+}
+
+fn persist_blob(root: &Path, hash: &str, data: &[u8]) -> io::Result<()> {
     key(hash, 64)?;
-    if digest(&blob.data) != hash {
+    if digest(data) != hash {
         return Err(io::Error::other("uploaded blob does not match its digest"));
     }
     let directory = root.join("blobs");
     let mut staging = tempfile::NamedTempFile::new_in(&directory)?;
-    staging.write_all(&blob.data)?;
+    staging.write_all(data)?;
     staging.persist(directory.join(hash))?;
-    wire::encode(&Blob::default())
+    Ok(())
 }
 
-fn lock_session(root: &Path, session: &Path) -> io::Result<fs::File> {
+fn lock_session(root: &Path, session: &Path, request: &Start) -> io::Result<fs::File> {
+    if let Some(source) = request
+        .files
+        .iter()
+        .find(|source| !root.join("blobs").join(&source.digest).is_file())
+    {
+        return Err(io::Error::other(format!(
+            "remote workspace is missing blob {}",
+            source.digest
+        )));
+    }
     let lock = fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -227,9 +279,15 @@ fn lock_session(root: &Path, session: &Path) -> io::Result<fs::File> {
     Ok(lock)
 }
 
-fn run(root: &Path, session: &Path, id: &str, slot_limit: Option<u32>) -> io::Result<Vec<u8>> {
+fn run(
+    root: &Path,
+    session: &Path,
+    id: &str,
+    slot_limit: Option<u32>,
+    sink: Option<std::sync::Arc<control::Sink>>,
+) -> io::Result<ResultFrame> {
     let request = Start::decode(fs::read(session.join("start.pb"))?.as_slice())?;
-    let _runner_lock = lock_session(root, session)?;
+    let _runner_lock = lock_session(root, session, &request)?;
     let cache_root = root.join("compiler");
     let cache_dir = crate::core::SoldrPaths::with_root(cache_root.clone()).cache;
     let manifest = manifest::decode(request.manifest_json.as_deref(), &request.commit)?;
@@ -263,7 +321,7 @@ fn run(root: &Path, session: &Path, id: &str, slot_limit: Option<u32>) -> io::Re
         Action::Lint => "lint",
     };
     let soldr = std::env::current_exe()?;
-    let transcript = Transcript::new();
+    let transcript = Transcript::new(sink);
     let result = transcript.run(
         runner_soldr(&soldr, &cache_root)
             .current_dir(&source)
@@ -328,7 +386,7 @@ fn run(root: &Path, session: &Path, id: &str, slot_limit: Option<u32>) -> io::Re
     };
     transcript.record_stderr(&result.stderr[stderr_before_postprocessing..]);
     publish_result(&output, &result, &transcript)?;
-    wire::encode(&result)
+    Ok(result)
 }
 
 fn publish_result(output: &Path, result: &ResultFrame, transcript: &Transcript) -> io::Result<()> {
@@ -342,12 +400,16 @@ fn publish_result(output: &Path, result: &ResultFrame, transcript: &Transcript) 
     let mut staging = tempfile::NamedTempFile::new_in(output)?;
     staging.write_all(&result.attestation)?;
     staging.persist(output.join("attestation.json"))?;
+    if let Some(sink) = &transcript.sink {
+        sink.finish(transcript.start.elapsed().as_secs_f64(), result.exit_code)?;
+    }
     Ok(())
 }
 
 struct Transcript {
     start: std::time::Instant,
     lines: std::sync::Arc<crate::platform::sync::Mutex<Vec<OutputLine>>>,
+    sink: Option<std::sync::Arc<control::Sink>>,
 }
 
 #[derive(serde::Serialize)]
@@ -359,31 +421,39 @@ struct OutputLine {
 }
 
 impl Transcript {
-    fn new() -> Self {
+    fn new(sink: Option<std::sync::Arc<control::Sink>>) -> Self {
         Self {
             start: std::time::Instant::now(),
             lines: std::sync::Arc::new(crate::platform::sync::Mutex::new(Vec::new())),
+            sink,
         }
     }
 
     fn run(&self, command: &mut Command) -> io::Result<std::process::Output> {
         let lines = self.lines.clone();
         let start = self.start;
+        let sink = self.sink.clone();
         wait::output_for_observed(command, wait::WHOLE_COMMAND, move |is_stderr, line| {
-            lines.lock().push(OutputLine::new(
-                start,
-                if is_stderr { 'e' } else { 'o' },
-                line,
-            ));
+            let mut lines = lines.lock();
+            let record = OutputLine::new(start, if is_stderr { 'e' } else { 'o' }, line);
+            if let Some(sink) = &sink {
+                sink.output(&record);
+            }
+            lines.push(record);
         })
     }
 
     fn record_stderr(&self, bytes: &[u8]) {
-        self.lines.lock().extend(
-            bytes
-                .split_inclusive(|&byte| byte == b'\n')
-                .map(|line| OutputLine::new(self.start, 'e', line)),
-        );
+        let mut lines = self.lines.lock();
+        for record in bytes
+            .split_inclusive(|&byte| byte == b'\n')
+            .map(|line| OutputLine::new(self.start, 'e', line))
+        {
+            if let Some(sink) = &self.sink {
+                sink.output(&record);
+            }
+            lines.push(record);
+        }
     }
 
     fn write_to(&self, writer: &mut impl Write) -> io::Result<()> {
