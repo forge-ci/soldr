@@ -414,7 +414,7 @@ fn opaque_cache_identity_matches_only_the_exact_advertised_digest() {
     ));
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod mirror_remap_tests {
     #[test]
     fn rustc_mirror_remap_restores_absolute_paths() {

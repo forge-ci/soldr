@@ -63,7 +63,7 @@ fn cargo_home() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::remaps_for;
     use std::path::Path;
@@ -72,9 +72,10 @@ mod tests {
     fn identity_remap_covers_cargo_home_whatever_the_cwd() {
         // Registry crates compile with their cwd inside CARGO_HOME; the remap
         // must not depend on it (an earlier cwd guard silently disabled it).
+        let home = std::env::temp_dir().join(".cargo");
         assert_eq!(
-            remaps_for(Some(Path::new("/home/u/.cargo"))),
-            ["--remap-path-prefix=/home/u/.cargo=/home/u/.cargo"]
+            remaps_for(Some(&home)),
+            [format!("--remap-path-prefix={0}={0}", home.display())]
         );
         assert!(remaps_for(Some(Path::new("relative"))).is_empty());
         assert!(remaps_for(None).is_empty());

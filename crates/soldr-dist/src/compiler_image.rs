@@ -59,18 +59,13 @@ fn canonical_alias_preserves_image_and_stays_inside_the_dist_root() {
     assert_eq!(materialize(&root, &image).unwrap(), alias);
 }
 
-#[cfg(unix)]
 #[test]
 fn relative_state_root_still_returns_an_absolute_compiler_program() {
-    let temp = tempfile::tempdir().unwrap();
+    // A root under the cwd gives a portable relative path: just its name.
+    let temp = tempfile::tempdir_in(".").unwrap();
     let image = temp.path().join("soldr-daemon");
     std::fs::write(&image, "relative-root image").unwrap();
-    let cwd = std::env::current_dir().unwrap();
-    let mut relative = PathBuf::new();
-    for _ in cwd.components().skip(1) {
-        relative.push("..");
-    }
-    relative.push(temp.path().strip_prefix("/").unwrap());
+    let mut relative = PathBuf::from(temp.path().file_name().unwrap());
     relative.push("dist");
     assert!(!relative.is_absolute());
     let alias = materialize(&relative, &image).unwrap();

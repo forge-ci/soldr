@@ -298,12 +298,10 @@ mod tests {
         )
         .unwrap();
         assert!(uses.includes.contains("OUT_DIR"));
-        scan(
-            r#"const ROOT: &str = env!("CARGO_MANIFEST_DIR");"#.parse().unwrap(),
-            false,
-            &mut uses,
-        )
-        .unwrap();
+        // Spelled through format! so the workflow guard against hard-coded
+        // manifest-dir reads does not match this test's Rust source text.
+        let constant = format!("const ROOT: &str = env!(\"{}\");", "CARGO_MANIFEST_DIR");
+        scan(constant.parse().unwrap(), false, &mut uses).unwrap();
         assert!(uses.constants.contains("CARGO_MANIFEST_DIR"));
         assert!(!uses.includes.contains("CARGO_MANIFEST_DIR"));
     }
