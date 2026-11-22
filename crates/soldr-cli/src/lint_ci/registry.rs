@@ -20,6 +20,9 @@ pub trait CiRule {
 }
 
 /// The registered CI policy rules, in evaluation order.
-pub fn rules() -> Vec<Box<dyn CiRule>> {
-    vec![Box::new(CrossCompileSurface)]
+pub fn rules(root: Option<&std::path::Path>) -> Vec<Box<dyn CiRule>> {
+    vec![
+        Box::new(CrossCompileSurface),
+        Box::new(super::canonical_invocation::CanonicalInvocation::new(root)),
+    ]
 }

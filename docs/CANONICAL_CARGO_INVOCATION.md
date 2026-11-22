@@ -248,7 +248,7 @@ features = []                # explicit list, or the string "all"
 default-features = true
 packages = "workspace"       # "workspace" or an explicit list of members
 exclude = []                 # only with packages = "workspace"
-dev-targets = true           # canonical builds include test targets (activates dev-deps)
+dev-targets = true           # target breadth: include all dev target kinds
 target = "explicit-host"     # "explicit-host" | "implicit"; see 3.3
 
 # Clippy shape. These are the ONLY args allowed after `--` on `soldr cargo clippy`.
@@ -284,10 +284,10 @@ The comparison is **syntactic** on a normalized selection:
 
 - Feature lists are sorted and deduplicated. Package names are compared as a
   set.
-- `dev-targets?` is true when any of `--all-targets`, `--tests`, `--test`,
-  `--benches`, `--bench`, `--examples` or `--example` is present, or when the
-  verb is `test`/`nextest` and no target selector is given (Cargo's default).
-- `--lib`, `--bins` and `--bin` never count as drift (3.3).
+- `dev-targets?` measures breadth, not dev-dependency activation. It is true
+  for `--all-targets`, `--tests`, `--benches`, `--examples`, or a test verb
+  with no target selector. A single `--test`, `--bench`, `--example`,
+  `--bin`, `--lib` or `--bins` narrows selection and does not widen breadth.
 - A `-p` list that equals the whole member set counts as `workspace`.
 
 An invocation matches when its tuple equals the canonical tuple or any declared
@@ -339,7 +339,14 @@ emit its selection:
 - `ci_test/plan.rs` `workspace_selection` (`:603-609`) and the scope args do the
   same. An explicit `--features`, `--all-features` or `-p` on
   `soldr ci-test` is then checked against the profile like any other
-  invocation.
+  invocation. Explicit caller selectors replace the corresponding generated
+  selection dimension; they are never silently discarded. With no declared
+  profile, all historical argv is preserved byte-for-byte.
+- Doctests keep `--doc` and the canonical packages/features/target, but omit
+  target-kind selectors: Cargo rejects `--doc --all-targets`. The normalizer
+  therefore compares every other axis for `test --doc`, leaving target breadth
+  to the separate rustdoc family. An implicit-host profile also uses Cargo's
+  unqualified artifact directory in the plan domains.
 
 The command lint runs and the command test runs then share one resolution by
 construction, so a repo cannot drift between its own two entrypoints.
@@ -451,7 +458,7 @@ literal `soldr cargo <compiling-verb> …` (or `cargo …` inside a `soldr` fron
 door) has a normalized selection tuple that matches neither the profile nor an
 alternate. The finding names `file:line`, the differing fields and the
 canonical command. Per-line suppression uses the existing
-`# soldr-lint: allow canonical-cargo-invocation` mechanism
+`# soldr-lint-ci: allow canonical-cargo-invocation` mechanism
 (`lint_ci/scan.rs:30` `allows`).
 
 What fails:
@@ -464,7 +471,10 @@ What fails:
   is declared.
 
 What does not fail: dynamically built argv (Python lists assembled at runtime).
-The front-door check (4.2) is the runtime authority for those, in the same way
+The static rule reuses the filesystem-only workspace-member census (including
+its single-component `*` wildcard limit); it does not run Cargo metadata.
+The front-door check (4.2) is the runtime authority for computed commands and
+full Cargo membership, in the same way
 the bare-Cargo trap complements the `rg` scan in soldr#2878.
 
 The clud command scanner (`block_bad_cmd`) can call
@@ -560,8 +570,17 @@ ship the table with `packages = "workspace"`, default features and
 | S2b | `unify = auto`: detect toolchain channel, pass `-Zfeature-unification` + `CARGO_RESOLVER_FEATURE_UNIFICATION=workspace`; inert on stable | `cargo_front_door/run.rs`, `toolchain*.rs` as needed | fixture: nightly toolchain + `-p a` → the dependency's rustc argv equals the `--workspace` one (the 2.3 probe as an assertion); stable → flag omitted, no warning |
 | S3 | Pure selection normalizer `Selection::from_args(verb, args, members)` + `diff(&profile) -> Vec<Drift>` | `cargo_front_door/canonical.rs` (new) | table test: `-p` == all members → match; `--lib` → no drift; `test` without selector ⇒ dev-targets; `--target host` vs none differs; clippy tail differs |
 | S4 | Front-door warn/refuse with the exact text from 4.2; `SOLDR_CANONICAL` env override | `cargo_front_door/run.rs`, `canonical.rs` | integration test in `tests/cargo_front_door/`: fixture workspace with `enforce="refuse"` + `soldr cargo test -p a` exits 2, no cargo spawned (stub cargo records invocation); `warn` spawns and prints the header |
-| S5 | `soldr lint rust` and `soldr ci-test` emit the profile selection; soldr's own `Cargo.toml` declares the profile (`target = "explicit-host"`), and `ci/local_gate.py:664` passes `--target` | `lint_cmd.rs:194-275`, `ci_test/plan.rs:112-116,603-609`, `Cargo.toml`, `ci/local_gate.py` | `lint_cmd_tests`: clippy argv equals profile; `ci_test` plan JSON snapshot; ci-test clippy argv == gate clippy argv |
+| S5 | `soldr lint rust` and `soldr ci-test` emit the profile selection; repository profile declarations and gate rollout remain S9 | `cargo_front_door/canonical.rs`, `lint_cmd.rs`, `ci_test/canonical_profile.rs`, `ci_test/plan.rs` | `lint_cmd_tests`: clippy argv equals profile; `ci_test` plan JSON snapshot; ci-test clippy argv == canonical profile argv |
 | S6 | `soldr lint ci` rule `canonical-cargo-invocation` | `lint_ci/canonical_invocation.rs` (new), `lint_ci/registry.rs`, `lint_ci/scan.rs` (entrypoint surfaces) | fixture repo: off-profile line in `ci/lint.py` → one finding with file:line; alternate-matched line → none; suppression comment → none |
 | S7 | Miss attribution (`selection-drift` / `own-features` / `flags` / `source`) in session stats and `soldr status` | `cache/session.rs`, status renderer | unit test over synthetic journal pairs per class; integration: build fixture `--workspace` then `-p a` → summary reports `selection-drift > 0`, `source == 0` |
 | S8 | Register `cargo-hakari` in `known_tools` (opt-in C) | `crates/soldr-fetch/src/fetch/known_tools.rs` | `known_tools` registry test resolves `hakari` subcommand |
 | S9 | Fleet rollout PRs (section 7 order) | each repo's `Cargo.toml` + entrypoints | `soldr lint ci` clean; attribution report shows `selection-drift == 0` across lint → test → filtered subset (the issue's acceptance) |
+
+### S5/S6 handoff scope clarification
+
+S5 makes the native lint/test entrypoints profile-aware; S6 adds the static
+rule and entrypoint discovery. The S5 implementation handoff does not opt this
+repository into the profile. Keep that declaration and the local gate's explicit
+host argument for S9: bootstrap/build surfaces need a rollout audit first, and
+current alternates cannot override target explicitness. Declaring the profile
+before that audit would make the new lint fail existing CI bootstrap commands.

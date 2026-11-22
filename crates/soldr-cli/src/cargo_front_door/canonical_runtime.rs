@@ -112,7 +112,10 @@ fn invocation_directory(args: &[String]) -> Result<PathBuf, SoldrError> {
     Ok(std::env::current_dir()?)
 }
 
-fn build_channel(explicit: Option<&str>, cwd: &Path) -> Result<Option<String>, SoldrError> {
+pub(crate) fn build_channel(
+    explicit: Option<&str>,
+    cwd: &Path,
+) -> Result<Option<String>, SoldrError> {
     if let Some(channel) = explicit {
         return Ok(Some(channel.to_owned()));
     }
@@ -124,7 +127,7 @@ fn build_channel(explicit: Option<&str>, cwd: &Path) -> Result<Option<String>, S
     Ok(read_rust_toolchain_manifest_from_ancestors(cwd)?.channel)
 }
 
-fn unifies(unify: CanonicalUnify, channel: Option<&str>) -> bool {
+pub(crate) fn unifies(unify: CanonicalUnify, channel: Option<&str>) -> bool {
     match unify {
         CanonicalUnify::Workspace => true,
         CanonicalUnify::Off => false,

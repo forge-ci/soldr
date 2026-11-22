@@ -14,7 +14,7 @@ pub(crate) enum CompilingVerb {
 }
 
 impl CompilingVerb {
-    pub(super) fn from_args(args: &[String]) -> Option<Self> {
+    pub(crate) fn from_args(args: &[String]) -> Option<Self> {
         let index = super::first_cargo_subcommand_index(args)?;
         let verb = args[index].as_str();
         match verb {
@@ -31,7 +31,7 @@ impl CompilingVerb {
         }
     }
 
-    pub(super) fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Check => "check",
             Self::Clippy => "clippy",
@@ -44,7 +44,7 @@ impl CompilingVerb {
 
     /// Verbs that compile test binaries. `nextest archive` builds every test
     /// binary the archive ships, so it belongs here with the two runners.
-    pub(super) fn tests(self) -> bool {
+    pub(crate) fn tests(self) -> bool {
         matches!(self, Self::Test | Self::NextestRun | Self::NextestArchive)
     }
 }
@@ -59,6 +59,7 @@ pub(crate) struct Selection {
     pub target_explicit: bool,
     pub clippy_args: Vec<String>,
     verb: CompilingVerb,
+    doc_tests: bool,
     members: Vec<String>,
 }
 
@@ -90,6 +91,7 @@ impl Selection {
             target_explicit: build_target,
             clippy_args: Vec::new(),
             verb,
+            doc_tests: false,
             members,
         };
         let mut features = Vec::new();
@@ -115,6 +117,10 @@ impl Selection {
                     target_selector = true;
                 }
                 "--lib" | "--bins" => target_selector = true,
+                "--doc" if verb == CompilingVerb::Test => {
+                    selection.doc_tests = true;
+                    target_selector = true;
+                }
                 "--features" | "-F" | "--package" | "-p" | "--exclude" | "--target" | "--bin"
                 | "--test" | "--bench" | "--example" => {
                     let value = inline.or_else(|| iter.next().map(String::as_str));
@@ -267,11 +273,15 @@ impl Selection {
             self.default_features.to_string(),
             profile.default_features.to_string(),
         );
-        compare(
-            "dev-targets",
-            self.dev_targets.to_string(),
-            profile.dev_targets.to_string(),
-        );
+        // Doctests form their own rustdoc family and Cargo forbids combining
+        // --doc with target-kind flags. Keep the remaining axes canonical.
+        if !self.doc_tests {
+            compare(
+                "dev-targets",
+                self.dev_targets.to_string(),
+                profile.dev_targets.to_string(),
+            );
+        }
         compare(
             "target",
             target_description(self.target_explicit).into(),
@@ -342,15 +352,25 @@ pub(super) fn package_flags(packages: &CanonicalPackages, exclude: &[String]) ->
     flags.join(" ")
 }
 
-pub(super) fn command(profile: &CanonicalProfile, verb: CompilingVerb, host: &str) -> String {
-    let mut parts = vec![format!("soldr cargo {}", verb.name())];
-    if !matches!(&profile.packages, CanonicalPackages::Explicit(packages) if packages.is_empty()) {
-        parts.push(package_flags(&profile.packages, &profile.exclude));
+/// Cargo argv shared by entrypoints and the diagnostic renderer. Keep values
+/// intact: a Clippy argument can contain whitespace.
+pub(crate) fn args(profile: &CanonicalProfile, verb: CompilingVerb, host: &str) -> Vec<String> {
+    let mut parts: Vec<String> = verb.name().split_whitespace().map(str::to_owned).collect();
+    match &profile.packages {
+        CanonicalPackages::Workspace => parts.push("--workspace".into()),
+        CanonicalPackages::Explicit(packages) => {
+            for package in sorted(packages.clone()) {
+                parts.extend(["-p".into(), package]);
+            }
+        }
+    }
+    for package in &profile.exclude {
+        parts.extend(["--exclude".into(), package.clone()]);
     }
     match &profile.features {
         CanonicalFeatures::All => parts.push("--all-features".into()),
         CanonicalFeatures::Explicit(features) if !features.is_empty() => {
-            parts.push(format!("--features {}", features.join(",")))
+            parts.extend(["--features".into(), features.join(",")]);
         }
         CanonicalFeatures::Explicit(_) => {}
     }
@@ -360,14 +380,94 @@ pub(super) fn command(profile: &CanonicalProfile, verb: CompilingVerb, host: &st
     if profile.dev_targets {
         parts.push("--all-targets".into());
     } else if verb.tests() {
-        parts.push("--lib --bins".into());
+        parts.extend(["--lib".into(), "--bins".into()]);
     }
     if profile.target == CanonicalTarget::ExplicitHost {
-        parts.push(format!("--target {host}"));
+        parts.extend(["--target".into(), host.into()]);
     }
     if verb == CompilingVerb::Clippy && !profile.clippy_args.is_empty() {
-        parts.push(format!("-- {}", profile.clippy_args.join(" ")));
+        parts.push("--".into());
+        parts.extend(profile.clippy_args.clone());
     }
+    parts
+}
+
+/// Explicit caller scope remains visible to normal front-door enforcement.
+pub(crate) fn scoped_args(
+    profile: &CanonicalProfile,
+    verb: CompilingVerb,
+    host: &str,
+    scope: &[String],
+) -> Vec<String> {
+    let mut args = args(profile, verb, host);
+    let has = |flags: &[&str]| {
+        scope.iter().any(|arg| {
+            let key = arg.split('=').next().unwrap_or(arg);
+            flags.contains(&key)
+                || (flags.contains(&"-p") && arg.starts_with("-p") && arg.len() > 2)
+                || (flags.contains(&"-F") && arg.starts_with("-F") && arg.len() > 2)
+        })
+    };
+    let packages = has(&["--workspace", "--all", "--package", "-p"]);
+    let features = has(&["--all-features", "--features", "-F"]);
+    let target = has(&["--target"]);
+    let defaults = has(&["--no-default-features"]);
+    let breadth = has(&[
+        "--all-targets",
+        "--lib",
+        "--bins",
+        "--bin",
+        "--tests",
+        "--test",
+        "--benches",
+        "--bench",
+        "--examples",
+        "--example",
+    ]);
+    let mut skip_value = false;
+    let mut tail = false;
+    args.retain(|arg| {
+        if skip_value {
+            skip_value = false;
+            return false;
+        }
+        tail |= arg == "--";
+        if tail {
+            return true;
+        }
+        if (packages && matches!(arg.as_str(), "-p" | "--exclude"))
+            || (features && arg == "--features")
+            || (target && arg == "--target")
+        {
+            skip_value = true;
+            return false;
+        }
+        !((defaults && arg == "--no-default-features")
+            || (packages && arg == "--workspace")
+            || (features && arg == "--all-features")
+            || (breadth && matches!(arg.as_str(), "--all-targets" | "--lib" | "--bins")))
+    });
+    let tail = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    args.splice(tail..tail, scope.iter().cloned());
+    args
+}
+
+pub(crate) fn command(profile: &CanonicalProfile, verb: CompilingVerb, host: &str) -> String {
+    let mut parts: Vec<String> = vec!["soldr".into(), "cargo".into()];
+    parts.extend(args(profile, verb, host).iter().map(|arg| {
+        if arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-/.,:=+".contains(c))
+            && !arg.is_empty()
+        {
+            arg.clone()
+        } else {
+            crate::linker_shim::shell_single_quote(arg)
+        }
+    }));
     parts.join(" ")
 }
 

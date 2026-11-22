@@ -81,6 +81,26 @@ pub fn discover(root: &Path) -> Vec<PathBuf> {
     collect_action_yaml(&gh.join("actions"), &mut out);
     collect_all(&gh.join("scripts"), &mut out);
 
+    for name in [
+        "lint",
+        "test",
+        "push",
+        "justfile",
+        "Makefile",
+        "local-gate.toml",
+        "bosn.toml",
+    ] {
+        let path = root.join(name);
+        if path.is_file() {
+            out.push(path);
+        }
+    }
+    walk(&root.join("ci"), &mut |path| {
+        if has_ext(path, "py") {
+            out.push(path.to_path_buf());
+        }
+    });
+
     // Best-effort: helper scripts referenced from a run:/uses: line.
     let referenced = collect_referenced_scripts(root, &out);
     for path in referenced {
