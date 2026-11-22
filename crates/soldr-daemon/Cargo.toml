@@ -13,6 +13,7 @@ publish = false
 soldr-core = { path = "../soldr-core" }
 soldr-cache = { path = "../soldr-cache" }
 soldr-platform = { path = "../soldr-platform" }
+soldr-dist = { path = "../soldr-dist", optional = true }
 
 fs2 = { workspace = true }
 hex = { workspace = true }
@@ -42,6 +43,7 @@ zccache = { workspace = true, features = ["mimalloc-allocator"] }
 filetime = { workspace = true }
 
 [features]
+dist = ["dep:soldr-dist"]
 # Opt-in tokio-console support for the daemon and embedded zccache
 # service. Requires a `--cfg tokio_unstable` build to produce useful
 # Tokio task instrumentation. Forwarded from soldr-cli's feature of the

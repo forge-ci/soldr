@@ -240,6 +240,7 @@ async fn handle(state: &State, conn: &Connection) -> Result<()> {
     )
     .await?;
     let mut done = compiler.run(&job, sandbox.path()).await?;
+    crate::rust_output::restore(&job, sandbox.path(), &mut done)?;
     if done.exit_code == 0 {
         done.outputs = compiler::outputs(&job, sandbox.path(), &mut lease)?;
     }

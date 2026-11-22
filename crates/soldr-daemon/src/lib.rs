@@ -16,6 +16,8 @@
 // limit of 128 (E0275 at daemon/session_endpoint.rs).
 #![recursion_limit = "256"]
 #![allow(dead_code)]
+// The hook revision's expanded process futures exceed rustc's default Send-proof depth.
+#![recursion_limit = "256"]
 
 /// Neutral host-platform facade (#2493): the single selection site lives
 /// in `soldr-platform`; this crate calls only `crate::platform::…`.
@@ -30,6 +32,8 @@ pub(crate) mod ci_test_report;
 pub(crate) mod compile_limit;
 mod compiler_exit;
 pub mod daemon;
+#[cfg(feature = "dist")]
+mod dist_executor;
 pub(crate) mod history_admission;
 pub(crate) mod memory_estimate;
 pub(crate) mod oom_evidence;

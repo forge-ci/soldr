@@ -147,9 +147,22 @@ impl DistClient {
         // No compile wall-clock timeout: QUIC keepalive bounds worker loss without killing live work.
         let reply: Reply = transport::recv(&mut recv).await?;
         let done = reply.done.ok_or("expected Done")?;
-        self.fetch(conn, job, &done, &mut send).await?;
+        let outputs = self.fetch(conn, job, &done, &mut send).await?;
         transport::send(&mut send, &Accepted {}).await?;
         send.finish()?;
+        // After publication starts, errors must not permit a local fallback over
+        // partly replaced outputs. No await/cancellation point follows publication.
+        if let Err(error) = publish(outputs) {
+            let mut stderr = done.stderr;
+            stderr.extend_from_slice(
+                format!("\nsoldr dist: output publication failed: {error}\n").as_bytes(),
+            );
+            return Ok(DistOutcome::Executed {
+                exit_code: 1,
+                stdout: done.stdout,
+                stderr,
+            });
+        }
         Ok(DistOutcome::Executed {
             exit_code: done.exit_code,
             stdout: done.stdout,
@@ -183,7 +196,7 @@ impl DistClient {
         job: &DistJob,
         done: &Done,
         send: &mut iroh::endpoint::SendStream,
-    ) -> Result<()> {
+    ) -> Result<Vec<(OutputFile, Vec<u8>)>> {
         if done.exit_code == 0
             && (done.outputs.len() != job.outputs.len()
                 || job
@@ -226,20 +239,48 @@ impl DistClient {
             .iter()
             .map(|o| self.cas.get(&o.blake3))
             .collect::<Result<_>>()?;
-        for (output, bytes) in done.outputs.iter().zip(verified) {
-            use std::io::Write;
-            let path = Path::new(&output.abs_path);
-            let parent = path.parent().ok_or("output parent missing")?;
-            fs::create_dir_all(parent)?;
-            let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-            temp.write_all(&bytes)?;
-            soldr_platform::fs::permissions::restore_mode(temp.path(), Some(output.mode & 0o777))?;
-            temp.persist(path)?;
-        }
-        Ok(())
+        Ok(done.outputs.iter().cloned().zip(verified).collect())
     }
+}
+
+fn publish(outputs: Vec<(OutputFile, Vec<u8>)>) -> Result<()> {
+    use std::io::Write;
+    let mut pending = Vec::with_capacity(outputs.len());
+    for (output, bytes) in outputs {
+        let path = std::path::PathBuf::from(output.abs_path);
+        let parent = path.parent().ok_or("output parent missing")?;
+        fs::create_dir_all(parent)?;
+        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        temp.write_all(&bytes)?;
+        soldr_platform::fs::permissions::restore_mode(temp.path(), Some(output.mode & 0o777))?;
+        pending.push((temp, path));
+    }
+    for (temp, path) in pending {
+        temp.persist(path)?;
+    }
+    Ok(())
 }
 /// Explicit tickets only: discovery and scheduling belong to a later slice.
 pub fn workers(tickets: &[String]) -> Result<Vec<EndpointAddr>> {
     tickets.iter().map(|t| transport::parse_ticket(t)).collect()
+}
+
+#[test]
+fn preparing_all_outputs_before_publication_preserves_existing_files_on_error() {
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("old.o");
+    let blocked = root.path().join("file");
+    fs::write(&output, b"old").unwrap();
+    fs::write(&blocked, b"not a directory").unwrap();
+    let file = |path: &Path| OutputFile {
+        abs_path: path.to_str().unwrap().into(),
+        mode: 0o644,
+        ..Default::default()
+    };
+    assert!(publish(vec![
+        (file(&output), b"new".to_vec()),
+        (file(&blocked.join("impossible.o")), b"other".to_vec()),
+    ])
+    .is_err());
+    assert_eq!(fs::read(output).unwrap(), b"old");
 }

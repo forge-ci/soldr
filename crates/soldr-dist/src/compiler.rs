@@ -179,8 +179,8 @@ impl Compiler {
         } else {
             command = command.arg(format!("-ffile-prefix-map={}=", mirror_root.display()));
         }
-        for arg in &job.argv {
-            command = command.arg(sandbox::rewrite(root, job, arg)?);
+        for arg in sandbox::argv(root, job)? {
+            command = command.arg(arg);
         }
         if self.kind == "rustc"
             && !job

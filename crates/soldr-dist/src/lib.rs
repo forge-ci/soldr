@@ -5,6 +5,7 @@ pub mod client;
 pub mod compiler;
 pub mod host_load;
 pub mod proto;
+mod rust_output;
 pub mod sandbox;
 pub mod status;
 pub mod transport;

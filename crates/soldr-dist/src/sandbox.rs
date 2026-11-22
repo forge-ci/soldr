@@ -75,6 +75,11 @@ pub fn absolute(cwd: &Path, path: &Path) -> Result<PathBuf> {
 }
 /// Rewrite path-bearing compiler argv, preserving unrelated string arguments.
 pub fn rewrite(root: &Path, job: &DistJob, value: &str) -> Result<String> {
+    if job.compiler_kind == "rustc" {
+        if let Some(value) = value.strip_prefix("--emit=") {
+            return Ok(format!("--emit={}", emit(root, job, value)?));
+        }
+    }
     let remap_prefix = [
         "--remap-path-prefix=",
         "-ffile-prefix-map=",
@@ -139,4 +144,42 @@ pub fn rewrite(root: &Path, job: &DistJob, value: &str) -> Result<String> {
         &value[..start],
         mirrored(root, path)?.display()
     ))
+}
+
+/// Handle rustc's paired --emit form as well as ordinary path-bearing arguments.
+pub fn argv(root: &Path, job: &DistJob) -> Result<Vec<String>> {
+    job.argv
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            if job.compiler_kind == "rustc" && index > 0 && job.argv[index - 1] == "--emit" {
+                emit(root, job, arg)
+            } else {
+                rewrite(root, job, arg)
+            }
+        })
+        .collect()
+}
+
+fn emit(root: &Path, job: &DistJob, value: &str) -> Result<String> {
+    value
+        .split(',')
+        .map(|part| {
+            let Some((kind, path)) = part.split_once('=') else {
+                return Ok(part.to_owned());
+            };
+            if path == "-" {
+                return Err("stdout emit assignments cannot be materialised".into());
+            }
+            let path = absolute(Path::new(&job.cwd), Path::new(path))?;
+            if !job.outputs.iter().any(|output| Path::new(output) == path) {
+                return Err("rustc emit path is not a declared output".into());
+            }
+            Ok(format!(
+                "{kind}={}",
+                mirrored(root, path.to_str().ok_or("non-UTF8 emit path")?)?.display()
+            ))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|parts| parts.join(","))
 }

@@ -112,7 +112,7 @@ tokio = { workspace = true, features = ["test-util"] }
 [features]
 default = ["dist"]
 # Keep networking and its dependency graph removable for minimal CLI builds.
-dist = ["dep:soldr-dist"]
+dist = ["dep:soldr-dist", "soldr-daemon/dist"]
 # Opt-in tokio-console support for the soldr daemon and embedded zccache
 # service. Requires a `--cfg tokio_unstable` build to produce useful Tokio
 # task instrumentation.

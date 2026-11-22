@@ -315,6 +315,10 @@ impl SoldrZccacheService {
         )
         .await
         .map_err(|e| EmbeddedServiceError::Start(e.to_string()))?;
+        #[cfg(feature = "dist")]
+        let svc = crate::dist_executor::register(svc, paths)
+            .await
+            .map_err(|e| EmbeddedServiceError::Start(e.to_string()))?;
         let zccache_start_ms = zccache_started.elapsed().as_millis() as u64;
         Ok(Self {
             inner: Arc::new(svc),

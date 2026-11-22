@@ -434,3 +434,101 @@ reuse an existing iroh Endpoint and give the client a dedicated CAS/trust root.
   disables relay transports and startup waits, retaining explicit interface
   addresses in tickets. This requires LAN UDP reachability; outbound-only NAT
   hosts still use explicit HTTPS relay mode.
+
+## Stacked miss-path bring-up (`feat/dist-miss-path`)
+
+This follow-up pins zccache by git revision
+`80ab644aa95ee3a6b17742b5ed4594aed7cc78c8` (the merged executor hook), pending
+its crates.io release. The core direct-LAN bundle remains on 1.15.14.
+The default-on CLI `dist` feature now forwards the daemon adapter feature;
+`--no-default-features` still omits the transport and adapter.
+
+The daemon registers `CompileExecutor` only when explicit peers are configured.
+Cache hits remain local. Dependency-free Rust misses with a complete, conservatively inspected source
+manifest use a static peer;
+incomplete manifests, other compiler families, mismatched local rustc identities,
+and unavailable/busy nodes decline into zccache's normal local admission.
+The adapter verifies zccache's full `rustc -vV` digest against its resolved local
+compiler before mapping to the wire's commit-hash/host identity. This prevents
+using the daemon's default compiler for a request from a different toolchain.
+
+Client configuration (loaded when this binary's daemon generation starts):
+
+```toml
+[dist]
+peers = ['<full printed JSON ticket>']
+root = '/absolute/client/dist-root'
+# relay_url = 'https://operational-iroh-relay.example'
+```
+
+`SOLDR_DIST_PEERS` overrides the configured list. It accepts one full ticket or
+node ID, or a JSON array of such strings. Empty disables remote offers.
+`SOLDR_DIST_ROOT` overrides the client root. `SOLDR_DIST_RELAY=none` disables
+relay use; node IDs otherwise need `SOLDR_DIST_RELAY_URL` or `dist.relay_url`.
+Multiple configured peers receive offers in rotation, with one offer per miss;
+a decline falls back locally rather than retrying another node.
+
+For an isolated first Cargo compile, preserving the workstation's busy daemon:
+
+```sh
+export SOLDR_CACHE_DIR="$PWD/target/dist-miss-cache"
+export SOLDR_DIST_ROOT="$PWD/target/dist-miss-client"
+export SOLDR_DIST_PEERS="$DIST_TICKET"
+export SOLDR_DIST_RELAY=none
+soldr dist status --root "$SOLDR_DIST_ROOT" --json
+# Add this node_id to the Dell's trusted_clients as its service account.
+soldr dist trust add "$WORKER_ID" --role worker --root "$SOLDR_DIST_ROOT"
+RUSTUP_TOOLCHAIN=1.98.1 soldr cargo build --release --manifest-path "$LIB_MANIFEST"
+```
+
+Use a small Rust library with no build script first. A cold dependency manifest
+may deliberately compile locally once; then change a source literal to force a
+new miss while retaining dependency discovery. A warm cache hit does not call
+the executor. Daemon logs report `soldr dist remote cache miss executed`, and
+zccache's journal records the remote execution. Final links and environment/path
+cases requiring namespace isolation remain local/declined as documented above.
+Output blobs are verified before acknowledgement and publication. Publication
+is synchronous with no cancellation point afterward; an error after publication
+begins returns nonzero Executed, preventing local fallback over changed outputs.
+
+- 2026-11-21 Stacked miss-path integration temporarily pins the merged zccache
+  executor by git SHA, as explicitly requested, and registers only for explicit
+  static peers. The core PR/bundle keeps the released 1.15.14 dependency.
+- 2026-11-21 Initial automatic offload supports verified Rust toolchains and
+  complete input sets; C/C++ adapters and independent input rediscovery remain
+  follow-ups. Remote offer capacity is 64, independent of node compiler slots.
+- 2026-11-21 Output publication has no later await; partial publication errors
+  become failed Executed results so the executor's Declined contract stays safe.
+
+- 2026-11-21 The hook git revision requires kernal-api 0.1.40, which requires
+  running-process 4.10.21. The stacked branch aligns the existing exact Soldr
+  pins with those requirements to make dependency resolution possible.
+
+- 2026-11-21 Initial automatic offload conservatively declines external crates,
+  non-Rust inputs, includes, module path attributes, assembly, identifier-pasting,
+  feature-dependent source and stdin. Source inspection verifies the hook digest
+  and uses bounded reads outside the async reactor. This prevents absolute host
+  reads from bypassing the CAS mirror until real namespace isolation is added.
+- 2026-11-21 The temporary git pin intentionally conflicts with existing
+  `tests/test_externalized_dependency_sources.py` registry-only guards and
+  `guards/version_lockstep.rs` exact-release guard. Their exact-revision exception
+  remains a gate follow-up; no full-gate success is claimed for the bundle.
+
+- 2026-11-21 The miss-path bundle also upgrades node handling of joined/paired
+  rustc --emit assignments, restoring dep-info paths and artifact JSON before
+  CAS ingestion/delivery. Both client and node need this bundle for Cargo misses.
+  Incremental state, env macros and non-host targets decline in the initial
+  adapter; use a dependency-free release-profile library for the first proof.
+
+- 2026-11-21 The hook revision expands async process futures beyond the default
+  Send-proof depth; soldr-daemon uses rustc's suggested recursion limit of 256.
+  Scoped Clippy also reports unchanged daemon/server_dispatch.rs and
+  daemon/server_compile.rs cognitive complexity, in addition to cook_gc.rs;
+  these files match fetched origin/main. Full main lint was not rerun during
+  this urgent handoff, and no passing broad lint/gate result is claimed.
+
+Stacked handoff validation: `soldr --no-cache cargo check -p soldr-dist -p
+soldr-daemon -p soldr-core -p soldr-platform -p soldr-cli --all-targets`
+completed with exit 0. Formatting and review passed. New regression tests were
+compiled, not executed. Clippy remains blocked by the unchanged complexity
+findings listed above; full gates and attested PR pushes are deferred.

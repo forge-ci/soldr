@@ -175,6 +175,9 @@ impl SoldrPaths {
 /// be added freely.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SoldrConfig {
+    /// Explicit distributed compiler peers; empty keeps execution local.
+    #[serde(default)]
+    pub dist: DistConfig,
     #[serde(default)]
     pub gc: GcConfig,
     /// Automatic GC under disk pressure (issue #323).
@@ -213,6 +216,16 @@ pub struct SoldrConfig {
     /// `soldr install` source-cache retention knobs (soldr#2310).
     #[serde(default)]
     pub install: InstallConfig,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DistConfig {
+    /// JSON tickets, or node IDs when an explicit HTTPS relay is configured.
+    pub peers: Vec<String>,
+    /// Client identity/CAS root; defaults to <soldr-root>/dist.
+    pub root: Option<PathBuf>,
+    pub relay_url: Option<String>,
 }
 
 /// `install` section of `config.toml` (soldr#2310).
@@ -525,6 +538,19 @@ pub fn resolve_rustup_home() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dist_config_has_explicit_peers_and_defaults_to_local() {
+        let config: super::SoldrConfig = toml::from_str("").unwrap();
+        assert!(config.dist.peers.is_empty());
+        let config: super::SoldrConfig =
+            toml::from_str("[dist]\npeers = ['ticket']\nroot = '/tmp/dist-client'\n").unwrap();
+        assert_eq!(config.dist.peers, ["ticket"]);
+        assert_eq!(
+            config.dist.root.unwrap(),
+            std::path::Path::new("/tmp/dist-client")
+        );
+        assert!(toml::from_str::<super::SoldrConfig>("[dist]\npeers = 5").is_err());
+    }
     use super::*;
 
     #[test]

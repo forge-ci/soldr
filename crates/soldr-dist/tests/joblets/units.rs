@@ -658,3 +658,32 @@ fn direct_lan_cli_and_ticket_need_no_relay() {
         endpoint.close().await;
     });
 }
+
+#[test]
+fn assigned_rust_emit_outputs_are_mirrored_in_both_argument_forms() {
+    use std::path::Path;
+    let mut job = soldr_dist::DistJob {
+        compiler_kind: "rustc".into(),
+        cwd: "/repo".into(),
+        outputs: vec!["/staging/lib.rlib".into(), "/repo/lib.d".into()],
+        argv: vec!["--emit=link=/staging/lib.rlib,dep-info=lib.d".into()],
+        ..Default::default()
+    };
+    let expected = "link=/job/root/staging/lib.rlib,dep-info=/job/root/repo/lib.d";
+    assert_eq!(
+        soldr_dist::sandbox::argv(Path::new("/job"), &job).unwrap(),
+        [format!("--emit={expected}")]
+    );
+    job.argv = vec![
+        "--emit".into(),
+        "link=/staging/lib.rlib,dep-info=lib.d".into(),
+    ];
+    assert_eq!(
+        soldr_dist::sandbox::argv(Path::new("/job"), &job).unwrap(),
+        ["--emit", expected]
+    );
+    job.argv = vec!["--emit=link=/unlisted/file".into()];
+    assert!(soldr_dist::sandbox::argv(Path::new("/job"), &job).is_err());
+    job.argv = vec!["--emit=link=-".into()];
+    assert!(soldr_dist::sandbox::argv(Path::new("/job"), &job).is_err());
+}
