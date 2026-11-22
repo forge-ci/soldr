@@ -853,7 +853,7 @@ pub(crate) fn fake_rustc_script(log_path: &Path) -> String {
              if \"%~1\"==\"-o\" (\n\
                call :materialize_one \"%~2\"\n\
                if not \"!all_args:dep-info=!\"==\"!all_args!\" (\n\
-                 for %%D in (\"%~2\") do call :materialize_one \"%%~dpD!crate_name!.d\"\n\
+                 for %%D in (\"%~2\") do call :materialize_one \"%%~dpnD.d\"\n\
                )\n\
                shift\n\
              )\n\
@@ -891,7 +891,7 @@ pub(crate) fn fake_rustc_script(log_path: &Path) -> String {
                mkdir -p \"$(dirname \"$output_path\")\"\n\
                : > \"$output_path\"\n\
                case \"$all_args\" in\n\
-                 *dep-info*) : > \"${{output_dir:-$(dirname \"$output_path\")}}/$crate_name.d\" ;;\n\
+                 *dep-info*) : > \"${{output_path%.*}}.d\" ;;\n\
                esac\n\
              fi\n",
             log_path.display()
