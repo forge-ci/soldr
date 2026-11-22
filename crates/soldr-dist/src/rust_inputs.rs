@@ -23,6 +23,7 @@ pub async fn construct(job: DistJob, memo: &SharedMemo) -> Result<DistJob> {
 }
 
 fn construct_blocking(mut job: DistJob, memo: &DigestMemo) -> Result<DistJob> {
+    let started = std::time::Instant::now();
     let original_inputs = job.inputs.clone();
     let cwd = Path::new(&job.cwd);
     let mut paths = job
@@ -54,7 +55,16 @@ fn construct_blocking(mut job: DistJob, memo: &DigestMemo) -> Result<DistJob> {
             .into());
         }
     }
+    let listed = started.elapsed();
     env::select(&mut job)?;
+    // Prototype phase split (speed run): listing+hashing versus env parsing.
+    eprintln!(
+        "soldr dist construct {}: inputs={} list+hash={}ms inspect={}ms",
+        crate::status::unit_name(&job.argv),
+        job.inputs.len(),
+        listed.as_millis(),
+        (started.elapsed() - listed).as_millis()
+    );
     Ok(job)
 }
 
