@@ -55,6 +55,42 @@ struct State {
     total_cpus: usize,
     host_load_file: Option<PathBuf>,
     admission: soldr_platform::sync::Mutex<()>,
+    /// Wakes the maintenance task (eviction + status). Never done inline on a joblet.
+    maintenance: tokio::sync::Notify,
+}
+
+/// Asks the maintenance task to evict and republish status. Coalesces: many
+/// requests while a pass runs produce one more pass, not one per joblet.
+fn request_maintenance(state: &State) {
+    state.maintenance.notify_one();
+}
+
+/// Runs store eviction and status publication off the async runtime. Both walk
+/// the whole content store, so they run on the blocking pool, one pass at a
+/// time, when a joblet finishes or every 15 s.
+async fn maintain(state: Arc<State>, mut shutdown: watch::Receiver<bool>) {
+    loop {
+        tokio::select! {
+            _ = state.maintenance.notified() => {},
+            _ = tokio::time::sleep(Duration::from_secs(15)) => {},
+            _ = shutdown.changed() => break,
+        }
+        let pass = state.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            pass.cas.evict()?;
+            write_status(&pass)
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                eprintln!("\x1b[31msoldr dist: worker maintenance failed: {error}\x1b[0m")
+            }
+            Err(error) => {
+                eprintln!("\x1b[31msoldr dist: worker maintenance task failed: {error}\x1b[0m")
+            }
+        }
+    }
 }
 impl Worker {
     pub async fn serve(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
@@ -96,8 +132,10 @@ impl Worker {
             total_cpus: self.total_cpus,
             host_load_file: self.host_load_file,
             admission: soldr_platform::sync::Mutex::new(()),
+            maintenance: tokio::sync::Notify::new(),
         });
         let mut jobs = JoinSet::new();
+        let maintenance = tokio::spawn(maintain(state.clone(), shutdown.clone()));
         for client in self.clients {
             // One warm session per client multiplexes every joblet; slots bound
             // compiler admission, not sockets.
@@ -119,10 +157,9 @@ impl Worker {
                 }
                 result = jobs.join_next(), if !jobs.is_empty() => {
                     report_join(result);
-                    state.cas.evict()?;
+                    request_maintenance(&state);
                 }
             }
-            write_status(&state)?;
         }
         // Stop accepting while allowing accepted jobs to finish; timeout kills their children.
         let drain = async {
@@ -141,7 +178,9 @@ impl Worker {
             }
         }
         self.endpoint.close().await;
-        state.cas.evict()?;
+        maintenance.abort();
+        let last = state.clone();
+        tokio::task::spawn_blocking(move || last.cas.evict()).await??;
         let path = state.root.join("status.pb");
         if path.exists() {
             std::fs::remove_file(path)?;
@@ -216,8 +255,7 @@ async fn serve_connection(
                 let (state, conn, router) = (state.clone(), conn.clone(), router.clone());
                 jobs.spawn(async move {
                     let result = handle_job(&state, &conn, &router, streams).await;
-                    write_status(&state)?;
-                    state.cas.evict()?;
+                    request_maintenance(&state);
                     result
                 });
             }
@@ -293,11 +331,14 @@ async fn handle_job(
         return Ok(());
     };
     let mut lease = state.cas.lease(job.inputs.iter().map(|i| i.blake3.clone()));
-    write_status(state)?;
+    request_maintenance(state);
     receive_inputs(state, &mut inbox, &job, &offer.speculative, &mut send).await?;
-    state.cas.evict()?;
     let sandbox = tempfile::tempdir_in(&state.root)?;
-    sandbox::materialise(sandbox.path(), &job, &state.cas)?;
+    {
+        // Hard-links or copies every input: blocking filesystem work.
+        let (path, job, cas) = (sandbox.path().to_path_buf(), job.clone(), state.cas.clone());
+        tokio::task::spawn_blocking(move || sandbox::materialise(&path, &job, &cas)).await??;
+    }
     transport::send(
         &mut send,
         &Reply {
@@ -309,10 +350,19 @@ async fn handle_job(
     let Some(mut done) = execute_compiler(compiler, &job, sandbox.path(), &mut send).await? else {
         return Ok(());
     };
-    crate::rust_output::restore(&job, sandbox.path(), &mut done)?;
-    if done.exit_code == 0 {
-        done.outputs = compiler::outputs(&job, sandbox.path(), &mut lease)?;
-    }
+    let (done, lease) = {
+        // Rewrites depfiles, then hashes and stores every output: blocking work.
+        let (path, job) = (sandbox.path().to_path_buf(), job.clone());
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            crate::rust_output::restore(&job, &path, &mut done)?;
+            if done.exit_code == 0 {
+                done.outputs = compiler::outputs(&job, &path, &mut lease)?;
+            }
+            Ok((done, lease))
+        })
+        .await??
+    };
+    let _lease = lease;
     // Disconnected clients keep the compile alive only through producing its result.
     transport::send(
         &mut send,

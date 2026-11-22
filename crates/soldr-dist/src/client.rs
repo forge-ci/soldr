@@ -101,8 +101,17 @@ impl DistClient {
         metrics.elapsed_millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         metrics.finish(&outcome);
         outcome.set_metrics(metrics);
-        if let Err(error) = crate::status::record_job(&self.root, outcome.metrics()) {
-            eprintln!("soldr dist: WARNING cannot persist job metrics: {error}");
+        let (root, recorded) = (self.root.clone(), outcome.metrics().clone());
+        let persisted =
+            tokio::task::spawn_blocking(move || crate::status::record_job(&root, &recorded)).await;
+        match persisted {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                eprintln!("\x1b[31msoldr dist: WARNING cannot persist job metrics: {error}\x1b[0m")
+            }
+            Err(error) => {
+                eprintln!("\x1b[31msoldr dist: WARNING job metrics task failed: {error}\x1b[0m")
+            }
         }
         outcome
     }

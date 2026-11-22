@@ -64,8 +64,9 @@ pub fn record_job(root: &Path, metrics: &JobMetrics) -> Result<()> {
         .write(true)
         .truncate(false)
         .open(root.join("metrics.lock"))?;
-    // Telemetry cannot wait indefinitely after compiler outputs are published.
-    lock.try_lock_exclusive()?;
+    // Called on the blocking pool; concurrent joblets serialize here briefly
+    // instead of failing with EWOULDBLOCK and dropping their metrics.
+    lock.lock_exclusive()?;
     let path = root.join("last-job.pb");
     if path.exists() {
         let previous = JobMetrics::decode(std::fs::read(&path)?.as_slice())?;

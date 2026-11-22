@@ -266,13 +266,19 @@ impl Compiler {
             eprintln!("dist compiler stdin close: {error}");
         }
         let output = child.capture().await?;
+        // The proof hashes every file rustc read: blocking work, off the runtime.
+        let (proof_job, proof_root) = (job.clone(), root.to_path_buf());
+        let dependency_info = tokio::task::spawn_blocking(move || {
+            crate::rust_output::proof(&proof_job, &proof_root, proof.as_deref())
+        })
+        .await?
+        .map_err(|error| crate::dep_info::InvalidProof(error.to_string()))?;
         Ok(Done {
             exit_code: output.status.code().unwrap_or(1),
             stdout: output.stdout,
             stderr: output.stderr,
             outputs: vec![],
-            dependency_info: crate::rust_output::proof(job, root, proof.as_deref())
-                .map_err(|error| crate::dep_info::InvalidProof(error.to_string()))?,
+            dependency_info,
         })
     }
 }
