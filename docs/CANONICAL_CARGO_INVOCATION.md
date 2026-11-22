@@ -326,7 +326,11 @@ upgrade.
 
 Bypasses, which are never checked: `--no-cache`, `RUSTC_WRAPPER=""`
 (`cargo_args_use_reserved_no_cache`), `metadata`, `tree`, `fmt`, `doc`, and
-every non-compiling verb.
+every non-compiling verb. Note that `RUSTC_WRAPPER=""` only skips the *cache*:
+soldr still points `RUSTC` at its own shim and still needs the daemon, so it is
+not a way to run soldr's entry points without the broker (measured 2026-11-22 —
+the compile still failed with `could not connect to the soldr daemon`). Plain
+`cargo`, with the repository's pinned toolchain, is the only true bypass.
 
 ### 4.3 Making soldr's own entrypoints canonical
 
