@@ -3,11 +3,50 @@ use crate::{compiler::RUNTIME_ENV, DistJob, Result};
 use proc_macro2::{TokenStream, TokenTree};
 use std::collections::BTreeSet;
 
+/// std/core macros whose expansion cannot read a user environment variable or
+/// include a file, so calling them leaves env inspection exact. A crate that
+/// defines its own `macro_rules!` under one of these names loses the exemption,
+/// and macros imported from another crate already require an rlib/proc-macro
+/// input, which is refused separately.
+const STD_MACROS: &[&str] = &[
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "debug_assert",
+    "debug_assert_eq",
+    "debug_assert_ne",
+    "matches",
+    "panic",
+    "todo",
+    "unimplemented",
+    "unreachable",
+    "write",
+    "writeln",
+    "format",
+    "format_args",
+    "print",
+    "println",
+    "eprint",
+    "eprintln",
+    "vec",
+    "dbg",
+    "cfg",
+    "line",
+    "column",
+    "file",
+    "module_path",
+    "stringify",
+    "compile_error",
+    "thread_local",
+];
+
 struct Uses {
     keys: BTreeSet<String>,
     includes: BTreeSet<String>,
     constants: BTreeSet<String>,
     aliases: BTreeSet<String>,
+    /// Names this crate defines with `macro_rules!`.
+    local_macros: BTreeSet<String>,
     ambiguous_macros: bool,
 }
 impl Default for Uses {
@@ -17,6 +56,7 @@ impl Default for Uses {
             includes: BTreeSet::new(),
             constants: BTreeSet::new(),
             aliases: BTreeSet::from(["env".into(), "option_env".into()]),
+            local_macros: BTreeSet::new(),
             ambiguous_macros: false,
         }
     }
@@ -57,6 +97,9 @@ pub(super) fn inspect(job: &mut DistJob) -> Result<BTreeSet<String>> {
         if uses.aliases.len() == before {
             break;
         }
+    }
+    for source in &tokens {
+        local_macros(source.clone(), &mut uses.local_macros);
     }
     for source in tokens {
         scan(source, false, &mut uses)?;
@@ -110,6 +153,27 @@ fn aliases(tokens: TokenStream, known: &mut BTreeSet<String>) {
     }
 }
 
+fn local_macros(tokens: TokenStream, defined: &mut BTreeSet<String>) {
+    let tokens = tokens.into_iter().collect::<Vec<_>>();
+    for part in tokens.windows(3) {
+        if let [TokenTree::Ident(keyword), TokenTree::Punct(bang), TokenTree::Ident(name)] = part {
+            if keyword == "macro_rules" && bang.as_char() == '!' {
+                defined.insert(name.to_string());
+            }
+        }
+    }
+    for token in tokens {
+        if let TokenTree::Group(group) = token {
+            local_macros(group.stream(), defined);
+        }
+    }
+}
+
+/// Whether calling `name` could hide an environment read from this scan.
+fn opaque_macro(name: &str, uses: &Uses) -> bool {
+    !STD_MACROS.contains(&name) || uses.local_macros.contains(name)
+}
+
 fn scan(tokens: TokenStream, path_context: bool, uses: &mut Uses) -> Result<()> {
     let tokens = tokens.into_iter().collect::<Vec<_>>();
     let mut index = 0;
@@ -133,7 +197,8 @@ fn scan(tokens: TokenStream, path_context: bool, uses: &mut Uses) -> Result<()> 
                     if !matches!(
                         name.as_str(),
                         "include" | "include_str" | "include_bytes" | "concat"
-                    ) {
+                    ) && opaque_macro(&name, uses)
+                    {
                         uses.ambiguous_macros = true;
                     }
                     let inside = path_context
@@ -185,6 +250,41 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("macro expansion"));
+    }
+    fn job_for(text: &str) -> (tempfile::TempDir, DistJob) {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("lib.rs");
+        std::fs::write(&source, text).unwrap();
+        let job = DistJob {
+            inputs: vec![crate::cas::DigestMemo::default().input(&source).unwrap()],
+            ..Default::default()
+        };
+        (root, job)
+    }
+    const INCLUDE: &str = r#"include!(concat!(env!("OUT_DIR"),"/generated.rs"));"#;
+    #[test]
+    fn std_macros_do_not_block_an_out_dir_include_rewrite() {
+        // target-lexicon's shape: generated include plus only std macros.
+        let (_root, mut job) = job_for(&format!(
+            "{INCLUDE} fn f(w: &mut String) {{ use std::fmt::Write; write!(w, \"x\").unwrap(); assert_eq!(1, 1); let _ = vec![format!(\"y\")]; }}"
+        ));
+        inspect(&mut job).unwrap();
+        assert_eq!(job.rewrite_env, ["OUT_DIR"]);
+    }
+    #[test]
+    fn unknown_or_shadowed_macros_still_block_the_rewrite() {
+        for text in [
+            format!("{INCLUDE} fn f() {{ custom!(); }}"),
+            // A local macro_rules named like a std macro is not std.
+            format!("{INCLUDE} macro_rules! write {{ () => {{}} }} fn f() {{ write!(); }}"),
+        ] {
+            let (_root, mut job) = job_for(&text);
+            let error = inspect(&mut job).unwrap_err().to_string();
+            assert!(
+                error.contains("unresolved macro expansion"),
+                "{text}: {error}"
+            );
+        }
     }
     #[test]
     fn include_paths_and_constants_have_distinct_environment_semantics() {
