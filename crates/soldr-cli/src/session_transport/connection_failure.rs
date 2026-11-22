@@ -12,6 +12,8 @@ pub(super) enum BrokerResponseDeadline {
     FirstResponse { elapsed_ms: u128, limit_ms: u128 },
     #[error("broker did not confirm either handoff ownership or same-connection proxy fallback")]
     Handoff,
+    #[error("broker handoff deadline expired; fresh broker proxy negotiation failed: {0}")]
+    ProxyRetryFailed(#[source] io::Error),
 }
 
 impl BrokerResponseDeadline {

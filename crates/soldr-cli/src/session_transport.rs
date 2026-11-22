@@ -22,6 +22,7 @@ use interprocess::local_socket::tokio::Stream;
 use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use running_process::broker::capabilities::CAP_HANDLE_PASSING;
 use running_process::broker::protocol::{
     encode_framed, hello_reply::Result as HelloReplyResult, try_decode_framed, FrameKind,
     HandoffAck, Hello, PayloadEncoding, CONTROL_PAYLOAD_PROTOCOL, ENVELOPE_VERSION,
@@ -337,23 +338,7 @@ async fn run_session_compile_async(
             .ok()
             .as_deref(),
     );
-    let mut stream = match tokio::time::timeout(
-        setup_timeout,
-        establish_session(service_name, rustc_argv, cwd, env),
-    )
-    .await
-    {
-        Ok(result) => result?,
-        Err(_) => {
-            return Err(SessionError::pre_output(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "SESSION setup did not complete within {}ms",
-                    setup_timeout.as_millis()
-                ),
-            )))
-        }
-    };
+    let mut stream = establish_session(service_name, rustc_argv, cwd, env, setup_timeout).await?;
 
     let mut probe = RelayProbe::new(rustc_argv);
     probe.on_request_sent();
@@ -367,9 +352,70 @@ async fn establish_session(
     rustc_argv: &[String],
     cwd: String,
     env: Vec<SessionEnvVar>,
+    setup_timeout: Duration,
 ) -> Result<Stream, SessionError> {
-    // Setup — connect / Hello / negotiate / SessionStart send. Failures here
-    // are tagged pre-output for precise diagnostics.
+    let deadline = tokio::time::Instant::now() + setup_timeout;
+    let setup_expired = |_| {
+        SessionError::pre_output(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "SESSION setup did not complete within {}ms",
+                setup_timeout.as_millis()
+            ),
+        ))
+    };
+    let mut stream = match tokio::time::timeout_at(deadline, negotiate_session(service_name, true))
+        .await
+        .map_err(setup_expired)?
+    {
+        Ok(stream) => stream,
+        Err(err) if proxy_retry_allowed(&err.source) && tokio::time::Instant::now() < deadline => {
+            // The original connection is closed and no SessionStart was sent.
+            // A fresh Hello re-resolves the route with the broker and selects
+            // its existing proxy path without asking for another handoff.
+            eprintln!(
+                "soldr: broker handoff deadline expired (route {service_name}); retrying once over a fresh broker proxy connection"
+            );
+            tokio::time::timeout_at(deadline, negotiate_session(service_name, false))
+                .await
+                .unwrap_or_else(|elapsed| Err(setup_expired(elapsed)))
+                .map_err(|err| {
+                    SessionError::pre_output(
+                        BrokerResponseDeadline::ProxyRetryFailed(err.source).into_io(),
+                    )
+                })?
+        }
+        Err(err) => return Err(err),
+    };
+    tokio::time::timeout_at(deadline, async {
+        let start = compile_session_start(rustc_argv, cwd, env);
+        let start_frame = encode_session_frame(
+            &SessionFrame {
+                kind: Some(session_frame::Kind::Start(start)),
+            },
+            0,
+        )
+        .map_err(io::Error::other)?;
+        stream.write_all(&start_frame).await?;
+        stream.flush().await
+    })
+    .await
+    .map_err(setup_expired)?
+    .map_err(SessionError::pre_output)?;
+    Ok(stream)
+}
+
+fn proxy_retry_allowed(error: &io::Error) -> bool {
+    matches!(
+        BrokerResponseDeadline::from_io(error),
+        Some(BrokerResponseDeadline::Handoff)
+    )
+}
+
+async fn negotiate_session(
+    service_name: &str,
+    request_handoff: bool,
+) -> Result<Stream, SessionError> {
     let session_socket = session_socket_path().map_err(SessionError::broker_unreachable)?;
     if session_debug_enabled() {
         eprintln!("soldr: SESSION dialing service={service_name} socket={session_socket}");
@@ -388,7 +434,7 @@ async fn establish_session(
         client_lib_name: "soldr".to_string(),
         client_lib_version: env!("CARGO_PKG_VERSION").to_string(),
         peer_attestation_nonce: crate::broker_server::client_host_attestation(),
-        client_capabilities: running_process::broker::capabilities::CAP_HANDLE_PASSING,
+        client_capabilities: if request_handoff { CAP_HANDLE_PASSING } else { 0 },
         ..Default::default()
     }
     .encode_to_vec();
@@ -400,7 +446,7 @@ async fn establish_session(
     // it before replying to Hello. Retrying this pre-session handshake is safe:
     // no compiler request or output has crossed the connection yet.
     let mut hello_attempt = 0;
-    let mut stream = loop {
+    loop {
         hello_attempt += 1;
         // A failed dial means no broker is bound at this socket.
         let mut candidate = connect_broker_with_busy_retry(name.clone())
@@ -412,31 +458,13 @@ async fn establish_session(
             .map_err(SessionError::pre_output)?;
         candidate.flush().await.map_err(SessionError::pre_output)?;
         match read_negotiated(&mut candidate, request_id).await {
-            Ok(_) => break candidate,
-            Err(error) if hello_attempt < 3 && broker_hello_retryable(&error) => {
+            Ok(_) => return Ok(candidate),
+            Err(error) if request_handoff && hello_attempt < 3 && broker_hello_retryable(&error) => {
                 tokio::time::sleep(busy_jitter()).await;
             }
             Err(error) => return Err(SessionError::pre_output(error)),
         }
-    };
-
-    // From here the connection is a transparent SESSION relay to the daemon.
-    let start = compile_session_start(rustc_argv, cwd, env);
-    let start_frame = encode_session_frame(
-        &SessionFrame {
-            kind: Some(session_frame::Kind::Start(start)),
-        },
-        0,
-    )
-    .map_err(|e| SessionError::pre_output(io::Error::other(e)))?;
-    stream
-        .write_all(&start_frame)
-        .await
-        .map_err(SessionError::pre_output)?;
-    stream.flush().await.map_err(SessionError::pre_output)?;
-
-    // Output phase — a failure after the first byte is printed is a hard error.
-    Ok(stream)
+    }
 }
 
 fn compile_session_start(
@@ -621,9 +649,7 @@ where
                         backend_pipe: negotiated.backend_pipe.clone(),
                         daemon_version: negotiated.daemon_version.clone(),
                     };
-                    if negotiated.server_capabilities
-                        & running_process::broker::capabilities::CAP_HANDLE_PASSING
-                        != 0
+                    if negotiated.server_capabilities & CAP_HANDLE_PASSING != 0
                         && !negotiated.handle_passed_token.is_empty()
                     {
                         pending_handoff = Some((

@@ -232,7 +232,7 @@ fn compile_service_that_never_publishes_is_bounded() {
 
 /// A broker that has accepted the connection but answers `delay` after the
 /// Hello: the reply frame a busy-but-alive broker eventually sends.
-async fn late_negotiated_reply(mut server: tokio::io::DuplexStream, delay: Duration) {
+async fn hold_negotiated_reply(mut server: tokio::io::DuplexStream, delay: Duration, handoff: bool) {
     use prost::Message as _;
     use running_process::broker::protocol::{
         hello_reply, Negotiated, PayloadEncoding, CONTROL_PAYLOAD_PROTOCOL,
@@ -242,6 +242,8 @@ async fn late_negotiated_reply(mut server: tokio::io::DuplexStream, delay: Durat
         result: Some(hello_reply::Result::Negotiated(Negotiated {
             backend_pipe: "late-pipe".to_string(),
             daemon_version: "9.9.9".to_string(),
+            server_capabilities: if handoff { CAP_HANDLE_PASSING } else { 0 },
+            handle_passed_token: if handoff { vec![1; 16] } else { Vec::new() },
             ..Default::default()
         })),
     };
@@ -273,7 +275,11 @@ fn a_busy_broker_answering_after_3_4_seconds_completes_under_the_defaults() {
         .expect("runtime");
     runtime.block_on(async {
         let (mut client, server) = tokio::io::duplex(4096);
-        tokio::spawn(late_negotiated_reply(server, Duration::from_millis(3400)));
+        tokio::spawn(hold_negotiated_reply(
+            server,
+            Duration::from_millis(3400),
+            false,
+        ));
         let route = read_negotiated_with_deadlines(
             &mut client,
             1,
@@ -302,6 +308,7 @@ fn a_broker_that_never_answers_still_fails_at_the_first_response_deadline() {
             .await
             .expect_err("a silent broker must fail");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(!proxy_retry_allowed(&error));
         assert!(
             error.to_string().contains("first-response deadline"),
             "{error}"
@@ -309,6 +316,38 @@ fn a_broker_that_never_answers_still_fails_at_the_first_response_deadline() {
         let waited = started.elapsed();
         assert!(waited >= deadlines.first_response, "{waited:?}");
         assert!(waited < deadlines.route_ceiling, "{waited:?}");
+    });
+}
+
+#[test]
+fn only_an_unconfirmed_handoff_can_retry_on_the_proxy_path() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let deadlines = crate::broker_deadlines::BrokerDeadlines::defaults();
+        let (mut client, server) = tokio::io::duplex(4096);
+        tokio::spawn(hold_negotiated_reply(server, Duration::ZERO, true));
+        let handoff = read_negotiated_with_deadlines(&mut client, 1, deadlines)
+            .await
+            .expect_err("the original connection never confirmed handoff or fallback");
+        assert!(proxy_retry_allowed(&handoff));
+        assert!(!proxy_retry_allowed(
+            &BrokerResponseDeadline::ProxyRetryFailed(handoff).into_io()
+        ));
+        assert!(!proxy_retry_allowed(&io::Error::new(
+            io::ErrorKind::TimedOut,
+            "route acquisition ceiling"
+        )));
+
+        let (mut proxy, server) = tokio::io::duplex(4096);
+        tokio::spawn(hold_negotiated_reply(server, Duration::ZERO, false));
+        let route = read_negotiated_with_deadlines(&mut proxy, 1, deadlines)
+            .await
+            .expect("proxy negotiation needs no separate handoff confirmation");
+        assert_eq!(route.backend_pipe, "late-pipe");
     });
 }
 
