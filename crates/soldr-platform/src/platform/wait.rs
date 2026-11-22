@@ -198,7 +198,8 @@ fn spawn_for_output(command: &mut std::process::Command) -> io::Result<Child> {
 pub fn output_for_observed(
     command: &mut std::process::Command,
     bound: Duration,
-    on_line: impl Fn(bool, &[u8]) + Send + Sync + 'static,
+    capture_limit: Option<usize>,
+    on_line: impl Fn(bool, &[u8]) -> io::Result<()> + Send + Sync + 'static,
 ) -> io::Result<std::process::Output> {
     use std::io::{BufRead, BufReader, Read};
     use std::sync::Arc;
@@ -206,16 +207,44 @@ pub fn output_for_observed(
     fn drain(
         pipe: impl Read,
         is_stderr: bool,
-        on_line: impl Fn(bool, &[u8]),
+        capture_limit: Option<usize>,
+        on_line: impl Fn(bool, &[u8]) -> io::Result<()>,
     ) -> io::Result<Vec<u8>> {
         let mut reader = BufReader::new(pipe);
         let mut bytes = Vec::new();
+        let mut chunk = Vec::new();
+        let mut overflow = false;
         loop {
-            let start = bytes.len();
-            if reader.read_until(b'\n', &mut bytes)? == 0 {
-                return Ok(bytes);
+            let pending = chunk.len();
+            if reader
+                .by_ref()
+                .take(64 * 1024)
+                .read_until(b'\n', &mut chunk)?
+                == 0
+            {
+                if !chunk.is_empty() {
+                    on_line(is_stderr, &chunk)?;
+                }
+                return if overflow {
+                    Err(io::Error::other(
+                        "remote output exceeds the buffered protocol limit; use --stream",
+                    ))
+                } else {
+                    Ok(bytes)
+                };
             }
-            on_line(is_stderr, &bytes[start..]);
+            if let Some(limit) = capture_limit {
+                if chunk.len() - pending <= limit.saturating_sub(bytes.len()) && !overflow {
+                    bytes.extend_from_slice(&chunk[pending..]);
+                } else {
+                    overflow = true;
+                }
+            }
+            let end = complete_utf8_prefix(&chunk);
+            if end > 0 {
+                on_line(is_stderr, &chunk[..end])?;
+            }
+            drop(chunk.drain(..end));
         }
     }
 
@@ -224,8 +253,11 @@ pub fn output_for_observed(
     let stderr = child.stderr.take().expect("piped stderr");
     let on_line = Arc::new(on_line);
     let on_stdout = Arc::clone(&on_line);
-    let stdout = std::thread::spawn(move || drain(stdout, false, |s, line| on_stdout(s, line)));
-    let stderr = std::thread::spawn(move || drain(stderr, true, |s, line| on_line(s, line)));
+    let stdout = std::thread::spawn(move || {
+        drain(stdout, false, capture_limit, |s, line| on_stdout(s, line))
+    });
+    let stderr =
+        std::thread::spawn(move || drain(stderr, true, capture_limit, |s, line| on_line(s, line)));
     let status = wait_for(&mut child, bound)?;
     let collect =
         |reader| join_for(reader, HELPER_JOIN).map_err(|(_, error)| io::Error::from(error));
@@ -234,6 +266,23 @@ pub fn output_for_observed(
         stdout: collect(stdout)??,
         stderr: collect(stderr)??,
     })
+}
+
+fn complete_utf8_prefix(bytes: &[u8]) -> usize {
+    let tail = bytes.len().saturating_sub(3);
+    let candidate = bytes[tail..]
+        .iter()
+        .rposition(|byte| byte & 0xc0 != 0x80)
+        .map(|index| tail + index);
+    match candidate {
+        Some(start)
+            if std::str::from_utf8(&bytes[start..])
+                .is_err_and(|error| error.error_len().is_none()) =>
+        {
+            start
+        }
+        _ => bytes.len(),
+    }
 }
 
 /// Run `command` with its stdio as configured (typically inherited) and wait

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path as RoutePath, Query, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path as RoutePath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -19,7 +19,7 @@ use crate::platform::{fs::permissions, wait};
 use super::slots;
 use super::snapshot::{digest, relative_path};
 use super::wire::{self, Action, Artifact, Artifacts, Blob, Fetch, ResultFrame, Session, Start};
-use super::{artifacts, control, manifest};
+use super::{artifacts, control, manifest, retention};
 
 type RunnerState = (PathBuf, String, Option<u32>, u8);
 
@@ -37,6 +37,8 @@ pub(super) async fn serve(
     }
     fs::create_dir_all(root.join("blobs"))?;
     fs::create_dir_all(root.join("sessions"))?;
+    retention::prepare(&root)?;
+    retention::maintain(root.canonicalize()?);
     let router = Router::new()
         .route("/v1/{*operation}", post(handle))
         .route("/v1/sessions/{id}/artifacts.json", get(get_inventory))
@@ -53,12 +55,17 @@ pub(super) async fn serve(
         "soldr remote listening at http://{}",
         listener.local_addr()?
     );
-    axum::serve(listener, router).await?;
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<retention::Connection>(),
+    )
+    .await?;
     Ok(0)
 }
 
 async fn handle(
     State((root, expected, slot_limit, artifact_streams)): State<RunnerState>,
+    ConnectInfo(connection): ConnectInfo<retention::Connection>,
     RoutePath(operation): RoutePath<String>,
     headers: HeaderMap,
     body: Bytes,
@@ -78,22 +85,31 @@ async fn handle(
             return StatusCode::BAD_REQUEST.into_response();
         };
         let id = id.to_owned();
+        let output = match connection.allocate_for_stream(&root, &id).await {
+            Ok(output) => output,
+            Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+        };
         return control::stream_run(move |sink| {
-            run(
-                &root,
-                &root.join("sessions").join(&id),
-                &id,
-                slot_limit,
-                Some(sink),
-            )
-            .map(|_| ())
+            run_session(&root, &id, slot_limit, Some(sink), &output).map(|_| ())
         });
     }
     match tokio::task::spawn_blocking(move || {
-        if let Some(id) = operation.strip_prefix("artifact/") {
-            return artifacts::serve(&finished_output(&root, id)?, &body);
+        if let Some(id) = operation.strip_prefix("run/") {
+            let id = key(id, 32)?;
+            let output = connection.allocate(&root, id)?;
+            let result = run_session(&root, id, slot_limit, None, &output)?;
+            return Ok::<_, io::Error>(
+                (
+                    [("content-type", "application/x-protobuf+zstd")],
+                    wire::encode(&result)?,
+                )
+                    .into_response(),
+            );
         }
-        let data = dispatch(&root, &operation, &body, slot_limit, artifact_streams)?;
+        if let Some(id) = operation.strip_prefix("artifact/") {
+            return artifacts::serve(&finished_output(&root, id, &connection)?.path, &body);
+        }
+        let data = dispatch(&root, &operation, &body, artifact_streams, &connection)?;
         Ok::<_, io::Error>(
             ([("content-type", "application/x-protobuf+zstd")], data).into_response(),
         )
@@ -124,6 +140,7 @@ struct ArtifactQuery {
 
 async fn get_inventory(
     State((root, expected, _, limit)): State<RunnerState>,
+    ConnectInfo(connection): ConnectInfo<retention::Connection>,
     RoutePath(id): RoutePath<String>,
     Query(query): Query<InventoryQuery>,
     headers: HeaderMap,
@@ -136,8 +153,8 @@ async fn get_inventory(
             Some(globs) => serde_json::from_str(&globs)?,
             None => vec!["**".into()],
         };
-        let data =
-            artifacts::inventory_json(&finished_output(&root, &id)?, Fetch { globs }, limit)?;
+        let output = finished_output(&root, &id, &connection)?;
+        let data = artifacts::inventory_json(&output.path, Fetch { globs }, limit)?;
         Ok(([("content-type", "application/json")], data).into_response())
     })
     .await
@@ -145,6 +162,7 @@ async fn get_inventory(
 
 async fn get_artifact(
     State((root, expected, _, _)): State<RunnerState>,
+    ConnectInfo(connection): ConnectInfo<retention::Connection>,
     RoutePath(id): RoutePath<String>,
     Query(query): Query<ArtifactQuery>,
     headers: HeaderMap,
@@ -167,7 +185,8 @@ async fn get_artifact(
                     .is_some_and(|q| q > 0.0 && q <= 1.0)
         });
     artifact_response(move || {
-        artifacts::serve_file(&finished_output(&root, &id)?, &query.path, compress, false)
+        let output = finished_output(&root, &id, &connection)?;
+        artifacts::serve_file(&output.path, &query.path, compress, false)
     })
     .await
 }
@@ -185,12 +204,32 @@ async fn artifact_response(
     }
 }
 
-fn finished_output(root: &Path, id: &str) -> io::Result<PathBuf> {
-    let output = root.join("sessions").join(key(id, 32)?).join("output");
-    if !output.join("attestation.json").is_file() {
-        return Err(io::Error::other("remote build session has not finished"));
+struct FinishedOutput {
+    path: PathBuf,
+    _retention: Option<std::sync::Arc<retention::OutputDirectory>>,
+}
+
+fn finished_output(
+    root: &Path,
+    id: &str,
+    connection: &retention::Connection,
+) -> io::Result<FinishedOutput> {
+    let id = key(id, 32)?;
+    let leased = connection.output(id);
+    let path = leased.as_ref().map_or_else(
+        || root.join("sessions").join(id).join("output"),
+        |lease| lease.path().join("output"),
+    );
+    if !path.join("attestation.json").is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "remote artifact session unavailable",
+        ));
     }
-    Ok(output)
+    Ok(FinishedOutput {
+        path,
+        _retention: leased,
+    })
 }
 
 fn key(value: &str, len: usize) -> io::Result<&str> {
@@ -209,28 +248,21 @@ fn dispatch(
     root: &Path,
     operation: &str,
     body: &[u8],
-    slot_limit: Option<u32>,
     artifact_streams: u8,
+    connection: &retention::Connection,
 ) -> io::Result<Vec<u8>> {
     let parts: Vec<_> = operation.split('/').collect();
     match parts.as_slice() {
         ["start"] => start(root, wire::decode(body)?),
         ["blob", hash] => store_blob(root, hash, wire::decode(body)?),
         ["workspace", id] => store_workspace(root, key(id, 32)?, wire::decode(body)?),
-        ["run", id] => wire::encode(&run(
-            root,
-            &root.join("sessions").join(key(id, 32)?),
-            id,
-            slot_limit,
-            None,
-        )?),
         ["artifact-list", id] => artifacts::inventory(
-            &finished_output(root, id)?,
+            &finished_output(root, id, connection)?.path,
             wire::decode(body)?,
             artifact_streams,
         ),
         ["fetch", id] => fetch(
-            &root.join("sessions").join(key(id, 32)?),
+            &finished_output(root, id, connection)?.path,
             wire::decode(body)?,
         ),
         _ => Err(io::Error::other("unknown remote build operation")),
@@ -354,12 +386,34 @@ fn lock_session(root: &Path, session: &Path, request: &Start) -> io::Result<fs::
     Ok(lock)
 }
 
+fn run_session(
+    root: &Path,
+    id: &str,
+    slot_limit: Option<u32>,
+    sink: Option<std::sync::Arc<control::Sink>>,
+    archive: &retention::OutputDirectory,
+) -> io::Result<ResultFrame> {
+    let result = run(
+        root,
+        &root.join("sessions").join(id),
+        id,
+        slot_limit,
+        sink,
+        archive,
+    );
+    if result.is_err() {
+        archive.discard();
+    }
+    result
+}
+
 fn run(
     root: &Path,
     session: &Path,
     id: &str,
     slot_limit: Option<u32>,
     sink: Option<std::sync::Arc<control::Sink>>,
+    archive: &retention::OutputDirectory,
 ) -> io::Result<ResultFrame> {
     let request = Start::decode(fs::read(session.join("start.pb"))?.as_slice())?;
     let _runner_lock = lock_session(root, session, &request)?;
@@ -374,24 +428,16 @@ fn run(
     let workspace = lease
         .as_ref()
         .map_or(session, |lease| lease.workspace.as_path());
-    let source = workspace.join("source");
-    let output = session.join("output");
-    let build_output = workspace.join("output");
-    prepare_sources(
-        root,
-        session,
-        &source,
-        &build_output,
-        &request,
-        lease.is_some(),
-    )?;
+    let output = &archive.path().join("output");
+    let (source, build_output) =
+        prepare_sources(root, session, workspace, output, &request, lease.is_some())?;
     let changes = lease
         .as_ref()
         .map(|lease| slots::OutputChanges::capture(&lease.workspace, &request))
         .transpose()?;
 
     let soldr = std::env::current_exe()?;
-    let transcript = Transcript::new(sink);
+    let transcript = Transcript::new(parent(output)?, sink)?;
     let (result, action, full_lint) = execute_action(
         &soldr,
         &cache_root,
@@ -406,10 +452,9 @@ fn run(
     let run_cook = lease.is_some() && exit_code == 0 && full_lint;
     let mut cook_archive_sha256 = None;
     if let (Some(lease), Some(changes)) = (&lease, changes) {
-        fs::create_dir(&output)?;
-        changes.publish(&output, exit_code == 0)?;
-        cook_archive_sha256 =
-            cook_slot_output(root, lease, &soldr, &output, run_cook, &mut stderr)?;
+        fs::create_dir(output)?;
+        changes.publish(output, exit_code == 0)?;
+        cook_archive_sha256 = cook_slot_output(root, lease, &soldr, output, run_cook, &mut stderr);
     }
     let cook_ready = run_cook.then_some(cook_archive_sha256.is_some());
     fs::write(
@@ -422,7 +467,7 @@ fn run(
             &cache_root,
             &source,
             &cache_dir,
-            &output,
+            output,
             level,
             &mut stderr,
         )
@@ -449,17 +494,20 @@ fn run(
         "arch": std::env::consts::ARCH,
         "source": request.files.iter().map(|file| (&file.path, &file.digest)).collect::<std::collections::BTreeMap<_, _>>(),
     }))?;
-    if let Some(lease) = &lease {
-        lease.finish(Some(result_code))?;
-    }
     let result = ResultFrame {
         exit_code: result_code,
         stdout: result.stdout,
         stderr,
         attestation,
     };
-    transcript.record_stderr(&result.stderr[stderr_before_postprocessing..]);
-    publish_result(&output, &result, &transcript, id)?;
+    publish_result(
+        archive,
+        &result,
+        &transcript,
+        id,
+        lease.as_ref(),
+        stderr_before_postprocessing,
+    )?;
     Ok(result)
 }
 
@@ -491,21 +539,25 @@ fn execute_action(
 }
 
 fn publish_result(
-    output: &Path,
+    archive: &retention::OutputDirectory,
     result: &ResultFrame,
     transcript: &Transcript,
     id: &str,
+    lease: Option<&slots::Lease>,
+    stderr_offset: usize,
 ) -> io::Result<()> {
-    let mut logs = std::io::BufWriter::new(fs::File::create(output.join("stdout-stderr.jsonl"))?);
-    transcript.write_to(&mut logs)?;
-    serde_json::to_writer(&mut logs, &serde_json::json!({"return": result.exit_code}))?;
-    logs.write_all(b"\n")?;
-    logs.flush()?;
+    let output = &archive.path().join("output");
+    if let Some(lease) = lease {
+        lease.finish(Some(result.exit_code))?;
+    }
+    transcript.record_stderr(&result.stderr[stderr_offset..])?;
+    transcript.publish(output, result.exit_code)?;
 
     // Fetch uses the atomically published attestation as its readiness signal.
     let mut staging = tempfile::NamedTempFile::new_in(output)?;
     staging.write_all(&result.attestation)?;
     staging.persist(output.join("attestation.json"))?;
+    archive.mark_ready();
     if let Some(sink) = &transcript.sink {
         sink.finish(
             transcript.start.elapsed().as_secs_f64(),
@@ -518,7 +570,8 @@ fn publish_result(
 
 struct Transcript {
     start: std::time::Instant,
-    lines: std::sync::Arc<crate::platform::sync::Mutex<Vec<OutputLine>>>,
+    file: tempfile::NamedTempFile,
+    writer: std::sync::Arc<crate::platform::sync::Mutex<std::io::BufWriter<fs::File>>>,
     sink: Option<std::sync::Arc<control::Sink>>,
 }
 
@@ -531,49 +584,64 @@ struct OutputLine {
 }
 
 impl Transcript {
-    fn new(sink: Option<std::sync::Arc<control::Sink>>) -> Self {
-        Self {
+    fn new(session: &Path, sink: Option<std::sync::Arc<control::Sink>>) -> io::Result<Self> {
+        let file = tempfile::NamedTempFile::new_in(session)?;
+        let writer = std::io::BufWriter::new(file.reopen()?);
+        Ok(Self {
             start: std::time::Instant::now(),
-            lines: std::sync::Arc::new(crate::platform::sync::Mutex::new(Vec::new())),
+            file,
+            writer: std::sync::Arc::new(crate::platform::sync::Mutex::new(writer)),
             sink,
-        }
-    }
-
-    fn run(&self, command: &mut Command) -> io::Result<std::process::Output> {
-        let lines = self.lines.clone();
-        let start = self.start;
-        let sink = self.sink.clone();
-        wait::output_for_observed(command, wait::WHOLE_COMMAND, move |is_stderr, line| {
-            let mut lines = lines.lock();
-            let record = OutputLine::new(start, if is_stderr { 'e' } else { 'o' }, line);
-            if let Some(sink) = &sink {
-                sink.output(&record);
-            }
-            lines.push(record);
         })
     }
 
-    fn record_stderr(&self, bytes: &[u8]) {
-        let mut lines = self.lines.lock();
+    fn run(&self, command: &mut Command) -> io::Result<std::process::Output> {
+        let writer = self.writer.clone();
+        let start = self.start;
+        let sink = self.sink.clone();
+        let capture_limit = self.sink.is_none().then_some(wire::MAX_FRAME / 4);
+        wait::output_for_observed(
+            command,
+            wait::WHOLE_COMMAND,
+            capture_limit,
+            move |is_stderr, line| {
+                let mut writer = writer.lock();
+                let record = OutputLine::new(start, if is_stderr { 'e' } else { 'o' }, line);
+                write_json_line(&mut *writer, &record)?;
+                if let Some(sink) = &sink {
+                    sink.output(&record);
+                }
+                Ok(())
+            },
+        )
+    }
+
+    fn record_stderr(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut writer = self.writer.lock();
         for record in bytes
             .split_inclusive(|&byte| byte == b'\n')
             .map(|line| OutputLine::new(self.start, 'e', line))
         {
+            write_json_line(&mut *writer, &record)?;
             if let Some(sink) = &self.sink {
                 sink.output(&record);
             }
-            lines.push(record);
-        }
-    }
-
-    fn write_to(&self, writer: &mut impl Write) -> io::Result<()> {
-        let lines = std::mem::take(&mut *self.lines.lock());
-        for line in lines {
-            serde_json::to_writer(&mut *writer, &line)?;
-            writer.write_all(b"\n")?;
         }
         Ok(())
     }
+
+    fn publish(&self, output: &Path, code: i32) -> io::Result<()> {
+        let mut writer = self.writer.lock();
+        write_json_line(&mut *writer, &serde_json::json!({"return": code}))?;
+        writer.flush()?;
+        fs::copy(self.file.path(), output.join("stdout-stderr.jsonl"))?;
+        Ok(())
+    }
+}
+
+fn write_json_line(writer: &mut impl Write, record: &impl serde::Serialize) -> io::Result<()> {
+    serde_json::to_writer(&mut *writer, record)?;
+    writer.write_all(b"\n")
 }
 
 impl OutputLine {
@@ -593,10 +661,10 @@ fn cook_slot_output(
     output: &Path,
     run_cook: bool,
     stderr: &mut Vec<u8>,
-) -> io::Result<Option<String>> {
-    let hash = if run_cook {
+) -> Option<String> {
+    if run_cook {
         warm_cook(
-            root,
+            output,
             lease,
             soldr,
             &root.join("compiler"),
@@ -605,16 +673,11 @@ fn cook_slot_output(
         )
     } else {
         None
-    };
-    if let Some(hash) = &hash {
-        let archive = root.join("cook").join(format!("{hash}.tar.zst"));
-        slots::reflink(&archive, &output.join("cook.tar.zst"))?;
     }
-    Ok(hash)
 }
 
 fn warm_cook(
-    root: &Path,
+    output: &Path,
     lease: &slots::Lease,
     soldr: &Path,
     cache_root: &Path,
@@ -624,9 +687,9 @@ fn warm_cook(
     use crate::cache_lib::cook_archive;
 
     let run = || -> io::Result<String> {
-        let archives = root.join("cook");
+        let archives = tempfile::tempdir_in(output)?;
         let target = tempfile::tempdir_in(&lease.workspace)?;
-        let result = wait::output_for(
+        let result = bounded_postprocessing(
             runner_soldr(soldr, cache_root)
                 .current_dir(source)
                 .env("CARGO_TARGET_DIR", target.path())
@@ -640,10 +703,14 @@ fn warm_cook(
                 String::from_utf8_lossy(&result.stderr)
             )));
         }
-        fs::create_dir_all(&archives)?;
-        let packed = cook_archive::pack_cook_archive(&target.path().join("debug"), &archives)
+        let packed = cook_archive::pack_cook_archive(&target.path().join("debug"), archives.path())
             .map_err(io::Error::other)?;
-        Ok(hex::encode(packed.sha256))
+        let hash = hex::encode(packed.sha256);
+        slots::reflink(
+            &archives.path().join(format!("{hash}.tar.zst")),
+            &output.join("cook.tar.zst"),
+        )?;
+        Ok(hash)
     };
     match run() {
         Ok(hash) => Some(hash),
@@ -659,17 +726,24 @@ fn warm_cook(
 fn prepare_sources(
     root: &Path,
     session: &Path,
-    source: &Path,
-    build_output: &Path,
+    workspace: &Path,
+    output: &Path,
     request: &Start,
     slotted: bool,
-) -> io::Result<()> {
+) -> io::Result<(PathBuf, PathBuf)> {
+    let source = workspace.join("source");
+    let build_output = if slotted {
+        workspace.join("output")
+    } else {
+        output.to_owned()
+    };
     if source.exists() {
-        fs::rename(source, session.join("previous-source"))?;
+        fs::rename(&source, session.join("previous-source"))?;
     }
-    fs::create_dir(source)?;
-    fs::create_dir_all(build_output)?;
-    materialize(root, source, request, slotted)
+    fs::create_dir(&source)?;
+    fs::create_dir_all(&build_output)?;
+    materialize(root, &source, request, slotted)?;
+    Ok((source, build_output))
 }
 
 fn materialize(root: &Path, source: &Path, request: &Start, reflink: bool) -> io::Result<()> {
@@ -706,7 +780,7 @@ fn save_cache(
     level: i32,
     stderr: &mut Vec<u8>,
 ) -> bool {
-    let cache = wait::output_for(
+    let cache = bounded_postprocessing(
         runner_soldr(soldr, cache_root)
             .current_dir(source)
             .args(["save", "--zstd-level"])
@@ -729,6 +803,27 @@ fn save_cache(
             false
         }
     }
+}
+
+fn bounded_postprocessing(
+    command: &mut Command,
+    timeout: std::time::Duration,
+) -> io::Result<std::process::Output> {
+    const LIMIT: usize = 16 * 1024;
+    let tail = std::sync::Arc::new(crate::platform::sync::Mutex::new(Vec::new()));
+    let observed = tail.clone();
+    let mut output = wait::output_for_observed(command, timeout, None, move |stderr, chunk| {
+        if stderr {
+            let chunk = &chunk[chunk.len().saturating_sub(LIMIT)..];
+            let mut tail = observed.lock();
+            let discard = (tail.len() + chunk.len()).saturating_sub(LIMIT);
+            tail.drain(..discard);
+            tail.extend_from_slice(chunk);
+        }
+        Ok(())
+    })?;
+    output.stderr = std::mem::take(&mut *tail.lock());
+    Ok(output)
 }
 
 fn runner_soldr(executable: &Path, cache_root: &Path) -> Command {
@@ -813,11 +908,7 @@ pub(super) fn write_file(path: &Path, data: &[u8], executable: bool) -> io::Resu
     Ok(())
 }
 
-fn fetch(session: &Path, request: Fetch) -> io::Result<Vec<u8>> {
-    let output = session.join("output");
-    if !output.join("attestation.json").is_file() {
-        return Err(io::Error::other("remote build session has not finished"));
-    }
+fn fetch(output: &Path, request: Fetch) -> io::Result<Vec<u8>> {
     let mut builder = GlobSetBuilder::new();
     for pattern in request.globs {
         builder.add(
@@ -830,13 +921,13 @@ fn fetch(session: &Path, request: Fetch) -> io::Result<Vec<u8>> {
     let patterns = builder.build().map_err(io::Error::other)?;
     let mut files = Vec::new();
     let mut size = 0_u64;
-    for entry in jwalk::WalkDir::new(&output).skip_hidden(false) {
+    for entry in jwalk::WalkDir::new(output).skip_hidden(false) {
         let entry = entry.map_err(io::Error::other)?;
         if !entry.file_type().is_file() {
             continue;
         }
         let absolute = entry.path();
-        let path = absolute.strip_prefix(&output).map_err(io::Error::other)?;
+        let path = absolute.strip_prefix(output).map_err(io::Error::other)?;
         if !patterns.is_match(path) {
             continue;
         }

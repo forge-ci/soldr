@@ -3,12 +3,13 @@
 mod artifacts;
 mod control;
 mod manifest;
+mod retention;
 mod server;
 mod slots;
 mod snapshot;
 mod wire;
 
-use std::io::{self, Write};
+use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -16,7 +17,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use prost::Message;
 use soldr_fetch::fetch::LoopbackPostClient;
 
-use self::wire::{Action, Blob, ResultFrame, Session, Start};
+use self::wire::{Action, Blob, Session, Start};
 
 #[derive(Args)]
 pub(crate) struct RemoteArgs {
@@ -57,8 +58,8 @@ enum RemoteCommand {
         /// Session-relative artifact glob to download after the run. Repeat as needed.
         #[arg(long, requires = "fetch_out")]
         fetch: Vec<String>,
-        /// Print output as the runner captures it.
-        #[arg(long)]
+        /// Accepted for compatibility. Output always streams.
+        #[arg(long, hide = true)]
         stream: bool,
         #[arg(long, allow_negative_numbers = true, value_parser = crate::cache_lib::zstd_level::parse_zstd_level)]
         cache_zstd_level: Option<i32>,
@@ -67,7 +68,7 @@ enum RemoteCommand {
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Fetch matching files from a finished session into a new directory.
+    /// Fetch matching files from a legacy on-disk session into a new directory.
     Fetch {
         #[arg(long, default_value = "127.0.0.1:7744")]
         endpoint: SocketAddr,
@@ -108,7 +109,7 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             manifest,
             fetch_out,
             fetch,
-            stream,
+            stream: _,
             cache_zstd_level,
             action,
             args,
@@ -120,8 +121,7 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
                 snapshot::verify_parent(&directory, &snapshot.commit, manifest.parent())?;
             }
             let manifest_json = manifest.as_ref().map(serde_json::to_vec).transpose()?;
-            let live = stream || fetch_out.is_some();
-            let client = Client::new(endpoint, token, live)?;
+            let client = Client::new(endpoint, token)?;
             let action = match action {
                 BuildAction::Build => Action::Build,
                 BuildAction::Test => Action::Test,
@@ -147,11 +147,13 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
                     "remote runner does not support session manifests; upgrade the runner",
                 ));
             }
-            client
-                .upload_workspace(&session, snapshot.blobs, live)
-                .await?;
+            client.upload_workspace(&session, snapshot.blobs).await?;
             eprintln!("Remote build session {}", session.id);
-            let code = client.finish_run(&session.id, &attestation, live).await?;
+            let code = match client.finish_run(&session.id, &attestation).await {
+                // A diagnostic could write to the same blocked pipe.
+                Err(error) if control::terminal_blocked(&error) => return Ok(1),
+                result => result?,
+            };
             if let Some(out) = fetch_out {
                 artifacts::download(&client, &session.id, &out, fetch).await?;
             }
@@ -163,7 +165,7 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             session,
             globs,
         } => {
-            let client = Client::new(endpoint, token, true)?;
+            let client = Client::new(endpoint, token)?;
             artifacts::download(&client, &session, &out, globs).await?;
             Ok(0)
         }
@@ -180,7 +182,6 @@ impl<'a> Client<'a> {
         &self,
         session: &Session,
         mut blobs: std::collections::BTreeMap<String, Vec<u8>>,
-        batch_upload: bool,
     ) -> io::Result<()> {
         const TARGET_BATCH: usize = 16 * 1024 * 1024;
         const MAX_BATCH_ENTRIES: usize = 512;
@@ -190,7 +191,7 @@ impl<'a> Client<'a> {
             let data = blobs
                 .remove(hash)
                 .ok_or_else(|| io::Error::other("runner requested an unknown source digest"))?;
-            if !batch_upload || data.len() >= TARGET_BATCH {
+            if data.len() >= TARGET_BATCH {
                 let _: Blob = self.post(&format!("blob/{hash}"), &Blob { data }).await?;
                 continue;
             }
@@ -225,45 +226,38 @@ impl<'a> Client<'a> {
         Ok(())
     }
 
-    async fn finish_run(
-        &self,
-        session: &str,
-        attestation: &std::path::Path,
-        live: bool,
-    ) -> io::Result<i32> {
-        let (code, bytes) = if live {
-            let code = control::receive(self, session).await?;
-            let compressed = self
-                .http
-                .get(
-                    &format!("/v1/sessions/{session}/artifact"),
-                    self.token,
-                    &[("path", "attestation.json")],
-                    wire::MAX_FRAME + 1024 * 1024,
-                )
-                .await?;
-            (code, wire::decompress(&compressed)?)
-        } else {
-            let result: ResultFrame = self
-                .post(&format!("run/{session}"), &Blob::default())
-                .await?;
-            io::stdout().write_all(&result.stdout)?;
-            io::stderr().write_all(&result.stderr)?;
-            (result.exit_code, result.attestation)
-        };
+    async fn finish_run(&self, session: &str, attestation: &std::path::Path) -> io::Result<i32> {
+        let code = control::receive(self, session).await?;
+        let compressed = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            self.http.get(
+                &format!("/v1/sessions/{session}/artifact"),
+                self.token,
+                &[("path", "attestation.json")],
+                wire::MAX_FRAME + 1024 * 1024,
+            ),
+        )
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "remote attestation download timed out",
+            )
+        })??;
+        let bytes = wire::decompress(&compressed)?;
         if let Some(parent) = attestation
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
         {
-            std::fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
-        std::fs::write(attestation, bytes)?;
+        tokio::fs::write(attestation, bytes).await?;
         Ok(code)
     }
 
-    fn new(endpoint: SocketAddr, token: &'a str, http2: bool) -> io::Result<Self> {
+    fn new(endpoint: SocketAddr, token: &'a str) -> io::Result<Self> {
         Ok(Self {
-            http: LoopbackPostClient::with_http2(endpoint, http2)?,
+            http: LoopbackPostClient::with_http2(endpoint, true)?,
             token,
         })
     }
