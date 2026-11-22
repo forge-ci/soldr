@@ -151,6 +151,26 @@ pub fn wait_for_terminate_signal() -> impl Future<Output = bool> {
     }
 }
 
+/// Windows uses console/job termination rather than catchable POSIX signals.
+pub struct ChildTerminationGuard;
+
+impl ChildTerminationGuard {
+    /// No signal dispositions to install on this host.
+    pub fn install() -> std::io::Result<Self> {
+        Ok(Self)
+    }
+}
+
+/// Explicit timeout cleanup uses terminate_tree; no POSIX signal to forward.
+pub fn forward_child_termination(_pid: u32) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+/// Observed Windows children are contained by their kill-on-close Job Object.
+pub fn kill_owned_process_group(_pid: u32) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,7 +190,10 @@ mod tests {
             request_graceful_terminate(pid).expect("open + SetEvent"),
             "the event exists, so the request must report it was signalled"
         );
-        assert!(wait_terminate_event(&event, 5_000), "event must be signalled");
+        assert!(
+            wait_terminate_event(&event, 5_000),
+            "event must be signalled"
+        );
         assert!(
             !wait_terminate_event(&event, 0),
             "auto-reset: the wait consumed the signal"

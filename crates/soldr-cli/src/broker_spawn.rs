@@ -696,19 +696,10 @@ fn admission_endpoint_accepts_connections(endpoint: &str) -> bool {
 }
 
 fn broker_instance_at(runtime: &tokio::runtime::Runtime, endpoint: &str) -> Option<String> {
-    broker_snapshot_at(
-        runtime,
-        endpoint,
-        crate::broker_deadlines::BrokerDeadlines::from_env().first_response,
-    )
-    .map(|(instance, _pid)| instance)
+    broker_snapshot_at(runtime, endpoint).map(|(instance, _pid)| instance)
 }
 
-pub(crate) fn broker_snapshot_at(
-    runtime: &tokio::runtime::Runtime,
-    endpoint: &str,
-    timeout: Duration,
-) -> Option<(String, u32)> {
+fn broker_snapshot_at(runtime: &tokio::runtime::Runtime, endpoint: &str) -> Option<(String, u32)> {
     crate::platform::wait::block_on_for(
         runtime,
         async {
@@ -774,7 +765,12 @@ pub(crate) fn broker_snapshot_at(
                     .ok_or_else(|| std::io::Error::other("readiness reply omitted broker_pid"))?;
                 Ok((instance, pid))
             };
-            match tokio::time::timeout(timeout, probe).await {
+            match tokio::time::timeout(
+                crate::broker_deadlines::BrokerDeadlines::from_env().first_response,
+                probe,
+            )
+            .await
+            {
                 Ok(Ok(instance)) => Some(instance),
                 Ok(Err(_)) | Err(_) => None,
             }

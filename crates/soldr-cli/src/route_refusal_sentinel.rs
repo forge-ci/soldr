@@ -22,7 +22,7 @@ const SENTINEL_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// The one line every repeat refusal in a build prints.
 pub(crate) const REPEAT_LINE: &str =
-    "soldr: control-plane failure: broker route failed earlier in this build -- see the first error above";
+    "soldr: broker route refused earlier in this build -- see the first error above";
 
 /// Whether this refusal was the first of its build to be recorded.
 #[derive(Debug, PartialEq, Eq)]

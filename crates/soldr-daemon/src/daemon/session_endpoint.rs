@@ -726,8 +726,34 @@ async fn accept_handoff_offer_async(
     let frame = running_process::broker::server::handoff::handoff_ack_frame(&ack);
     let bytes =
         running_process::broker::protocol::encode_framed(&frame).map_err(io::Error::other)?;
-    stream.write_all(&bytes).await?;
-    stream.flush().await
+    let started = std::time::Instant::now();
+    let id = offer.correlation_id;
+    stream.write_all(&bytes).await.map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "handoff ACK write failed: connection_id={id} elapsed_ms={} error={error}",
+                started.elapsed().as_millis()
+            ),
+        )
+    })?;
+    stream.flush().await.map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "handoff ACK flush failed: connection_id={id} elapsed_ms={} error={error}",
+                started.elapsed().as_millis()
+            ),
+        )
+    })?;
+    let elapsed = started.elapsed();
+    if elapsed >= running_process::broker::server::DEFAULT_HANDOFF_ACK_DEADLINE / 2 {
+        eprintln!(
+            "soldr-daemon: slow handoff ACK connection_id={id} elapsed_ms={}",
+            elapsed.as_millis()
+        );
+    }
+    Ok(())
 }
 
 async fn read_envelope_body(

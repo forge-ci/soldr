@@ -22,20 +22,16 @@ use interprocess::local_socket::tokio::Stream;
 use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use running_process::broker::capabilities::CAP_HANDLE_PASSING;
 use running_process::broker::protocol::{
     encode_framed, hello_reply::Result as HelloReplyResult, try_decode_framed, FrameKind,
     HandoffAck, Hello, PayloadEncoding, CONTROL_PAYLOAD_PROTOCOL, ENVELOPE_VERSION,
 };
 use running_process::broker::protocol::{Frame, HelloReply};
-use running_process::broker::protocol_v2::{
-    session_frame, SessionEnvVar, SessionFrame, SessionStart,
-};
-use running_process::broker::session_codec::{encode_session_frame, try_decode_session_frame};
+use running_process::broker::protocol_v2::{session_frame, SessionEnvVar};
+use running_process::broker::session_codec::try_decode_session_frame;
 
-mod connection_failure;
-pub(crate) use connection_failure::ConnectionFailure;
-use connection_failure::{is_connection_failure, BrokerResponseDeadline};
+mod setup;
+use setup::{establish_session, HandoffTimeout};
 
 static NEXT_BROKER_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -134,7 +130,7 @@ pub fn session_hot_path(rustc_argv: &[String]) -> SessionHotPathOutcome {
         }
         Err(err) if is_connection_failure(&err) => {
             use std::io::IsTerminal;
-            SessionHotPathOutcome::HardFail(io::Error::other(ConnectionFailure::new(
+            SessionHotPathOutcome::HardFail(io::Error::other(connection_failure_message(
                 &err,
                 &service_name,
                 started.elapsed(),
@@ -159,6 +155,60 @@ pub(crate) fn session_setup_timeout(route_ceiling: Duration, explicit: Option<&s
         .map_or(route_ceiling, |secs| {
             route_ceiling.min(Duration::from_secs(secs))
         })
+}
+
+/// Is this failure about reaching or keeping the daemon connection, as
+/// opposed to the compiler's own result?
+fn is_connection_failure(err: &SessionError) -> bool {
+    use io::ErrorKind::{
+        BrokenPipe, ConnectionAborted, ConnectionRefused, ConnectionReset, NotFound, TimedOut,
+        UnexpectedEof,
+    };
+    if err.broker_unreachable {
+        return true;
+    }
+    let reply_timeout = err.source.to_string().contains("reply did not complete");
+    !reply_timeout
+        && matches!(
+            err.source.kind(),
+            BrokenPipe
+                | ConnectionAborted
+                | ConnectionRefused
+                | ConnectionReset
+                | NotFound
+                | TimedOut
+                | UnexpectedEof
+        )
+}
+
+/// The loud, stand-alone failure printed when the daemon connection cannot be
+/// established or re-established in time (soldr#3815). Red on a terminal; the
+/// text reads the same without colour.
+fn connection_failure_message(
+    err: &SessionError,
+    service_name: &str,
+    elapsed: Duration,
+    color: bool,
+) -> String {
+    let what = if err.broker_unreachable || err.source.kind() == io::ErrorKind::TimedOut {
+        "could not connect to the soldr daemon"
+    } else {
+        "lost the connection to the soldr daemon"
+    };
+    let text = format!(
+        "soldr: ERROR: {what} (route {service_name}) after {:.1}s: {}\n\
+         soldr: the compile was not completed; this build cannot continue. Recover with:\n\
+         soldr:   soldr daemon status\n\
+         soldr:   soldr daemon stop && soldr daemon start\n\
+         soldr:   soldr logs paths   (daemon and broker logs)",
+        elapsed.as_secs_f64(),
+        err.source
+    );
+    if color {
+        format!("\x1b[1;31m{text}\x1b[0m")
+    } else {
+        text
+    }
 }
 
 /// Did the relay close before the terminal `Exit` frame and before any
@@ -338,154 +388,30 @@ async fn run_session_compile_async(
             .ok()
             .as_deref(),
     );
-    let mut stream = establish_session(service_name, rustc_argv, cwd, env, setup_timeout).await?;
+    let deadline = tokio::time::Instant::now() + setup_timeout;
+    let mut stream = match tokio::time::timeout_at(
+        deadline,
+        establish_session(service_name, rustc_argv, cwd, env, deadline),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(SessionError::pre_output(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "SESSION setup did not complete within {}ms",
+                    setup_timeout.as_millis()
+                ),
+            )))
+        }
+    };
 
     let mut probe = RelayProbe::new(rustc_argv);
     probe.on_request_sent();
     let reply_timeout = crate::daemon::client::compile_reply_timeout();
     let pump = pump_session_output_with_timeout(&mut stream, reply_timeout, &mut probe);
     crate::compile_stall_watch::await_compile_reply(pump).await
-}
-
-async fn establish_session(
-    service_name: &str,
-    rustc_argv: &[String],
-    cwd: String,
-    env: Vec<SessionEnvVar>,
-    setup_timeout: Duration,
-) -> Result<Stream, SessionError> {
-    let deadline = tokio::time::Instant::now() + setup_timeout;
-    let setup_expired = |_| {
-        SessionError::pre_output(io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!(
-                "SESSION setup did not complete within {}ms",
-                setup_timeout.as_millis()
-            ),
-        ))
-    };
-    let mut stream = match tokio::time::timeout_at(deadline, negotiate_session(service_name, true))
-        .await
-        .map_err(setup_expired)?
-    {
-        Ok(stream) => stream,
-        Err(err) if proxy_retry_allowed(&err.source) && tokio::time::Instant::now() < deadline => {
-            // The original connection is closed and no SessionStart was sent.
-            // A fresh Hello re-resolves the route with the broker and selects
-            // its existing proxy path without asking for another handoff.
-            eprintln!(
-                "soldr: broker handoff deadline expired (route {service_name}); retrying once over a fresh broker proxy connection"
-            );
-            tokio::time::timeout_at(deadline, negotiate_session(service_name, false))
-                .await
-                .unwrap_or_else(|elapsed| Err(setup_expired(elapsed)))
-                .map_err(|err| {
-                    SessionError::pre_output(
-                        BrokerResponseDeadline::ProxyRetryFailed(err.source).into_io(),
-                    )
-                })?
-        }
-        Err(err) => return Err(err),
-    };
-    tokio::time::timeout_at(deadline, async {
-        let start = compile_session_start(rustc_argv, cwd, env);
-        let start_frame = encode_session_frame(
-            &SessionFrame {
-                kind: Some(session_frame::Kind::Start(start)),
-            },
-            0,
-        )
-        .map_err(io::Error::other)?;
-        stream.write_all(&start_frame).await?;
-        stream.flush().await
-    })
-    .await
-    .map_err(setup_expired)?
-    .map_err(SessionError::pre_output)?;
-    Ok(stream)
-}
-
-fn proxy_retry_allowed(error: &io::Error) -> bool {
-    matches!(
-        BrokerResponseDeadline::from_io(error),
-        Some(BrokerResponseDeadline::Handoff)
-    )
-}
-
-async fn negotiate_session(
-    service_name: &str,
-    request_handoff: bool,
-) -> Result<Stream, SessionError> {
-    let session_socket = session_socket_path().map_err(SessionError::broker_unreachable)?;
-    if session_debug_enabled() {
-        eprintln!("soldr: SESSION dialing service={service_name} socket={session_socket}");
-    }
-    let name = local_session_name(&session_socket).map_err(SessionError::broker_unreachable)?;
-    // Negotiate the requested daemon route over the v2 control envelope.
-    let hello_payload = Hello {
-        client_min_protocol: ENVELOPE_VERSION as u32,
-        client_max_protocol: ENVELOPE_VERSION as u32,
-        service_name: service_name.to_string(),
-        wanted_version: crate::daemon::backend_handle_adoption::SOLDR_DAEMON_SERVICE_VERSION
-            .to_string(),
-        client_version: env!("CARGO_PKG_VERSION").to_string(),
-        request_id: format!("soldr-session-{}", std::process::id()),
-        peer_pid: std::process::id(),
-        client_lib_name: "soldr".to_string(),
-        client_lib_version: env!("CARGO_PKG_VERSION").to_string(),
-        peer_attestation_nonce: crate::broker_server::client_host_attestation(),
-        client_capabilities: if request_handoff {
-            CAP_HANDLE_PASSING
-        } else {
-            0
-        },
-        ..Default::default()
-    }
-    .encode_to_vec();
-    let hello_frame = broker_hello_frame(hello_payload);
-    let request_id = hello_frame.request_id;
-    let hello =
-        encode_framed(&hello_frame).map_err(|e| SessionError::pre_output(io::Error::other(e)))?;
-    // A same-version broker replacement can accept a pipe instance and close
-    // it before replying to Hello. Retrying this pre-session handshake is safe:
-    // no compiler request or output has crossed the connection yet.
-    let mut hello_attempt = 0;
-    loop {
-        hello_attempt += 1;
-        // A failed dial means no broker is bound at this socket.
-        let mut candidate = connect_broker_with_busy_retry(name.clone())
-            .await
-            .map_err(SessionError::broker_unreachable)?;
-        candidate
-            .write_all(&hello)
-            .await
-            .map_err(SessionError::pre_output)?;
-        candidate.flush().await.map_err(SessionError::pre_output)?;
-        match read_negotiated(&mut candidate, request_id).await {
-            Ok(_) => return Ok(candidate),
-            Err(error)
-                if request_handoff && hello_attempt < 3 && broker_hello_retryable(&error) =>
-            {
-                tokio::time::sleep(busy_jitter()).await;
-            }
-            Err(error) => return Err(SessionError::pre_output(error)),
-        }
-    }
-}
-
-fn compile_session_start(
-    rustc_argv: &[String],
-    cwd: String,
-    env: Vec<running_process::broker::protocol_v2::SessionEnvVar>,
-) -> SessionStart {
-    SessionStart {
-        program: rustc_argv.first().cloned().unwrap_or_default(),
-        args: rustc_argv.get(1..).unwrap_or_default().to_vec(),
-        cwd,
-        env,
-        clear_inherited_env: true,
-        environment_policy: running_process::broker::protocol_v2::EnvironmentPolicy::Clear as i32,
-    }
 }
 
 async fn connect_broker_with_busy_retry(
@@ -573,7 +499,7 @@ where
     let route_ceiling = started + deadlines.route_ceiling;
     let mut response_deadline = started + deadlines.first_response;
     let mut pending_handoff: Option<(Vec<u8>, u64, ReadyRoute)> = None;
-    let mut last_progress_elapsed_ms = None;
+    let mut last_progress: Option<crate::broker_server::RouteProgress> = None;
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
@@ -600,12 +526,12 @@ where
                 if progress.stage.is_empty()
                     || progress.latest_result.is_empty()
                     || progress.attempt == 0
-                    || last_progress_elapsed_ms
-                        .is_some_and(|previous| progress.elapsed_ms < previous)
+                    || last_progress
+                        .as_ref()
+                        .is_some_and(|last| progress.elapsed_ms < last.elapsed_ms)
                 {
                     return Err(io::Error::other("broker returned invalid route progress"));
                 }
-                last_progress_elapsed_ms = Some(progress.elapsed_ms);
                 if session_debug_enabled() {
                     eprintln!(
                         "soldr: broker route progress stage={} attempt={} elapsed_ms={} result={}",
@@ -615,6 +541,7 @@ where
                         progress.latest_result
                     );
                 }
+                last_progress = Some(progress);
                 response_deadline = tokio::time::Instant::now() + deadlines.progress_silence;
                 continue;
             }
@@ -656,7 +583,9 @@ where
                         backend_pipe: negotiated.backend_pipe.clone(),
                         daemon_version: negotiated.daemon_version.clone(),
                     };
-                    if negotiated.server_capabilities & CAP_HANDLE_PASSING != 0
+                    if negotiated.server_capabilities
+                        & running_process::broker::capabilities::CAP_HANDLE_PASSING
+                        != 0
                         && !negotiated.handle_passed_token.is_empty()
                     {
                         pending_handoff = Some((
@@ -703,37 +632,52 @@ where
         } else {
             response_deadline.min(route_ceiling)
         };
-        let n = tokio::time::timeout_at(deadline, stream.read(&mut chunk))
-            .await
-            .map_err(|_| {
-                if pending_handoff.is_some() {
-                    return BrokerResponseDeadline::Handoff.into_io();
-                }
-                let class = if deadline == route_ceiling {
-                    "route acquisition ceiling"
-                } else if last_progress_elapsed_ms.is_none() {
-                    return BrokerResponseDeadline::FirstResponse {
-                        elapsed_ms: started.elapsed().as_millis(),
-                        limit_ms: deadlines.first_response.as_millis(),
-                    }
-                    .into_io();
+        let context = || {
+            crate::broker_deadlines::handshake_context(
+                expected_request_id,
+                started.elapsed(),
+                last_progress.as_ref(),
+                pending_handoff.as_ref().map(|(_, id, route)| {
+                    (
+                        *id,
+                        route.backend_pipe.as_str(),
+                        route.daemon_version.as_str(),
+                    )
+                }),
+            )
+        };
+        let n = match tokio::time::timeout_at(deadline, stream.read(&mut chunk)).await {
+            Ok(Ok(0)) => {
+                eprintln!(
+                    "soldr: broker closed before handshake completed ({})",
+                    context()
+                );
+                return Err(io::Error::other("broker closed before Hello reply"));
+            }
+            Ok(Err(error)) => {
+                eprintln!(
+                    "soldr: broker handshake read failed: {error} ({})",
+                    context()
+                );
+                return Err(error);
+            }
+            Ok(Ok(n)) => n,
+            Err(_) => {
+                let reason = crate::broker_deadlines::handshake_timeout_reason(
+                    pending_handoff.is_some(),
+                    deadline == route_ceiling,
+                    response_deadline == started + deadlines.first_response,
+                    deadline - started,
+                );
+                let message = format!("{reason} ({})", context());
+                eprintln!("soldr: {message}");
+                return Err(if pending_handoff.is_some() {
+                    io::Error::new(io::ErrorKind::TimedOut, HandoffTimeout(message))
                 } else {
-                    "progress-silence deadline"
-                };
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!(
-                        "broker {class} exceeded after {}ms (limit {}ms; raise {} if the broker is only busy)",
-                        started.elapsed().as_millis(),
-                        (deadline - started).as_millis(),
-                        crate::broker_deadlines::deadline_env_var(class),
-                    ),
-                )
-            });
-        let n = n??;
-        if n == 0 {
-            return Err(io::Error::other("broker closed before Hello reply"));
-        }
+                    io::Error::new(io::ErrorKind::TimedOut, message)
+                });
+            }
+        };
         buf.extend_from_slice(&chunk[..n]);
     }
 }

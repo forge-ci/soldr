@@ -20,7 +20,135 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+const CLOSURE_CACHE_NAME: &str = ".soldr-dependency-closure-v1.json";
+
+#[derive(Serialize, Deserialize)]
+struct ClosureCache {
+    fingerprint: String,
+    closure: String,
+}
+
+/// A standalone lint with a lockfile containing only itself as a path package
+/// has a stable dependency graph until one of its dependency inputs changes.
+/// Other workspace shapes continue through graph resolution on every run.
+fn closure_fingerprint(workspace_root: &Path, libraries: &[PathBuf]) -> Option<String> {
+    let mut hasher = Sha256::new();
+    hash_input(
+        &mut hasher,
+        b"workspace",
+        workspace_root.as_os_str().as_encoded_bytes(),
+    );
+    for name in KEY_FILES {
+        hash_input(
+            &mut hasher,
+            name.as_bytes(),
+            &std::fs::read(workspace_root.join(name)).unwrap_or_default(),
+        );
+    }
+    for library in libraries {
+        let manifest_path = library.join(KEY_FILES[0]);
+        let manifest = std::fs::read(&manifest_path).ok()?;
+        let parsed: toml::Value = toml::from_str(std::str::from_utf8(&manifest).ok()?).ok()?;
+        parsed.get("workspace").and_then(toml::Value::as_table)?;
+        let lock = std::fs::read(manifest_path.with_extension("lock")).ok()?;
+        let parsed_lock: toml::Value = toml::from_str(std::str::from_utf8(&lock).ok()?).ok()?;
+        let packages = parsed_lock.get("package")?.as_array()?;
+        let path_packages: Vec<_> = packages
+            .iter()
+            .filter(|package| package.get("source").is_none())
+            .collect();
+        if path_packages.len() != 1
+            || path_packages[0].get("name")?.as_str()? != library.file_name()?.to_str()?
+        {
+            return None;
+        }
+        hash_input(
+            &mut hasher,
+            b"library",
+            library.file_name()?.as_encoded_bytes(),
+        );
+        hash_input(&mut hasher, b"manifest", &manifest);
+        hash_input(&mut hasher, b"lock", &lock);
+        for ancestor in library.ancestors() {
+            for name in [".cargo/config", ".cargo/config.toml"] {
+                hash_cargo_config(&mut hasher, &ancestor.join(name))?;
+            }
+        }
+        for name in &KEY_FILES[1..] {
+            hash_input(
+                &mut hasher,
+                name.as_bytes(),
+                &std::fs::read(library.join(name)).unwrap_or_default(),
+            );
+        }
+    }
+    for root in [
+        std::env::var_os("CARGO_HOME").map(PathBuf::from),
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for name in ["config", "config.toml"] {
+            hash_cargo_config(&mut hasher, &root.join(name))?;
+        }
+    }
+    let mut variables: Vec<_> = std::env::vars_os()
+        .filter(|(name, _)| {
+            let name = name.to_string_lossy();
+            name.starts_with("CARGO_") || name.starts_with("RUSTUP_") || name == "RUSTFLAGS"
+        })
+        .collect();
+    variables.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, value) in variables {
+        hash_input(
+            &mut hasher,
+            name.as_encoded_bytes(),
+            value.as_encoded_bytes(),
+        );
+    }
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+fn write_closure_cache(path: &Path, cache: &ClosureCache) -> std::io::Result<()> {
+    let parent = path.parent().expect("closure cache has a parent");
+    std::fs::create_dir_all(parent)?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer(&mut staged, cache)?;
+    staged.persist(path)?;
+    Ok(())
+}
+
+fn hash_cargo_config(hasher: &mut Sha256, path: &Path) -> Option<()> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(()),
+        Err(_) => return None,
+    };
+    let config: toml::Table = toml::from_str(&content).ok()?;
+    if ["include", "patch", "paths"]
+        .iter()
+        .any(|key| config.contains_key(*key))
+    {
+        return None;
+    }
+    hash_input(
+        hasher,
+        path.as_os_str().as_encoded_bytes(),
+        content.as_bytes(),
+    );
+    Some(())
+}
+
+fn hash_input(hasher: &mut Sha256, name: &[u8], bytes: &[u8]) {
+    hasher.update((name.len() as u64).to_le_bytes());
+    hasher.update(name);
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
 
 /// Files whose content decides what a lint library's build tree contains.
 const KEY_FILES: &[&str] = &["Cargo.toml", "rust-toolchain", "rust-toolchain.toml"];
@@ -66,6 +194,37 @@ impl StoreInputs {
             return None;
         }
         let closure = metadata::dependency_closure(workspace_root, &libraries).ok()?;
+        Some(Self { libraries, closure })
+    }
+
+    fn resolve_cached(workspace_root: &Path, target_dir: &Path) -> Option<Self> {
+        let libraries = crate::dylint_libraries::library_directories(workspace_root).ok()?;
+        if libraries.is_empty() {
+            return None;
+        }
+        let fingerprint = closure_fingerprint(workspace_root, &libraries);
+        let cache_path = target_dir.join("dylint").join(CLOSURE_CACHE_NAME);
+        let cached = fingerprint.as_ref().and_then(|fingerprint| {
+            let bytes = std::fs::read(&cache_path).ok()?;
+            let cache: ClosureCache = serde_json::from_slice(&bytes).ok()?;
+            (cache.fingerprint == *fingerprint).then_some(cache)
+        });
+        if let Some(cache) = cached {
+            return Some(Self {
+                libraries,
+                closure: cache.closure,
+            });
+        }
+        let closure = metadata::dependency_closure(workspace_root, &libraries).ok()?;
+        if let Some(fingerprint) = fingerprint.filter(|before| {
+            closure_fingerprint(workspace_root, &libraries).as_ref() == Some(before)
+        }) {
+            let cache = ClosureCache {
+                fingerprint,
+                closure: closure.clone(),
+            };
+            let _ = write_closure_cache(&cache_path, &cache);
+        }
         Some(Self { libraries, closure })
     }
 
@@ -152,7 +311,7 @@ pub(crate) fn share_library_build(
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let _lock = gc::lock_store(&store_root)?;
         let targets = invocation_targets(workspace_root, args)?;
-        let Some(inputs) = StoreInputs::resolve(workspace_root) else {
+        let Some(inputs) = StoreInputs::resolve_cached(workspace_root, target_dir) else {
             return Ok(());
         };
         for requested in std::iter::once(None).chain(targets.into_iter().map(Some)) {

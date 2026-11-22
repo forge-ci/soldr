@@ -157,12 +157,7 @@ pub fn output_for(
     bound: Duration,
 ) -> io::Result<std::process::Output> {
     use std::io::Read;
-    use std::process::Stdio;
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut child = spawn_for_output(command)?;
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
     let stdout_reader = std::thread::spawn(move || {
@@ -187,6 +182,57 @@ pub fn output_for(
         status,
         stdout,
         stderr,
+    })
+}
+
+fn spawn_for_output(command: &mut std::process::Command) -> io::Result<Child> {
+    use std::process::Stdio;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+}
+
+/// Capture both pipes and report each line as it is read.
+pub fn output_for_observed(
+    command: &mut std::process::Command,
+    bound: Duration,
+    on_line: impl Fn(bool, &[u8]) + Send + Sync + 'static,
+) -> io::Result<std::process::Output> {
+    use std::io::{BufRead, BufReader, Read};
+    use std::sync::Arc;
+
+    fn drain(
+        pipe: impl Read,
+        is_stderr: bool,
+        on_line: impl Fn(bool, &[u8]),
+    ) -> io::Result<Vec<u8>> {
+        let mut reader = BufReader::new(pipe);
+        let mut bytes = Vec::new();
+        loop {
+            let start = bytes.len();
+            if reader.read_until(b'\n', &mut bytes)? == 0 {
+                return Ok(bytes);
+            }
+            on_line(is_stderr, &bytes[start..]);
+        }
+    }
+
+    let mut child = spawn_for_output(command)?;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let on_line = Arc::new(on_line);
+    let on_stdout = Arc::clone(&on_line);
+    let stdout = std::thread::spawn(move || drain(stdout, false, |s, line| on_stdout(s, line)));
+    let stderr = std::thread::spawn(move || drain(stderr, true, |s, line| on_line(s, line)));
+    let status = wait_for(&mut child, bound)?;
+    let collect =
+        |reader| join_for(reader, HELPER_JOIN).map_err(|(_, error)| io::Error::from(error));
+    Ok(std::process::Output {
+        status,
+        stdout: collect(stdout)??,
+        stderr: collect(stderr)??,
     })
 }
 
@@ -308,6 +354,18 @@ impl Barrier {
 /// Drive `future` to completion on `runtime`, at most `bound`.
 pub fn block_on_for<F: std::future::Future>(
     runtime: &tokio::runtime::Runtime,
+    future: F,
+    bound: Duration,
+) -> Result<F::Output, WaitError> {
+    #[allow(clippy::disallowed_methods)]
+    runtime
+        .block_on(async { tokio::time::timeout(bound, future).await })
+        .map_err(|_| WaitError::TimedOut(bound))
+}
+
+/// Bridge from a blocking worker to an async operation with a time limit.
+pub fn block_on_handle_for<F: std::future::Future>(
+    runtime: &tokio::runtime::Handle,
     future: F,
     bound: Duration,
 ) -> Result<F::Output, WaitError> {

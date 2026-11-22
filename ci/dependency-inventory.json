@@ -22,12 +22,14 @@
       "zstd"
     ],
     "soldr-cli": [
+      "axum",
       "blake3",
       "cap-fs-ext",
       "cap-std",
       "clap",
       "filetime",
       "fs2",
+      "futures-util",
       "getrandom",
       "globset",
       "hex",

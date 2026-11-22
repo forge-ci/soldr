@@ -145,6 +145,57 @@ fn env_duration(name: &str, default_ms: u64) -> Duration {
     )
 }
 
+pub(crate) fn handshake_timeout_reason(
+    awaiting_handoff: bool,
+    reached_ceiling: bool,
+    awaiting_first_response: bool,
+    limit: Duration,
+) -> String {
+    if awaiting_handoff {
+        return "broker did not confirm either handoff ownership or same-connection proxy fallback"
+            .into();
+    }
+    let class = if reached_ceiling {
+        "route acquisition ceiling"
+    } else if awaiting_first_response {
+        "first-response deadline"
+    } else {
+        "progress-silence deadline"
+    };
+    format!(
+        "broker {class} exceeded (limit {}ms; raise {} if the broker is only busy)",
+        limit.as_millis(),
+        deadline_env_var(class)
+    )
+}
+
+pub(crate) fn handshake_context(
+    request_id: u64,
+    elapsed: Duration,
+    last_progress: Option<&crate::broker_server::RouteProgress>,
+    handoff: Option<(u64, &str, &str)>,
+) -> String {
+    let phase = handoff.map_or_else(
+        || "phase=route-acquisition".into(),
+        |(id, backend, version)| {
+            format!("phase=handoff connection_id={id} backend={backend} daemon_version={version}")
+        },
+    );
+    let progress = last_progress.map_or_else(
+        || "no progress received".into(),
+        |last| {
+            format!(
+                "stage={} attempt={} broker_elapsed_ms={} result={}",
+                last.stage, last.attempt, last.elapsed_ms, last.latest_result
+            )
+        },
+    );
+    format!(
+        "request_id={request_id} {phase} elapsed_ms={} last_progress=[{progress}]",
+        elapsed.as_millis()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

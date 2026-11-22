@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package soldr.remote.v1;
+
+message Start {
+  string commit = 1;
+  repeated Source files = 2;
+  Action action = 3;
+  repeated string args = 4;
+  optional sint32 cache_zstd_level = 5;
+  optional bytes manifest_json = 6;
+}
+
+message Source {
+  string path = 1;
+  string digest = 2;
+  bool executable = 3;
+  bool symlink = 4;
+}
+
+enum Action {
+  BUILD = 0;
+  TEST = 1;
+  DYLINT = 2;
+  LINT = 3;
+}
+
+message Session {
+  string id = 1;
+  repeated string missing = 2;
+  bool manifest_accepted = 3;
+}
+
+message Blob {
+  bytes data = 1;
+}
+
+message WorkspaceBatch {
+  repeated WorkspaceBlob blobs = 1;
+}
+
+message WorkspaceBlob {
+  string digest = 1;
+  bytes data = 2;
+}
+
+message ResultFrame {
+  int32 exit_code = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+  bytes attestation = 4;
+}
+
+message Fetch {
+  repeated string globs = 1;
+}
+
+message Artifact {
+  string path = 1;
+  bytes data = 2;
+  bool executable = 3;
+}
+
+message Artifacts {
+  repeated Artifact files = 1;
+}

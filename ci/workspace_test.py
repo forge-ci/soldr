@@ -149,13 +149,18 @@ def container_path(path: Path) -> str:
 
 
 def workspace_test_plan(
-    *, target: Path, bootstrap: Path, packages: tuple[str, ...] | None = None
+    *,
+    target: Path,
+    bootstrap: Path,
+    packages: tuple[str, ...] | None = None,
+    fail_fast: bool = False,
 ) -> WorkspaceTestPlan:
     """Return the ordered bootstrap-to-source validation handoff.
 
     ``packages`` narrows both test stages (soldr#3731); None is --workspace.
     """
     scope = " ".join(f"-p {p}" for p in packages) if packages else "--workspace"
+    nextest_failure_mode = "--fail-fast" if fail_fast else "--no-fail-fast"
     built = target / "debug"
     # The source route runs from a snapshot of the built image, never from
     # target/debug itself: nextest's integration-test build relinks
@@ -256,7 +261,7 @@ def workspace_test_plan(
                 "sh",
                 "-c",
                 f'"{source_text}" cargo test {scope} --doc'
-                f' && "{source_text}" cargo nextest run --no-fail-fast {scope} --lib --tests',
+                f' && "{source_text}" cargo nextest run {nextest_failure_mode} {scope} --lib --tests',
             ],
             base_env,
             unset=source_unset,
@@ -351,7 +356,9 @@ def rerun_filter(tests: list[TimedOutTest]) -> str:
     return " | ".join(f"(binary_id(={t.binary_id}) & test(={t.name}))" for t in tests)
 
 
-def run_validation(plan: WorkspaceTestPlan, *, repo: Path) -> None:
+def run_validation(
+    plan: WorkspaceTestPlan, *, repo: Path, fail_fast: bool = False
+) -> None:
     """Run the validation step; re-check, alone, tests that only timed out.
 
     A loaded shared host starves fixture-compiling integration tests past
@@ -367,6 +374,9 @@ def run_validation(plan: WorkspaceTestPlan, *, repo: Path) -> None:
         run_step(plan.validation, repo=repo, transcript=transcript)
         return
     except subprocess.CalledProcessError:
+        if fail_fast:
+            # A stopped run can leave tests unexecuted even if a timeout rerun passes.
+            raise
         tests = timed_out_only(transcript)
         if not tests:
             raise
@@ -584,6 +594,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run on this host from the current checkout, in a private soldr root",
     )
+    parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        default=os.environ.get("SOLDR_LOCAL_TEST_FAIL_FAST") == "1",
+        help="stop scheduling tests after the first failure (SOLDR_LOCAL_TEST_FAIL_FAST=1)",
+    )
     args = parser.parse_args(argv)
     if args.host:
         args.repo = Path.cwd()
@@ -602,13 +618,16 @@ def main(argv: list[str] | None = None) -> int:
     selection = select_packages(args.repo, changed_paths(args.repo))
     print(selection.reason, flush=True)
     plan = workspace_test_plan(
-        target=args.target, bootstrap=args.bootstrap, packages=selection.packages
+        target=args.target,
+        bootstrap=args.bootstrap,
+        packages=selection.packages,
+        fail_fast=args.fail_fast,
     )
     for step in plan.setup:
         run_step(step, repo=args.repo.resolve())
     try:
         run_step(plan.source_start, repo=args.repo.resolve())
-        run_validation(plan, repo=args.repo.resolve())
+        run_validation(plan, repo=args.repo.resolve(), fail_fast=args.fail_fast)
     except BaseException:
         cleanup(list(plan.teardown), repo=args.repo.resolve(), preserve_primary=True)
         raise

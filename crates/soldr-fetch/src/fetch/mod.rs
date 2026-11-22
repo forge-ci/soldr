@@ -40,7 +40,7 @@ pub(crate) mod segmented_download;
 /// soldr#2310 — whole-source-tree acquisition via GitHub codeload zips.
 pub mod source_zip;
 pub(crate) mod stream_download;
-pub use stream_download::pypi_has_version;
+pub use stream_download::{pypi_has_version, LoopbackPostClient};
 
 pub use rustup_init::{
     auto_bootstrap_if_missing, auto_bootstrap_if_missing_blocking, bootstrap_rustup,

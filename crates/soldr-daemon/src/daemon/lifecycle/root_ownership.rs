@@ -86,10 +86,15 @@ impl RootOwnershipGuard {
             }
             if !waited {
                 waited = true;
-                tracing::info!(
-                    "root ownership is busy with no daemon serving; waiting up to {budget:?} \
-                     for the previous owner to finish exiting"
+                let pid = std::process::id();
+                let lock = root_owner_lock_path(paths);
+                let message = format!(
+                    "root ownership is busy with no daemon serving; lock={} pid={pid} \
+                     waiting up to {budget:?} for the previous owner to finish exiting",
+                    lock.display()
                 );
+                eprintln!("soldr-daemon: {message}");
+                tracing::info!("{message}");
             }
             std::thread::sleep(poll);
         }

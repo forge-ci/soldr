@@ -107,6 +107,7 @@
         "cli_cargo_linker",
         "cli_cargo_native_cc",
         "cli_cargo_nested_cargo_guard",
+        "cli_cargo_parent_death",
         "cli_cargo_run_trampoline",
         "cli_cargo_wrappers",
         "cli_exec",
@@ -453,6 +454,32 @@
         "aarch64-pc-windows-msvc"
       ],
       "reason": "Replay only on targets with Windows locked-file deletion semantics."
+    },
+    {
+      "id": "cargo-parent-death-signal",
+      "source_id": "cargo-front-target-replay",
+      "test_name": "cli_cargo_parent_death::sigkill_of_soldr_kills_cargo_in_its_separate_group",
+      "targets": [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "reason": "Linux PR_SET_PDEATHSIG must kill Cargo even when its Soldr parent is SIGKILLed across a process-group boundary."
+    },
+    {
+      "id": "cargo-termination-forwarding",
+      "source_id": "cargo-front-target-replay",
+      "test_name": "cli_cargo_parent_death::cargo_receives_termination_and_interrupt_and_ignoring_child_is_killed",
+      "targets": [
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "reason": "POSIX SIGTERM/SIGINT delivery and forced process-group cleanup require native signal and child-lifetime semantics."
     },
     {
       "id": "cargo-timeout-process-tree",

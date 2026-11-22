@@ -1,7 +1,7 @@
 //! Unit tests for `session_transport`, split out to keep that file under the
 //! 1,000-line production-source ceiling.
 
-use super::connection_failure::{connection_failure_message, BrokerIdentity};
+use super::setup::{compile_session_start, negotiate_with_proxy_retry};
 use super::*;
 
 #[test]
@@ -141,10 +141,6 @@ fn accepted_relay_that_never_negotiates_is_bounded() {
         .await
         .expect_err("a silent relay must not wait forever");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(matches!(
-            BrokerResponseDeadline::from_io(&error),
-            Some(BrokerResponseDeadline::FirstResponse { .. })
-        ));
         let text = error.to_string();
         assert!(text.contains("first-response deadline"), "{text}");
         assert!(text.contains("SOLDR_BROKER_FIRST_RESPONSE_MS"), "{text}");
@@ -206,7 +202,11 @@ fn continuous_progress_is_still_bounded_by_route_ceiling() {
         .expect_err("progress must not defeat the absolute ceiling");
         writer.abort();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(error.to_string().contains("route acquisition ceiling"));
+        let text = error.to_string();
+        assert!(text.contains("route acquisition ceiling"), "{text}");
+        assert!(text.contains("request_id=2476"), "{text}");
+        assert!(text.contains("stage=probe attempt=3"), "{text}");
+        assert!(text.contains("daemon still starting"), "{text}");
     });
 }
 
@@ -232,7 +232,7 @@ fn compile_service_that_never_publishes_is_bounded() {
 
 /// A broker that has accepted the connection but answers `delay` after the
 /// Hello: the reply frame a busy-but-alive broker eventually sends.
-async fn hold_negotiated_reply(
+async fn late_negotiated_reply(
     mut server: tokio::io::DuplexStream,
     delay: Duration,
     handoff: bool,
@@ -246,7 +246,11 @@ async fn hold_negotiated_reply(
         result: Some(hello_reply::Result::Negotiated(Negotiated {
             backend_pipe: "late-pipe".to_string(),
             daemon_version: "9.9.9".to_string(),
-            server_capabilities: if handoff { CAP_HANDLE_PASSING } else { 0 },
+            server_capabilities: if handoff {
+                running_process::broker::capabilities::CAP_HANDLE_PASSING
+            } else {
+                0
+            },
             handle_passed_token: if handoff { vec![1; 16] } else { Vec::new() },
             ..Default::default()
         })),
@@ -279,7 +283,7 @@ fn a_busy_broker_answering_after_3_4_seconds_completes_under_the_defaults() {
         .expect("runtime");
     runtime.block_on(async {
         let (mut client, server) = tokio::io::duplex(4096);
-        tokio::spawn(hold_negotiated_reply(
+        tokio::spawn(late_negotiated_reply(
             server,
             Duration::from_millis(3400),
             false,
@@ -312,7 +316,6 @@ fn a_broker_that_never_answers_still_fails_at_the_first_response_deadline() {
             .await
             .expect_err("a silent broker must fail");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(!proxy_retry_allowed(&error));
         assert!(
             error.to_string().contains("first-response deadline"),
             "{error}"
@@ -323,36 +326,63 @@ fn a_broker_that_never_answers_still_fails_at_the_first_response_deadline() {
     });
 }
 
-#[test]
-fn only_an_unconfirmed_handoff_can_retry_on_the_proxy_path() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .start_paused(true)
-        .build()
-        .expect("runtime");
-    runtime.block_on(async {
-        let deadlines = crate::broker_deadlines::BrokerDeadlines::defaults();
-        let (mut client, server) = tokio::io::duplex(4096);
-        tokio::spawn(hold_negotiated_reply(server, Duration::ZERO, true));
-        let handoff = read_negotiated_with_deadlines(&mut client, 1, deadlines)
-            .await
-            .expect_err("the original connection never confirmed handoff or fallback");
-        assert!(proxy_retry_allowed(&handoff));
-        assert!(!proxy_retry_allowed(
-            &BrokerResponseDeadline::ProxyRetryFailed(handoff).into_io()
-        ));
-        assert!(!proxy_retry_allowed(&io::Error::new(
-            io::ErrorKind::TimedOut,
-            "route acquisition ceiling"
-        )));
+async fn negotiate_test_reply(handoff: Option<bool>) -> Result<ReadyRoute, SessionError> {
+    let (mut client, server) = tokio::io::duplex(4096);
+    let _silent_broker = match handoff {
+        Some(handoff) => {
+            tokio::spawn(late_negotiated_reply(server, Duration::ZERO, handoff));
+            None
+        }
+        None => Some(server),
+    };
+    read_negotiated_with_deadlines(
+        &mut client,
+        1,
+        crate::broker_deadlines::BrokerDeadlines::defaults(),
+    )
+    .await
+    .map_err(SessionError::pre_output)
+}
 
-        let (mut proxy, server) = tokio::io::duplex(4096);
-        tokio::spawn(hold_negotiated_reply(server, Duration::ZERO, false));
-        let route = read_negotiated_with_deadlines(&mut proxy, 1, deadlines)
-            .await
-            .expect("proxy negotiation needs no separate handoff confirmation");
-        assert_eq!(route.backend_pipe, "late-pipe");
-    });
+#[tokio::test(start_paused = true)]
+async fn only_handoff_timeout_retries_with_handle_passing_disabled() {
+    let mut attempts = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let route = negotiate_with_proxy_retry("test", deadline, |request_handoff| {
+        attempts.push(request_handoff);
+        negotiate_test_reply(Some(request_handoff))
+    })
+    .await
+    .expect("the second negotiation succeeds without a handoff");
+    assert_eq!(route.backend_pipe, "late-pipe");
+    assert_eq!(attempts, [true, false]);
+
+    attempts.clear();
+    let result = negotiate_with_proxy_retry("test", deadline, |request_handoff| {
+        attempts.push(request_handoff);
+        negotiate_test_reply(None)
+    })
+    .await;
+    assert_eq!(result.unwrap_err().source.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(attempts, [true]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_second_handoff_timeout_is_returned_without_another_attempt() {
+    let mut attempts = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let error = negotiate_with_proxy_retry("test", deadline, |request_handoff| {
+        attempts.push(request_handoff);
+        // A broker that offers handoff again still gets only two attempts.
+        negotiate_test_reply(Some(true))
+    })
+    .await
+    .expect_err("the second attempt also timed out");
+    assert!(error
+        .source
+        .get_ref()
+        .is_some_and(|cause| cause.is::<HandoffTimeout>()));
+    assert_eq!(attempts, [true, false]);
 }
 
 #[test]
@@ -387,15 +417,12 @@ fn connection_loss_is_a_loud_error_with_recovery_steps() {
         "nothing listening",
     ));
     assert!(is_connection_failure(&err));
-    let plain =
-        connection_failure_message(&err, "soldr-daemon-x", Duration::from_secs(30), false, None);
+    let plain = connection_failure_message(&err, "soldr-daemon-x", Duration::from_secs(30), false);
     assert!(plain.contains("could not connect") && plain.contains("soldr-daemon-x"));
     assert!(plain.contains("30.0s") && plain.contains("soldr daemon status"));
     assert!(plain.contains("soldr daemon stop") && plain.contains("soldr logs paths"));
     assert!(!plain.contains('\x1b'));
-    assert!(
-        connection_failure_message(&err, "x", Duration::ZERO, true, None).starts_with("\x1b[1;31m")
-    );
+    assert!(connection_failure_message(&err, "x", Duration::ZERO, true).starts_with("\x1b[1;31m"));
     let eof = SessionError {
         output_started: true,
         broker_unreachable: false,
@@ -404,44 +431,8 @@ fn connection_loss_is_a_loud_error_with_recovery_steps() {
             "SESSION relay closed before Exit",
         ),
     };
-    assert!(
-        connection_failure_message(&eof, "x", Duration::ZERO, false, None)
-            .contains("lost the connection")
-    );
-}
-
-#[test]
-fn handoff_deadline_reports_the_broker_identity_and_recovery_order() {
-    let err = SessionError::pre_output(BrokerResponseDeadline::Handoff.into_io());
-    let running = "soldr-0.9.55-running";
-    let local = "soldr-0.9.55-local";
-    let format = |running: Option<&str>| {
-        connection_failure_message(
-            &err,
-            "soldr-daemon-x",
-            Duration::from_millis(5200),
-            false,
-            Some(&BrokerIdentity {
-                running: running.map(str::to_owned),
-                local: Some(local.to_owned()),
-            }),
-        )
-    };
-    let text = format(Some(running));
-    assert!(text.contains("control-plane failure"));
-    assert!(text.contains("route soldr-daemon-x"));
-    assert!(text.contains("handoff ownership"));
-    assert!(text.contains(running));
-    assert!(text.contains(local));
-    assert!(text.contains("differs from this binary"));
-    assert!(
-        text.find("soldr broker remove").unwrap()
-            < text
-                .find("soldr daemon stop && soldr daemon start")
-                .unwrap()
-    );
-    assert!(format(Some(local)).contains("matches this binary"));
-    assert!(format(None).contains("comparison unavailable"));
+    assert!(connection_failure_message(&eof, "x", Duration::ZERO, false)
+        .contains("lost the connection"));
 }
 
 /// A long compile on a live daemon is not a connection failure.

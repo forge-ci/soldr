@@ -325,6 +325,8 @@ pub(crate) use crate::builtin_verbs::{
 
 #[derive(clap::Subcommand)]
 pub(crate) enum Commands {
+    /// Run whole-workspace builds on a remote runner.
+    Remote(crate::remote_build::RemoteArgs),
     /// Build the workspace via soldr's blessed cross-compile path
     ///
     /// `soldr build --target X` is the **blessed-default surface** for

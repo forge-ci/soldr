@@ -168,10 +168,11 @@ Do not work around it by starting one broker per root.
 1. Inspect `soldr doctor`, `soldr daemon status`, and `soldr logs paths`.
 2. Shorten the compile-reply timeout only when a bounded diagnostic failure is
    preferable to the normal long-build allowance.
-3. For a broker first-response or handoff deadline failure, run
-   `soldr broker remove` before restarting the daemon (soldr#4221).
-4. Restart the selected broker-owned route with
-   `soldr daemon stop && soldr daemon start`.
+3. Restart the selected broker-owned route with `soldr daemon stop` followed
+   by `soldr daemon start`.
+4. Only when the front door reports a broker image/version mismatch and you
+   want that broker gone, run `soldr broker remove`. Nothing in Soldr takes
+   this step for you.
 5. Re-run through a compile-capable Soldr front door.
 
 All broker, daemon, transport, version-skew, retirement, initialization, and
