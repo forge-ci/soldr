@@ -357,9 +357,10 @@ impl SoldrZccacheService {
     pub async fn acquire_resident_capacity(
         &self,
         permits: u32,
-    ) -> Result<tokio::sync::OwnedSemaphorePermit, EmbeddedServiceError> {
+        lint: bool,
+    ) -> Result<(u32, impl Send + Sync + 'static), EmbeddedServiceError> {
         self.compile_admission
-            .acquire_resident(permits)
+            .acquire_resident(permits, lint)
             .await
             .map_err(|error| EmbeddedServiceError::ResidentCapacity(error.to_string()))
     }
@@ -395,7 +396,7 @@ impl SoldrZccacheService {
     /// binary and argv[1] is the tool path).
     pub async fn compile(
         &self,
-        req: CompileRequest,
+        mut req: CompileRequest,
     ) -> Result<CompileResponseBody, EmbeddedServiceError> {
         // soldr#2706: keep this lease through zccache's synchronous staged
         // publication. Shutdown takes the fair write side before it closes
@@ -417,6 +418,13 @@ impl SoldrZccacheService {
         if let Some(notice) = crate::amalgamation::compile_notice(&req.args, &compile_cwd) {
             eprintln!("{notice}");
         }
+        let options = soldr_compile_options();
+        let lint = crate::core::lint_priority::take_from_compile_env(&mut req.env);
+        let options = if lint {
+            options.with_host_admission_class(crate::core::lint_priority::HOST_CLASS)
+        } else {
+            options
+        };
         let audit = default_audit_context();
         let zreq = ZccacheCompileRequest {
             audit,
@@ -441,15 +449,21 @@ impl SoldrZccacheService {
         // carrying that state inline makes this adapter's callers inherit the
         // full stack footprint even when they only use the buffered API.
         crate::daemon::compile_profile::mark_compile_start();
-        let zresult = Box::pin(
-            self.inner
-                .compile_with_options(zreq, soldr_compile_options()),
-        )
-        .await;
+        let compile: std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>> =
+            Box::pin(self.inner.compile_with_options(zreq, options));
+        let zresult = compile.await;
         crate::daemon::compile_profile::mark_compile_end();
         let zresp = zresult
             .map_err(|e| EmbeddedServiceError::Compile(e.to_string()))?
             .response;
+        if crate::core::lint_priority::trace_enabled() {
+            tracing::warn!(
+                lint,
+                cached = zresp.cached,
+                exit_code = zresp.exit_code,
+                "compile completed"
+            );
+        }
         // soldr#3152 step 4: remember this unit's measured memory (zccache
         // 1.13.24 reports it per compile). A cache hit spawned no compiler and
         // reports nothing, which the history ignores.

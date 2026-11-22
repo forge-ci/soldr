@@ -53,6 +53,7 @@ fn child_rustup_home(
         args: &args,
         cargo: &fixture.host_cargo,
         rustc: &fixture.host_rustc,
+        test_admission: false,
         trust_inherited_soldr_env: false,
         build_like_cargo: false,
         explicit_toolchain: None,

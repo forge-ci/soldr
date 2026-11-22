@@ -338,14 +338,20 @@ fn cargo_toml_pins_the_exact_cargo_dylint_version() {
 /// stable (E0554).
 #[test]
 fn driver_build_is_pinned_to_the_plan_nightly() {
-    let rustc = Path::new("/toolchains/nightly-2026-05-28/bin/rustc");
+    let rustc = Path::new("/toolchains/nightly-2026-05-28-x86_64-unknown-linux-gnu/bin/rustc");
     let mut command = std::process::Command::new("cargo");
     command.env("RUSTUP_TOOLCHAIN", "1.95.0");
-    pin_driver_build_toolchain(&mut command, "nightly-2026-05-28", rustc);
+    pin_driver_build_toolchain(
+        &mut command,
+        "nightly-2026-05-28-x86_64-unknown-linux-gnu",
+        rustc,
+    );
     let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
     assert_eq!(
         envs[std::ffi::OsStr::new("RUSTUP_TOOLCHAIN")],
-        Some(std::ffi::OsStr::new("nightly-2026-05-28"))
+        Some(std::ffi::OsStr::new(
+            "nightly-2026-05-28-x86_64-unknown-linux-gnu"
+        ))
     );
     assert_eq!(envs[std::ffi::OsStr::new("RUSTC")], Some(rustc.as_os_str()));
 }

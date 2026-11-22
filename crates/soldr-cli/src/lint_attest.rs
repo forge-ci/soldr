@@ -441,6 +441,12 @@ fn execute(
     // Every child uses stderr, leaving stdout for the single evidence object.
     let mut normal_code = 0;
     for step in normal_steps {
+        let _capacity = match &step {
+            crate::lint_steps::PlannedStep::Extra(_) => {
+                crate::lint_steps::acquire_external_lint_capacity(cache)?
+            }
+            crate::lint_steps::PlannedStep::Cargo { .. } => None,
+        };
         let mut command = match step {
             crate::lint_steps::PlannedStep::Cargo { args, .. } => {
                 crate::lint_steps::cargo_step_command(soldr, &args, cache, trust)
@@ -449,6 +455,7 @@ fn execute(
                 crate::lint_steps::extra_command(&extra)
             }
         };
+        crate::lint_steps::mark_resident_child(&mut command, _capacity.as_ref());
         command
             .current_dir(root)
             .env_remove("SOLDR_ATTEST_KEY_FILE");

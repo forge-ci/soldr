@@ -135,12 +135,16 @@ pub(super) trait ResidentLeaseController {
 /// Real daemon-backed lease controller.
 pub(super) struct DaemonResidentLeaseController {
     pub(super) permits: u32,
+    pub(super) enabled: bool,
 }
 
 impl ResidentLeaseController for DaemonResidentLeaseController {
     type Lease = crate::daemon::client::ResidentCapacityLease;
 
     fn acquire(&self) -> Option<Self::Lease> {
+        if !self.enabled {
+            return None;
+        }
         let paths = match crate::core::SoldrPaths::new() {
             Ok(paths) => paths,
             Err(error) => {

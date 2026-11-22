@@ -32,6 +32,7 @@ pub mod installer_watchdog;
 /// soldr#1761 — soldr-owned compile concurrency limit, resolved once
 /// and shared by the admission queue and the compile semaphore.
 pub mod jobs;
+pub mod lint_priority;
 /// soldr#3407 — zccache cache-hit delivery mode (`ZCCACHE_MODE`), resolved
 /// once and injected on the cargo child.
 pub mod materialization_mode;

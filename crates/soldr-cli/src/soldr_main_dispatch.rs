@@ -26,6 +26,24 @@ async fn run_cli(
     // tree -- including the daemon, which auto-forwards `SOLDR_*` -- agrees
     // without threading booleans through every prepare path.
     cli.export_global_env();
+    let priority = match &cli.command {
+        Commands::Lint { .. }
+        | Commands::Dylint { .. }
+        | Commands::CiTest { .. }
+        | Commands::Rustfmt { .. }
+        | Commands::ClippyDriver { .. } => Some(true),
+        Commands::Cargo { args } => {
+            cargo_admission_priority(cargo_front_door::first_cargo_subcommand(args))
+        }
+        Commands::External(args) => cargo_admission_priority(args.first().map(String::as_str)),
+        _ => None,
+    };
+    if let Some(lint) = priority {
+        std::env::set_var(
+            crate::core::lint_priority::ENV,
+            if lint && flags.cache_enabled { "1" } else { "0" },
+        );
+    }
 
     // Each family handles its own commands and hands any other back.
     let Some(command) = dispatch_build_command(cli.command, flags, inherited_provenance).await?
@@ -36,6 +54,14 @@ async fn run_cli(
         return Ok(());
     };
     dispatch_state_command(command, flags).await
+}
+
+fn cargo_admission_priority(verb: Option<&str>) -> Option<bool> {
+    match verb {
+        Some("clippy" | "dylint" | "fmt") => Some(true),
+        Some("test" | "t" | "nextest") => Some(false),
+        _ => None,
+    }
 }
 
 /// Build, compile and packaging commands. Returns any other command unhandled.
@@ -89,6 +115,9 @@ async fn dispatch_build_command(
         }
         Commands::Cook { args } => exit_with(cook::run_cook(&args, cache_enabled).await),
         Commands::Exec { args } => exit_with(exec_cmd::run_exec(&args)),
+        Commands::TestCapacityRunner { args } => {
+            exit_with(crate::test_capacity_runner::run(&args, inherited_provenance))
+        }
         Commands::ReplayNextest { runner, args } => exit_with(crate::replay_nextest::run(
             &runner,
             &args,
@@ -140,7 +169,7 @@ async fn dispatch_toolchain_command(
             &args,
             cache_enabled,
         )),
-        Commands::Rustdoc { args } => exit_with(toolchain::run_rustdoc(&args)),
+        Commands::Rustdoc { args } => exit_with(toolchain::run_rustdoc(&args, cache_enabled)),
         Commands::RustGdb { args } => {
             exit_with(toolchain::run_toolchain_passthrough("rust-gdb", &args))
         }
@@ -219,6 +248,7 @@ async fn dispatch_state_command(command: Commands, flags: DispatchFlags) -> Resu
         | Commands::CiTest { .. }
         | Commands::Cook { .. }
         | Commands::Exec { .. }
+        | Commands::TestCapacityRunner { .. }
         | Commands::Archive { .. }
         | Commands::Prepare { .. }
         | Commands::BuildFromSource { .. }

@@ -76,6 +76,8 @@ pub enum WireRequestKind {
 pub struct WireAcquireResidentCapacity {
     #[prost(uint32, tag = "1")]
     pub permits: u32,
+    #[prost(bool, tag = "2")]
+    pub lint: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]

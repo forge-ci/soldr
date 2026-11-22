@@ -456,7 +456,7 @@ fn first_nextest_verb(args: &[String], nextest_idx: usize) -> Option<&str> {
         .map(String::as_str)
 }
 
-fn first_nextest_verb_index(args: &[String], nextest_idx: usize) -> Option<usize> {
+pub(crate) fn first_nextest_verb_index(args: &[String], nextest_idx: usize) -> Option<usize> {
     let mut skip_next = false;
     for (index, arg) in args.iter().enumerate().skip(nextest_idx + 1) {
         if skip_next {

@@ -412,9 +412,12 @@ impl From<&Request> for proto::WireRequest {
                     paths: paths.clone(),
                 })
             }
-            Request::AcquireResidentCapacity { permits } => {
+            Request::AcquireResidentCapacity { permits, lint } => {
                 proto::WireRequestKind::AcquireResidentCapacity(
-                    proto::WireAcquireResidentCapacity { permits: *permits },
+                    proto::WireAcquireResidentCapacity {
+                        permits: *permits,
+                        lint: *lint,
+                    },
                 )
             }
             Request::ReleaseResidentCapacity => {
@@ -560,7 +563,10 @@ impl TryFrom<proto::WireRequest> for Request {
                 Request::RemoveTargetRegistry { paths: m.paths }
             }
             proto::WireRequestKind::AcquireResidentCapacity(m) => {
-                Request::AcquireResidentCapacity { permits: m.permits }
+                Request::AcquireResidentCapacity {
+                    permits: m.permits,
+                    lint: m.lint,
+                }
             }
             proto::WireRequestKind::ReleaseResidentCapacity(_) => Request::ReleaseResidentCapacity,
             proto::WireRequestKind::BuildLogInputs(m) => Request::BuildLogInputs {

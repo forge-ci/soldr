@@ -2781,6 +2781,7 @@ name = "soldr-nextest-wrapper"
 version = "0.9.56"
 dependencies = [
  "sha2",
+ "soldr-cli",
  "soldr-core",
  "soldr-platform",
  "tempfile",

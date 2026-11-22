@@ -85,6 +85,9 @@ impl RustfmtLeaseController for DaemonRustfmtLeaseController {
     type Lease = crate::daemon::client::ResidentCapacityLease;
 
     fn acquire(&self) -> Option<Self::Lease> {
+        if crate::lint_steps::shares_resident_capacity() {
+            return None;
+        }
         let paths = match crate::core::SoldrPaths::new() {
             Ok(paths) => paths,
             Err(error) => {
@@ -94,7 +97,7 @@ impl RustfmtLeaseController for DaemonRustfmtLeaseController {
         };
         let sock = crate::daemon::client::default_sock_path(&paths);
         let acquired = acquire_starting_daemon(
-            || crate::daemon::client::acquire_resident_capacity(&sock, self.permits),
+            || crate::daemon::client::acquire_lint_capacity(&sock, self.permits),
             || {
                 crate::soldr_main::start_daemon_route(crate::soldr_main::DAEMON_START_ROUTE_BUDGET)
                     .map_err(|error| error.to_string())

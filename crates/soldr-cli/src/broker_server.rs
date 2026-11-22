@@ -774,7 +774,7 @@ async fn handle_daemon_control_tunnel(
     let Some(endpoint) = endpoint else {
         return Ok(());
     };
-    running_process::broker::session_relay::relay_session(stream, &endpoint).await
+    crate::broker_control_transport::relay_to_daemon(stream, &endpoint).await
 }
 
 fn retryable_route_refusal(reply: &HelloReply) -> Option<(String, u64)> {

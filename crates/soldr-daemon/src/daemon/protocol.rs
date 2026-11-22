@@ -275,7 +275,7 @@ pub enum Request {
     AttachBuildLogHistory(Box<BuildLogHistoryUpdate>),
     /// Begin a connection-scoped reservation of the embedded compiler's
     /// capacity. The daemon replies only after all requested permits are held.
-    AcquireResidentCapacity { permits: u32 },
+    AcquireResidentCapacity { permits: u32, lint: bool },
     /// End the resident-capacity reservation held by this connection.
     /// Valid only as the next frame after a successful acquisition.
     ReleaseResidentCapacity,

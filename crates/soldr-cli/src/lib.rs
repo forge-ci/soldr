@@ -410,6 +410,7 @@ pub(crate) mod system_toolchain_pin;
 /// See module doc for the `soldr build --target <alias>` UX contract.
 pub mod target_alias;
 pub mod target_lifecycle;
+mod test_capacity_runner;
 pub(crate) mod timeout_registry;
 pub mod toolchain;
 pub(crate) mod toolchain_dir_name;
@@ -452,6 +453,14 @@ pub use soldr_core::{
     startup_profile, test_util,
 };
 pub use soldr_daemon::{daemon, zccache_embedded};
+
+/// Acquire an ordinary test slot using the same broker control transport as Soldr.
+#[doc(hidden)]
+pub fn acquire_nextest_test_capacity(
+) -> Result<Option<daemon::client::ResidentCapacityLease>, String> {
+    broker_control_transport::install().map_err(str::to_owned)?;
+    test_capacity_runner::acquire_test_capacity().map_err(|error| error.to_string())
+}
 pub use soldr_fetch::fetch;
 
 /// CLI entry logic — formerly the `main.rs` crate root (#1490 Phase 1).

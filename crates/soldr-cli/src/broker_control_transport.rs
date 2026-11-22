@@ -22,6 +22,33 @@ use crate::broker_server::{
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
+pub(crate) async fn relay_to_daemon(
+    client: interprocess::local_socket::tokio::Stream,
+    endpoint: &str,
+) -> io::Result<()> {
+    let endpoint = crate::daemon::session_endpoint::runtime_control_endpoint_path(
+        std::path::PathBuf::from(endpoint),
+    );
+    let backend = crate::platform::ipc::connect::open_pipe_with_retry(&endpoint).await?;
+    relay_control_stream(client, backend.stream).await
+}
+
+async fn relay_control_stream<Client, Backend>(client: Client, backend: Backend) -> io::Result<()>
+where
+    Client: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    Backend: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let (mut client_rx, mut client_tx) = tokio::io::split(client);
+    let (mut backend_rx, mut backend_tx) = tokio::io::split(backend);
+    // Control clients leave their connection open until they receive a reply.
+    // A completed direction means the other peer must be disconnected too.
+    // Local sockets can acknowledge AsyncWrite::shutdown without half-closing.
+    tokio::select! {
+        result = tokio::io::copy(&mut client_rx, &mut backend_tx) => result.map(|_| ()),
+        result = tokio::io::copy(&mut backend_rx, &mut client_tx) => result.map(|_| ()),
+    }
+}
+
 pub(crate) fn install() -> Result<(), &'static str> {
     crate::daemon::client::install_control_connector(Arc::new(BrokerControlConnector))
 }
@@ -163,6 +190,30 @@ fn unix_deadline_ms(timeout: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn control_relay_closes_backend_when_client_disconnects() {
+        use std::future::{poll_fn, Future};
+        use std::pin::pin;
+        use std::task::Poll;
+        use tokio::io::AsyncReadExt;
+
+        let (client, accepted) = tokio::io::duplex(64);
+        let (backend, mut daemon) = tokio::io::duplex(64);
+        drop(client);
+        {
+            let mut relay = pin!(relay_control_stream(accepted, backend));
+            poll_fn(|cx| {
+                let Poll::Ready(result) = relay.as_mut().poll(cx) else {
+                    panic!("relay waited for the daemon after the client disconnected");
+                };
+                Poll::Ready(result)
+            })
+            .await
+            .expect("relay closes cleanly");
+        }
+        assert_eq!(daemon.read(&mut [0]).await.expect("daemon read"), 0);
+    }
 
     #[test]
     fn control_tunnel_deadline_is_future_and_bounded() {

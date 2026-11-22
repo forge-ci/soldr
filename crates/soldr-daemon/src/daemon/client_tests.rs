@@ -188,7 +188,7 @@ fn scripted_resident_peer() -> (BoxedControlStream, Arc<Mutex<Vec<u8>>>, Arc<Ato
 #[test]
 fn resident_capacity_lease_retains_stream_until_explicit_finish() {
     let (stream, writes, dropped) = scripted_resident_peer();
-    let lease = acquire_resident_capacity_on_stream(stream, 2).expect("acquire lease");
+    let lease = acquire_resident_capacity_on_stream(stream, 2, false).expect("acquire lease");
     assert!(!dropped.load(Ordering::SeqCst));
 
     lease.finish().expect("release lease");
@@ -197,7 +197,10 @@ fn resident_capacity_lease_retains_stream_until_explicit_finish() {
     let mut sent = Cursor::new(writes.lock().expect("writes lock").clone());
     assert!(matches!(
         read_frame_sync::<_, Request>(&mut sent).expect("acquire request"),
-        Request::AcquireResidentCapacity { permits: 2 }
+        Request::AcquireResidentCapacity {
+            permits: 2,
+            lint: false
+        }
     ));
     assert!(matches!(
         read_frame_sync::<_, Request>(&mut sent).expect("release request"),
@@ -206,16 +209,22 @@ fn resident_capacity_lease_retains_stream_until_explicit_finish() {
 }
 
 #[test]
-fn dropping_resident_capacity_lease_disconnects_without_a_release_frame() {
+fn dropping_resident_capacity_lease_sends_release_before_disconnect() {
     let (stream, writes, dropped) = scripted_resident_peer();
-    let lease = acquire_resident_capacity_on_stream(stream, 2).expect("acquire lease");
+    let lease = acquire_resident_capacity_on_stream(stream, 2, false).expect("acquire lease");
     drop(lease);
     assert!(dropped.load(Ordering::SeqCst));
 
     let mut sent = Cursor::new(writes.lock().expect("writes lock").clone());
     assert!(matches!(
         read_frame_sync::<_, Request>(&mut sent).expect("acquire request"),
-        Request::AcquireResidentCapacity { permits: 2 }
+        Request::AcquireResidentCapacity {
+            permits: 2,
+            lint: false
+        }
     ));
-    assert!(read_frame_sync::<_, Request>(&mut sent).is_err());
+    assert!(matches!(
+        read_frame_sync::<_, Request>(&mut sent).expect("release request"),
+        Request::ReleaseResidentCapacity
+    ));
 }

@@ -55,6 +55,8 @@ pub fn returncode(status: &std::process::ExitStatus) -> i32 {
     status.code().unwrap_or(1)
 }
 
+pub use returncode as forward_exit_status;
+
 /// Inert: only Linux gives tests a private `TMPDIR` to match on (soldr#3739).
 pub fn pids_with_env(_name: &str, _value: &std::ffi::OsStr) -> Vec<u32> {
     Vec::new()

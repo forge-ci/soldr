@@ -114,6 +114,19 @@ pub fn returncode(status: &std::process::ExitStatus) -> i32 {
         .unwrap_or(1)
 }
 
+pub fn forward_exit_status(status: &std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    if let Some(signal) = status.signal() {
+        // SAFETY: the kernel supplied the child's signal number. Only this runner is signalled.
+        unsafe {
+            libc::signal(signal, libc::SIG_DFL);
+            libc::raise(signal);
+        }
+        return 128 + signal;
+    }
+    status.code().unwrap_or(1)
+}
+
 /// Inert: only Linux gives tests a private `TMPDIR` to match on (soldr#3739).
 pub fn pids_with_env(_name: &str, _value: &std::ffi::OsStr) -> Vec<u32> {
     Vec::new()

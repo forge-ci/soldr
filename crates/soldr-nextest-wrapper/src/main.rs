@@ -159,6 +159,41 @@ impl Termination {
     }
 }
 
+fn acquire_daemon_capacity(
+    enabled_env: &str,
+) -> Result<Option<soldr_cli::daemon::client::ResidentCapacityLease>, ()> {
+    use soldr_platform::wait::{recv_for, WaitError};
+
+    if !soldr_core::core::flag(enabled_env) {
+        return Ok(None);
+    }
+    let (send, receive) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = send.send(soldr_cli::acquire_nextest_test_capacity());
+    });
+    loop {
+        if test_child::received_termination().is_some() {
+            // The wrapper exits immediately on this path. Exiting also
+            // closes the worker's control connection if it is still queued.
+            return Err(());
+        }
+        match recv_for(&receive, Duration::from_millis(25)) {
+            Ok(Ok(lease)) => return Ok(lease),
+            Ok(Err(error)) => {
+                write_stderr(&format!(
+                    "nextest: could not reserve daemon test capacity: {error}\n"
+                ));
+                return Ok(None);
+            }
+            Err(WaitError::TimedOut(_)) => {}
+            Err(WaitError::Disconnected) => {
+                write_stderr("nextest: daemon capacity worker disconnected\n");
+                return Ok(None);
+            }
+        }
+    }
+}
+
 #[expect(clippy::too_many_lines, reason = "baseline, zackees/ci.yml#229")]
 fn run(argv: &[std::ffi::OsString]) -> i32 {
     let command: Vec<String> = argv
@@ -175,6 +210,9 @@ fn run(argv: &[std::ffi::OsString]) -> i32 {
     let mut guard = ProcessGuard::new(&command);
     let mut child_command = Command::new(program);
     child_command.args(args);
+    let admission_env = soldr_core::core::lint_priority::NEXTEST_DAEMON_ADMISSION_ENV;
+    child_command.env_remove(admission_env);
+    child_command.env_remove(soldr_core::core::lint_priority::NEXTEST_STAGE_ROOT_ENV);
     for name in CONTROL_ENVS.iter().chain([&NATIVE_WRAPPER_ENV]) {
         child_command.env_remove(name);
     }
@@ -206,6 +244,13 @@ fn run(argv: &[std::ffi::OsString]) -> i32 {
     // soldr#2885: wait here while ci-test reports memory pressure, and hold
     // an active-test slot from now until the test exits.
     guard.before_spawn();
+    let _daemon_capacity = match acquire_daemon_capacity(admission_env) {
+        Ok(lease) if test_child::received_termination().is_none() => lease,
+        _ => {
+            remove_private_dir(&private);
+            return guard.finish(1, true);
+        }
+    };
     test_child::configure_test_child(
         &mut child_command,
         parent_pid,

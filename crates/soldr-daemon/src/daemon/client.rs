@@ -373,11 +373,38 @@ impl ResidentCapacityLease {
     }
 }
 
-/// Acquire `permits` from the daemon's embedded compile-capacity semaphore.
+impl Drop for ResidentCapacityLease {
+    fn drop(&mut self) {
+        if let Some(mut stream) = self.stream.take() {
+            // Ask explicitly before closing, even on older broker relays
+            // that do not propagate a client half-close. Drop never waits
+            // for an acknowledgement.
+            let _ = write_frame_sync(&mut stream, &Request::ReleaseResidentCapacity);
+        }
+    }
+}
+
+/// Acquire ordinary resident capacity from the daemon's shared queue.
 /// The call returns only after the daemon holds every requested permit.
 pub fn acquire_resident_capacity(
     sock_path: &Path,
     permits: u32,
+) -> Result<ResidentCapacityLease, ClientError> {
+    acquire_capacity(sock_path, permits, false)
+}
+
+/// Acquire resident capacity for a lint tool that runs outside the compiler hook.
+pub fn acquire_lint_capacity(
+    sock_path: &Path,
+    permits: u32,
+) -> Result<ResidentCapacityLease, ClientError> {
+    acquire_capacity(sock_path, permits, true)
+}
+
+fn acquire_capacity(
+    sock_path: &Path,
+    permits: u32,
+    lint: bool,
 ) -> Result<ResidentCapacityLease, ClientError> {
     if permits == 0 {
         return Err(ClientError::Protocol(
@@ -390,24 +417,30 @@ pub fn acquire_resident_capacity(
     } else {
         Box::new(connect(sock_path, timeout)?) as BoxedControlStream
     };
-    acquire_resident_capacity_on_stream(stream, permits)
+    acquire_resident_capacity_on_stream(stream, permits, lint)
 }
 
 fn acquire_resident_capacity_on_stream(
     mut stream: BoxedControlStream,
     permits: u32,
+    lint: bool,
 ) -> Result<ResidentCapacityLease, ClientError> {
     if permits == 0 {
         return Err(ClientError::Protocol(
             "resident capacity requires at least one permit".to_string(),
         ));
     }
-    write_frame_sync(&mut stream, &Request::AcquireResidentCapacity { permits })?;
+    write_frame_sync(
+        &mut stream,
+        &Request::AcquireResidentCapacity { permits, lint },
+    )?;
     match read_frame_sync(&mut stream)? {
-        Response::ResidentCapacityAcquired { permits: acquired } if acquired == permits => {
+        Response::ResidentCapacityAcquired { permits: acquired }
+            if acquired == permits || (permits == 1 && acquired == 0) =>
+        {
             Ok(ResidentCapacityLease {
                 stream: Some(stream),
-                permits,
+                permits: acquired,
             })
         }
         Response::ResidentCapacityAcquired { permits: acquired } => Err(ClientError::Protocol(

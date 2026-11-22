@@ -842,9 +842,16 @@ pub(crate) fn current_soldr_binary() -> Result<std::path::PathBuf, SoldrError> {
 pub(crate) fn rustc_wrapper_shim_binary(
     paths: &SoldrPaths,
 ) -> Result<std::path::PathBuf, SoldrError> {
+    tool_shim_binary(paths, "rustc")
+}
+
+pub(crate) fn tool_shim_binary(
+    paths: &SoldrPaths,
+    tool: &str,
+) -> Result<std::path::PathBuf, SoldrError> {
     let target = paths
         .versioned_shims_dir()
-        .join(format!("rustc{}", std::env::consts::EXE_SUFFIX));
+        .join(format!("{tool}{}", std::env::consts::EXE_SUFFIX));
     let source = crate::shim_materialize::soldr_binary_source()?;
     crate::shim_materialize::materialize_executable(&source, &target)?;
     Ok(target)
