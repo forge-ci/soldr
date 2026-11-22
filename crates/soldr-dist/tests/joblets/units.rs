@@ -411,6 +411,8 @@ fn service_cli_accepts_signal_and_status_root() {
         "10000",
         "--relay-url",
         "https://relay.example.com",
+        "--key",
+        "/var/lib/soldr/host.key",
         "--signal-url",
         "https://signal.example.com",
         "--host-load-file",
@@ -423,12 +425,19 @@ fn service_cli_accepts_signal_and_status_root() {
         std::path::Path::new("/var/lib/soldr-dist/state")
     );
     let DistCommand::Serve {
-        signal_url, slots, ..
+        signal_url,
+        slots,
+        key,
+        ..
     } = serve.command
     else {
         panic!("expected serve");
     };
     assert_eq!(signal_url, "https://signal.example.com");
+    assert_eq!(
+        key.unwrap(),
+        std::path::Path::new("/var/lib/soldr/host.key")
+    );
     assert_eq!(slots, 8);
     let status = Command::try_parse_from([
         "dist",
@@ -495,4 +504,81 @@ fn inactive_status_cannot_confirm_a_deployed_node() {
         assert_eq!(loaded.running_joblets, 0);
         assert!(loaded.build_id.is_empty());
     }
+}
+
+#[test]
+fn explicit_host_key_preserves_read_only_seed_and_endpoint_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("host.key");
+    let expected = iroh::SecretKey::generate();
+    fs::write(&path, expected.to_bytes()).unwrap();
+    soldr_platform::fs::permissions::restore_mode(&path, Some(0o400)).unwrap();
+    let mode = soldr_platform::fs::permissions::mode(&path);
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    let actual = soldr_dist::trust::load_or_create_key(&path).unwrap();
+    assert_eq!(actual.public(), expected.public());
+    assert_eq!(fs::read(&path).unwrap(), expected.to_bytes());
+    assert_eq!(soldr_platform::fs::permissions::mode(&path), mode);
+    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let endpoint = soldr_dist::transport::endpoint_with_identity(actual, true, None)
+            .await
+            .unwrap();
+        assert_eq!(endpoint.id(), expected.public());
+        endpoint.close().await;
+    });
+    assert!(!root.path().join("node.key").exists());
+}
+
+#[test]
+fn explicit_key_creation_is_atomic_private_and_invalid_keys_are_not_replaced() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("shared/host.key");
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+    let threads: Vec<_> = (0..4)
+        .map(|_| {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                soldr_dist::trust::load_or_create_key(&path)
+                    .unwrap()
+                    .public()
+            })
+        })
+        .collect();
+    let keys: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    assert!(keys.iter().all(|id| *id == keys[0]));
+    assert_eq!(fs::read(&path).unwrap().len(), 32);
+    if let Some(mode) = soldr_platform::fs::permissions::mode(&path) {
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let invalid = root.path().join("invalid.key");
+    fs::write(&invalid, b"invalid seed").unwrap();
+    let error = soldr_dist::trust::load_or_create_key(&invalid)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("32-byte"));
+    assert!(error.contains("invalid.key"));
+    assert_eq!(fs::read(invalid).unwrap(), b"invalid seed");
+}
+
+#[test]
+fn shared_key_lease_excludes_endpoints_with_different_roots() {
+    use soldr_dist::transport::EndpointLease;
+    let parent = tempfile::tempdir().unwrap();
+    let key = parent.path().join("host.key");
+    soldr_dist::trust::load_or_create_key(&key).unwrap();
+    soldr_platform::fs::permissions::restore_mode(&key, Some(0o400)).unwrap();
+    let mode = soldr_platform::fs::permissions::mode(&key);
+    let root_a = parent.path().join("a");
+    let root_b = parent.path().join("b");
+    let first = EndpointLease::acquire_with_key(&root_a, &key).unwrap();
+    assert!(EndpointLease::acquire_with_key(&root_b, &key).is_err());
+    // Signing/read access for the phone-home agent stays available.
+    soldr_dist::trust::load_or_create_key(&key).unwrap();
+    drop(first);
+    let second = EndpointLease::acquire_with_key(&root_b, &key).unwrap();
+    assert_eq!(soldr_platform::fs::permissions::mode(&key), mode);
+    drop(second);
 }

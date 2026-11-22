@@ -1,6 +1,10 @@
 //! Debug command surface. No discovery or zccache integration.
 use crate::{
-    compiler::Compiler, transport, trust::Trust, worker::Worker, DistClient, DistOutcome, Result,
+    compiler::Compiler,
+    transport,
+    trust::{self, Trust},
+    worker::Worker,
+    DistClient, DistOutcome, Result,
 };
 use clap::{Args, Subcommand};
 use std::{
@@ -35,6 +39,9 @@ pub enum DistCommand {
             default_value = "https://signal.forge-ci.com"
         )]
         signal_url: String,
+        /// Shared Ed25519 seed; defaults to <root>/node.key.
+        #[arg(long)]
+        key: Option<PathBuf>,
     },
     /// Run one debug compiler invocation on an explicitly trusted worker.
     Exec {
@@ -76,21 +83,34 @@ pub async fn run(args: DistArgs) -> Result<i32> {
             cas_budget,
             host_load_file,
             signal_url,
+            key,
         } => {
             let relay = args
                 .relay_url
                 .as_deref()
                 .ok_or("dist serve requires --relay-url or SOLDR_DIST_RELAY_URL")?;
-            serve(&root, slots, cas_budget, host_load_file, relay, signal_url).await
+            serve(
+                &root,
+                slots,
+                cas_budget,
+                host_load_file,
+                relay,
+                signal_url,
+                key,
+            )
+            .await
         }
         DistCommand::Exec { worker, argv } => {
-            let _endpoint_lease = transport::EndpointLease::acquire(&root)?;
+            let identity = trust::node_key(&root)?;
+            let _endpoint_lease =
+                transport::EndpointLease::acquire_with_key(&root, &root.join("node.key"))?;
             let job = scaffold::job(&argv).await?;
             let worker = transport::parse_ticket(&worker)?;
             let relay = args
                 .relay_url
                 .or_else(|| worker.relay_urls().next().map(ToString::to_string));
-            let endpoint = transport::endpoint_with_relay(&root, false, relay.as_deref()).await?;
+            let endpoint =
+                transport::endpoint_with_identity(identity, false, relay.as_deref()).await?;
             let client = DistClient::new(endpoint, worker, &root)?;
             let outcome = client.execute(job).await;
             client.endpoint.close().await;
@@ -133,10 +153,15 @@ async fn serve(
     host_load_file: Option<PathBuf>,
     relay: &str,
     signal_url: String,
+    key: Option<PathBuf>,
 ) -> Result<i32> {
     std::fs::create_dir_all(root.join("tmp"))?;
-    let _endpoint_lease = transport::EndpointLease::acquire(root)?;
-    let endpoint = transport::endpoint_with_relay(root, false, Some(relay)).await?;
+    let (identity, key_path) = match key {
+        Some(path) => (trust::load_or_create_key(&path)?, path),
+        None => (trust::node_key(root)?, root.join("node.key")),
+    };
+    let _endpoint_lease = transport::EndpointLease::acquire_with_key(root, &key_path)?;
+    let endpoint = transport::endpoint_with_identity(identity, false, Some(relay)).await?;
     tokio::time::timeout(std::time::Duration::from_secs(10), endpoint.online())
         .await
         .map_err(|_| "dist relay did not become online within 10 seconds")?;

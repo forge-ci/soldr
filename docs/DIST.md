@@ -36,6 +36,14 @@ Host roles (soldrix / gh-runner host config `forge.role`):
   wormhole-style code; `soldr dist pair <code>` on the client exchanges and pins public keys
   (rendezvous via signal). Org-level trust via GitHub OIDC (CI) comes later.
 
+## Executable and host-identity policy
+
+Soldr ships one executable, `soldr`. Phone-home is `soldr agent` and compilation
+is `soldr dist`; `soldr-dist` remains a library (`autobins = false`), with no binary target.
+The host Ed25519 identity is `/var/lib/soldr/host.key`. A node selects that same
+identity with `soldr dist serve --key /var/lib/soldr/host.key`; omitting `--key`
+preserves `<root>/node.key` (normally `~/.soldr/dist/node.key`).
+
 ## Code layout
 - zccache: new public **executor hook** on the embedded API at the miss path
   (`handle_compile/pipeline/compile_exec.rs` spawn site). The hook receives a fully resolved
@@ -77,7 +85,7 @@ Host roles (soldrix / gh-runner host config `forge.role`):
 ## Host registry and phone-home (shared with soldrix / GH pool)
 Machines can be plugged in anywhere (wired or Wi-Fi, behind NAT) and become usable
 immediately. Everything is outbound; nothing listens on the internet.
-- **Identity**: each host has an Ed25519 key (`/var/lib/forge/host.key`), enrolled once
+- **Identity**: each host has an Ed25519 key (`/var/lib/soldr/host.key`), enrolled once
   (public key + name + role in signal's host policy). The same key derives the host's iroh
   NodeId, so the dist node and admin tunnel share the identity.
 - **`soldr agent`** (host side, inside the single soldr binary; argv[0] alias `soldr-agent`; every soldrix host has soldr; systemd, starts after network-online): holds one outbound
@@ -325,3 +333,20 @@ reuse an existing iroh Endpoint and give the client a dedicated CAS/trust root.
   from the CLI build graph. The frozen `dist` verb remains captured and reports
   that the feature is disabled. Iroh defaults remain off; only `tls-ring` is
   enabled (no metrics, portmapper, or discovery feature backends).
+
+- 2026-11-21 Mono-binary policy: soldr-dist remains library-only behind the
+  soldr dist command; host phone-home is another command in the same executable.
+- 2026-11-21 `serve --key PATH` selects the shared host Ed25519 seed, defaulting
+  to `<root>/node.key`. `trust::load_or_create_key` is the isolated adapter for
+  future `soldr_agent::host_identity::load_or_create`; no unreleased agent
+  dependency is added. The current file format is the existing 32-byte raw seed.
+  Existing explicit keys are read without writes or chmod, so the host key can
+  live outside the hardened node's writable root. Provision it and grant the
+  node service read access before startup; missing external keys fail if their
+  parent is read-only, without falling back to a different identity. Newly
+  created keys remain atomic and private (0600).
+
+- 2026-11-21 CLI endpoints hold a read-only-open advisory lock on the selected
+  key in addition to the root lease. Two roots selecting the same key file cannot silently replace that
+  identity's relay registration. Ordinary key reads/signing by phone-home stay
+  available; no shared-key permissions or contents are changed by the lease.

@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
+autobins = false
 
 [dependencies]
 iroh = { version = "1.5.0", default-features = false, features = ["tls-ring"] }
