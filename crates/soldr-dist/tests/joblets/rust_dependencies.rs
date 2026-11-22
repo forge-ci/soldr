@@ -138,7 +138,7 @@ fn cold_rust_unit_with_two_dependencies_and_host_proc_macro_is_byte_identical() 
             matches!(result, DistOutcome::Executed { exit_code: 0, .. }),
             "{result:?}"
         );
-        assert_eq!(fs::read(cwd.join("out.rlib")).unwrap(), expected);
+        assert_same_archive(&fs::read(cwd.join("out.rlib")).unwrap(), &expected);
         assert!(result.metrics().need_digests > 0);
         let again = fixture.client.execute(manifest.clone()).await;
         assert!(
@@ -226,4 +226,62 @@ fn shipped_absolute_include_cannot_read_different_original_host_bytes() {
         assert_eq!(fs::read(output).unwrap(), b"keep me");
         fixture.stop().await;
     });
+}
+
+/// Asserts two `ar` archives (rlibs) are identical; on a mismatch names each
+/// differing member, its sizes and first differing offset, and the absolute
+/// paths embedded in it (a leaked sandbox or checkout path is the usual cause).
+fn assert_same_archive(actual: &[u8], expected: &[u8]) {
+    if actual == expected {
+        return;
+    }
+    fn members(bytes: &[u8]) -> Vec<(String, &[u8])> {
+        let mut out = vec![];
+        let mut at = 8; // "!<arch>\n"
+        while at + 60 <= bytes.len() {
+            let header = &bytes[at..at + 60];
+            let name = String::from_utf8_lossy(&header[..16]).trim().to_string();
+            let size: usize = String::from_utf8_lossy(&header[48..58]).trim().parse().unwrap_or(0);
+            let body = &bytes[at + 60..(at + 60 + size).min(bytes.len())];
+            out.push((name, body));
+            at += 60 + size + (size % 2);
+        }
+        out
+    }
+    fn paths(body: &[u8]) -> Vec<String> {
+        let mut found: Vec<String> = body
+            .split(|b| !(b.is_ascii_graphic()))
+            .filter(|run| run.len() > 4 && run.starts_with(b"/"))
+            .map(|run| String::from_utf8_lossy(run).into_owned())
+            .collect();
+        found.sort();
+        found.dedup();
+        found.truncate(12);
+        found
+    }
+    let (a, e) = (members(actual), members(expected));
+    let mut report = format!(
+        "remote archive differs from local: {} vs {} bytes, {} vs {} members\n",
+        actual.len(),
+        expected.len(),
+        a.len(),
+        e.len()
+    );
+    for (index, (name, body)) in a.iter().enumerate() {
+        match e.get(index) {
+            Some((local_name, local)) if local_name == name && local == body => {}
+            Some((local_name, local)) => {
+                let offset = body.iter().zip(local.iter()).position(|(x, y)| x != y);
+                report += &format!(
+                    "  member {index} remote `{name}` ({} B) vs local `{local_name}` ({} B); first difference at {offset:?}\n    remote paths: {:?}\n    local paths:  {:?}\n",
+                    body.len(),
+                    local.len(),
+                    paths(body),
+                    paths(local)
+                );
+            }
+            None => report += &format!("  member {index} `{name}` only in the remote archive\n"),
+        }
+    }
+    panic!("{report}");
 }
