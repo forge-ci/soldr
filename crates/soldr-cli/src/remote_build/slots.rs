@@ -1,5 +1,6 @@
 //! Persistent affinity and accounting for the trusted remote runner.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -8,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use super::manifest::Manifest;
+use super::wire::Start;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 const MINIMUM_FREE: u64 = 5 * GIB;
@@ -221,19 +223,79 @@ impl Drop for Lease {
     }
 }
 
-pub(super) fn snapshot_output(source: &Path, output: &Path) -> io::Result<()> {
+type FileStamp = (u64, SystemTime, Option<SystemTime>);
+
+fn output_files(source: &Path) -> io::Result<BTreeMap<PathBuf, FileStamp>> {
+    let mut files = BTreeMap::new();
     for entry in jwalk::WalkDir::new(source).min_depth(1).skip_hidden(false) {
         let entry = entry.map_err(io::Error::other)?;
-        let path = entry.path();
-        let target = output.join(path.strip_prefix(source).map_err(io::Error::other)?);
-        if entry.file_type().is_dir() {
-            fs::create_dir(&target)?;
-        } else if entry.file_type().is_file() {
-            reflink(&path, &target)?;
-            fs::set_permissions(&target, fs::metadata(&path)?.permissions())?;
+        if entry.file_type().is_file() {
+            let path = entry.path();
+            let metadata = fs::metadata(&path)?;
+            let relative = path.strip_prefix(source).map_err(io::Error::other)?;
+            files.insert(
+                relative.to_owned(),
+                (
+                    metadata.len(),
+                    metadata.modified()?,
+                    metadata.created().ok(),
+                ),
+            );
         }
     }
-    Ok(())
+    Ok(files)
+}
+
+pub(super) struct OutputChanges {
+    source: PathBuf,
+    marker: PathBuf,
+    before: BTreeMap<PathBuf, FileStamp>,
+    previous: BTreeMap<PathBuf, FileStamp>,
+}
+
+impl OutputChanges {
+    pub(super) fn capture(workspace: &Path, request: &Start) -> io::Result<Self> {
+        let inputs = serde_json::to_vec(&(&request.commit, request.action, &request.args))?;
+        let invocation = super::snapshot::digest(&inputs);
+        let source = workspace.join("output");
+        let marker = workspace.join("published-outputs").join(invocation);
+        let previous = match fs::read(&marker) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(error) => return Err(error),
+        };
+        let before = output_files(&source)?;
+        Ok(Self {
+            source,
+            marker,
+            before,
+            previous,
+        })
+    }
+
+    pub(super) fn publish(self, output: &Path, succeeded: bool) -> io::Result<()> {
+        let mut published = BTreeMap::new();
+        if succeeded {
+            for (relative, stamp) in output_files(&self.source)? {
+                let changed = self.before.get(&relative) != Some(&stamp);
+                let replay = self.previous.get(&relative) == Some(&stamp);
+                if changed || replay {
+                    let source = self.source.join(&relative);
+                    let target = output.join(&relative);
+                    fs::create_dir_all(super::server::parent(&target)?)?;
+                    reflink(&source, &target)?;
+                    fs::set_permissions(&target, fs::metadata(&source)?.permissions())?;
+                    published.insert(relative, stamp);
+                }
+            }
+        }
+        let parent = super::server::parent(&self.marker)?;
+        fs::create_dir_all(parent)?;
+        let staging = tempfile::NamedTempFile::new_in(parent)?;
+        serde_json::to_writer(staging.as_file(), &published)?;
+        staging.persist(self.marker)?;
+        Ok(())
+    }
 }
 
 pub(super) fn reflink(source: &Path, destination: &Path) -> io::Result<()> {

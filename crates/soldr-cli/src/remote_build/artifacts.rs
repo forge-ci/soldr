@@ -3,6 +3,7 @@
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
@@ -223,6 +224,12 @@ pub(super) async fn download(
     out: &Path,
     globs: Vec<String>,
 ) -> io::Result<()> {
+    if fs::symlink_metadata(out).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "artifact destination already exists",
+        ));
+    }
     let globs = serde_json::to_string(&globs)?;
     let list = client
         .http
@@ -235,19 +242,26 @@ pub(super) async fn download(
         .await?;
     let list: Inventory = serde_json::from_slice(&list)?;
     let parallel = list.max_parallel.clamp(1, PARALLEL_DOWNLOADS);
-    fs::create_dir(out)?;
+    let parent = out
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let staging = Arc::new(tempfile::tempdir_in(parent)?);
     stream::iter(list.files.into_iter().map(Ok))
-        .try_for_each_concurrent(parallel, |entry| download_one(client, session, out, entry))
-        .await
+        .try_for_each_concurrent(parallel, |entry| {
+            download_one(client, session, Arc::clone(&staging), entry)
+        })
+        .await?;
+    fs::rename(staging.path(), out)
 }
 
 async fn download_one(
     client: &Client<'_>,
     session: &str,
-    out: &Path,
+    staging: Arc<tempfile::TempDir>,
     entry: Entry,
 ) -> io::Result<()> {
-    let path = out.join(relative_path(&entry.path)?);
+    let path = staging.path().join(relative_path(&entry.path)?);
     let mut response = tokio::time::timeout(
         IO_IDLE,
         client.http.get_stream(
@@ -271,7 +285,10 @@ async fn download_one(
         )));
     }
     let (tx, rx) = mpsc::channel(CHUNK_QUEUE);
-    let writer = tokio::task::spawn_blocking(move || save(path, &entry, rx));
+    let writer = tokio::task::spawn_blocking(move || {
+        let _staging = staging;
+        save(path, &entry, rx)
+    });
     let transfer = async {
         while let Some(chunk) = tokio::time::timeout(IO_IDLE, response.chunk())
             .await?

@@ -41,7 +41,8 @@ Soldr command from the repository root. To export the runner's Soldr cache,
 pass `--cache-zstd-level 3` before the action and include `cache.tar.zst`
 among the fetch globs. The runner serializes builds and cache exports
 against its dedicated compiler cache. The fetch destination must be a new
-directory with an existing parent. Artifact paths retain their relative layout.
+directory with an existing parent. Give the fetch exclusive use of that
+destination path until it completes. Artifact paths retain their relative layout.
 An explicit Cargo `--target-dir` is relative to the session's fetchable
 output directory. For example, `--target-dir target/special` makes
 `target/special/**` available for fetch.
@@ -49,7 +50,8 @@ output directory. For example, `--target-dir target/special` makes
 Fetch uses one HTTP/2 connection and up to eight concurrent file streams.
 The runner can advertise a lower limit with `remote serve --artifact-streams N`.
 Each stream sends binary Zstandard at level 9. The client verifies the
-uncompressed size and SHA-256 before publishing a file.
+uncompressed size and SHA-256 of every file before publishing the
+download directory.
 
 To reuse the build connection for downloads, request artifacts on the run
 command. Downloads start after the runner reports the build result.
@@ -132,8 +134,10 @@ cleanup.
 
 Each run creates fresh source files from the committed blob store at the
 slot's stable path. The stable target tree carries incremental state for
-that user and repository, and finished session artifacts are reflinked into
-their own fetch directory. A client disconnect leaves the build running
+that user and repository. Successful runs reflink new or changed files into
+the session's fetch directory. An identical successful run can also reuse
+files that still match its recorded output inventory. Failed commands still
+publish their logs and metadata. A client disconnect leaves the build running
 until its child exits or times out, so a slot cannot be reused while a
 detached build is writing to it. Build execution remains serialized.
 

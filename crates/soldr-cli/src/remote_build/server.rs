@@ -385,33 +385,31 @@ fn run(
         &request,
         lease.is_some(),
     )?;
+    let changes = lease
+        .as_ref()
+        .map(|lease| slots::OutputChanges::capture(&lease.workspace, &request))
+        .transpose()?;
 
-    let action = Action::try_from(request.action).map_err(io::Error::other)?;
-    let arguments = compile_args(action, &request.args, &build_output)?;
-    let full_lint = action == Action::Lint && arguments == ["rust", "--check"];
-    let action = match action {
-        Action::Build => "build",
-        Action::Test => "test",
-        Action::Dylint => "dylint",
-        Action::Lint => "lint",
-    };
     let soldr = std::env::current_exe()?;
     let transcript = Transcript::new(sink);
-    let result = transcript.run(
-        runner_soldr(&soldr, &cache_root)
-            .current_dir(&source)
-            .env("CARGO_TARGET_DIR", build_output.join("target"))
-            .arg(action)
-            .args(&arguments),
+    let (result, action, full_lint) = execute_action(
+        &soldr,
+        &cache_root,
+        &source,
+        &build_output,
+        &request,
+        &transcript,
     )?;
     let exit_code = result.status.code().unwrap_or(1);
     let mut stderr = result.stderr;
     let stderr_before_postprocessing = stderr.len();
     let run_cook = lease.is_some() && exit_code == 0 && full_lint;
     let mut cook_archive_sha256 = None;
-    if let Some(lease) = &lease {
+    if let (Some(lease), Some(changes)) = (&lease, changes) {
+        fs::create_dir(&output)?;
+        changes.publish(&output, exit_code == 0)?;
         cook_archive_sha256 =
-            collect_slot_output(root, lease, &soldr, &output, run_cook, &mut stderr)?;
+            cook_slot_output(root, lease, &soldr, &output, run_cook, &mut stderr)?;
     }
     let cook_ready = run_cook.then_some(cook_archive_sha256.is_some());
     fs::write(
@@ -429,6 +427,10 @@ fn run(
             &mut stderr,
         )
     });
+    let result_code = match (exit_code, cache_saved, cook_ready) {
+        (0, Some(false), _) | (0, _, Some(false)) => 1,
+        _ => exit_code,
+    };
     let attestation = serde_json::to_vec_pretty(&serde_json::json!({
         "schema_version": 1,
         "session": id,
@@ -437,7 +439,8 @@ fn run(
         "slot": lease.as_ref().map(|lease| lease.slot),
         "action": action,
         "args": request.args,
-        "exit_code": exit_code,
+        "exit_code": result_code,
+        "command_exit_code": exit_code,
         "cache_saved": cache_saved,
         "cook_ready": cook_ready,
         "cook_archive_sha256": cook_archive_sha256,
@@ -446,10 +449,6 @@ fn run(
         "arch": std::env::consts::ARCH,
         "source": request.files.iter().map(|file| (&file.path, &file.digest)).collect::<std::collections::BTreeMap<_, _>>(),
     }))?;
-    let result_code = match (exit_code, cache_saved, cook_ready) {
-        (0, Some(false), _) | (0, _, Some(false)) => 1,
-        _ => exit_code,
-    };
     if let Some(lease) = &lease {
         lease.finish(Some(result_code))?;
     }
@@ -462,6 +461,33 @@ fn run(
     transcript.record_stderr(&result.stderr[stderr_before_postprocessing..]);
     publish_result(&output, &result, &transcript, id)?;
     Ok(result)
+}
+
+fn execute_action(
+    soldr: &Path,
+    cache_root: &Path,
+    source: &Path,
+    build_output: &Path,
+    request: &Start,
+    transcript: &Transcript,
+) -> io::Result<(std::process::Output, &'static str, bool)> {
+    let action = Action::try_from(request.action).map_err(io::Error::other)?;
+    let arguments = compile_args(action, &request.args, build_output)?;
+    let full_lint = action == Action::Lint && arguments == ["rust", "--check"];
+    let action = match action {
+        Action::Build => "build",
+        Action::Test => "test",
+        Action::Dylint => "dylint",
+        Action::Lint => "lint",
+    };
+    let result = transcript.run(
+        runner_soldr(soldr, cache_root)
+            .current_dir(source)
+            .env("CARGO_TARGET_DIR", build_output.join("target"))
+            .arg(action)
+            .args(&arguments),
+    )?;
+    Ok((result, action, full_lint))
 }
 
 fn publish_result(
@@ -560,7 +586,7 @@ impl OutputLine {
     }
 }
 
-fn collect_slot_output(
+fn cook_slot_output(
     root: &Path,
     lease: &slots::Lease,
     soldr: &Path,
@@ -568,8 +594,6 @@ fn collect_slot_output(
     run_cook: bool,
     stderr: &mut Vec<u8>,
 ) -> io::Result<Option<String>> {
-    fs::create_dir(output)?;
-    slots::snapshot_output(&lease.workspace.join("output"), output)?;
     let hash = if run_cook {
         warm_cook(
             root,
@@ -600,21 +624,12 @@ fn warm_cook(
     use crate::cache_lib::cook_archive;
 
     let run = || -> io::Result<String> {
-        let recipe = cook_archive::compute_recipe_hash_proxy(source)
-            .ok_or_else(|| io::Error::other("cannot identify the workspace cook recipe"))?;
-        let recipe = hex::encode(recipe);
         let archives = root.join("cook");
-        let marker = lease.workspace.join(format!("cook-{recipe}"));
-        if let Ok(hash) = fs::read_to_string(&marker) {
-            if key(&hash, 64).is_ok() && archives.join(format!("{hash}.tar.zst")).is_file() {
-                return Ok(hash);
-            }
-        }
-        let target = lease.workspace.join("cook-target");
+        let target = tempfile::tempdir_in(&lease.workspace)?;
         let result = wait::output_for(
             runner_soldr(soldr, cache_root)
                 .current_dir(source)
-                .env("CARGO_TARGET_DIR", &target)
+                .env("CARGO_TARGET_DIR", target.path())
                 .args(["cook", "--workspace", "--no-index"]),
             wait::WHOLE_COMMAND,
         )?;
@@ -626,11 +641,9 @@ fn warm_cook(
             )));
         }
         fs::create_dir_all(&archives)?;
-        let packed = cook_archive::pack_cook_archive(&target.join("debug"), &archives)
+        let packed = cook_archive::pack_cook_archive(&target.path().join("debug"), &archives)
             .map_err(io::Error::other)?;
-        let hash = hex::encode(packed.sha256);
-        fs::write(marker, &hash)?;
-        Ok(hash)
+        Ok(hex::encode(packed.sha256))
     };
     match run() {
         Ok(hash) => Some(hash),
