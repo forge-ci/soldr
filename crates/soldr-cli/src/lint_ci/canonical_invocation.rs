@@ -141,12 +141,21 @@ impl CiRule for CanonicalInvocation {
             }
         };
         let mut findings = Vec::new();
+        eprintln!(
+            "DBG files={} lines={}",
+            files.len(),
+            files.iter().map(|f| f.lines.len()).sum::<usize>()
+        );
         for file in files {
             for line in &file.lines {
                 if line.is_comment || !line.is_command {
                     continue;
                 }
-                for args in super::canonical_tokens::invocations(&line.original) {
+                let inv = super::canonical_tokens::invocations(&line.original);
+                if !inv.is_empty() {
+                    eprintln!("DBG {}:{} -> {:?}", file.rel_path, line.line, inv);
+                }
+                for args in inv {
                     if let Some(finding) = context.check(file, line.line, args) {
                         findings.push(finding);
                     }

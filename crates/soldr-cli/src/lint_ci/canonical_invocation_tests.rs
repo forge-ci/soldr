@@ -5,7 +5,7 @@ fn fixture(profile: bool) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let mut manifest = "[workspace]\nmembers = ['crates/*']\n".to_owned();
     if profile {
-        manifest.push_str("[workspace.metadata.soldr.cargo]\ntarget = 'implicit'\nunify = 'off'\nfeatures = ['a', 'b']\n[workspace.metadata.soldr.cargo.alternates.narrow]\npackages = ['a']\nfeatures = ['other']\n");
+        manifest.push_str("[workspace.metadata.soldr.cargo]\nenforce = 'refuse'\ntarget = 'implicit'\nunify = 'off'\nfeatures = ['a', 'b']\n[workspace.metadata.soldr.cargo.alternates.narrow]\npackages = ['a']\nfeatures = ['other']\n");
     }
     std::fs::write(dir.path().join("Cargo.toml"), manifest).unwrap();
     for name in ["a", "b"] {
