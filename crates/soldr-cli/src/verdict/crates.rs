@@ -188,6 +188,22 @@ pub fn selects_workspace(args: &[String]) -> bool {
     whole && !narrowed
 }
 
+/// The `cargo metadata` arguments that select the same workspace as `args`:
+/// its `--manifest-path`, when the invocation names one before `--`.
+pub fn metadata_selector(args: &[String]) -> Vec<String> {
+    let mut before_sep = args.iter().take_while(|a| a.as_str() != "--");
+    while let Some(arg) = before_sep.next() {
+        if arg == "--manifest-path" {
+            if let Some(path) = before_sep.next() {
+                return vec![arg.clone(), path.clone()];
+            }
+        } else if let Some(path) = arg.strip_prefix("--manifest-path=") {
+            return vec!["--manifest-path".into(), path.into()];
+        }
+    }
+    Vec::new()
+}
+
 /// Replace `--workspace`/`--all` with `-p <name>` for each of `run`.
 pub fn narrow(args: &[String], run: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(args.len() + run.len() * 2);

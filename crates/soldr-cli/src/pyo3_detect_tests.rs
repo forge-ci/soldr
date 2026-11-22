@@ -567,3 +567,54 @@ fn probe_runs_the_cargo_the_front_door_passed() {
         "{recorded}"
     );
 }
+
+/// A package with both a PyO3 extension (cdylib) and a CLI bin, built with
+/// `extension-module` (bosn-python's `wheel` feature). `extension-module`
+/// means PyO3 never links libpython, so the bin cannot embed Python: the
+/// build is an extension build, and an abi3 one plans `PYO3_NO_PYTHON`
+/// instead of refusing as ambiguous. `auto-initialize` still embeds.
+#[test]
+fn extension_module_bin_is_an_extension_build_not_ambiguous() {
+    let metadata = |pyo3_features: &[&str]| {
+        serde_json::json!({
+            "workspace_members": ["app"],
+            "workspace_default_members": ["app"],
+            "packages": [
+                {"id": "app", "name": "app", "version": "0.1.0", "targets": [
+                    {"kind": ["cdylib"], "crate_types": ["cdylib"]},
+                    {"kind": ["bin"], "crate_types": ["bin"]}
+                ]},
+                {"id": "pyo3", "name": "pyo3", "version": "0.29.2", "targets": []}
+            ],
+            "resolve": {"nodes": [
+                {"id": "app", "deps": [{"pkg": "pyo3"}], "features": []},
+                {"id": "pyo3", "deps": [], "features": pyo3_features}
+            ]}
+        })
+    };
+    let detect = |features: &[&str]| {
+        detect_from_metadata_json(&serde_json::to_vec(&metadata(features)).unwrap(), &[])
+            .unwrap()
+            .unwrap()
+    };
+    let extension = detect(&["abi3-py310", "extension-module"]);
+    assert_eq!(extension.shape, BuildShape::Extension);
+    let plan = resolve_policy(PolicyInput {
+        host: "x86_64-unknown-linux-gnu".into(),
+        target: "x86_64-unknown-linux-musl".into(),
+        detected: Some(extension),
+        caller_pyo3: BTreeMap::new(),
+        compatibility_sysroot: false,
+        raw_dylib_disabled: false,
+    });
+    assert_eq!(plan.mode, PlanMode::Abi3NoPython);
+    assert_eq!(
+        plan.env.get("PYO3_NO_PYTHON").map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        detect(&["abi3-py310", "extension-module", "auto-initialize"]).shape,
+        BuildShape::Ambiguous
+    );
+    assert_eq!(detect(&["abi3-py310"]).shape, BuildShape::Ambiguous);
+}
