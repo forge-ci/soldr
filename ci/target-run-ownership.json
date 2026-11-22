@@ -220,7 +220,9 @@
       "id": "replay-windows-exit-guard",
       "package": "soldr-cli",
       "binary": "guards",
-      "modules": ["replay_nextest_windows"],
+      "modules": [
+        "replay_nextest_windows"
+      ],
       "disposition": "target-replay",
       "reason": "Windows waits for replay children and must preserve their failure diagnostics without an invented Soldr fault."
     },
@@ -228,7 +230,9 @@
       "id": "replay-guard-linux-once",
       "package": "soldr-cli",
       "binary": "guards",
-      "modules": ["replay_nextest"],
+      "modules": [
+        "replay_nextest"
+      ],
       "disposition": "native-linux-once",
       "reason": "The process fixture is a POSIX shell executable and asserts exact signal propagation; Windows target replay is exercised separately."
     },
@@ -298,6 +302,26 @@
       "binary": "wrapper",
       "disposition": "native-linux-once",
       "reason": "The native Nextest wrapper runs only in soldr ci-test's Linux Nextest stage (soldr#3453); its tests assert Linux session, signal, TMPDIR and exit-status behaviour and are inert elsewhere."
+    },
+    {
+      "id": "canonical-profile-plan",
+      "package": "soldr-cli",
+      "binary": "guards",
+      "modules": [
+        "canonical_profile_plan"
+      ],
+      "disposition": "native-linux-once",
+      "reason": "Asserts the profile-driven clippy/test argv a repository entry point emits; the decision is portable host-independent data, so canonical Linux validation covers it."
+    },
+    {
+      "id": "canonical-front-door",
+      "package": "soldr-cli",
+      "binary": "cargo_front_door",
+      "modules": [
+        "cli_cargo_canonical"
+      ],
+      "disposition": "native-linux-once",
+      "reason": "Spawns a stub cargo to assert warn/refuse argv decisions and the unification flag; the observable is the argument vector, not host behaviour, so canonical Linux validation covers it."
     }
   ],
   "replay_selectors": [
