@@ -84,7 +84,7 @@ impl Drop for ClientConnections {
 }
 
 fn take(state: &State, id: EndpointId) -> Option<Connection> {
-    let mut map = state.pending.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = state.pending.lock();
     let queue = map.get_mut(&id)?;
     while let Some(conn) = queue.pop_front() {
         if conn.close_reason().is_none() {
@@ -136,7 +136,7 @@ async fn accept(incoming: iroh::endpoint::Incoming, root: &Path, state: &State) 
         conn.close(1u32.into(), b"untrusted worker");
         return Err(format!("untrusted worker {id}").into());
     }
-    let mut map = state.pending.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = state.pending.lock();
     let queue = map.entry(id).or_default();
     queue.retain(|conn| conn.close_reason().is_none());
     if queue.len() >= 64 {
