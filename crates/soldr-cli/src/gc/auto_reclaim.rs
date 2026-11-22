@@ -70,7 +70,8 @@ pub(crate) fn reclaim_target_dirs_for_block(build_volume: &std::path::Path) -> u
     // trying to spend on deleting. The background sweeper's tier 2 does
     // the discovery, so a blocked build still benefits from it on the
     // next firing.
-    run_soldr_target_purge_background(&paths, &targets, Vec::new(), validated.min_age_secs).reclaimed
+    run_soldr_target_purge_background(&paths, &targets, Vec::new(), validated.min_age_secs, None)
+        .reclaimed
 }
 
 /// Whether `candidate` is the build's own `target/` (or contains it).

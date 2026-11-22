@@ -1,9 +1,8 @@
 //! Auto-GC under disk pressure (issue #323).
 //!
 //! Hook lives at the soldr cargo front door. On every cargo invocation
-//! the wrapper consults a throttle marker and, if the throttle has
-//! expired and the user hasn't opted out, spawns a detached background
-//! thread that:
+//! the wrapper reserves a sweep after the cooldown and, unless the user
+//! opted out, starts one detached worker per Soldr root. The worker:
 //!
 //!   1. enumerates soldr-relevant paths and groups them by volume;
 //!   2. probes free space per volume;
@@ -19,9 +18,15 @@ use crate::core::SoldrPaths;
 use crate::GcCargoArgs;
 
 use super::cargo_native::invoke_cargo_native_gc;
+use super::discovery::target_still_cold;
 use super::purge::resolve_gc_dev_roots;
 
-const AUTO_GC_THROTTLE_SECONDS: u64 = 5 * 60;
+#[path = "auto_schedule.rs"]
+mod schedule;
+use schedule::{
+    auto_gc_throttle_expired, request_sweep, run_reserved_sweep, sweep_lock, touch_auto_gc_marker,
+};
+const AUTO_CARGO_GC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const AUTO_GC_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 const AUTO_GC_DISABLE_ENV_VAR: &str = "SOLDR_AUTO_GC_DISABLED";
 /// Retain daemon event rows for 30 days when no daemon owns this root.
@@ -79,23 +84,14 @@ pub(crate) fn maybe_spawn_auto_gc_sweeper(paths: &SoldrPaths) {
         return;
     }
     let marker = crate::cache_lib::auto_gc_throttle_marker_path(paths);
-    if !auto_gc_throttle_expired(&marker, AUTO_GC_THROTTLE_SECONDS) {
-        return;
-    }
-    // Touch the marker before spawning so a crashing sweeper doesn't
-    // cause us to immediately rerun on the next invocation.
-    let _ = touch_auto_gc_marker(&marker);
-
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let mut cmd = sweeper_command(exe);
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    // Detached background spawn: own process group, no console window —
-    // the platform crate owns the flag mapping.
-    let _ = crate::platform::process::spawn::spawn_detached(&mut cmd);
+    request_sweep(&marker, || {
+        let exe = std::env::current_exe()?;
+        let mut cmd = sweeper_command(exe);
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        crate::platform::process::spawn::spawn_detached(&mut cmd).map(|_| ())
+    });
 }
 
 /// The detached sweeper's argv, with the two facts a self-spawn must state.
@@ -119,11 +115,16 @@ fn sweeper_command(exe: std::path::PathBuf) -> std::process::Command {
 }
 
 /// Issue #1286 (F5): synchronous entry point behind the hidden
-/// `soldr gc auto-sweep` verb. The spawner above already consumed the
-/// throttle marker, so this runs the sweep unconditionally (the
-/// `build_active` preamble check still applies inside).
+/// `soldr gc auto-sweep` verb. The launcher already reserved the
+/// cooldown. The worker now takes the lock for the duration of the pass.
 pub(crate) fn run_gc_auto_sweep_command() -> Result<(), crate::core::SoldrError> {
     let paths = SoldrPaths::new()?;
+    let marker = crate::cache_lib::auto_gc_throttle_marker_path(&paths);
+    run_reserved_sweep(&marker, || run_auto_gc_sweep(paths));
+    Ok(())
+}
+
+fn run_auto_gc_sweep(paths: SoldrPaths) {
     let log_path = crate::cache_lib::auto_gc_log_path(&paths);
     // soldr#1790: best-effort prune of the always-on per-build XML logs
     // (plus any legacy `.json` files from interim builds before the
@@ -139,8 +140,7 @@ pub(crate) fn run_gc_auto_sweep_command() -> Result<(), crate::core::SoldrError>
     // TTL, and it is enforced here rather than by a new sweeper.
     let porcelain_deleted = crate::cargo_front_door::porcelain::prune(&paths);
     tracing::debug!(porcelain_deleted, "pruned porcelain run logs");
-    run_auto_gc_background(paths.root.clone(), log_path);
-    Ok(())
+    run_auto_gc_background(paths, log_path);
 }
 
 fn auto_gc_env_disabled() -> bool {
@@ -148,38 +148,6 @@ fn auto_gc_env_disabled() -> bool {
         Ok(value) => crate::core::flag_value(&value),
         Err(_) => false,
     }
-}
-
-fn auto_gc_throttle_expired(marker: &std::path::Path, throttle_seconds: u64) -> bool {
-    let Ok(meta) = std::fs::metadata(marker) else {
-        return true;
-    };
-    let Ok(modified) = meta.modified() else {
-        return true;
-    };
-    let elapsed = std::time::SystemTime::now()
-        .duration_since(modified)
-        .unwrap_or(std::time::Duration::ZERO);
-    elapsed.as_secs() >= throttle_seconds
-}
-
-fn touch_auto_gc_marker(marker: &std::path::Path) -> std::io::Result<()> {
-    if let Some(parent) = marker.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(marker, "")
-}
-
-/// Issue #980 L7: re-arm the throttle marker so the next wrapper
-/// invocation can rerun the deferred sweep. Called when the background
-/// thread bails out because a `cargo build` is active in this process.
-fn rearm_auto_gc_marker(paths: &SoldrPaths) {
-    let marker = crate::cache_lib::auto_gc_throttle_marker_path(paths);
-    // Best-effort: remove the marker so the next call sees the
-    // throttle as expired. A failure to remove is silent — the
-    // throttle window is 5 minutes, the worst case is one missed
-    // sweep window.
-    let _ = std::fs::remove_file(&marker);
 }
 
 fn build_activity_active(paths: &SoldrPaths) -> bool {
@@ -195,12 +163,28 @@ fn build_activity_active(paths: &SoldrPaths) -> bool {
     }
 }
 
-fn defer_for_active_build(paths: &SoldrPaths, log_path: &std::path::Path, stage: &str) {
+fn defer_for_active_build(log_path: &std::path::Path, stage: &str) {
     let _ = append_auto_gc_log_line(
         log_path,
         &format!("auto-gc status=deferred reason=build_active stage={stage}"),
     );
-    rearm_auto_gc_marker(paths);
+}
+
+fn try_target_maintenance(
+    paths: &SoldrPaths,
+    log_path: &std::path::Path,
+) -> Option<crate::cache_lib::build_active::MaintenanceLease> {
+    match crate::cache_lib::build_active::MaintenanceLease::try_acquire(paths) {
+        Ok(Some(lease)) => Some(lease),
+        Ok(None) => {
+            defer_for_active_build(log_path, "target_reclaim");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(%error, "auto-GC target maintenance lease failed");
+            None
+        }
+    }
 }
 
 /// Reclaim stale entries under `<cache>/tmp` (soldr#1900).
@@ -241,30 +225,25 @@ fn sweep_stale_scratch(paths: &SoldrPaths, now_ms: i64) -> u64 {
 }
 
 #[expect(clippy::too_many_lines, reason = "baseline, zackees/ci.yml#229")]
-fn run_auto_gc_background(paths_root: std::path::PathBuf, log_path: std::path::PathBuf) {
+fn run_auto_gc_background(paths: SoldrPaths, log_path: std::path::PathBuf) {
     use crate::cache_lib::auto_gc::DiskFreeProbe as _;
     use crate::cache_lib::auto_gc::VolumeProbe as _;
     let start = std::time::Instant::now();
-    let paths = SoldrPaths::with_root(paths_root);
 
-    // Issue #980 L7: cargo build is running in this same process. Yield
-    // immediately so we don't compete for IO + the cargo
-    // `.package-cache` mutex. Re-arm the marker so the post-build
-    // wrapper invocation can pick up the deferred sweep.
+    // Yield to builds while keeping the retry cooldown in effect.
     if build_activity_active(&paths) {
         tracing::debug!("auto-GC background tick deferred: build active");
         let _ = append_auto_gc_log_line(
             &log_path,
             "auto-gc status=deferred reason=build_active stage=preamble",
         );
-        rearm_auto_gc_marker(&paths);
         return;
     }
-    let _maintenance_lease =
+    let maintenance_lease =
         match crate::cache_lib::build_active::MaintenanceLease::try_acquire(&paths) {
             Ok(Some(lease)) => lease,
             Ok(None) => {
-                defer_for_active_build(&paths, &log_path, "root_lease");
+                defer_for_active_build(&log_path, "root_lease");
                 return;
             }
             Err(error) => {
@@ -272,7 +251,6 @@ fn run_auto_gc_background(paths_root: std::path::PathBuf, log_path: std::path::P
                     &log_path,
                     &format!("auto-gc status=deferred reason=root_lease_failed error={error}"),
                 );
-                rearm_auto_gc_marker(&paths);
                 return;
             }
         };
@@ -365,7 +343,6 @@ fn run_auto_gc_background(paths_root: std::path::PathBuf, log_path: std::path::P
                 &log_path,
                 &format!("auto-gc status=deferred reason=invalid_config error={error}"),
             );
-            rearm_auto_gc_marker(&paths);
             return;
         }
     };
@@ -466,6 +443,7 @@ fn run_auto_gc_background(paths_root: std::path::PathBuf, log_path: std::path::P
         }
     }
 
+    drop(maintenance_lease);
     run_stale_target_pass(&paths, &validated, &log_path);
 
     if !validated.enabled {
@@ -496,6 +474,7 @@ fn run_auto_gc_background(paths_root: std::path::PathBuf, log_path: std::path::P
         // so cargo uses its own conservative defaults). Only attempt
         // when the volume holds the cargo home.
         let mut last_tier = 0u8;
+        let mut cargo_gc_failed = false;
         let cargo_volume_paths = plan
             .paths
             .iter()
@@ -504,6 +483,7 @@ fn run_auto_gc_background(paths_root: std::path::PathBuf, log_path: std::path::P
         if cargo_volume_paths > 0 {
             let outcome = run_conservative_cargo_gc_background(&log_path);
             last_tier = 1;
+            cargo_gc_failed = outcome.exit_code != 0;
             let _ = append_auto_gc_log_line(
                 &log_path,
                 &format!(
@@ -591,6 +571,7 @@ fn run_auto_gc_background(paths_root: std::path::PathBuf, log_path: std::path::P
                     &workspace_targets,
                     discovered_rows,
                     validated.min_age_secs,
+                    Some(&log_path),
                 );
                 last_tier = 2;
                 free_bytes = probe.free_bytes(&plan.paths[0].path).unwrap_or(free_bytes);
@@ -632,6 +613,7 @@ fn run_auto_gc_background(paths_root: std::path::PathBuf, log_path: std::path::P
         // nightly or accept that tier 3 won't fire on this box.
         if crate::cache_lib::auto_gc::next_tier(free_bytes, target_bytes, last_tier).is_some()
             && cargo_volume_paths > 0
+            && !cargo_gc_failed
         {
             if !nightly_toolchain_available() {
                 last_tier = 3;
@@ -755,6 +737,19 @@ struct AutoGcCargoOutcome {
     reason: Option<String>,
 }
 
+fn invoke_background_cargo_gc(
+    args: &GcCargoArgs,
+) -> Result<super::cargo_native::GcCargoOutput, crate::core::SoldrError> {
+    let cargo_home = crate::core::resolve_cargo_home()
+        .ok_or_else(|| crate::core::SoldrError::Other("could not resolve Cargo home".into()))?;
+    let _cargo_gc_lock = sweep_lock(&cargo_home.join(".soldr-auto-gc")).ok_or_else(|| {
+        crate::core::SoldrError::Other(
+            "automatic Cargo GC is busy or its lock is unavailable".into(),
+        )
+    })?;
+    invoke_cargo_native_gc(args, true, AUTO_CARGO_GC_TIMEOUT)
+}
+
 fn run_conservative_cargo_gc_background(log_path: &std::path::Path) -> AutoGcCargoOutcome {
     let args = GcCargoArgs {
         dry_run: false,
@@ -771,7 +766,7 @@ fn run_conservative_cargo_gc_background(log_path: &std::path::Path) -> AutoGcCar
         max_download_size: None,
         json: true,
     };
-    match invoke_cargo_native_gc(&args, true) {
+    match invoke_background_cargo_gc(&args) {
         Ok(outcome) => AutoGcCargoOutcome {
             exit_code: outcome.exit_code,
             skipped: outcome.skipped,
@@ -817,7 +812,7 @@ fn run_aggressive_cargo_gc_background(
     ages: &crate::cache_lib::auto_gc::CargoGcAgeSeconds,
 ) -> AutoGcCargoOutcome {
     let args = aggressive_cargo_gc_args(ages);
-    match invoke_cargo_native_gc(&args, true) {
+    match invoke_background_cargo_gc(&args) {
         Ok(outcome) => AutoGcCargoOutcome {
             exit_code: outcome.exit_code,
             skipped: outcome.skipped,
@@ -869,6 +864,7 @@ fn run_soldr_target_purge_background(
     workspace_targets: &[std::path::PathBuf],
     discovered_rows: Vec<crate::cache_lib::target_registry::TargetRow>,
     min_age_secs: u64,
+    background_log: Option<&std::path::Path>,
 ) -> Tier2Outcome {
     use crate::cache_lib::gc::{parse_size, GcOptions};
     let larger_than_bytes = parse_size("256M").unwrap_or(256 * 1024 * 1024);
@@ -925,12 +921,29 @@ fn run_soldr_target_purge_background(
             budget_exhausted = true;
             break;
         }
+        let _maintenance_lease = match background_log {
+            Some(log_path) => {
+                let Some(lease) = try_target_maintenance(paths, log_path) else {
+                    break;
+                };
+                if !target_still_cold(&cand.path, &options, || super::daemon_registry_rows(paths)) {
+                    continue;
+                }
+                Some(lease)
+            }
+            None => None,
+        };
         on_volume_matched += 1;
         let bytes = cand.size_bytes;
         let outcome = crate::cache_lib::gc::delete_candidate_dir(cand);
         if outcome.removed {
             reclaimed = reclaimed.saturating_add(bytes);
-            removed_rows.push(outcome.candidate.path);
+            if background_log.is_none() {
+                removed_rows.push(outcome.candidate.path);
+            }
+            // Background registration may race with an IPC delete. Leave
+            // the tombstone for registry maintenance rather than removing
+            // a row that a build can refresh.
         }
     }
     if !removed_rows.is_empty() {

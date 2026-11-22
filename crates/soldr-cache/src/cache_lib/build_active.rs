@@ -89,10 +89,17 @@ impl BuildRootLease {
             .write(true)
             .truncate(false)
             .open(maintenance_lock_path(paths))?;
-        // A maintenance pass already owns the root exclusively. Builds are
-        // correctness-critical, so wait for that bounded pass to finish
-        // instead of failing an otherwise valid cargo invocation.
-        crate::platform::wait::lock_shared_for(&file, crate::platform::wait::LONG_LOCK)?;
+        if let Err(error) =
+            crate::platform::wait::lock_shared_for(&file, crate::platform::wait::SHORT_LOCK)
+        {
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "could not acquire the build lease at {}: {error}",
+                    maintenance_lock_path(paths).display()
+                ),
+            ));
+        }
         Ok(Self { file })
     }
 }

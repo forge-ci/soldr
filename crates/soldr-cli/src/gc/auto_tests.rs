@@ -1,6 +1,7 @@
 //! Unit coverage split from `auto.rs` for the soldr#2493
 //! 1,000-line production-source ceiling.
 
+use super::schedule::AUTO_GC_THROTTLE_SECONDS;
 use super::*;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -314,4 +315,117 @@ fn stale_target_pass_evicts_idle_discovered_target_once_per_day() {
     assert!(stale_target_marker_path(&paths).exists());
     let text = std::fs::read_to_string(&log).unwrap();
     assert!(text.contains("stale-targets days=14"), "{text}");
+}
+
+#[test]
+fn sweep_requests_share_a_cooldown_after_launch_failure() {
+    let root = tempfile::tempdir().expect("temporary GC root");
+    let marker = root.path().join("marker");
+    let launches = std::cell::Cell::new(0);
+    request_sweep(&marker, || {
+        launches.set(launches.get() + 1);
+        Err(std::io::Error::other("mock spawn failure"))
+    });
+    request_sweep(&marker, || {
+        launches.set(launches.get() + 1);
+        Ok(())
+    });
+    assert_eq!(launches.get(), 1);
+    let expired = SystemTime::now() - Duration::from_secs(AUTO_GC_THROTTLE_SECONDS + 1);
+    filetime::set_file_mtime(&marker, filetime::FileTime::from_system_time(expired))
+        .expect("expire marker");
+    request_sweep(&marker, || {
+        launches.set(launches.get() + 1);
+        Ok(())
+    });
+    assert_eq!(launches.get(), 2);
+}
+
+#[test]
+fn sweep_requests_coalesce_while_worker_is_running() {
+    let root = tempfile::tempdir().expect("temporary GC root");
+    let marker = root.path().join("marker");
+    let worker = sweep_lock(&marker).expect("reserve worker lock");
+    request_sweep(&marker, || panic!("a running sweep owns the lock"));
+    assert!(!marker.exists());
+    drop(worker);
+
+    let launched = std::cell::Cell::new(false);
+    request_sweep(&marker, || {
+        launched.set(true);
+        Ok(())
+    });
+    assert!(launched.get());
+}
+
+#[test]
+fn active_build_deferral_keeps_cooldown() {
+    let root = tempfile::tempdir().expect("temporary GC root");
+    let marker = root.path().join("marker");
+    let log = root.path().join("logs/auto-gc.log");
+    request_sweep(&marker, || {
+        defer_for_active_build(&log, "mock");
+        Ok(())
+    });
+    request_sweep(&marker, || panic!("deferral must preserve cooldown"));
+    assert!(std::fs::read_to_string(log).unwrap().contains("stage=mock"));
+}
+
+#[test]
+fn worker_admission_does_not_take_the_build_lease() {
+    use crate::cache_lib::build_active::BuildRootLease;
+
+    let root = tempfile::tempdir().expect("temporary GC root");
+    let paths = SoldrPaths::with_root(root.path().to_path_buf());
+    let marker = crate::cache_lib::auto_gc_throttle_marker_path(&paths);
+    let worker = sweep_lock(&marker).expect("reserve worker lock");
+    let build = BuildRootLease::acquire(&paths).expect("build can start during a sweep");
+    let log = root.path().join("logs/auto-gc.log");
+    assert!(try_target_maintenance(&paths, &log).is_none());
+    assert!(std::fs::read_to_string(&log)
+        .unwrap()
+        .contains("build_active"));
+    drop(build);
+    assert!(try_target_maintenance(&paths, &log).is_some());
+    drop(worker);
+}
+
+#[test]
+fn long_sweep_starts_cooldown_when_it_finishes() {
+    let root = tempfile::tempdir().expect("temporary GC root");
+    let marker = root.path().join("marker");
+    touch_auto_gc_marker(&marker).unwrap();
+    run_reserved_sweep(&marker, || {
+        let expired = SystemTime::now() - Duration::from_secs(AUTO_GC_THROTTLE_SECONDS + 1);
+        filetime::set_file_mtime(&marker, filetime::FileTime::from_system_time(expired)).unwrap();
+        request_sweep(&marker, || panic!("worker holds the lock"));
+    });
+    request_sweep(&marker, || panic!("completed sweep refreshed cooldown"));
+}
+
+#[test]
+fn target_used_after_planning_is_not_evicted() {
+    use crate::cache_lib::gc::GcOptions;
+    use crate::cache_lib::target_registry::{current_unix_seconds, TargetRow};
+
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("target");
+    std::fs::create_dir(&target).unwrap();
+    age(&target, Duration::from_secs(1));
+    let options = GcOptions {
+        older_than_seconds: 3600,
+        larger_than_bytes: 0,
+        dev_roots: vec![root.path().to_path_buf()],
+        dry_run: false,
+    };
+    assert!(target_still_cold(&target, &options, || Ok(vec![])));
+    assert!(!target_still_cold(&target, &options, || Ok(vec![
+        TargetRow {
+            path: target.clone(),
+            last_used: current_unix_seconds().unwrap(),
+        }
+    ])));
+    assert!(!target_still_cold(&target, &options, || Err(
+        crate::core::SoldrError::Other("mock registry was unavailable".into())
+    )));
 }
