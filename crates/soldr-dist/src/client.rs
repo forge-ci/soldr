@@ -72,7 +72,18 @@ impl DistClient {
     pub fn input_files(&mut self, paths: &[std::path::PathBuf]) -> Result<Vec<InputFile>> {
         paths.iter().map(|path| self.memo.input(path)).collect()
     }
-    pub async fn execute(&self, mut job: DistJob) -> DistOutcome {
+    pub async fn execute(&self, job: DistJob) -> DistOutcome {
+        self.execute_constructed(job, std::time::Duration::ZERO)
+            .await
+    }
+
+    /// `construct` is the time already spent listing and hashing the inputs,
+    /// recorded so per-joblet metrics show the client-side overhead too.
+    pub async fn execute_constructed(
+        &self,
+        mut job: DistJob,
+        construct: std::time::Duration,
+    ) -> DistOutcome {
         let started = std::time::Instant::now();
         let mut metrics = JobMetrics::for_job(self.worker.id.to_string(), &job);
         let validation = if job.compiler_kind == "rustc" {
@@ -125,6 +136,7 @@ impl DistClient {
             }
         };
         metrics.elapsed_millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        metrics.construct_millis = u64::try_from(construct.as_millis()).unwrap_or(u64::MAX);
         metrics.finish(&outcome);
         outcome.set_metrics(metrics);
         let (root, recorded) = (self.root.clone(), outcome.metrics().clone());

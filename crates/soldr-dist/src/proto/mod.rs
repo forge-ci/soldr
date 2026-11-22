@@ -188,4 +188,7 @@ pub struct JobMetrics {
     pub cas_hits_known: bool,
     #[prost(uint64, tag = "23")]
     pub completed_unix_millis: u64,
+    /// Client-side input listing + hashing before the joblet was sent.
+    #[prost(uint64, tag = "24")]
+    pub construct_millis: u64,
 }

@@ -102,4 +102,5 @@ message JobMetrics {
   string connection_side = 21;
   bool cas_hits_known = 22;
   uint64 completed_unix_millis = 23;
+  uint64 construct_millis = 24;
 }

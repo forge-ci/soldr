@@ -221,6 +221,7 @@ impl CompileExecutor for Executor {
             if let Err(reason) = namespace::check(&manifest, true) {
                 return self.declined(job, reason);
             }
+            let constructing = std::time::Instant::now();
             let manifest = match soldr_dist::rust_inputs::construct(manifest, &self.inputs).await {
                 Ok(manifest) => manifest,
                 Err(error) => {
@@ -228,7 +229,10 @@ impl CompileExecutor for Executor {
                 }
             };
             let index = self.next.fetch_add(1, Ordering::Relaxed) % self.clients.len();
-            match self.clients[index].execute(manifest).await {
+            match self.clients[index]
+                .execute_constructed(manifest, constructing.elapsed())
+                .await
+            {
                 DistOutcome::Executed {
                     exit_code,
                     stdout,
