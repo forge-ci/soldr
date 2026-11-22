@@ -106,6 +106,9 @@ fn cold_rust_unit_with_two_dependencies_and_host_proc_macro_is_byte_identical() 
         let args = [
             "--crate-name=main",
             "--crate-type=rlib",
+            // As Cargo does: the worker then reuses this dep-info as its input proof
+            // instead of adding an output type, which would change the crate hash.
+            "--emit=dep-info,link",
             "lib.rs",
             "--extern=b=deps/libb.rlib",
             &external,
