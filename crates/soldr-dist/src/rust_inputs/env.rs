@@ -125,7 +125,8 @@ pub(super) fn inspect(job: &mut DistJob) -> Result<BTreeSet<String>> {
     let external_macros = job
         .argv
         .iter()
-        .any(|arg| arg == "--extern" || arg.starts_with("--extern="))
+        // An @argfile can carry --extern where this scan cannot see it.
+        .any(|arg| arg == "--extern" || arg.starts_with("--extern=") || arg.starts_with('@'))
         || sources.iter().any(|text| imports_non_sysroot_crate(text));
     if !uses.includes.is_empty() && (uses.ambiguous_macros || external_macros) {
         return Err(
@@ -303,6 +304,8 @@ mod tests {
         inspect(&mut sysroot).unwrap();
         let (_r3, mut foreign) = job_for(&format!("extern crate other; {INCLUDE}"));
         assert!(inspect(&mut foreign).is_err());
+        job.argv = vec!["@args.txt".into()];
+        assert!(inspect(&mut job).is_err(), "argfile may hide --extern");
         job.argv = vec!["--extern".into(), format!("other={}", lib.display())];
         let error = inspect(&mut job).unwrap_err().to_string();
         assert!(error.contains("unresolved macro expansion"), "{error}");
