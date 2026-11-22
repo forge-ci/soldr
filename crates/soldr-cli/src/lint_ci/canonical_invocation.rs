@@ -6,7 +6,7 @@ use crate::cargo_front_door::{
     canonical_runtime,
 };
 use crate::cargo_metadata_canonical::{
-    profile_from, CanonicalPackages, CanonicalProfile, CanonicalUnify,
+    profile_from, CanonicalEnforce, CanonicalPackages, CanonicalProfile, CanonicalUnify,
 };
 use crate::core::{SoldrError, TargetTriple};
 
@@ -87,13 +87,21 @@ impl Context {
         if drift.is_empty() {
             return None;
         }
+        // The profile's `enforce` is one policy with two surfaces: the front
+        // door (warn/refuse at run time) and this rule. `off` means the repo
+        // has not opted in yet, so it must not fail `soldr lint ci` either.
+        let severity = match profile.enforce {
+            CanonicalEnforce::Off => return None,
+            CanonicalEnforce::Warn => Severity::Warning,
+            CanonicalEnforce::Refuse => Severity::Error,
+        };
         let package: &str = match &selection.packages {
             CanonicalPackages::Explicit(packages) if packages.len() == 1 => &packages[0],
             _ => "x",
         };
         Some(Finding {
             rule: RULE.into(),
-            severity: Severity::Error,
+            severity,
             file: file.rel_path.clone(),
             line,
             tool: format!("soldr {}{}", if cargo { "cargo " } else { "" }, verb.name()),

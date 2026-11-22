@@ -142,3 +142,35 @@ fn canonical_ci_invalid_profile_fails_loudly() {
     assert!(report.findings[0].recommendation.contains("featuers"));
     assert!(!report.ok);
 }
+
+#[test]
+fn canonical_ci_severity_follows_the_declared_enforcement() {
+    // One policy, two surfaces: a repo that opted into `warn` gets findings
+    // that do not fail `soldr lint ci`, and one that opted out gets none.
+    for (enforce, expected) in [
+        ("warn", Some(lint_ci::Severity::Warning)),
+        ("refuse", Some(lint_ci::Severity::Error)),
+        ("off", None),
+    ] {
+        let dir = fixture(false);
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            format!(
+                "[workspace]\nmembers = ['crates/*']\n[workspace.metadata.soldr.cargo]\n\
+                 enforce = '{enforce}'\ntarget = 'implicit'\nunify = 'off'\nfeatures = ['a', 'b']\n"
+            ),
+        )
+        .unwrap();
+        write(
+            dir.path(),
+            "ci/test.py",
+            "# fixture\nrun(\"soldr cargo test -p a\")\n",
+        );
+        let report = lint_ci::analyze(dir.path());
+        assert_eq!(
+            report.findings.first().map(|finding| finding.severity),
+            expected,
+            "enforce = {enforce}"
+        );
+    }
+}
