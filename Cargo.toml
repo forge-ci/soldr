@@ -100,7 +100,7 @@ fs2 = "0.4"
 # (`stream`). Previously these were pulled in by feature-unification
 # through other deps; declaring them explicitly makes soldr's build
 # self-sufficient against dep-trim churn.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "charset", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "charset", "stream", "http2"] }
 tempfile = "3"
 # soldr#1356 A4 — default-features=false + deflate only. Drops bzip2-sys
 # (C build) + aes + sha1 + lzma + deflate64 + zopfli + zip's own zstd copy.

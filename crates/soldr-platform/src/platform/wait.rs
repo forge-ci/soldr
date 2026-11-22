@@ -364,6 +364,18 @@ pub fn block_on_for<F: std::future::Future>(
         .map_err(|_| WaitError::TimedOut(bound))
 }
 
+/// Bridge from a blocking worker to an async operation with a time limit.
+pub fn block_on_handle_for<F: std::future::Future>(
+    runtime: &tokio::runtime::Handle,
+    future: F,
+    bound: Duration,
+) -> Result<F::Output, WaitError> {
+    #[allow(clippy::disallowed_methods)]
+    runtime
+        .block_on(async { tokio::time::timeout(bound, future).await })
+        .map_err(|_| WaitError::TimedOut(bound))
+}
+
 #[cfg(test)]
 #[path = "wait_tests.rs"]
 mod tests;

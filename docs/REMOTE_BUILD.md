@@ -46,6 +46,21 @@ An explicit Cargo `--target-dir` is relative to the session's fetchable
 output directory. For example, `--target-dir target/special` makes
 `target/special/**` available for fetch.
 
+Fetch uses one HTTP/2 connection and up to eight concurrent file streams.
+The runner can advertise a lower limit with `remote serve --artifact-streams N`.
+Each stream sends binary Zstandard at level 15. The client verifies the
+uncompressed size and SHA-256 before publishing a file.
+
+To reuse the build connection for downloads, request artifacts on the run
+command. Downloads start after the runner reports the build result.
+
+```sh
+soldr remote --token-file "$HOME/.soldr-remote-token" run \
+  --fetch-out target/remote-demo \
+  --fetch 'target/debug/soldr-remote-demo' --fetch attestation.json \
+  build -- --locked --manifest-path examples/remote-build-demo/Cargo.toml
+```
+
 The client requires a commit and a clean Git status, including untracked
 files. Ignored build outputs stay local. The client reads sources from the
 committed Git tree. The runner

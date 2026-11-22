@@ -16,16 +16,17 @@ use prost::Message;
 
 use crate::platform::{fs::permissions, wait};
 
-use super::manifest;
 use super::slots;
 use super::snapshot::{digest, relative_path};
 use super::wire::{self, Action, Artifact, Artifacts, Blob, Fetch, ResultFrame, Session, Start};
+use super::{artifacts, manifest};
 
 pub(super) async fn serve(
     listen: std::net::SocketAddr,
     root: PathBuf,
     token: &str,
     slot_limit: Option<u32>,
+    artifact_streams: u8,
 ) -> io::Result<i32> {
     if !listen.ip().is_loopback() {
         return Err(io::Error::other(
@@ -41,6 +42,7 @@ pub(super) async fn serve(
             root.canonicalize()?,
             digest(format!("Bearer {token}").as_bytes()),
             slot_limit,
+            artifact_streams,
         ));
     let listener = tokio::net::TcpListener::bind(listen).await?;
     eprintln!(
@@ -52,7 +54,12 @@ pub(super) async fn serve(
 }
 
 async fn handle(
-    State((root, expected, slot_limit)): State<(PathBuf, String, Option<u32>)>,
+    State((root, expected, slot_limit, artifact_streams)): State<(
+        PathBuf,
+        String,
+        Option<u32>,
+        u8,
+    )>,
     RoutePath(operation): RoutePath<String>,
     headers: HeaderMap,
     body: Bytes,
@@ -70,17 +77,29 @@ async fn handle(
     if provided.as_ref() != Some(&expected) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    match tokio::task::spawn_blocking(move || dispatch(&root, &operation, &body, slot_limit)).await
-    {
-        Ok(Ok(data)) => (
-            StatusCode::OK,
-            [("content-type", "application/x-protobuf+zstd")],
-            data,
+    match tokio::task::spawn_blocking(move || {
+        if let Some(id) = operation.strip_prefix("artifact/") {
+            return artifacts::serve(&finished_output(&root, id)?, &body);
+        }
+        let data = dispatch(&root, &operation, &body, slot_limit, artifact_streams)?;
+        Ok::<_, io::Error>(
+            ([("content-type", "application/x-protobuf+zstd")], data).into_response(),
         )
-            .into_response(),
+    })
+    .await
+    {
+        Ok(Ok(response)) => response,
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }
+}
+
+fn finished_output(root: &Path, id: &str) -> io::Result<PathBuf> {
+    let output = root.join("sessions").join(key(id, 32)?).join("output");
+    if !output.join("attestation.json").is_file() {
+        return Err(io::Error::other("remote build session has not finished"));
+    }
+    Ok(output)
 }
 
 fn key(value: &str, len: usize) -> io::Result<&str> {
@@ -100,6 +119,7 @@ fn dispatch(
     operation: &str,
     body: &[u8],
     slot_limit: Option<u32>,
+    artifact_streams: u8,
 ) -> io::Result<Vec<u8>> {
     let parts: Vec<_> = operation.split('/').collect();
     match parts.as_slice() {
@@ -110,6 +130,11 @@ fn dispatch(
             &root.join("sessions").join(key(id, 32)?),
             id,
             slot_limit,
+        ),
+        ["artifact-list", id] => artifacts::inventory(
+            &finished_output(root, id)?,
+            wire::decode(body)?,
+            artifact_streams,
         ),
         ["fetch", id] => fetch(
             &root.join("sessions").join(key(id, 32)?),

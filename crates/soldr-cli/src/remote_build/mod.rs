@@ -1,5 +1,6 @@
 //! Whole-workspace builds on a trusted runner reached over an SSH tunnel.
 
+mod artifacts;
 mod manifest;
 mod server;
 mod slots;
@@ -14,7 +15,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use prost::Message;
 use soldr_fetch::fetch::LoopbackPostClient;
 
-use self::wire::{Action, Artifacts, Blob, Fetch, ResultFrame, Session, Start};
+use self::wire::{Action, Blob, ResultFrame, Session, Start};
 
 #[derive(Args)]
 pub(crate) struct RemoteArgs {
@@ -36,6 +37,9 @@ enum RemoteCommand {
         /// Override the automatic slot count. Zero disables warm slots.
         #[arg(long, value_parser = clap::value_parser!(u32).range(0..=1024))]
         slots: Option<u32>,
+        /// Maximum parallel artifact transfers advertised to each client.
+        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u8).range(1..=8))]
+        artifact_streams: u8,
     },
     /// Run a command against the current Git commit on the runner.
     Run {
@@ -46,6 +50,12 @@ enum RemoteCommand {
         /// Optional JSON identifying a repository, user, and commit lineage.
         #[arg(long)]
         manifest: Option<PathBuf>,
+        /// Download matching artifacts to this new directory on the same connection.
+        #[arg(long, requires = "fetch")]
+        fetch_out: Option<PathBuf>,
+        /// Session-relative artifact glob to download after the run. Repeat as needed.
+        #[arg(long, requires = "fetch_out")]
+        fetch: Vec<String>,
         #[arg(long, allow_negative_numbers = true, value_parser = crate::cache_lib::zstd_level::parse_zstd_level)]
         cache_zstd_level: Option<i32>,
         #[arg(value_enum)]
@@ -86,11 +96,14 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             listen,
             root,
             slots,
-        } => server::serve(listen, root, token, slots).await,
+            artifact_streams,
+        } => server::serve(listen, root, token, slots, artifact_streams).await,
         RemoteCommand::Run {
             endpoint,
             attestation,
             manifest,
+            fetch_out,
+            fetch,
             cache_zstd_level,
             action,
             args,
@@ -102,7 +115,7 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
                 snapshot::verify_parent(&directory, &snapshot.commit, manifest.parent())?;
             }
             let manifest_json = manifest.as_ref().map(serde_json::to_vec).transpose()?;
-            let client = Client::new(endpoint, token)?;
+            let client = Client::new(endpoint, token, fetch_out.is_some())?;
             let action = match action {
                 BuildAction::Build => Action::Build,
                 BuildAction::Test => Action::Test,
@@ -148,6 +161,9 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             std::fs::write(attestation, result.attestation)?;
             io::stdout().write_all(&result.stdout)?;
             io::stderr().write_all(&result.stderr)?;
+            if let Some(out) = fetch_out {
+                artifacts::download(&client, &session.id, &out, fetch).await?;
+            }
             Ok(result.exit_code)
         }
         RemoteCommand::Fetch {
@@ -156,19 +172,8 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             session,
             globs,
         } => {
-            let client = Client::new(endpoint, token)?;
-            let artifacts: Artifacts = client
-                .post(&format!("fetch/{session}"), &Fetch { globs })
-                .await?;
-            std::fs::create_dir(&out)?;
-            for artifact in artifacts.files {
-                let path = out.join(snapshot::relative_path(&artifact.path)?);
-                std::fs::create_dir_all(
-                    path.parent()
-                        .ok_or_else(|| io::Error::other("missing artifact parent"))?,
-                )?;
-                server::write_file(&path, &artifact.data, artifact.executable)?;
-            }
+            let client = Client::new(endpoint, token, true)?;
+            artifacts::download(&client, &session, &out, globs).await?;
             Ok(0)
         }
     }
@@ -180,9 +185,9 @@ struct Client<'a> {
 }
 
 impl<'a> Client<'a> {
-    fn new(endpoint: SocketAddr, token: &'a str) -> io::Result<Self> {
+    fn new(endpoint: SocketAddr, token: &'a str, http2: bool) -> io::Result<Self> {
         Ok(Self {
-            http: LoopbackPostClient::new(endpoint)?,
+            http: LoopbackPostClient::with_http2(endpoint, http2)?,
             token,
         })
     }
