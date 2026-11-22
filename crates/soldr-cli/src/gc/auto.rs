@@ -18,6 +18,7 @@ use crate::core::SoldrPaths;
 use crate::GcCargoArgs;
 
 use super::cargo_native::invoke_cargo_native_gc;
+use super::discovery::target_still_cold;
 use super::purge::resolve_gc_dev_roots;
 
 #[path = "auto_schedule.rs"]
@@ -925,6 +926,9 @@ fn run_soldr_target_purge_background(
                 let Some(lease) = try_target_maintenance(paths, log_path) else {
                     break;
                 };
+                if !target_still_cold(&cand.path, &options, || super::daemon_registry_rows(paths)) {
+                    continue;
+                }
                 Some(lease)
             }
             None => None,
@@ -934,7 +938,12 @@ fn run_soldr_target_purge_background(
         let outcome = crate::cache_lib::gc::delete_candidate_dir(cand);
         if outcome.removed {
             reclaimed = reclaimed.saturating_add(bytes);
-            removed_rows.push(outcome.candidate.path);
+            if background_log.is_none() {
+                removed_rows.push(outcome.candidate.path);
+            }
+            // Background registration may race with an IPC delete. Leave
+            // the tombstone for registry maintenance rather than removing
+            // a row that a build can refresh.
         }
     }
     if !removed_rows.is_empty() {

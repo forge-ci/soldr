@@ -402,3 +402,30 @@ fn long_sweep_starts_cooldown_when_it_finishes() {
     });
     request_sweep(&marker, || panic!("completed sweep refreshed cooldown"));
 }
+
+#[test]
+fn target_used_after_planning_is_not_evicted() {
+    use crate::cache_lib::gc::GcOptions;
+    use crate::cache_lib::target_registry::{current_unix_seconds, TargetRow};
+
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("target");
+    std::fs::create_dir(&target).unwrap();
+    age(&target, Duration::from_secs(1));
+    let options = GcOptions {
+        older_than_seconds: 3600,
+        larger_than_bytes: 0,
+        dev_roots: vec![root.path().to_path_buf()],
+        dry_run: false,
+    };
+    assert!(target_still_cold(&target, &options, || Ok(vec![])));
+    assert!(!target_still_cold(&target, &options, || Ok(vec![
+        TargetRow {
+            path: target.clone(),
+            last_used: current_unix_seconds().unwrap(),
+        }
+    ])));
+    assert!(!target_still_cold(&target, &options, || Err(
+        crate::core::SoldrError::Other("mock registry was unavailable".into())
+    )));
+}
