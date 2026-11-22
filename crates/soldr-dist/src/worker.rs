@@ -267,7 +267,18 @@ async fn handle_job(
         .iter()
         .find(|c| c.kind == job.compiler_kind && c.matches_identity(&job.compiler_identity))
     else {
-        decline(&mut send, "toolchain mismatch").await?;
+        let offered = state
+            .compilers
+            .iter()
+            .filter(|c| c.kind == job.compiler_kind)
+            .map(|c| c.identity.lines().next().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        let reason = format!(
+            "toolchain mismatch: {} requested {}; worker offers {offered:?}",
+            job.compiler_kind, job.compiler_identity
+        );
+        eprintln!("Dist joblet declined: {reason}");
+        decline(&mut send, &reason).await?;
         send.finish()?;
         return Ok(());
     };
