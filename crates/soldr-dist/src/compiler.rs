@@ -304,6 +304,7 @@ impl Compiler {
             stderr: output.stderr,
             outputs: vec![],
             dependency_info,
+            ..Done::default()
         })
     }
 }

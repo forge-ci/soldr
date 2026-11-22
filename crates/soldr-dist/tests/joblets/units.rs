@@ -47,6 +47,8 @@ fn proto_roundtrip() {
                 size: 5,
                 mode: 0o755,
             }],
+            compile_millis: 7,
+            ..Done::default()
         }),
         ..Reply::default()
     };
