@@ -891,7 +891,7 @@ pub(crate) fn fake_rustc_script(log_path: &Path) -> String {
                mkdir -p \"$(dirname \"$output_path\")\"\n\
                : > \"$output_path\"\n\
                case \"$all_args\" in\n\
-                 *dep-info*) : > \"${{output_path%.*}}.d\" ;;\n\
+                 *dep-info*) dep_base=$(basename \"$output_path\"); dep_base=${{dep_base%.*}}; : > \"$(dirname \"$output_path\")/$dep_base.d\" ;;\n\
                esac\n\
              fi\n",
             log_path.display()
