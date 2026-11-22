@@ -127,6 +127,11 @@ where
     // the front door's background LLVM fetch.
     let rewritten = crate::host_tool_link::rewrite_with_system_cc(rustc_argv);
     let rustc_argv = rewritten.as_deref().unwrap_or(rustc_argv);
+    // Dist mode (soldr#4215): every route to the daemon (wrapper and the
+    // `zccache-soldr` shim) passes here, and the same argv keys the cache, runs
+    // remotely and runs locally on a decline, so the portable remap goes here.
+    let portable = crate::dist_paths::with_portable_paths(rustc_argv);
+    let rustc_argv = portable.as_deref().unwrap_or(rustc_argv);
     crate::llvm_fetch_wait::gate_linking_compile(rustc_argv).map_err(SoldrError::Other)?;
     match crate::session_transport::session_hot_path(rustc_argv) {
         crate::session_transport::SessionHotPathOutcome::Served(exit_code) => Ok(exit_code),

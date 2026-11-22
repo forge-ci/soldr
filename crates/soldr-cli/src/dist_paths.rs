@@ -26,6 +26,23 @@ pub(crate) fn portable_path_remaps(cwd: &Path) -> Vec<String> {
     remaps_for(cargo_home().as_deref(), cwd)
 }
 
+/// `argv` (`[compiler, args...]`) with the portable remaps inserted after the
+/// compiler, or `None` when there is nothing to add or it is not a rustc call.
+pub(crate) fn with_portable_paths(argv: &[String]) -> Option<Vec<String>> {
+    if !argv.iter().any(|arg| arg == "--crate-name") {
+        return None;
+    }
+    let remaps = portable_path_remaps(&std::env::current_dir().ok()?);
+    if remaps.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(argv.len() + remaps.len());
+    out.push(argv.first()?.clone());
+    out.extend(remaps);
+    out.extend_from_slice(&argv[1..]);
+    Some(out)
+}
+
 fn remaps_for(cargo_home: Option<&Path>, cwd: &Path) -> Vec<String> {
     match cargo_home {
         // A workspace inside CARGO_HOME (e.g. a git checkout being built) keeps
