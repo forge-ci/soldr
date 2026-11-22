@@ -98,7 +98,7 @@ fn aliases(tokens: TokenStream, known: &mut BTreeSet<String>) {
     let tokens = tokens.into_iter().collect::<Vec<_>>();
     for part in tokens.windows(3) {
         if let [TokenTree::Ident(name), TokenTree::Ident(rename), TokenTree::Ident(alias)] = part {
-            if rename.to_string() == "as" && known.contains(&name.to_string()) {
+            if rename == "as" && known.contains(&name.to_string()) {
                 known.insert(alias.to_string());
             }
         }
