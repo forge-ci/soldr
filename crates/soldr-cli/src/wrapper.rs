@@ -320,6 +320,10 @@ pub(crate) fn run_rustc_wrapper(
         let compiler = resolve_wrapper_tool_path(tool_arg, tool_stem)?;
         let mut daemon_args = compile_args[1..].to_vec();
         daemon_args[0] = compiler.to_string_lossy().into_owned();
+        // Dist mode: the same argv keys the cache, runs remotely, and runs
+        // locally on a decline, so a portable-path remap must be added here.
+        let remaps = crate::dist_paths::portable_path_remaps(&std::env::current_dir()?);
+        daemon_args.splice(1..1, remaps);
         // L1 (issue #977 / #980 L1): dispatch the rustc invocation to
         // the daemon's embedded zccache service over IPC. The legacy
         // `zccache.exe` fork was deleted in the L1 second pass.
