@@ -1,7 +1,9 @@
 //! Profile enforcement before verdict replay, tool bootstrap or compilation.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+
+use soldr_platform::sync::Mutex;
 
 use crate::cargo_metadata_canonical::{
     profile_from, CanonicalEnforce, CanonicalPackages, CanonicalProfile, CanonicalUnify,
@@ -152,9 +154,10 @@ fn members(
         globals.clone(),
     );
     let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
-    let mut cache = cache
-        .lock()
-        .map_err(|e| SoldrError::Other(format!("canonical metadata cache: {e}")))?;
+    // `soldr_platform::sync::Mutex` is the watchdog-bounded lock the repository
+    // requires (dylint `ban_std_sync_mutex`, soldr#3836): its `lock()` cannot
+    // fail and cannot wait unboundedly.
+    let mut cache = cache.lock();
     if let Some(members) = cache.get(&key) {
         return Ok(members.clone());
     }
