@@ -243,10 +243,16 @@ impl Compiler {
         for arg in args {
             command = command.arg(arg);
         }
-        // No further remaps: the mirror remap above already presents every sandbox
-        // path as the client's own absolute path, which is what the local compile
-        // records. Remapping the cwd to `.` here changed rustc's recorded working
-        // directory, and with it the crate hash (SVH) in every rmeta.
+        if self.kind == "rustc"
+            && !job
+                .argv
+                .iter()
+                .any(|arg| arg.starts_with("--remap-path-prefix"))
+        {
+            let cwd = sandbox::mirrored(root, &job.cwd)?;
+            command = command.arg(format!("--remap-path-prefix={}=.", job.cwd));
+            command = command.arg(format!("--remap-path-prefix={}=.", cwd.display()));
+        }
         let mut child = command
             .current_dir(sandbox::mirrored(root, &job.cwd)?)
             .build();
