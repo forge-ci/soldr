@@ -157,12 +157,7 @@ pub fn output_for(
     bound: Duration,
 ) -> io::Result<std::process::Output> {
     use std::io::Read;
-    use std::process::Stdio;
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut child = spawn_for_output(command)?;
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
     let stdout_reader = std::thread::spawn(move || {
@@ -190,6 +185,15 @@ pub fn output_for(
     })
 }
 
+fn spawn_for_output(command: &mut std::process::Command) -> io::Result<Child> {
+    use std::process::Stdio;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+}
+
 /// Capture both pipes and report each line as it is read.
 pub fn output_for_observed(
     command: &mut std::process::Command,
@@ -197,7 +201,6 @@ pub fn output_for_observed(
     on_line: impl Fn(bool, &[u8]) + Send + Sync + 'static,
 ) -> io::Result<std::process::Output> {
     use std::io::{BufRead, BufReader, Read};
-    use std::process::Stdio;
     use std::sync::Arc;
 
     fn drain(
@@ -216,11 +219,7 @@ pub fn output_for_observed(
         }
     }
 
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut child = spawn_for_output(command)?;
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let on_line = Arc::new(on_line);
