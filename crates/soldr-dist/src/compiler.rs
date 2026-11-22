@@ -258,13 +258,8 @@ impl Compiler {
         if let Some(toolchain) = &self.toolchain {
             command = command.env("RUSTUP_TOOLCHAIN", toolchain);
         }
-        let mirror_root = root.join("root");
-        if self.kind == "rustc" {
-            // Restore non-workspace absolute paths, before more-specific caller remaps.
-            command = command.arg(format!("--remap-path-prefix={}=", mirror_root.display()));
-        } else {
-            command = command.arg(format!("-ffile-prefix-map={}=", mirror_root.display()));
-        }
+        // Restore non-workspace absolute paths, before more-specific caller remaps.
+        command = command.arg(mirror_remap(&self.kind, &root.join("root")));
         let (args, proof) = crate::rust_output::proof_args(job, root)?;
         for arg in args {
             command = command.arg(arg);
@@ -326,6 +321,26 @@ pub fn outputs(
         });
     }
     Ok(outputs)
+}
+
+/// The argument mapping sandbox-mirrored paths back to the client's absolute paths.
+///
+/// rustc remaps by path components: it strips the prefix, leaving a *relative*
+/// remainder (`home/u/x`), and joins it onto the replacement. The replacement
+/// must therefore be the filesystem root, or every path outside the caller's
+/// own remaps (the Cargo registry, toolchains) loses its leading separator and
+/// the rmeta differs from a local compile. C compilers' `-ffile-prefix-map`
+/// replaces the string prefix, so an empty replacement is already exact there.
+fn mirror_remap(kind: &str, mirror_root: &Path) -> String {
+    if kind == "rustc" {
+        let root = mirror_root
+            .ancestors()
+            .last()
+            .map_or_else(|| "/".into(), |r| r.display().to_string());
+        format!("--remap-path-prefix={}={root}", mirror_root.display())
+    } else {
+        format!("-ffile-prefix-map={}=", mirror_root.display())
+    }
 }
 
 fn soldr_command(program: &Path) -> AsyncProcessBuilder {
@@ -393,4 +408,21 @@ fn opaque_cache_identity_matches_only_the_exact_advertised_digest() {
         &offered,
         &format!("{requested}\nhost: injected")
     ));
+}
+
+#[cfg(all(test, unix))]
+mod mirror_remap_tests {
+    #[test]
+    fn rustc_mirror_remap_restores_absolute_paths() {
+        let mirror = std::path::Path::new("/var/lib/w/tmp/job/root");
+        // rustc joins the relative remainder onto the replacement: it must be `/`.
+        assert_eq!(
+            super::mirror_remap("rustc", mirror),
+            "--remap-path-prefix=/var/lib/w/tmp/job/root=/"
+        );
+        assert_eq!(
+            super::mirror_remap("cc", mirror),
+            "-ffile-prefix-map=/var/lib/w/tmp/job/root="
+        );
+    }
 }
