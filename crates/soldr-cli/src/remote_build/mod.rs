@@ -16,7 +16,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use prost::Message;
 use soldr_fetch::fetch::LoopbackPostClient;
 
-use self::wire::{Action, Artifacts, Blob, Fetch, ResultFrame, Session, Start};
+use self::wire::{Action, Blob, ResultFrame, Session, Start};
 
 #[derive(Args)]
 pub(crate) struct RemoteArgs {
@@ -233,20 +233,16 @@ impl<'a> Client<'a> {
     ) -> io::Result<i32> {
         let (code, bytes) = if live {
             let code = control::receive(self, session).await?;
-            let artifacts: Artifacts = self
-                .post(
-                    &format!("fetch/{session}"),
-                    &Fetch {
-                        globs: vec!["attestation.json".into()],
-                    },
+            let compressed = self
+                .http
+                .get(
+                    &format!("/v1/sessions/{session}/artifact"),
+                    self.token,
+                    &[("path", "attestation.json")],
+                    wire::MAX_FRAME + 1024 * 1024,
                 )
                 .await?;
-            let file = artifacts
-                .files
-                .into_iter()
-                .find(|file| file.path == "attestation.json")
-                .ok_or_else(|| io::Error::other("remote session omitted its attestation"))?;
-            (code, file.data)
+            (code, wire::decompress(&compressed)?)
         } else {
             let result: ResultFrame = self
                 .post(&format!("run/{session}"), &Blob::default())

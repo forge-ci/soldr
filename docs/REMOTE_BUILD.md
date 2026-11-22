@@ -183,9 +183,9 @@ runner's advertised limit.
    relative path, size, SHA-256, and `mime_type`. A failed build can still publish logs
    and metadata.
 5. **Download.** On a Zstandard side stream, the client requests one path
-   and receives binary Zstandard at level 9. The response uses
-   `Content-Type: application/zstd` and reports the original file type in
-   `X-Soldr-Artifact-Content-Type`. On an rsync side stream, the
+   and receives binary Zstandard at level 9. The client sends
+   `Accept-Encoding: zstd`. The file response uses its original
+   `Content-Type` and `Content-Encoding: zstd`. On an rsync side stream, the
    peers trade native rsync protocol bytes, using an older local copy as
    the receiver's basis. The runner exposes only the selected files from
    the finished session. Each transfer can fail and be retried independently.
@@ -193,5 +193,6 @@ runner's advertised limit.
 The runner supports the content-addressed setup and upload path today.
 Use `remote run --stream` or `--fetch-out` for live output and batches of
 missing workspace blobs compressed at Zstandard level 9. The finished
-session's artifact inventory is available from the `artifact-list` operation.
+session postamble points to `GET /v1/sessions/{id}/artifacts.json`.
+Download each file with `GET /v1/sessions/{id}/artifact?path=<relative-path>`.
 Mutual TLS, Git patch application, and the rsync side channel are extensions.

@@ -49,6 +49,16 @@ pub(super) fn inventory(
     request: Fetch,
     artifact_streams: u8,
 ) -> io::Result<Vec<u8>> {
+    wire::encode(&Blob {
+        data: inventory_json(output, request, artifact_streams)?,
+    })
+}
+
+pub(super) fn inventory_json(
+    output: &Path,
+    request: Fetch,
+    artifact_streams: u8,
+) -> io::Result<Vec<u8>> {
     let mut builder = GlobSetBuilder::new();
     for glob in request.globs {
         builder.add(
@@ -90,12 +100,14 @@ pub(super) fn inventory(
         });
     }
     entries.sort_unstable_by(|left, right| left.path.cmp(&right.path));
-    wire::encode(&Blob {
-        data: serde_json::to_vec(&Inventory {
-            max_parallel: usize::from(artifact_streams),
-            files: entries,
-        })?,
-    })
+    Ok(serde_json::to_vec(&Inventory {
+        max_parallel: usize::from(artifact_streams),
+        files: entries,
+    })?)
+}
+
+pub(super) fn manifest_path(session: &str) -> String {
+    format!("/v1/sessions/{session}/artifacts.json")
 }
 
 fn artifact_mime_type(path: &Path) -> &'static str {
@@ -128,8 +140,17 @@ fn open_artifact(output: &Path, requested: &str) -> io::Result<File> {
 pub(super) fn serve(output: &Path, body: &[u8]) -> io::Result<Response> {
     let request: Blob = wire::decode(body)?;
     let path = std::str::from_utf8(&request.data).map_err(io::Error::other)?;
+    serve_file(output, path, true, true)
+}
+
+pub(super) fn serve_file(
+    output: &Path,
+    path: &str,
+    compress: bool,
+    legacy: bool,
+) -> io::Result<Response> {
     let mime_type = artifact_mime_type(Path::new(path));
-    let file = open_artifact(output, path)?;
+    let mut file = open_artifact(output, path)?;
     let (tx, rx) = mpsc::channel(CHUNK_QUEUE);
     let runtime = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
@@ -137,7 +158,11 @@ pub(super) fn serve(output: &Path, body: &[u8]) -> io::Result<Response> {
             tx: &tx,
             runtime: &runtime,
         };
-        let result = zstd::stream::copy_encode(file, &writer, COMPRESSION_LEVEL);
+        let result = if compress {
+            zstd::stream::copy_encode(file, &writer, COMPRESSION_LEVEL)
+        } else {
+            io::copy(&mut file, &mut &writer).map(|_| ())
+        };
         if let Err(error) = result {
             let _ = writer.send(Err(error));
         }
@@ -145,14 +170,28 @@ pub(super) fn serve(output: &Path, body: &[u8]) -> io::Result<Response> {
     let body = Body::from_stream(stream::unfold(rx, |mut rx| async {
         rx.recv().await.map(|chunk| (chunk, rx))
     }));
-    Ok((
-        [
-            ("content-type", "application/zstd"),
-            ("x-soldr-artifact-content-type", mime_type),
-        ],
+    if legacy {
+        return Ok((
+            [
+                ("content-type", "application/zstd"),
+                ("x-soldr-artifact-content-type", mime_type),
+            ],
+            body,
+        )
+            .into_response());
+    }
+    let mut response = (
+        [("content-type", mime_type), ("vary", "accept-encoding")],
         body,
     )
-        .into_response())
+        .into_response();
+    if compress {
+        response.headers_mut().insert(
+            "content-encoding",
+            axum::http::HeaderValue::from_static("zstd"),
+        );
+    }
+    Ok(response)
 }
 
 struct ChunkWriter<'a> {
@@ -184,10 +223,17 @@ pub(super) async fn download(
     out: &Path,
     globs: Vec<String>,
 ) -> io::Result<()> {
-    let list: Blob = client
-        .post(&format!("artifact-list/{session}"), &Fetch { globs })
+    let globs = serde_json::to_string(&globs)?;
+    let list = client
+        .http
+        .get(
+            &manifest_path(session),
+            client.token,
+            &[("globs", &globs)],
+            wire::MAX_FRAME,
+        )
         .await?;
-    let list: Inventory = serde_json::from_slice(&list.data)?;
+    let list: Inventory = serde_json::from_slice(&list)?;
     let parallel = list.max_parallel.clamp(1, PARALLEL_DOWNLOADS);
     fs::create_dir(out)?;
     stream::iter(list.files.into_iter().map(Ok))
@@ -202,25 +248,21 @@ async fn download_one(
     entry: Entry,
 ) -> io::Result<()> {
     let path = out.join(relative_path(&entry.path)?);
-    let request = Blob {
-        data: entry.path.as_bytes().to_vec(),
-    };
     let mut response = tokio::time::timeout(
         IO_IDLE,
-        client.http.post_stream(
-            &format!("/v1/artifact/{session}"),
+        client.http.get_stream(
+            &format!("/v1/sessions/{session}/artifact"),
             client.token,
-            "application/x-protobuf+zstd",
-            wire::encode(&request)?,
+            &[("path", &entry.path)],
         ),
     )
     .await??;
     if !response.status().is_success()
         || response
             .headers()
-            .get("content-type")
+            .get("content-encoding")
             .and_then(|value| value.to_str().ok())
-            != Some("application/zstd")
+            != Some("zstd")
     {
         return Err(io::Error::other(format!(
             "remote artifact {}: expected a zstd response, got HTTP {}",

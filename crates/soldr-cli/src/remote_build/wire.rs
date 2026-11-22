@@ -117,11 +117,16 @@ pub(super) fn encode_at_level(message: &impl Message, level: i32) -> io::Result<
 }
 
 pub(super) fn decode<M: Message + Default>(compressed: &[u8]) -> io::Result<M> {
+    let data = decompress(compressed)?;
+    M::decode(data.as_slice()).map_err(io::Error::other)
+}
+
+pub(super) fn decompress(compressed: &[u8]) -> io::Result<Vec<u8>> {
     let decoder = zstd::stream::Decoder::new(compressed)?;
     let mut data = Vec::new();
     decoder.take(MAX_FRAME as u64 + 1).read_to_end(&mut data)?;
     if data.len() > MAX_FRAME {
         return Err(io::Error::other("remote build message exceeds 256 MiB"));
     }
-    M::decode(data.as_slice()).map_err(io::Error::other)
+    Ok(data)
 }

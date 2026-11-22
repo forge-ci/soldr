@@ -295,7 +295,46 @@ impl LoopbackPostClient {
         body: Vec<u8>,
         max_response: usize,
     ) -> std::io::Result<Vec<u8>> {
-        let mut response = self.post_stream(path, token, content_type, body).await?;
+        let response = self.post_stream(path, token, content_type, body).await?;
+        Self::read_response(response, max_response).await
+    }
+
+    /// Fetch a resource with a bounded response body.
+    pub async fn get(
+        &self,
+        path: &str,
+        token: &str,
+        query: &[(&str, &str)],
+        max_response: usize,
+    ) -> std::io::Result<Vec<u8>> {
+        let response = self.get_stream(path, token, query).await?;
+        Self::read_response(response, max_response).await
+    }
+
+    /// Issue an authenticated GET and return its streaming response body.
+    pub async fn get_stream(
+        &self,
+        path: &str,
+        token: &str,
+        query: &[(&str, &str)],
+    ) -> std::io::Result<reqwest::Response> {
+        if !path.starts_with('/') {
+            return Err(std::io::Error::other("HTTP service path must begin with /"));
+        }
+        self.http
+            .get(format!("http://{}{path}", self.endpoint))
+            .query(query)
+            .header("accept-encoding", "zstd")
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(std::io::Error::other)
+    }
+
+    async fn read_response(
+        mut response: reqwest::Response,
+        max_response: usize,
+    ) -> std::io::Result<Vec<u8>> {
         let mut data = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(std::io::Error::other)? {
             if chunk.len() > max_response - data.len() {

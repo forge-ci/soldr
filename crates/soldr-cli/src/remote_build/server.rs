@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path as RoutePath, State};
+use axum::extract::{DefaultBodyLimit, Path as RoutePath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::Router;
 use cap_fs_ext::DirExt;
 use cap_std::{ambient_authority, fs::Dir};
@@ -20,6 +20,8 @@ use super::slots;
 use super::snapshot::{digest, relative_path};
 use super::wire::{self, Action, Artifact, Artifacts, Blob, Fetch, ResultFrame, Session, Start};
 use super::{artifacts, control, manifest};
+
+type RunnerState = (PathBuf, String, Option<u32>, u8);
 
 pub(super) async fn serve(
     listen: std::net::SocketAddr,
@@ -37,6 +39,8 @@ pub(super) async fn serve(
     fs::create_dir_all(root.join("sessions"))?;
     let router = Router::new()
         .route("/v1/{*operation}", post(handle))
+        .route("/v1/sessions/{id}/artifacts.json", get(get_inventory))
+        .route("/v1/sessions/{id}/artifact", get(get_artifact))
         .layer(DefaultBodyLimit::max(wire::MAX_FRAME + 1024 * 1024))
         .with_state((
             root.canonicalize()?,
@@ -54,12 +58,7 @@ pub(super) async fn serve(
 }
 
 async fn handle(
-    State((root, expected, slot_limit, artifact_streams)): State<(
-        PathBuf,
-        String,
-        Option<u32>,
-        u8,
-    )>,
+    State((root, expected, slot_limit, artifact_streams)): State<RunnerState>,
     RoutePath(operation): RoutePath<String>,
     headers: HeaderMap,
     body: Bytes,
@@ -71,10 +70,7 @@ async fn handle(
     {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
-    let provided = headers
-        .get("authorization")
-        .map(|value| digest(value.as_bytes()));
-    if provided.as_ref() != Some(&expected) {
+    if !authorized(&headers, &expected) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if let Some(id) = operation.strip_prefix("run-stream/") {
@@ -105,6 +101,85 @@ async fn handle(
     .await
     {
         Ok(Ok(response)) => response,
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+fn authorized(headers: &HeaderMap, expected: &str) -> bool {
+    headers
+        .get("authorization")
+        .is_some_and(|value| digest(value.as_bytes()) == expected)
+}
+
+#[derive(serde::Deserialize)]
+struct InventoryQuery {
+    globs: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ArtifactQuery {
+    path: String,
+}
+
+async fn get_inventory(
+    State((root, expected, _, limit)): State<RunnerState>,
+    RoutePath(id): RoutePath<String>,
+    Query(query): Query<InventoryQuery>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if !authorized(&headers, &expected) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    artifact_response(move || {
+        let globs = match query.globs {
+            Some(globs) => serde_json::from_str(&globs)?,
+            None => vec!["**".into()],
+        };
+        let data =
+            artifacts::inventory_json(&finished_output(&root, &id)?, Fetch { globs }, limit)?;
+        Ok(([("content-type", "application/json")], data).into_response())
+    })
+    .await
+}
+
+async fn get_artifact(
+    State((root, expected, _, _)): State<RunnerState>,
+    RoutePath(id): RoutePath<String>,
+    Query(query): Query<ArtifactQuery>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if !authorized(&headers, &expected) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let compress = headers
+        .get_all("accept-encoding")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|encoding| {
+            let (name, weight) = encoding.split_once(';').unwrap_or((encoding, "q=1"));
+            name.trim().eq_ignore_ascii_case("zstd")
+                && weight
+                    .trim()
+                    .strip_prefix("q=")
+                    .and_then(|q| q.parse::<f32>().ok())
+                    .is_some_and(|q| q > 0.0 && q <= 1.0)
+        });
+    artifact_response(move || {
+        artifacts::serve_file(&finished_output(&root, &id)?, &query.path, compress, false)
+    })
+    .await
+}
+
+async fn artifact_response(
+    task: impl FnOnce() -> io::Result<axum::response::Response> + Send + 'static,
+) -> axum::response::Response {
+    match tokio::task::spawn_blocking(task).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) if error.kind() == io::ErrorKind::NotFound => {
+            StatusCode::NOT_FOUND.into_response()
+        }
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }
@@ -385,11 +460,16 @@ fn run(
         attestation,
     };
     transcript.record_stderr(&result.stderr[stderr_before_postprocessing..]);
-    publish_result(&output, &result, &transcript)?;
+    publish_result(&output, &result, &transcript, id)?;
     Ok(result)
 }
 
-fn publish_result(output: &Path, result: &ResultFrame, transcript: &Transcript) -> io::Result<()> {
+fn publish_result(
+    output: &Path,
+    result: &ResultFrame,
+    transcript: &Transcript,
+    id: &str,
+) -> io::Result<()> {
     let mut logs = std::io::BufWriter::new(fs::File::create(output.join("stdout-stderr.jsonl"))?);
     transcript.write_to(&mut logs)?;
     serde_json::to_writer(&mut logs, &serde_json::json!({"return": result.exit_code}))?;
@@ -401,7 +481,11 @@ fn publish_result(output: &Path, result: &ResultFrame, transcript: &Transcript) 
     staging.write_all(&result.attestation)?;
     staging.persist(output.join("attestation.json"))?;
     if let Some(sink) = &transcript.sink {
-        sink.finish(transcript.start.elapsed().as_secs_f64(), result.exit_code)?;
+        sink.finish(
+            transcript.start.elapsed().as_secs_f64(),
+            result.exit_code,
+            id,
+        )?;
     }
     Ok(())
 }

@@ -45,14 +45,14 @@ impl Sink {
         }
     }
 
-    pub(super) fn finish(&self, t: f64, code: i32) -> io::Result<()> {
+    pub(super) fn finish(&self, t: f64, code: i32, session: &str) -> io::Result<()> {
         if self.interrupted.load(Ordering::Relaxed) {
             return Err(io::Error::other(
                 "remote control stream could not deliver all output",
             ));
         }
         self.send(&serde_json::json!({"t": t, "return": code}))?;
-        self.send(&serde_json::json!({"artifacts": "artifact-list"}))
+        self.send(&serde_json::json!({"artifacts": super::artifacts::manifest_path(session)}))
     }
 }
 
@@ -102,6 +102,7 @@ pub(super) async fn receive(client: &Client<'_>, session: &str) -> io::Result<i3
     let mut pending = Vec::new();
     let mut exit = None;
     let mut artifacts = false;
+    let manifest_path = super::artifacts::manifest_path(session);
     while let Some(chunk) = response.chunk().await.map_err(io::Error::other)? {
         for part in chunk.split_inclusive(|&byte| byte == b'\n') {
             if part.len() > MAX_LINE + 1 - pending.len() {
@@ -111,7 +112,7 @@ pub(super) async fn receive(client: &Client<'_>, session: &str) -> io::Result<i3
             }
             pending.extend_from_slice(part);
             if part.last() == Some(&b'\n') {
-                receive_line(&pending, &mut exit, &mut artifacts)?;
+                receive_line(&pending, &mut exit, &mut artifacts, &manifest_path)?;
                 pending.clear();
             }
         }
@@ -124,7 +125,12 @@ pub(super) async fn receive(client: &Client<'_>, session: &str) -> io::Result<i3
     exit.ok_or_else(|| io::Error::other("remote control stream omitted the return code"))
 }
 
-fn receive_line(line: &[u8], exit: &mut Option<i32>, artifacts: &mut bool) -> io::Result<()> {
+fn receive_line(
+    line: &[u8],
+    exit: &mut Option<i32>,
+    artifacts: &mut bool,
+    manifest_path: &str,
+) -> io::Result<()> {
     let record: serde_json::Value = serde_json::from_slice(line)?;
     if let Some(error) = record.get("error").and_then(serde_json::Value::as_str) {
         return Err(io::Error::other(error.to_owned()));
@@ -136,7 +142,7 @@ fn receive_line(line: &[u8], exit: &mut Option<i32>, artifacts: &mut bool) -> io
         *exit = Some(i32::try_from(code).map_err(io::Error::other)?);
         return Ok(());
     }
-    if record.get("artifacts").and_then(serde_json::Value::as_str) == Some("artifact-list") {
+    if record.get("artifacts").and_then(serde_json::Value::as_str) == Some(manifest_path) {
         if exit.is_none() || *artifacts {
             return Err(io::Error::other("unexpected remote artifact postamble"));
         }
