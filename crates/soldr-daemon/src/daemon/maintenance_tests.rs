@@ -172,11 +172,16 @@ fn sweep_never_holds_state_db_across_filesystem_work() {
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    // Exactly what `persist_start_fallback_inner` does on the front
-    // door when the daemon is unreachable: one handle, three ops.
+    // The ops `persist_start_fallback_inner` does on the front door when
+    // the daemon is unreachable: one handle, three ops. The handle uses the
+    // 50 ms best-effort busy budget, so a lock the parked sweep still held
+    // fails these ops at once with SQLITE_BUSY. That detects the property
+    // directly; a wall-clock bound cannot, because WAL setup and commits
+    // fsync and a loaded disk alone can take seconds (soldr#2224).
     let started = std::time::Instant::now();
     let result = (|| -> Result<(), String> {
-        let handle = db::open_handle(&db_path).map_err(|e| e.to_string())?;
+        let handle = crate::cache_lib::state_store::open_state_db_best_effort(&db_path)
+            .map_err(|e| e.to_string())?;
         let existing = db::get_build_in(&handle, 4242).map_err(|e| e.to_string())?;
         assert!(existing.is_none(), "fixture starts with no session row");
         db::upsert_build_in(
@@ -223,11 +228,8 @@ fn sweep_never_holds_state_db_across_filesystem_work() {
                  across its filesystem phase again (soldr#2224)."
         )
     });
-    assert!(
-        elapsed < Duration::from_secs(2),
-        "the fallback stalled {elapsed:?} waiting for the sweep's handle; it must \
-             not wait at all (soldr#2224)"
-    );
+    // Informational only: elapsed time includes disk latency, not just locks.
+    eprintln!("fallback ops completed in {elapsed:?} while the sweep was parked");
     assert_eq!(exit_code, 0, "sweep child failed");
     // The record really landed, not just "the open succeeded".
     let stored = db::get_build(&db_path, 4242).expect("read back");
