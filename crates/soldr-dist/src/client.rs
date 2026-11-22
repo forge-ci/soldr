@@ -1,6 +1,7 @@
 //! Trusted single-worker execution; transport loss is a visible local-fallback decision.
 use crate::{
     cas::Cas,
+    client_connections::ClientConnections,
     proto::*,
     transport::{self, VERSION},
     trust::Trust,
@@ -12,13 +13,17 @@ use std::{
     collections::HashSet,
     fs,
     path::Path,
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 use tokio::task::JoinSet;
 
 pub struct DistClient {
     pub endpoint: Endpoint,
+    pub connections: Arc<ClientConnections>,
+    reverse_only: bool,
     worker: EndpointAddr,
     root: std::path::PathBuf,
     cas: Cas,
@@ -29,11 +34,21 @@ pub struct DistClient {
 }
 impl DistClient {
     pub fn new(endpoint: Endpoint, worker: EndpointAddr, root: &Path) -> Result<Self> {
+        let connections = ClientConnections::new(endpoint, root)?;
+        Self::with_connections(connections, worker, root)
+    }
+    pub fn with_connections(
+        connections: Arc<ClientConnections>,
+        worker: EndpointAddr,
+        root: &Path,
+    ) -> Result<Self> {
         if !Trust::load(&root.join("trusted_workers.toml"))?.contains(worker.id) {
             return Err(format!("untrusted Dist worker {}", worker.id).into());
         }
         Ok(Self {
-            endpoint,
+            endpoint: connections.endpoint.clone(),
+            connections,
+            reverse_only: false,
             worker,
             root: root.into(),
             cas: Cas::new(root, u64::MAX)?,
@@ -41,6 +56,10 @@ impl DistClient {
             memo: crate::cas::DigestMemo::default(),
             uploaded_blobs: AtomicU64::new(0),
         })
+    }
+    pub fn with_reverse_only(mut self, value: bool) -> Self {
+        self.reverse_only = value;
+        self
     }
     /// Reuses metadata-keyed digests across job manifests from this client.
     pub fn input_files(&mut self, paths: &[std::path::PathBuf]) -> Result<Vec<InputFile>> {
@@ -66,11 +85,10 @@ impl DistClient {
                 reason: "untrusted worker".into(),
             });
         }
-        let conn = tokio::time::timeout(
-            Duration::from_secs(8),
-            self.endpoint.connect(self.worker.clone(), transport::ALPN),
-        )
-        .await??;
+        let conn = self
+            .connections
+            .connect(&self.worker, self.reverse_only)
+            .await?;
         let result = self.exchange(&conn, job).await;
         conn.close(0u32.into(), b"client complete");
         result

@@ -8,7 +8,10 @@ use crate::{
     trust::Trust,
     Result,
 };
-use iroh::{endpoint::Connection, Endpoint};
+use iroh::{
+    endpoint::{Connection, RecvStream, SendStream},
+    Endpoint, EndpointAddr,
+};
 use prost::Message;
 use std::{
     collections::HashSet,
@@ -23,6 +26,7 @@ use tokio::{
     sync::{watch, Semaphore},
     task::JoinSet,
 };
+mod outbound;
 
 pub struct Worker {
     pub endpoint: Endpoint,
@@ -34,6 +38,8 @@ pub struct Worker {
     pub signal_url: String,
     pub total_cpus: usize,
     pub uploaded_blobs: Arc<AtomicU64>,
+    pub clients: Vec<EndpointAddr>,
+    pub outbound_only: bool,
 }
 struct State {
     root: PathBuf,
@@ -53,6 +59,17 @@ impl Worker {
     pub async fn serve(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
         if self.slots == 0 {
             return Err("Dist worker slots must be positive".into());
+        }
+        if self.outbound_only && self.clients.is_empty() {
+            return Err("outbound-only dist serving requires at least one client ticket".into());
+        }
+        let trusted = Trust::load(&self.root.join("trusted_clients.toml"))?;
+        for client in &self.clients {
+            if !trusted.contains(client.id) {
+                return Err(
+                    format!("configured outbound client {} is not trusted", client.id).into(),
+                );
+            }
         }
         use fs2::FileExt;
         let root_lock = std::fs::OpenOptions::new()
@@ -78,33 +95,25 @@ impl Worker {
             admission: soldr_platform::sync::Mutex::new(()),
         });
         let mut jobs = JoinSet::new();
+        for client in self.clients {
+            // Bound warm sockets, not compiler admission; each carries one joblet.
+            for _ in 0..self.slots.min(64) {
+                jobs.spawn(outbound::dial(
+                    state.clone(),
+                    self.endpoint.clone(),
+                    client.clone(),
+                    shutdown.clone(),
+                ));
+            }
+        }
         write_status(&state)?;
         loop {
             tokio::select! {
                 _ = shutdown.changed() => break,
                 incoming = self.endpoint.accept() => {
                     let Some(incoming) = incoming else { break; };
-                    let state = state.clone();
-                    jobs.spawn(async move {
-                        let conn = incoming.await?;
-                        let trust = Trust::load(&state.root.join("trusted_clients.toml"))?;
-                        if !trust.contains(conn.remote_id()) {
-                            eprintln!("Dist rejected untrusted client {}", conn.remote_id());
-                            conn.close(1u32.into(), b"untrusted client");
-                            return Ok(());
-                        }
-                        let result = handle(&state, &conn).await;
-                        if let Err(ref e) = result { eprintln!("Dist job from {}: {e}", conn.remote_id()); }
-                        if result.is_ok() { let _ = tokio::time::timeout(Duration::from_secs(8), conn.closed()).await; }
-                        match &result {
-                            Ok(()) => conn.close(0u32.into(), b"job complete"),
-                            Err(error) => {
-                                let reason = error.to_string();
-                                conn.close(1u32.into(), &reason.as_bytes()[..reason.len().min(200)]);
-                            }
-                        }
-                        result
-                    });
+                    if self.outbound_only { incoming.refuse(); continue; }
+                    jobs.spawn(outbound::incoming(state.clone(), incoming));
                 }
                 result = jobs.join_next(), if !jobs.is_empty() => {
                     report_join(result);
@@ -183,7 +192,13 @@ async fn decline(send: &mut iroh::endpoint::SendStream, reason: &str) -> Result<
     .await
 }
 async fn handle(state: &State, conn: &Connection) -> Result<()> {
-    let (mut send, mut recv) = conn.accept_bi().await?;
+    handle_job(state, conn, conn.accept_bi().await?).await
+}
+async fn handle_job(
+    state: &State,
+    conn: &Connection,
+    (mut send, mut recv): (SendStream, RecvStream),
+) -> Result<()> {
     let hello: Hello = transport::recv(&mut recv).await?;
     transport::send(
         &mut send,

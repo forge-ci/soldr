@@ -54,16 +54,27 @@ pub async fn endpoint_with_identity(
         // no fixed listener, TCP service or router port-mapping is configured.
         builder = builder.bind_addr("0.0.0.0:0")?.bind_addr("[::]:0")?;
         if let Some(url) = relay_url {
-            let url: iroh::RelayUrl = url.parse()?;
-            if url.scheme() != "https" {
-                return Err("dist relay URL must use HTTPS".into());
-            }
-            builder = builder.relay_mode(iroh::RelayMode::custom([url]));
+            builder = builder.relay_mode(relay_mode(Some(url))?);
         } else {
             builder = builder.clear_relay_transports();
         }
     }
     Ok(builder.bind().await?)
+}
+
+/// Public n0 relays are enabled only through an explicit `default` selection.
+pub fn relay_mode(value: Option<&str>) -> Result<iroh::RelayMode> {
+    match value {
+        None => Ok(iroh::RelayMode::Disabled),
+        Some("default") => Ok(iroh::RelayMode::Default),
+        Some(value) => {
+            let url: iroh::RelayUrl = value.parse()?;
+            if url.scheme() != "https" {
+                return Err("dist relay URL must use HTTPS".into());
+            }
+            Ok(iroh::RelayMode::custom([url]))
+        }
+    }
 }
 /// Human-portable dial ticket. JSON is configuration, never the job wire format.
 pub fn ticket(addr: &EndpointAddr) -> Result<String> {
@@ -76,6 +87,9 @@ pub fn parse_ticket(ticket: &str) -> Result<EndpointAddr> {
 /// A static peer needs either a full ticket or a node ID plus an explicit relay.
 pub fn parse_peer(value: &str, relay_url: Option<&str>) -> Result<EndpointAddr> {
     if let Ok(id) = value.parse::<iroh::EndpointId>() {
+        if relay_url == Some("default") {
+            return Err("public-relay peers need a full printed ticket; a node ID alone has no home relay routing".into());
+        }
         let relay: iroh::RelayUrl = relay_url
             .ok_or("a node-id peer needs --relay-url or SOLDR_DIST_RELAY_URL; alternatively use the printed ticket")?
             .parse()?;
@@ -86,6 +100,19 @@ pub fn parse_peer(value: &str, relay_url: Option<&str>) -> Result<EndpointAddr> 
     }
     parse_ticket(value)
         .map_err(|e| format!("expected one static node ID or printed JSON ticket: {e}").into())
+}
+
+pub fn parse_worker(
+    value: &str,
+    relay_url: Option<&str>,
+    reverse_only: bool,
+) -> Result<EndpointAddr> {
+    if reverse_only {
+        if let Ok(id) = value.parse::<iroh::EndpointId>() {
+            return Ok(EndpointAddr::new(id));
+        }
+    }
+    parse_peer(value, relay_url)
 }
 
 pub async fn send<M: Message>(stream: &mut SendStream, message: &M) -> Result<()> {

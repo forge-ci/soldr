@@ -19,8 +19,8 @@ pub struct DistArgs {
     pub root: Option<PathBuf>,
     #[arg(long, global = true, env = "SOLDR_DIST_RELAY_URL")]
     pub relay_url: Option<String>,
-    /// Disable relays for direct LAN tickets; overrides SOLDR_DIST_RELAY_URL.
-    #[arg(long, global = true, value_parser = ["none"], env = "SOLDR_DIST_RELAY")]
+    /// Explicit public n0 relays, or none for direct LAN; overrides relay URL.
+    #[arg(long, global = true, value_parser = ["none", "default"], env = "SOLDR_DIST_RELAY")]
     pub relay: Option<String>,
     #[command(subcommand)]
     pub command: DistCommand,
@@ -46,12 +46,21 @@ pub enum DistCommand {
         /// Shared Ed25519 seed; defaults to <root>/node.key.
         #[arg(long)]
         key: Option<PathBuf>,
+        /// Repeat with full client tickets to establish worker-originated connections.
+        #[arg(long = "client-ticket", value_name = "JSON_TICKET")]
+        clients: Vec<String>,
+        /// Refuse client-initiated QUIC connections and use configured clients only.
+        #[arg(long, requires = "clients")]
+        outbound_only: bool,
     },
     /// Run one debug compiler invocation on an explicitly trusted worker.
     Exec {
         /// One static node ID (with relay URL) or a printed JSON ticket.
         #[arg(long, env = "SOLDR_DIST_PEERS")]
         worker: String,
+        /// Wait only for an authenticated worker-originated connection.
+        #[arg(long, env = "SOLDR_DIST_REVERSE_ONLY")]
+        reverse_only: bool,
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         argv: Vec<String>,
     },
@@ -83,7 +92,11 @@ pub async fn run(args: DistArgs) -> Result<i32> {
     let root = args.root.map(Ok).unwrap_or_else(default_root)?;
     std::fs::create_dir_all(&root)?;
     let relay_disabled = args.relay.as_deref() == Some("none");
-    let relay_url = if relay_disabled { None } else { args.relay_url };
+    let relay_url = match args.relay.as_deref() {
+        Some("none") => None,
+        Some("default") => Some("default".to_owned()),
+        _ => args.relay_url,
+    };
     match args.command {
         DistCommand::Serve {
             slots,
@@ -91,24 +104,34 @@ pub async fn run(args: DistArgs) -> Result<i32> {
             host_load_file,
             signal_url,
             key,
+            clients,
+            outbound_only,
         } => {
             serve(
                 &root,
-                slots,
-                cas_budget,
-                host_load_file,
                 relay_url.as_deref(),
-                signal_url,
-                key,
+                ServeConfig {
+                    slots,
+                    cas_budget,
+                    host_load_file,
+                    signal_url,
+                    key,
+                    clients,
+                    outbound_only,
+                },
             )
             .await
         }
-        DistCommand::Exec { worker, argv } => {
+        DistCommand::Exec {
+            worker,
+            argv,
+            reverse_only,
+        } => {
             let identity = trust::node_key(&root)?;
             let _endpoint_lease =
                 transport::EndpointLease::acquire_with_key(&root, &root.join("node.key"))?;
             let job = scaffold::job(&argv).await?;
-            let worker = transport::parse_peer(&worker, relay_url.as_deref())?;
+            let worker = transport::parse_worker(&worker, relay_url.as_deref(), reverse_only)?;
             let relay = if relay_disabled {
                 None
             } else {
@@ -116,7 +139,7 @@ pub async fn run(args: DistArgs) -> Result<i32> {
             };
             let endpoint =
                 transport::endpoint_with_identity(identity, false, relay.as_deref()).await?;
-            let client = DistClient::new(endpoint, worker, &root)?;
+            let client = DistClient::new(endpoint, worker, &root)?.with_reverse_only(reverse_only);
             let outcome = client.execute(job).await;
             client.endpoint.close().await;
             match outcome {
@@ -151,15 +174,25 @@ pub async fn run(args: DistArgs) -> Result<i32> {
         }
     }
 }
-async fn serve(
-    root: &Path,
+struct ServeConfig {
     slots: usize,
     cas_budget: u64,
     host_load_file: Option<PathBuf>,
-    relay: Option<&str>,
     signal_url: String,
     key: Option<PathBuf>,
-) -> Result<i32> {
+    clients: Vec<String>,
+    outbound_only: bool,
+}
+async fn serve(root: &Path, relay: Option<&str>, config: ServeConfig) -> Result<i32> {
+    let ServeConfig {
+        slots,
+        cas_budget,
+        host_load_file,
+        signal_url,
+        key,
+        clients,
+        outbound_only,
+    } = config;
     std::fs::create_dir_all(root.join("tmp"))?;
     let (identity, key_path) = match key {
         Some(path) => (trust::load_or_create_key(&path)?, path),
@@ -195,6 +228,11 @@ async fn serve(
         signal_url,
         total_cpus: std::thread::available_parallelism()?.get(),
         uploaded_blobs: Arc::new(AtomicU64::new(0)),
+        clients: clients
+            .iter()
+            .map(|ticket| transport::parse_ticket(ticket))
+            .collect::<Result<_>>()?,
+        outbound_only,
     };
     let signal = tokio::spawn(async move {
         tokio::select! {

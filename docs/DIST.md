@@ -532,3 +532,80 @@ soldr-daemon -p soldr-core -p soldr-platform -p soldr-cli --all-targets`
 completed with exit 0. Formatting and review passed. New regression tests were
 compiled, not executed. Clippy remains blocked by the unchanged complexity
 findings listed above; full gates and attested PR pushes are deferred.
+
+## No-inbound nodes: explicit public relays and reverse static peers
+
+The direct2 bundle supplies transport/library and debug-exec support on zccache
+1.15.14. Automatic Cargo offload and its environment configuration require the
+separate `feat/dist-miss-path` adapter bundle; a successful ordinary Cargo build
+on direct2 alone is not evidence of remote execution.
+
+`--relay default` (or `SOLDR_DIST_RELAY=default`) explicitly enables iroh's
+production n0 public relay map. This is opt-in: no flag/URL still means direct
+LAN, and `--relay none` still disables relay transports. Existing explicit
+HTTPS `--relay-url` remains the self-hosted alternative. No public address
+lookup, registry, portmapper, or discovery backend is enabled. Relay traffic
+contains end-to-end encrypted QUIC payloads authenticated to the pinned peer
+identities; public relays can observe connection metadata. Iroh attempts direct
+UDP paths when possible and keeps the encrypted relay fallback when they fail.
+
+| Mode | Required network reachability |
+|---|---|
+| Ordinary `--relay none` | Client must reach the node's advertised UDP IP/port. This needs allowed inbound UDP on the node and does **not** meet the Dell firewall policy. |
+| Ordinary `--relay default` or HTTPS relay URL | Both endpoints need outbound DNS and HTTPS to their configured relays. Optional outbound UDP enables hole punching; no node inbound port rule/forwarding is required for relay fallback. |
+| `serve --outbound-only --client-ticket ... --relay none` | Node initiates UDP to the client's advertised IP/port. Client must allow that inbound path; node needs only outbound/established-return traffic. |
+| `serve --outbound-only --client-ticket ... --relay default` | Both endpoints use outbound relay connections. Node initiates QUIC to the client's full relay ticket; neither host needs an unsolicited inbound port rule. |
+
+The node accepts repeatable `--client-ticket '<full JSON ticket>'` arguments.
+They do not grant trust: each client ID must already be in trusted_clients.toml,
+and the client must trust the node ID in trusted_workers.toml. `--outbound-only`
+refuses client-initiated connections, including those delivered over a relay.
+Nodes keep up to min(slots, 64) warm outbound connections per configured client;
+each connection carries exactly one joblet and its blob streams, then is
+replenished. This preserves stream isolation and avoids a wire-version change.
+Compiler admission still uses the existing node slots and host-load reservations.
+Idle outbound connections close on shutdown; accepted jobs drain within 30 s.
+
+Each dist client endpoint starts an authenticated reverse listener, with one
+shared pool per endpoint. It atomically publishes its current public dial
+configuration as `<client-root>/client-ticket.json`, refreshing on address/relay
+changes. Copy the latest full ticket (including the relay after connection) to
+the node configuration. Static tickets must be recopied after a restart or route
+change; this is intentionally not registry/discovery. `--reverse-only` on debug
+exec, or `SOLDR_DIST_REVERSE_ONLY=true` on the separate miss-path Cargo client, prevents client
+outbound dialing and waits up to eight seconds for a node-originated connection.
+No live reverse node yields the existing loud `worker lost` decline.
+
+First no-inbound debug proof (ordinary relay mode; reciprocal trust as above):
+
+```sh
+# Dell, as soldr-dist. No inbound firewall change.
+RUSTUP_TOOLCHAIN=1.98.1 soldr dist serve --root /var/lib/soldr-dist/state \
+  --relay default --slots 8 --cas-budget 10737418240 \
+  --host-load-file /run/forge/host-load.json
+# Workstation, after copying the node's printed full ticket.
+RUSTUP_TOOLCHAIN=1.98.1 soldr dist exec --root "$CLIENT_ROOT" --relay default \
+  --worker "$DIST_TICKET" -- rustc --crate-type lib --emit=obj \
+  "$PWD/target/dist-smoke/smoke.rs" -o "$PWD/target/dist-smoke/smoke.o"
+```
+
+For reverse-only Cargo **on the separate feat/dist-miss-path adapter stack**,
+first initialise the long-lived miss-path daemon/client
+with SOLDR_DIST_RELAY=default and an explicit trusted worker, then copy its
+client-ticket.json to CLIENT_TICKET. Start the node with:
+
+```sh
+RUSTUP_TOOLCHAIN=1.98.1 soldr dist serve --root /var/lib/soldr-dist/state \
+  --relay default --outbound-only --client-ticket "$CLIENT_TICKET" \
+  --slots 8 --cas-budget 10737418240 --host-load-file /run/forge/host-load.json
+```
+
+Set SOLDR_DIST_REVERSE_ONLY=true **before** that client daemon starts to enforce
+the direction. Its worker configuration may then be just the pinned node ID;
+the full client ticket supplies routing in the worker-to-client direction.
+
+- 2026-11-21 Owner explicitly opts into n0 public relays through --relay default
+  to reach Dells that open no inbound ports. Defaults remain private/direct.
+- 2026-11-21 Static worker-to-client warm connections provide a reverse path;
+  one joblet per connection retains blob isolation without changing protobuf.
+  Published client tickets are human-copyable configuration, not a registry.

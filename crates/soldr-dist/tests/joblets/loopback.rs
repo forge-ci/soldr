@@ -32,6 +32,14 @@ impl Fixture {
         trusted: bool,
         load: Option<serde_json::Value>,
     ) -> Self {
+        Self::with_direction(compilers, trusted, load, false).await
+    }
+    async fn with_direction(
+        compilers: Vec<Compiler>,
+        trusted: bool,
+        load: Option<serde_json::Value>,
+        reverse: bool,
+    ) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let worker_root = temp.path().join("worker");
         let client_root = temp.path().join("client");
@@ -45,7 +53,10 @@ impl Fixture {
             )
             .unwrap();
         }
-        let client = DistClient::new(client_endpoint, endpoint.addr(), &client_root).unwrap();
+        let client_ticket = client_endpoint.addr();
+        let client = DistClient::new(client_endpoint, endpoint.addr(), &client_root)
+            .unwrap()
+            .with_reverse_only(reverse);
         let uploaded = Arc::new(AtomicU64::new(0));
         let host_load_file = load.map(|load| {
             let path = temp.path().join("host-load.json");
@@ -62,6 +73,8 @@ impl Fixture {
             signal_url: "https://signal.forge-ci.com".into(),
             total_cpus: 8,
             uploaded_blobs: uploaded.clone(),
+            clients: if reverse { vec![client_ticket] } else { vec![] },
+            outbound_only: reverse,
         };
         let (shutdown, rx) = watch::channel(false);
         let task = tokio::spawn(worker.serve(rx));
@@ -98,12 +111,18 @@ fn job(
         outputs: vec![output.to_str().unwrap().into()],
     }
 }
-async fn compare(compiler: Compiler, source_name: &str, source: &str, args: &[&str]) {
+async fn compare(
+    compiler: Compiler,
+    source_name: &str,
+    source: &str,
+    args: &[&str],
+    reverse: bool,
+) {
     if !Path::new("/").is_absolute() {
         eprintln!("SKIP: dist job materialisation currently supports POSIX paths only");
         return;
     }
-    let fixture = Fixture::new(vec![compiler.clone()], true).await;
+    let fixture = Fixture::with_direction(vec![compiler.clone()], true, None, reverse).await;
     let cwd = fixture._temp.path().join("project");
     fs::create_dir_all(&cwd).unwrap();
     let src = cwd.join(source_name);
@@ -149,6 +168,10 @@ async fn compare(compiler: Compiler, source_name: &str, source: &str, args: &[&s
     let uploaded = fixture.client.uploaded_blobs.load(Ordering::Relaxed);
     assert_eq!(uploaded, 1);
     assert_eq!(fixture.uploaded.load(Ordering::Relaxed), 1);
+    if reverse {
+        assert_eq!(fixture.client.connections.outbound_connections(), 0);
+        assert!(fixture.client.connections.incoming_connections() >= 1);
+    }
     assert!(matches!(
         fixture.client.execute(job).await,
         DistOutcome::Executed { exit_code: 0, .. }
@@ -169,6 +192,7 @@ fn rustc_byte_identical_and_zero_second_upload() {
             "hello.rs",
             "fn main() { println!(\"hello world {}\", env!(\"DIST_TAG\")); }\n",
             &["--emit=obj", "-g"],
+            false,
         )
         .await;
     });
@@ -191,7 +215,22 @@ fn c_byte_identical_and_zero_second_upload() {
         "hello.c",
         "int answer(void) { return 42; }\n",
         &["-c"],
+        false,
     ));
+}
+
+#[test]
+fn outbound_only_worker_compiles_without_client_dialling_it() {
+    Runtime::new().unwrap().block_on(async {
+        compare(
+            Compiler::rustc().await.unwrap(),
+            "hello.rs",
+            "pub fn answer() -> u32 { 42 }\n",
+            &["--crate-type=lib", "--emit=obj"],
+            true,
+        )
+        .await;
+    });
 }
 #[test]
 fn toolchain_mismatch_declined_and_untrusted_rejected() {

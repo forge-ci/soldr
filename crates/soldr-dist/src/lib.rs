@@ -2,6 +2,7 @@
 pub mod cas;
 pub mod cli;
 pub mod client;
+pub mod client_connections;
 pub mod compiler;
 pub mod host_load;
 pub mod proto;

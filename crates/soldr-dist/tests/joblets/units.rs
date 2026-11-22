@@ -687,3 +687,33 @@ fn assigned_rust_emit_outputs_are_mirrored_in_both_argument_forms() {
     job.argv = vec!["--emit=link=-".into()];
     assert!(soldr_dist::sandbox::argv(Path::new("/job"), &job).is_err());
 }
+
+#[test]
+fn public_relays_are_explicit_and_reverse_peers_can_use_only_a_node_id() {
+    use soldr_dist::transport::{parse_worker, relay_mode};
+    assert!(matches!(
+        relay_mode(None).unwrap(),
+        iroh::RelayMode::Disabled
+    ));
+    assert!(matches!(
+        relay_mode(Some("default")).unwrap(),
+        iroh::RelayMode::Default
+    ));
+    assert!(relay_mode(Some("http://relay.example.com")).is_err());
+    let id = iroh::SecretKey::generate().public();
+    assert_eq!(parse_worker(&id.to_string(), None, true).unwrap().id, id);
+    assert!(parse_worker(&id.to_string(), None, false).is_err());
+    assert!(parse_worker(&id.to_string(), Some("default"), false).is_err());
+    #[derive(clap::Parser)]
+    struct Command {
+        #[command(flatten)]
+        args: soldr_dist::cli::DistArgs,
+    }
+    use clap::Parser;
+    let args = Command::try_parse_from(["dist", "serve", "--relay", "default"])
+        .unwrap()
+        .args;
+    assert_eq!(args.relay.as_deref(), Some("default"));
+    assert!(Command::try_parse_from(["dist", "serve", "--outbound-only"]).is_err());
+    assert!(Command::try_parse_from(["dist", "serve", "--relay", "auto"]).is_err());
+}
