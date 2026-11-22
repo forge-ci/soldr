@@ -44,7 +44,54 @@ skip = [
     # version still fails the ratchet.
     { name = "sysinfo", version = "=0.39.6" },
     { name = "digest", version = "=0.11.3" },
-    { name = "sha2", version = "=0.11.0" },
+    { name = "sha2", version = "=0.11.1" },
+    # iroh-relay 1.5 -> num_enum -> proc-macro-crate requires toml_edit 0.25
+    # and winnow 1, while the workspace's toml 0.8/toml_edit 0.22 require
+    # winnow 0.7. Convergence needs a workspace TOML API migration; keep the
+    # new side exact so another version still fails the ratchet.
+    { name = "winnow", version = "=1.0.5" },
+    # iroh -> netwatch -> netdev's Android JNI 0.21 dependency holds
+    # windows-sys 0.45 and this old support package. JNI must upgrade its
+    # Windows dependency before the graph can converge with windows 0.52+.
+    { name = "windows_x86_64_msvc", version = "=0.42.2" },
+    # iroh 1.5 requires reqwest 0.13 (and its wasm-streams 0.5), while
+    # soldr-fetch's existing HTTP API uses 0.12. The transport addition does
+    # not migrate that independent HTTP surface.
+    { name = "reqwest", version = "=0.13.5" },
+    { name = "wasm-streams", version = "=0.5.0" },
+    # netdev's macOS plist 1.10 requires base64 0.23; hyper-util still uses 0.22.
+    { name = "base64", version = "=0.23.1" },
+    # iroh/n0-dns-resolver currently publish different LRU API requirements.
+    { name = "lru", version = "=0.19.1" },
+    # iroh requires strum 0.28, while the exact released zccache dependency
+    # and existing workspace dispatch types still require strum 0.27.
+    { name = "strum", version = "=0.28.0" },
+    { name = "strum_macros", version = "=0.28.0" },
+    # netdev still uses JNI 0.21 (thiserror 1, jni-sys 0.3); iroh's DNS and
+    # rustls platform verifier use JNI 0.22 (jni-sys 0.4). This waits on netdev.
+    { name = "jni", version = "=0.21.1" },
+    { name = "jni-sys", version = "=0.3.1" },
+    { name = "thiserror", version = "=1.0.69" },
+    { name = "thiserror-impl", version = "=1.0.69" },
+    # The proc-macro-crate TOML migration described above also splits these APIs.
+    { name = "toml_edit", version = "=0.25.20+spec-1.1.0" },
+    { name = "toml_datetime", version = "=1.1.3+spec-1.1.0" },
+    # netdev uses the windows 0.100 support family; pinned zccache/kernal-api
+    # and the existing Windows platform facade still hold older Windows APIs.
+    { name = "windows-implement", version = "=0.100.0" },
+    { name = "windows-interface", version = "=0.100.0" },
+    { name = "windows-link", version = "=0.100.0" },
+    { name = "windows-result", version = "=0.100.0" },
+    { name = "windows-strings", version = "=0.100.0" },
+    # JNI 0.21's windows-sys 0.45 also holds the rest of this 0.42 package
+    # family; the existing sysinfo Windows implementation requires 0.52.
+    { name = "windows-targets", version = "=0.42.2" },
+    { name = "windows_aarch64_gnullvm", version = "=0.42.2" },
+    { name = "windows_aarch64_msvc", version = "=0.42.2" },
+    { name = "windows_i686_gnu", version = "=0.42.2" },
+    { name = "windows_i686_msvc", version = "=0.42.2" },
+    { name = "windows_x86_64_gnu", version = "=0.42.2" },
+    { name = "windows_x86_64_gnullvm", version = "=0.42.2" },
     # errno/rustix/tempfile still cap at 0.52, reached only through
     # prost-build's build-dependency tree (amalgamated zccache-protocol and
     # running-process). The #2406 convergence covered the runtime tree;

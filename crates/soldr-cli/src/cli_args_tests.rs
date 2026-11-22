@@ -380,3 +380,20 @@ fn the_agent_capability_verb_parses_to_its_own_variant() {
         _ => panic!("expected Commands::Agent"),
     }
 }
+
+#[cfg(feature = "dist")]
+#[test]
+fn dist_is_a_native_command_with_the_default_feature() {
+    let cli = Cli::try_parse_from(["soldr", "dist", "status", "--json"]).unwrap();
+    assert!(matches!(cli.command, Commands::Dist(_)));
+}
+
+#[cfg(not(feature = "dist"))]
+#[test]
+fn disabled_dist_stays_native_instead_of_fetching_a_tool() {
+    let cli = Cli::try_parse_from(["soldr", "dist", "serve", "--slots", "2"]).unwrap();
+    let Commands::Dist { argv } = cli.command else {
+        panic!("disabled dist must remain a captured built-in");
+    };
+    assert_eq!(argv, ["serve", "--slots", "2"]);
+}

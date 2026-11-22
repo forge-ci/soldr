@@ -220,7 +220,9 @@
       "id": "replay-windows-exit-guard",
       "package": "soldr-cli",
       "binary": "guards",
-      "modules": ["replay_nextest_windows"],
+      "modules": [
+        "replay_nextest_windows"
+      ],
       "disposition": "target-replay",
       "reason": "Windows waits for replay children and must preserve their failure diagnostics without an invented Soldr fault."
     },
@@ -228,7 +230,9 @@
       "id": "replay-guard-linux-once",
       "package": "soldr-cli",
       "binary": "guards",
-      "modules": ["replay_nextest"],
+      "modules": [
+        "replay_nextest"
+      ],
       "disposition": "native-linux-once",
       "reason": "The process fixture is a POSIX shell executable and asserts exact signal propagation; Windows target replay is exercised separately."
     },
@@ -298,6 +302,17 @@
       "binary": "wrapper",
       "disposition": "native-linux-once",
       "reason": "The native Nextest wrapper runs only in soldr ci-test's Linux Nextest stage (soldr#3453); its tests assert Linux session, signal, TMPDIR and exit-status behaviour and are inert elsewhere."
+    },
+    {
+      "id": "dist-joblets-linux-once",
+      "package": "soldr-dist",
+      "binary": "joblets",
+      "modules": [
+        "loopback",
+        "units"
+      ],
+      "disposition": "native-linux-once",
+      "reason": "Temporary CAS/trust files, child compilers and direct-only localhost iroh endpoints verify portable distribution policy in canonical Linux validation. Native mechanics belong to iroh and existing platform facades; POSIX-only path fixtures explicitly skip unsupported hosts."
     }
   ],
   "replay_selectors": [

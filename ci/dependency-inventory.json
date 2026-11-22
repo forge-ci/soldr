@@ -91,6 +91,21 @@
       "windows-sys",
       "zccache"
     ],
+    "soldr-dist": [
+      "blake3",
+      "clap",
+      "filetime",
+      "fs2",
+      "iroh",
+      "prost",
+      "running-process",
+      "serde",
+      "serde_json",
+      "sha2",
+      "tempfile",
+      "tokio",
+      "toml"
+    ],
     "soldr-fetch": [
       "bzip2",
       "flate2",

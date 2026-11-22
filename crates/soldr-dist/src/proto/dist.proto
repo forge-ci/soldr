@@ -1,0 +1,70 @@
+syntax = "proto3";
+package soldr.dist;
+message InputFile {
+  string abs_path = 1;
+  string blake3 = 2;
+  uint64 size = 3;
+  bool executable = 4;
+}
+message DistJob {
+  string compiler_kind = 1;
+  string compiler_identity = 2;
+  repeated string argv = 3;
+  map<string, string> env = 4;
+  string cwd = 5;
+  bytes stdin = 6;
+  repeated InputFile inputs = 7;
+  repeated string outputs = 8;
+}
+message Hello {
+  uint32 version = 1;
+  repeated string toolchains = 2;
+}
+message Offer {
+  DistJob job = 1;
+  repeated string speculative = 2;
+}
+message Need {
+  repeated string digests = 1;
+}
+message Blob {
+  string digest = 1;
+  uint64 size = 2;
+}
+message Accepted {
+}
+message Declined {
+  string reason = 1;
+}
+message OutputFile {
+  string abs_path = 1;
+  string blake3 = 2;
+  uint64 size = 3;
+  uint32 mode = 4;
+}
+message Done {
+  int32 exit_code = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+  repeated OutputFile outputs = 4;
+}
+message Fetch {
+  repeated string digests = 1;
+}
+message Status {
+  string node_id = 1;
+  string role = 2;
+  repeated string trusted_clients = 3;
+  repeated string trusted_workers = 4;
+  uint64 cas_bytes = 5;
+  uint64 running_joblets = 6;
+  uint64 pid = 7;
+  string build_id = 8;
+  string signal_url = 9;
+}
+message Reply {
+  Accepted accepted = 1;
+  Declined declined = 2;
+  Done done = 3;
+  Need need = 4;
+}
