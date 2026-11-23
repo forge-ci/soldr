@@ -467,33 +467,41 @@ pub fn detach_candidate_dir(
     root: &Path,
 ) -> (GcDeleteOutcome, Option<DetachedCandidate>) {
     let mut detached = None;
-    let outcome = remove_candidate_dir(candidate, |path| {
-        let lock = super::trash_gc::try_trash_reclaim_lock(root, true)?.ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::WouldBlock, "trash sweep is active")
-        })?;
-        let trash = root.join("trash-gc-targets");
-        std::fs::create_dir_all(&trash)?;
-        super::path_safety::validate_owned_directory(root, &trash)?;
-        let staging = tempfile::Builder::new()
-            .prefix("target-")
-            .tempdir_in(trash)?;
-        match std::fs::rename(path, staging.path().join("target")) {
-            Ok(()) => {
-                detached = Some(DetachedCandidate {
-                    path: staging.keep(),
-                    _lock: lock,
-                })
-            }
-            // Root-local trash may be on a different filesystem. Preserve
-            // the existing cleanup on volumes that cannot rename into it.
-            Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
-                std::fs::remove_dir_all(path)?;
-            }
-            Err(error) => return Err(error),
+    let outcome = remove_candidate_dir(candidate, |path| match detach_target(path, root) {
+        Ok(candidate) => {
+            detached = Some(candidate);
+            Ok(())
         }
-        Ok(())
+        // Guarded direct deletion still frees space if a detach cannot
+        // allocate an inode or if the trash is on a different volume.
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::CrossesDevices
+                    | std::io::ErrorKind::StorageFull
+                    | std::io::ErrorKind::QuotaExceeded
+            ) =>
+        {
+            std::fs::remove_dir_all(path)
+        }
+        Err(error) => Err(error),
     });
     (outcome, detached)
+}
+
+fn detach_target(path: &Path, root: &Path) -> std::io::Result<DetachedCandidate> {
+    let lock = super::trash_gc::try_trash_reclaim_lock(root, true)?.ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::WouldBlock, "trash sweep is active")
+    })?;
+    let trash = root.join("trash-gc-targets");
+    std::fs::create_dir_all(&trash)?;
+    super::path_safety::validate_owned_directory(root, &trash)?;
+    let staging = tempfile::Builder::new().prefix("target-").tempdir_in(trash)?;
+    std::fs::rename(path, staging.path().join("target"))?;
+    Ok(DetachedCandidate {
+        path: staging.keep(),
+        _lock: lock,
+    })
 }
 
 /// An owned detached target protected from concurrent trash sweeps.

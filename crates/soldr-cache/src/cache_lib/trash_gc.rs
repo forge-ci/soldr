@@ -36,12 +36,23 @@ pub(super) fn try_trash_reclaim_lock(
     root: &std::path::Path,
     shared: bool,
 ) -> std::io::Result<Option<std::fs::File>> {
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(root.join("trash-reclaim.lock"))?;
+    use std::io::{Error, ErrorKind};
+
+    super::path_safety::validate_owned_directory(root, root)?;
+    let path = root.join("trash-reclaim.lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    let file = match options.clone().create_new(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if !metadata.is_file() || super::path_safety::is_link_or_reparse(&metadata) {
+                return Err(Error::new(ErrorKind::InvalidInput, "invalid trash lock file"));
+            }
+            options.open(&path)?
+        }
+        Err(error) => return Err(error),
+    };
     let result = if shared {
         fs2::FileExt::try_lock_shared(&file)
     } else {
@@ -59,7 +70,6 @@ pub fn sweep_trash(paths: &SoldrPaths) -> std::io::Result<SweepReport> {
     if !paths.root.exists() {
         return Ok(report);
     }
-    crate::cache_lib::path_safety::validate_owned_directory(&paths.root, &paths.root)?;
     let Some(_lease) = try_trash_reclaim_lock(&paths.root, false)? else {
         return Ok(report);
     };
