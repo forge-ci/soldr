@@ -51,6 +51,7 @@ SYSTEM_DLLS = frozenset(
         "bcryptprimitives.dll",
         "combase.dll",
         "crypt32.dll",
+        "iphlpapi.dll",  # Windows IP Helper API, used by network interface discovery.
         "kernel32.dll",
         "kernelbase.dll",
         "ntdll.dll",
