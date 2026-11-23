@@ -1,6 +1,7 @@
 //! Register this Soldr installation with Forge CI.
 
 use std::io::{self, Write};
+use std::process::Command;
 use std::time::Duration;
 
 use soldr_fetch::fetch::ForgePairingClient;
@@ -36,8 +37,12 @@ pub(crate) async fn run() -> Result<(), SoldrError> {
         return Err(io::Error::other("Forge CI returned an invalid pairing challenge").into());
     }
 
-    println!("Open {PAIR_PAGE} and enter {}", challenge.user_code);
-    println!("Then sign in with GitHub. Keep this terminal open.");
+    let url = format!("{PAIR_PAGE}#code={}", challenge.user_code);
+    println!("Pairing URL: {url}");
+    println!("If your browser does not open, open the URL above.");
+    println!("Continue with GitHub and keep this terminal open.");
+    io::stdout().flush()?;
+    open_browser(&url);
     let deadline = started + Duration::from_secs(challenge.expires_in);
     let registration = timeout_at(deadline, client.wait_for_approval(&challenge))
         .await
@@ -49,6 +54,26 @@ pub(crate) async fn run() -> Result<(), SoldrError> {
         .map_err(|error| error.error)?;
     println!("Registered");
     Ok(())
+}
+
+fn open_browser(url: &str) {
+    let mut opener = match std::env::consts::OS {
+        "macos" => Command::new("open"),
+        "windows" => {
+            let mut command = Command::new("rundll32.exe");
+            command.arg("url.dll,FileProtocolHandler");
+            command
+        }
+        "linux" => Command::new("xdg-open"),
+        _ => return,
+    };
+    // The opener needs the caller's desktop session, including Wayland and D-Bus.
+    if let Err(error) = running_process::spawn_daemon_with_env_policy(
+        opener.arg(url),
+        running_process::EnvironmentPolicy::Inherit,
+    ) {
+        eprintln!("Could not open a browser: {error}");
+    }
 }
 
 fn expired() -> io::Error {
