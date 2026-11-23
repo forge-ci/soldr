@@ -1,5 +1,6 @@
 //! Dispatch supported ordinary builds to the signed-in Forge CI worker.
 
+use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -15,6 +16,7 @@ use super::{artifacts, control, snapshot, Client};
 
 pub(crate) const WORKER_BUILD_ENV: &str = "SOLDR_FORGE_WORKER_BUILD";
 const PROBE_DEADLINE: Duration = Duration::from_secs(3);
+const WORKER_PROBE_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BuildMode {
@@ -200,15 +202,28 @@ async fn start_worktree(
 }
 
 async fn worker(mode: BuildMode) -> io::Result<Option<Client>> {
-    let request = async {
-        let Some(grant) = crate::forge_sign_in::discover_worker().await? else {
+    let mut result = Ok(None);
+    for _ in 0..WORKER_PROBE_ATTEMPTS {
+        // The gateway routes each fresh grant independently. Leave the
+        // selection fixed once a worker has accepted a compatible probe.
+        let Some(grant) = probe_request(crate::forge_sign_in::discover_worker()).await? else {
             return Ok(None);
         };
         let client = Client::forge(grant)?;
-        let capabilities: Capabilities = client.post("capabilities", &Blob::default()).await?;
-        let host = crate::core::TargetTriple::host().map_err(io::Error::other)?;
-        Ok(supports_build(&capabilities, &host.triple(), mode).then_some(client))
-    };
+        let capabilities: io::Result<Capabilities> =
+            probe_request(client.post("capabilities", &Blob::default())).await;
+        result = capabilities.and_then(|capabilities| {
+            let host = crate::core::TargetTriple::host().map_err(io::Error::other)?;
+            Ok(supports_build(&capabilities, &host.triple(), mode).then_some(client))
+        });
+        if matches!(result, Ok(Some(_))) {
+            return result;
+        }
+    }
+    result
+}
+
+async fn probe_request<T>(request: impl Future<Output = io::Result<T>>) -> io::Result<T> {
     tokio::time::timeout(PROBE_DEADLINE, request)
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "worker probe expired"))?
