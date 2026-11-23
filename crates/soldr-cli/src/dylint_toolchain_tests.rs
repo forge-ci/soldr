@@ -877,3 +877,19 @@ fn apply_to_command_strips_dylint_link_copy_library_env() {
          always writes the toolchain-stamped library copy itself"
     );
 }
+
+#[test]
+fn prepared_library_child_leaves_parent_marker_untouched() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let _root = EnvVarGuard::set(crate::core::SOLDR_CACHE_DIR_ENV_VAR, root.path());
+    let mut plan = sample_plan();
+    plan.channel.push_str("-x86_64-unknown-linux-gnu");
+    let _prepared = EnvVarGuard::set(PREPARED_IDENTITY_ENV_VAR, plan.cache_identity());
+    let marker = prepared_marker_path(root.path(), "1.94");
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, "parent marker\n").unwrap();
+
+    assert_eq!(prepare_resolved(plan.clone()).unwrap(), plan);
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "parent marker\n");
+}

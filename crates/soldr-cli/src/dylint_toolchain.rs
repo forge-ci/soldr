@@ -50,7 +50,7 @@ pub(crate) const PREPARE_TTL_ENV_VAR: &str = "SOLDR_DYLINT_PREPARE_TTL_SECS";
 pub(crate) const REVERIFY_ENV_VAR: &str = "SOLDR_DYLINT_REVERIFY";
 
 const MAP_ASSET: &str = "rust-nightly-versions.v1.json";
-const REQUIRED_COMPONENTS: &[&str] = &["rustc-dev", "rust-src", "llvm-tools-preview"];
+pub(crate) const REQUIRED_COMPONENTS: &[&str] = &["rustc-dev", "rust-src", "llvm-tools-preview"];
 
 /// Default freshness window for the warm-run prepared-plan marker: 24
 /// hours. Long enough that a normal dev inner loop (many `soldr cargo
@@ -422,7 +422,13 @@ pub(crate) fn prepare_resolved(
     mut plan: DylintToolchainPlan,
 ) -> Result<DylintToolchainPlan, SoldrError> {
     let prepared_identity = plan.cache_identity();
-    if non_empty_env(PREPARED_IDENTITY_ENV_VAR).as_deref() != Some(prepared_identity.as_str()) {
+    let inherited =
+        non_empty_env(PREPARED_IDENTITY_ENV_VAR).as_deref() == Some(prepared_identity.as_str());
+    // The parent already qualified this channel and published the shared marker.
+    if inherited && is_fully_qualified_nightly(&plan.channel) {
+        return Ok(plan);
+    }
+    if !inherited {
         ensure_installed(&plan)?;
         verify_installed_identity(&plan)?;
     }
