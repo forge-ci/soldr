@@ -43,6 +43,28 @@ pub(super) enum Action {
     Lint = 3,
     CargoBuild = 4,
     CargoCheck = 5,
+    CargoClippy = 6,
+    CargoTestCompile = 7,
+}
+
+impl Action {
+    pub(super) fn worker_command(self, args: &mut Vec<String>) -> &'static str {
+        let cargo_verb = match self {
+            Self::Build => return "build",
+            Self::Test => return "test",
+            Self::Dylint => return "dylint",
+            Self::Lint => return "lint",
+            Self::CargoBuild => "build",
+            Self::CargoCheck => "check",
+            Self::CargoClippy => "clippy",
+            Self::CargoTestCompile => {
+                args.insert(0, "--no-run".into());
+                "test"
+            }
+        };
+        args.insert(0, cargo_verb.into());
+        "cargo"
+    }
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -65,6 +87,8 @@ pub(super) struct Capabilities {
     pub working_tree_builds: bool,
     #[prost(bool, tag = "3")]
     pub cargo_check: bool,
+    #[prost(enumeration = "Action", repeated, tag = "4")]
+    pub compile_actions: Vec<i32>,
 }
 
 impl Capabilities {
@@ -75,6 +99,10 @@ impl Capabilities {
                 .triple(),
             working_tree_builds: true,
             cargo_check: true,
+            compile_actions: [Action::CargoClippy, Action::CargoTestCompile]
+                .into_iter()
+                .map(|action| action as i32)
+                .collect(),
         })
     }
 }

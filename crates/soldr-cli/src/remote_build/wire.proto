@@ -26,6 +26,8 @@ enum Action {
   LINT = 3;
   CARGO_BUILD = 4;
   CARGO_CHECK = 5;
+  CARGO_CLIPPY = 6;
+  CARGO_TEST_COMPILE = 7;
 }
 
 message Session {
@@ -39,6 +41,7 @@ message Capabilities {
   string host = 1;
   bool working_tree_builds = 2;
   bool cargo_check = 3;
+  repeated Action compile_actions = 4;
 }
 
 message Blob {

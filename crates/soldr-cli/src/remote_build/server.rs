@@ -547,21 +547,7 @@ fn execute_action(
     let action = Action::try_from(request.action).map_err(io::Error::other)?;
     let mut arguments = compile_args(action, &request.args, build_output)?;
     let full_lint = action == Action::Lint && arguments == ["rust", "--check"];
-    let action = match action {
-        Action::Build => "build",
-        Action::Test => "test",
-        Action::Dylint => "dylint",
-        Action::Lint => "lint",
-        Action::CargoBuild | Action::CargoCheck => {
-            let verb = if action == Action::CargoBuild {
-                "build"
-            } else {
-                "check"
-            };
-            arguments.insert(0, verb.into());
-            "cargo"
-        }
-    };
+    let action = action.worker_command(&mut arguments);
     let result = transcript.run(
         runner_soldr(soldr, cache_root)
             .current_dir(source)

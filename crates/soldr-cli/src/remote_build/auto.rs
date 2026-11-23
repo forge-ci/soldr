@@ -13,11 +13,35 @@ use super::{artifacts, control, snapshot, Client};
 pub(crate) const WORKER_BUILD_ENV: &str = "SOLDR_FORGE_WORKER_BUILD";
 const PROBE_DEADLINE: Duration = Duration::from_secs(3);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BuildMode {
     Blessed,
     Cargo,
     CargoCheck,
+    CargoClippy,
+    CargoTestCompile,
+}
+
+impl BuildMode {
+    fn for_cargo(verb: &str, args: &[String]) -> Option<Self> {
+        match verb {
+            "build" => Some(Self::Cargo),
+            "check" => Some(Self::CargoCheck),
+            "clippy" => Some(Self::CargoClippy),
+            "test" if args.iter().any(|arg| arg == "--no-run") => Some(Self::CargoTestCompile),
+            _ => None,
+        }
+    }
+
+    fn action(self) -> Action {
+        match self {
+            Self::Blessed => Action::Build,
+            Self::Cargo => Action::CargoBuild,
+            Self::CargoCheck => Action::CargoCheck,
+            Self::CargoClippy => Action::CargoClippy,
+            Self::CargoTestCompile => Action::CargoTestCompile,
+        }
+    }
 }
 
 pub(crate) async fn try_cargo(
@@ -25,10 +49,8 @@ pub(crate) async fn try_cargo(
     args: &[String],
     cache_enabled: bool,
 ) -> io::Result<Option<i32>> {
-    let mode = match verb {
-        "build" => BuildMode::Cargo,
-        "check" => BuildMode::CargoCheck,
-        _ => return Ok(None),
+    let Some(mode) = BuildMode::for_cargo(verb, args) else {
+        return Ok(None);
     };
     try_build(args, cache_enabled, mode).await
 }
@@ -38,7 +60,7 @@ pub(crate) async fn try_build(
     cache_enabled: bool,
     mode: BuildMode,
 ) -> io::Result<Option<i32>> {
-    if !cache_enabled || !can_delegate(args) {
+    if !cache_enabled || !can_delegate(args, mode) {
         return Ok(None);
     }
     let client = match worker(mode).await {
@@ -72,12 +94,12 @@ pub(crate) async fn try_build(
             Start {
                 commit: snapshot.commit,
                 files: snapshot.files,
-                action: match mode {
-                    BuildMode::Blessed => Action::Build,
-                    BuildMode::Cargo => Action::CargoBuild,
-                    BuildMode::CargoCheck => Action::CargoCheck,
-                } as i32,
-                args: args.to_vec(),
+                action: mode.action() as i32,
+                args: args
+                    .iter()
+                    .filter(|arg| mode != BuildMode::CargoTestCompile || *arg != "--no-run")
+                    .cloned()
+                    .collect(),
                 working_tree: true,
                 ..Start::default()
             },
@@ -113,10 +135,16 @@ async fn worker(mode: BuildMode) -> io::Result<Option<Client>> {
 fn supports_build(capabilities: &Capabilities, host: &str, mode: BuildMode) -> bool {
     capabilities.working_tree_builds
         && capabilities.host == host
-        && (!matches!(mode, BuildMode::CargoCheck) || capabilities.cargo_check)
+        && match mode {
+            BuildMode::Blessed | BuildMode::Cargo => true,
+            BuildMode::CargoCheck => capabilities.cargo_check,
+            BuildMode::CargoClippy | BuildMode::CargoTestCompile => capabilities
+                .compile_actions
+                .contains(&(mode.action() as i32)),
+        }
 }
 
-fn can_delegate(args: &[String]) -> bool {
+fn can_delegate(args: &[String], mode: BuildMode) -> bool {
     std::env::var_os(WORKER_BUILD_ENV).is_none()
         && [
             "CARGO_TARGET_DIR",
@@ -132,10 +160,10 @@ fn can_delegate(args: &[String]) -> bool {
         ]
         .iter()
         .all(|key| std::env::var_os(key).is_none())
-        && supported_args(args)
+        && supported_args(args, mode)
 }
 
-fn supported_args(args: &[String]) -> bool {
+fn supported_args(args: &[String], mode: BuildMode) -> bool {
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let (flag, value) = arg
@@ -150,7 +178,11 @@ fn supported_args(args: &[String]) -> bool {
             | "--lib"
             | "--bins"
             | "--examples"
+            | "--all-targets"
+            | "--tests"
+            | "--benches"
                 if value.is_none() => {}
+            "--no-run" if mode == BuildMode::CargoTestCompile && value.is_none() => {}
             "--target" => {
                 if !value
                     .or_else(|| args.next().map(String::as_str))
@@ -159,7 +191,8 @@ fn supported_args(args: &[String]) -> bool {
                     return false;
                 }
             }
-            "-p" | "--package" | "--features" | "-F" | "--profile" | "--bin" | "--example" => {
+            "-p" | "--package" | "--features" | "-F" | "--profile" | "--bin" | "--example"
+            | "--test" | "--bench" => {
                 if !value
                     .or_else(|| args.next().map(String::as_str))
                     .is_some_and(|value| !value.is_empty() && !value.starts_with('-'))
@@ -258,6 +291,7 @@ mod tests {
 
     #[test]
     fn remote_build_routing_only_accepts_supported_arguments() {
+        let supported_args = |args: &[String]| super::supported_args(args, BuildMode::Cargo);
         assert!(supported_args(&[]));
         assert!(supported_args(&["--release".into(), "--locked".into()]));
         assert!(supported_args(&[
@@ -289,6 +323,36 @@ mod tests {
             "aarch64-apple-darwin",
             BuildMode::CargoCheck
         ));
+    }
+
+    #[test]
+    fn remote_build_clippy_and_test_compilation_require_worker_support() {
+        let host = "x86_64-unknown-linux-gnu";
+        let mut capabilities = Capabilities {
+            host: host.into(),
+            working_tree_builds: true,
+            cargo_check: true,
+            ..Capabilities::default()
+        };
+        let no_run = ["--no-run".into(), "--test".into(), "example".into()];
+        assert_eq!(
+            BuildMode::for_cargo("clippy", &[]),
+            Some(BuildMode::CargoClippy)
+        );
+        assert_eq!(BuildMode::for_cargo("test", &[]), None);
+        assert_eq!(
+            BuildMode::for_cargo("test", &no_run),
+            Some(BuildMode::CargoTestCompile)
+        );
+        assert!(supported_args(&no_run, BuildMode::CargoTestCompile));
+        for mode in [BuildMode::CargoClippy, BuildMode::CargoTestCompile] {
+            assert!(!supports_build(&capabilities, host, mode));
+            capabilities.compile_actions.push(mode.action() as i32);
+            assert!(supports_build(&capabilities, host, mode));
+        }
+        let mut args = vec!["--locked".into()];
+        assert_eq!(Action::CargoTestCompile.worker_command(&mut args), "cargo");
+        assert_eq!(args, ["test", "--no-run", "--locked"]);
     }
 
     #[test]
