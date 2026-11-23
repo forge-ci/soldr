@@ -17,6 +17,20 @@ const PROBE_DEADLINE: Duration = Duration::from_secs(3);
 pub(crate) enum BuildMode {
     Blessed,
     Cargo,
+    CargoCheck,
+}
+
+pub(crate) async fn try_cargo(
+    verb: &str,
+    args: &[String],
+    cache_enabled: bool,
+) -> io::Result<Option<i32>> {
+    let mode = match verb {
+        "build" => BuildMode::Cargo,
+        "check" => BuildMode::CargoCheck,
+        _ => return Ok(None),
+    };
+    try_build(args, cache_enabled, mode).await
 }
 
 pub(crate) async fn try_build(
@@ -27,7 +41,7 @@ pub(crate) async fn try_build(
     if !cache_enabled || !can_delegate(args) {
         return Ok(None);
     }
-    let client = match worker().await {
+    let client = match worker(mode).await {
         Ok(Some(client)) => client,
         Ok(None) => return Ok(None),
         Err(error) => {
@@ -61,6 +75,7 @@ pub(crate) async fn try_build(
                 action: match mode {
                     BuildMode::Blessed => Action::Build,
                     BuildMode::Cargo => Action::CargoBuild,
+                    BuildMode::CargoCheck => Action::CargoCheck,
                 } as i32,
                 args: args.to_vec(),
                 working_tree: true,
@@ -80,7 +95,7 @@ pub(crate) async fn try_build(
     Ok(Some(code))
 }
 
-async fn worker() -> io::Result<Option<Client>> {
+async fn worker(mode: BuildMode) -> io::Result<Option<Client>> {
     let request = async {
         let Some(grant) = crate::forge_sign_in::discover_worker().await? else {
             return Ok(None);
@@ -88,14 +103,17 @@ async fn worker() -> io::Result<Option<Client>> {
         let client = Client::forge(grant)?;
         let capabilities: Capabilities = client.post("capabilities", &Blob::default()).await?;
         let host = crate::core::TargetTriple::host().map_err(io::Error::other)?;
-        Ok(
-            (capabilities.working_tree_builds && capabilities.host == host.triple())
-                .then_some(client),
-        )
+        Ok(supports_build(&capabilities, &host.triple(), mode).then_some(client))
     };
     tokio::time::timeout(PROBE_DEADLINE, request)
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "worker probe expired"))?
+}
+
+fn supports_build(capabilities: &Capabilities, host: &str, mode: BuildMode) -> bool {
+    capabilities.working_tree_builds
+        && capabilities.host == host
+        && (!matches!(mode, BuildMode::CargoCheck) || capabilities.cargo_check)
 }
 
 fn can_delegate(args: &[String]) -> bool {
@@ -133,6 +151,14 @@ fn supported_args(args: &[String]) -> bool {
             | "--bins"
             | "--examples"
                 if value.is_none() => {}
+            "--target" => {
+                if !value
+                    .or_else(|| args.next().map(String::as_str))
+                    .is_some_and(portable_target)
+                {
+                    return false;
+                }
+            }
             "-p" | "--package" | "--features" | "-F" | "--profile" | "--bin" | "--example" => {
                 if !value
                     .or_else(|| args.next().map(String::as_str))
@@ -145,6 +171,13 @@ fn supported_args(args: &[String]) -> bool {
         }
     }
     true
+}
+
+fn portable_target(target: &str) -> bool {
+    target
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        && crate::target_alias::resolve_soldr_target(target).is_ok()
 }
 
 fn uses_default_target_dir(root: &Path) -> bool {
@@ -234,7 +267,28 @@ mod tests {
         ]));
         assert!(!supported_args(&["--package".into(), "--release".into()]));
         assert!(!supported_args(&["--target-dir=/other".into()]));
-        assert!(!supported_args(&["--target=wasm32-unknown-unknown".into()]));
+        assert!(supported_args(&["--target=wasm32-unknown-unknown".into()]));
+        assert!(supported_args(&["--target".into(), "win-x64".into()]));
+        assert!(!supported_args(&["--target=../custom-target.json".into()]));
+    }
+
+    #[test]
+    fn remote_build_checks_require_a_worker_that_advertises_cargo_check() {
+        let host = "x86_64-unknown-linux-gnu";
+        let mut capabilities = Capabilities {
+            host: host.into(),
+            working_tree_builds: true,
+            ..Capabilities::default()
+        };
+        assert!(supports_build(&capabilities, host, BuildMode::Cargo));
+        assert!(!supports_build(&capabilities, host, BuildMode::CargoCheck));
+        capabilities.cargo_check = true;
+        assert!(supports_build(&capabilities, host, BuildMode::CargoCheck));
+        assert!(!supports_build(
+            &capabilities,
+            "aarch64-apple-darwin",
+            BuildMode::CargoCheck
+        ));
     }
 
     #[test]

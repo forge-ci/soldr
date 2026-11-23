@@ -42,6 +42,7 @@ pub(super) enum Action {
     Dylint = 2,
     Lint = 3,
     CargoBuild = 4,
+    CargoCheck = 5,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -62,6 +63,20 @@ pub(super) struct Capabilities {
     pub host: String,
     #[prost(bool, tag = "2")]
     pub working_tree_builds: bool,
+    #[prost(bool, tag = "3")]
+    pub cargo_check: bool,
+}
+
+impl Capabilities {
+    pub(super) fn worker() -> io::Result<Self> {
+        Ok(Self {
+            host: crate::core::TargetTriple::host()
+                .map_err(io::Error::other)?
+                .triple(),
+            working_tree_builds: true,
+            cargo_check: true,
+        })
+    }
 }
 
 #[derive(Clone, PartialEq, Message)]

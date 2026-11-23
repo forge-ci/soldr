@@ -269,12 +269,7 @@ fn dispatch(
 ) -> io::Result<Vec<u8>> {
     let parts: Vec<_> = operation.split('/').collect();
     match parts.as_slice() {
-        ["capabilities"] => wire::encode(&wire::Capabilities {
-            host: crate::core::TargetTriple::host()
-                .map_err(io::Error::other)?
-                .triple(),
-            working_tree_builds: true,
-        }),
+        ["capabilities"] => wire::encode(&wire::Capabilities::worker()?),
         ["start"] => start(root, wire::decode(body)?, access),
         ["blob", hash] => store_blob(root, hash, wire::decode(body)?),
         ["workspace", id] => store_workspace(root, key(id, 32)?, wire::decode(body)?),
@@ -551,16 +546,21 @@ fn execute_action(
 ) -> io::Result<(std::process::Output, &'static str, bool)> {
     let action = Action::try_from(request.action).map_err(io::Error::other)?;
     let mut arguments = compile_args(action, &request.args, build_output)?;
-    if action == Action::CargoBuild {
-        arguments.insert(0, "build".into());
-    }
     let full_lint = action == Action::Lint && arguments == ["rust", "--check"];
     let action = match action {
         Action::Build => "build",
         Action::Test => "test",
         Action::Dylint => "dylint",
         Action::Lint => "lint",
-        Action::CargoBuild => "cargo",
+        Action::CargoBuild | Action::CargoCheck => {
+            let verb = if action == Action::CargoBuild {
+                "build"
+            } else {
+                "check"
+            };
+            arguments.insert(0, verb.into());
+            "cargo"
+        }
     };
     let result = transcript.run(
         runner_soldr(soldr, cache_root)

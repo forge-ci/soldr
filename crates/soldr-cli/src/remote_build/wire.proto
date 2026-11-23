@@ -25,6 +25,7 @@ enum Action {
   DYLINT = 2;
   LINT = 3;
   CARGO_BUILD = 4;
+  CARGO_CHECK = 5;
 }
 
 message Session {
@@ -37,6 +38,7 @@ message Session {
 message Capabilities {
   string host = 1;
   bool working_tree_builds = 2;
+  bool cargo_check = 3;
 }
 
 message Blob {
