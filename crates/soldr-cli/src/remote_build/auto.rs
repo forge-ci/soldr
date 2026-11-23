@@ -202,20 +202,30 @@ async fn start_worktree(
 }
 
 async fn worker(mode: BuildMode) -> io::Result<Option<Client>> {
+    retry_worker(crate::forge_sign_in::discover_worker, |grant| async move {
+        let client = Client::forge(grant)?;
+        let capabilities: Capabilities = client.post("capabilities", &Blob::default()).await?;
+        let host = crate::core::TargetTriple::host().map_err(io::Error::other)?;
+        Ok(supports_build(&capabilities, &host.triple(), mode).then_some(client))
+    })
+    .await
+}
+
+async fn retry_worker<G, T, D, P>(
+    mut discover: impl FnMut() -> D,
+    mut probe: impl FnMut(G) -> P,
+) -> io::Result<Option<T>>
+where
+    D: Future<Output = io::Result<Option<G>>>,
+    P: Future<Output = io::Result<Option<T>>>,
+{
     let mut result = Ok(None);
     for _ in 0..WORKER_PROBE_ATTEMPTS {
-        // The gateway routes each fresh grant independently. Leave the
-        // selection fixed once a worker has accepted a compatible probe.
-        let Some(grant) = probe_request(crate::forge_sign_in::discover_worker()).await? else {
+        // Each fresh grant gives the gateway another chance to route the build.
+        let Some(grant) = probe_request(discover()).await? else {
             return Ok(None);
         };
-        let client = Client::forge(grant)?;
-        let capabilities: io::Result<Capabilities> =
-            probe_request(client.post("capabilities", &Blob::default())).await;
-        result = capabilities.and_then(|capabilities| {
-            let host = crate::core::TargetTriple::host().map_err(io::Error::other)?;
-            Ok(supports_build(&capabilities, &host.triple(), mode).then_some(client))
-        });
+        result = probe_request(probe(grant)).await;
         if matches!(result, Ok(Some(_))) {
             return result;
         }
@@ -487,6 +497,23 @@ fn publish_profile_products(source: &Dir, local: &Dir, include_examples: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unavailable_worker_is_retried_with_a_fresh_grant() {
+        let mut grants = ["first", "second"].into_iter();
+        let selected = retry_worker(
+            || std::future::ready(Ok(grants.next())),
+            |grant| async move {
+                match grant {
+                    "first" => Err(io::Error::new(io::ErrorKind::ConnectionRefused, "offline")),
+                    _ => Ok(Some(grant)),
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected, Some("second"));
+    }
 
     #[test]
     fn remote_build_routing_only_accepts_supported_arguments() {
