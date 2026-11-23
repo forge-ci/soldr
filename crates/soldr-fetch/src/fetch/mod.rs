@@ -56,6 +56,8 @@ pub mod darwin_toolchain;
 /// toolchain catalogue lookup misses. See module doc for the env-var
 /// contract and failure surface.
 pub mod forge_dispatch;
+mod forge_pairing;
+pub use forge_pairing::ForgePairingClient;
 pub mod github;
 pub mod llvm;
 pub mod llvm_background;

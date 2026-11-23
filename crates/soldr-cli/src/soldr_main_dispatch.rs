@@ -51,6 +51,7 @@ async fn dispatch_build_command(
     let command = crate::blaze_cmd::route_command(command);
     let handled = match command {
         Commands::Blaze { args, allow_ci } => exit_with(crate::blaze_cmd::run(&args, allow_ci)),
+        Commands::Pair => exit_with(crate::pair_cmd::run().await.map(|()| 0)),
         Commands::Remote(args) => {
             exit_with(crate::remote_build::run(args).await.map_err(Into::into))
         }
@@ -206,6 +207,7 @@ async fn dispatch_state_command(command: Commands, flags: DispatchFlags) -> Resu
         // it is routed to a family.
         Commands::Build { .. }
         | Commands::Remote(_)
+        | Commands::Pair
         | Commands::Blaze { .. }
         | Commands::Cc(_)
         | Commands::Cxx(_)

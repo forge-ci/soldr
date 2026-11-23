@@ -44,6 +44,13 @@ each machine.
 scp "$HOME/.soldr-remote-token" build-runner:.soldr-remote-token
 ```
 
+## Register Soldr with Forge CI
+
+Run `soldr pair` on your computer. Leave it running, enter the printed code at
+[forge-ci.com/soldr/pair](https://forge-ci.com/soldr/pair), and sign in with
+GitHub. The code expires after 30 minutes. The page and terminal confirm
+registration.
+
 ## Persistent peer connection
 
 On the runner, create a persistent identity and enroll its public ID with the

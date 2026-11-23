@@ -332,6 +332,8 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: crate::forge_sign_in::SignCommand,
     },
+    /// Register this Soldr installation with Forge CI.
+    Pair,
     /// Build the workspace via soldr's blessed cross-compile path
     ///
     /// `soldr build --target X` is the **blessed-default surface** for
