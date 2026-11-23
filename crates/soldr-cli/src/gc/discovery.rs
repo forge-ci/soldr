@@ -136,7 +136,7 @@ pub(super) fn target_still_cold(
     >,
 ) -> bool {
     use crate::cache_lib::target_registry::{
-        current_unix_seconds, evaluate_safety_guards, workspace_root_for_target, GuardOutcome,
+        current_unix_seconds, workspace_root_for_target, GuardOutcome,
     };
 
     let (Ok(rows), Ok(now)) = (rows(), current_unix_seconds()) else {
@@ -150,7 +150,7 @@ pub(super) fn target_still_cold(
     age >= 0
         && age as u64 >= options.older_than_seconds
         && matches!(
-            evaluate_safety_guards(
+            crate::cache_lib::gc::evaluate_target_metadata_guards(
                 target,
                 &workspace_root_for_target(target),
                 &options.dev_roots,

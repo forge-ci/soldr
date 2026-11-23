@@ -179,6 +179,43 @@ pub fn scan(registry: &TargetRegistry, options: &GcOptions) -> Result<GcReport, 
     scan_snapshot(snapshot, options)
 }
 
+/// Check the allowlist and workspace lockfile age without walking the target.
+/// A caller that mutates the target must also acquire its Cargo locks.
+pub fn evaluate_target_metadata_guards(
+    target_dir: &Path,
+    workspace_root: &Path,
+    dev_roots: &[PathBuf],
+    stale_age_seconds: u64,
+    now_unix_seconds: i64,
+) -> GuardOutcome {
+    if !super::target_registry::is_under_any_root(target_dir, dev_roots) {
+        return GuardOutcome::Skipped(format!(
+            "outside configured gc.allowlist_roots ({} roots)",
+            dev_roots.len()
+        ));
+    }
+
+    let cargo_lock = workspace_root.join("Cargo.lock");
+    if let Ok(meta) = std::fs::metadata(&cargo_lock) {
+        if let Ok(modified) = meta.modified() {
+            if let Ok(elapsed) = modified
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+            {
+                let age = now_unix_seconds.saturating_sub(elapsed);
+                if (age as u64) < stale_age_seconds {
+                    return GuardOutcome::Skipped(format!(
+                        "Cargo.lock modified {} ago (< staleness threshold)",
+                        human_age(age)
+                    ));
+                }
+            }
+        }
+    }
+
+    GuardOutcome::Eligible
+}
+
 /// How old a tracked `target/` is, taking the *most recent* of two
 /// signals (soldr#2134).
 ///
