@@ -541,11 +541,12 @@ fn wait_for_child_with_watchdog<P: ProgressProbe>(
         }
         // Wake on child exit instead of rounding short toolchain probes up
         // to the watchdog's progress sampling interval.
-        if let Some(status) = child
-            .wait_timeout(config.poll_interval)
-            .map_err(|err| SoldrError::Other(format!("wait on {context} failed: {err}")))?
-        {
-            return Ok(status);
+        match child.wait_timeout(config.poll_interval) {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {}
+            // Notification setup can fail while the child is still healthy.
+            // Keep supervising it with the original polling path.
+            Err(_) => thread::sleep(config.poll_interval),
         }
     }
 }
