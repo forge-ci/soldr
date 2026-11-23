@@ -27,6 +27,13 @@ use crate::dylint_toolchain_readiness::{
 use crate::toolchain_readiness::TOOLCHAIN_CHANNEL_MANIFEST;
 use crate::{apply_implicit_toolchain_homes, resolve_toolchain_binary_for_channel, rustup_binary};
 
+#[path = "dylint_toolchain_marker.rs"]
+mod marker;
+
+use marker::write_prepared_marker;
+#[cfg(test)]
+use marker::write_prepared_marker_at;
+
 pub(crate) const TOOLCHAIN_ENV_VAR: &str = "SOLDR_DYLINT_TOOLCHAIN";
 pub(crate) const COMPILER_RELEASE_ENV_VAR: &str = "SOLDR_DYLINT_RUSTC_RELEASE";
 pub(crate) const COMPILER_COMMIT_ENV_VAR: &str = "SOLDR_DYLINT_RUSTC_COMMIT_HASH";
@@ -594,47 +601,6 @@ fn parse_marker_identity(line: &str) -> Option<DylintToolchainPlan> {
 /// any directory whose name starts with `<channel>-` if the host triple
 /// cannot be determined, so an unusual host doesn't spuriously miss a
 /// perfectly good warm cache.
-/// Production entry point for persisting the warm-path marker after a
-/// successful cold-path prepare. Best-effort by contract — callers must
-/// not fail the run on a write error, only log it.
-fn write_prepared_marker(
-    version: &str,
-    plan: &DylintToolchainPlan,
-    preserve_existing: bool,
-) -> Result<(), SoldrError> {
-    let base_dir = SoldrPaths::new()?.root;
-    write_prepared_marker_at(&base_dir, version, plan, preserve_existing)
-}
-
-fn write_prepared_marker_at(
-    base_dir: &Path,
-    version: &str,
-    plan: &DylintToolchainPlan,
-    preserve_existing: bool,
-) -> Result<(), SoldrError> {
-    use std::io::Write as _;
-
-    let path = prepared_marker_path(base_dir, version);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let contents = format!("{}\n", plan.cache_identity());
-    if preserve_existing {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-        {
-            Ok(mut file) => file.write_all(contents.as_bytes())?,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
-        }
-    } else {
-        std::fs::write(path, contents)?;
-    }
-    Ok(())
-}
-
 fn plan_from_configured_environment() -> Result<Option<DylintToolchainPlan>, SoldrError> {
     let values = (
         non_empty_env(CONFIGURED_TOOLCHAIN_ENV_VAR),
