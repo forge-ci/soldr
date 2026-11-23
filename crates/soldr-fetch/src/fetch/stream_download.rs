@@ -254,13 +254,16 @@ use sha2::{Digest, Sha256};
 pub(crate) const ASSET_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const ASSET_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const CONTROL_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
-/// Client for an authenticated HTTP service on a local tunnel endpoint.
-pub struct LoopbackPostClient {
+/// Client for an authenticated remote build service over HTTPS or an SSH tunnel.
+pub struct RemoteBuildHttpClient {
     http: reqwest::Client,
-    endpoint: std::net::SocketAddr,
+    origin: String,
 }
 
-impl LoopbackPostClient {
+/// Compatibility name for callers using the loopback SSH transport.
+pub type LoopbackPostClient = RemoteBuildHttpClient;
+
+impl RemoteBuildHttpClient {
     /// Use a literal loopback address and keep credentials on that endpoint.
     pub fn new(endpoint: std::net::SocketAddr) -> std::io::Result<Self> {
         Self::with_http2(endpoint, false)
@@ -273,17 +276,51 @@ impl LoopbackPostClient {
                 "Remote build endpoint must be a loopback SSH tunnel.",
             ));
         }
-        let builder = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10));
+        let builder = Self::builder();
         let builder = if http2 {
             builder.http2_prior_knowledge()
         } else {
             builder
         };
         let http = builder.build().map_err(std::io::Error::other)?;
-        Ok(Self { http, endpoint })
+        Ok(Self {
+            http,
+            origin: format!("http://{endpoint}"),
+        })
+    }
+
+    /// Use a TLS-authenticated HTTP/2 worker origin without redirects or proxies.
+    pub fn https_worker(origin: &str) -> std::io::Result<Self> {
+        let origin = reqwest::Url::parse(origin).map_err(std::io::Error::other)?;
+        if origin.scheme() != "https"
+            || origin.host_str().is_none()
+            || origin.port_or_known_default() != Some(443)
+            || !origin.username().is_empty()
+            || origin.password().is_some()
+            || origin.path() != "/"
+            || origin.query().is_some()
+            || origin.fragment().is_some()
+        {
+            return Err(std::io::Error::other(
+                "Remote build worker must be an HTTPS origin.",
+            ));
+        }
+        let http = Self::builder()
+            .https_only(true)
+            .http2_prior_knowledge()
+            .build()
+            .map_err(std::io::Error::other)?;
+        Ok(Self {
+            http,
+            origin: origin.origin().ascii_serialization(),
+        })
+    }
+
+    fn builder() -> reqwest::ClientBuilder {
+        reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(10))
     }
 
     /// Post a frame and return its response with a bounded body size.
@@ -322,7 +359,7 @@ impl LoopbackPostClient {
             return Err(std::io::Error::other("HTTP service path must begin with /"));
         }
         self.http
-            .get(format!("http://{}{path}", self.endpoint))
+            .get(format!("{}{path}", self.origin))
             .query(query)
             .header("accept-encoding", "zstd")
             .bearer_auth(token)
@@ -366,7 +403,7 @@ impl LoopbackPostClient {
             return Err(std::io::Error::other("HTTP service path must begin with /"));
         }
         self.http
-            .post(format!("http://{}{path}", self.endpoint))
+            .post(format!("{}{path}", self.origin))
             .header("content-type", content_type)
             .bearer_auth(token)
             .body(body)
@@ -931,5 +968,24 @@ mod redirect_tests {
         assert!(!may_follow_redirect(0, true, &downgrade));
         let credentialed = url::Url::parse("https://user:secret@example.invalid/next").unwrap();
         assert!(!may_follow_redirect(0, false, &credentialed));
+    }
+}
+
+#[cfg(test)]
+mod remote_worker_transport_tests {
+    use super::RemoteBuildHttpClient;
+
+    #[test]
+    fn worker_connections_require_an_https_origin() {
+        assert!(RemoteBuildHttpClient::https_worker("https://build.forge-ci.com").is_ok());
+        for invalid in [
+            "http://build.forge-ci.com",
+            "https://build.forge-ci.com:8443",
+            "https://user@build.forge-ci.com",
+            "https://build.forge-ci.com/api",
+            "https://build.forge-ci.com/?next=worker",
+        ] {
+            assert!(RemoteBuildHttpClient::https_worker(invalid).is_err());
+        }
     }
 }

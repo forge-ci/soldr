@@ -41,6 +41,7 @@ fs2 = { workspace = true }
 getrandom = "0.4"
 globset = "0.4"
 hex = { workspace = true }
+ring = "0.17"
 interprocess = { version = "2", features = ["tokio"] }
 jwalk = { workspace = true }
 prost = { workspace = true }

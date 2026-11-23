@@ -219,7 +219,7 @@ impl Write for &ChunkWriter<'_> {
 }
 
 pub(super) async fn download(
-    client: &Client<'_>,
+    client: &Client,
     session: &str,
     out: &Path,
     globs: Vec<String>,
@@ -235,7 +235,7 @@ pub(super) async fn download(
         .http
         .get(
             &manifest_path(session),
-            client.token,
+            &client.token,
             &[("globs", &globs)],
             wire::MAX_FRAME,
         )
@@ -256,7 +256,7 @@ pub(super) async fn download(
 }
 
 async fn download_one(
-    client: &Client<'_>,
+    client: &Client,
     session: &str,
     staging: Arc<tempfile::TempDir>,
     entry: Entry,
@@ -266,7 +266,7 @@ async fn download_one(
         IO_IDLE,
         client.http.get_stream(
             &format!("/v1/sessions/{session}/artifact"),
-            client.token,
+            &client.token,
             &[("path", &entry.path)],
         ),
     )

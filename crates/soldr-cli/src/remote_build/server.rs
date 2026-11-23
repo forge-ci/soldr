@@ -16,17 +16,18 @@ use prost::Message;
 
 use crate::platform::{fs::permissions, wait};
 
+use super::auth::RunnerAuth;
 use super::slots;
 use super::snapshot::{digest, relative_path};
 use super::wire::{self, Action, Artifact, Artifacts, Blob, Fetch, ResultFrame, Session, Start};
 use super::{artifacts, control, manifest, retention};
 
-type RunnerState = (PathBuf, String, Option<u32>, u8);
+type RunnerState = (PathBuf, RunnerAuth, Option<u32>, u8);
 
 pub(super) async fn serve(
     listen: std::net::SocketAddr,
     root: PathBuf,
-    token: &str,
+    auth: RunnerAuth,
     slot_limit: Option<u32>,
     artifact_streams: u8,
 ) -> io::Result<i32> {
@@ -44,12 +45,7 @@ pub(super) async fn serve(
         .route("/v1/sessions/{id}/artifacts.json", get(get_inventory))
         .route("/v1/sessions/{id}/artifact", get(get_artifact))
         .layer(DefaultBodyLimit::max(wire::MAX_FRAME + 1024 * 1024))
-        .with_state((
-            root.canonicalize()?,
-            digest(format!("Bearer {token}").as_bytes()),
-            slot_limit,
-            artifact_streams,
-        ));
+        .with_state((root.canonicalize()?, auth, slot_limit, artifact_streams));
     let listener = tokio::net::TcpListener::bind(listen).await?;
     eprintln!(
         "soldr remote listening at http://{}",
@@ -64,7 +60,7 @@ pub(super) async fn serve(
 }
 
 async fn handle(
-    State((root, expected, slot_limit, artifact_streams)): State<RunnerState>,
+    State((root, auth, slot_limit, artifact_streams)): State<RunnerState>,
     ConnectInfo(connection): ConnectInfo<retention::Connection>,
     RoutePath(operation): RoutePath<String>,
     headers: HeaderMap,
@@ -77,7 +73,7 @@ async fn handle(
     {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
-    if !authorized(&headers, &expected) {
+    if !auth.authorized(&headers, operation == "start") {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if let Some(id) = operation.strip_prefix("run-stream/") {
@@ -122,12 +118,6 @@ async fn handle(
     }
 }
 
-fn authorized(headers: &HeaderMap, expected: &str) -> bool {
-    headers
-        .get("authorization")
-        .is_some_and(|value| digest(value.as_bytes()) == expected)
-}
-
 #[derive(serde::Deserialize)]
 struct InventoryQuery {
     globs: Option<String>,
@@ -139,13 +129,13 @@ struct ArtifactQuery {
 }
 
 async fn get_inventory(
-    State((root, expected, _, limit)): State<RunnerState>,
+    State((root, auth, _, limit)): State<RunnerState>,
     ConnectInfo(connection): ConnectInfo<retention::Connection>,
     RoutePath(id): RoutePath<String>,
     Query(query): Query<InventoryQuery>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    if !authorized(&headers, &expected) {
+    if !auth.authorized(&headers, false) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     artifact_response(move || {
@@ -161,13 +151,13 @@ async fn get_inventory(
 }
 
 async fn get_artifact(
-    State((root, expected, _, _)): State<RunnerState>,
+    State((root, auth, _, _)): State<RunnerState>,
     ConnectInfo(connection): ConnectInfo<retention::Connection>,
     RoutePath(id): RoutePath<String>,
     Query(query): Query<ArtifactQuery>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    if !authorized(&headers, &expected) {
+    if !auth.authorized(&headers, false) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let compress = headers

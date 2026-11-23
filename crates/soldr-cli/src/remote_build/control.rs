@@ -178,12 +178,12 @@ fn heartbeat_body(rx: mpsc::Receiver<io::Result<Bytes>>) -> Body {
     ))
 }
 
-pub(super) async fn receive(client: &Client<'_>, session: &str) -> io::Result<i32> {
+pub(super) async fn receive(client: &Client, session: &str) -> io::Result<i32> {
     let mut response = tokio::time::timeout(
         HEADER_TIMEOUT,
         client.http.post_stream(
             &format!("/v1/run-stream/{session}"),
-            client.token,
+            &client.token,
             "application/x-protobuf+zstd",
             wire::encode(&wire::Blob::default())?,
         ),

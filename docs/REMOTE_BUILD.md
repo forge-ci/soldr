@@ -5,6 +5,24 @@ account dedicated to trusted builds. Cargo build scripts and tests run with
 that account's permissions. Both endpoints bind to loopback and the SSH
 tunnel authenticates and encrypts the connection between machines.
 
+## Forge CI pairing
+
+Run `soldr sign in` and approve the pairing code with GitHub at
+`https://forge-ci.com/soldr/pair`. Once Forge CI has a worker configured,
+`soldr remote run build` uses the saved account to request a worker grant.
+The worker receives that grant over HTTPS and never sees the device credential.
+
+Run the worker in its dedicated build environment with
+`soldr remote serve --forge-key-file /path/to/key --root /path/to/state`.
+Put a TLS endpoint in front of the loopback listener. The endpoint must
+preserve a dedicated upstream HTTP/2 connection for each client connection
+through artifact download. The worker key must match the service's configured
+worker key. A grant can start builds for 15 minutes and access sessions for
+four hours after that. Configure the worker origin only once its HTTPS
+endpoint is reachable.
+
+## SSH tunnel
+
 Generate a shared token on the client with a restrictive file mode and
 copy the file to the runner via SSH. Use the corresponding token path on
 each machine.

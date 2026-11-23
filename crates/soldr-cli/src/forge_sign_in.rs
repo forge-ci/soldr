@@ -12,6 +12,7 @@ use crate::core::{home_dir, SoldrError};
 const PAIR_URL: &str = "https://forge-ci.com/soldr/pair";
 const API_URL: &str = "https://forge-ci.com/api/v1/soldr/pairings";
 const SESSION_URL: &str = "https://forge-ci.com/api/v1/soldr/session";
+const WORKER_URL: &str = "https://forge-ci.com/api/v1/soldr/worker";
 const CREDENTIAL_FILE: &str = "credential.json";
 
 #[derive(clap::Subcommand)]
@@ -47,6 +48,38 @@ pub(crate) async fn run(command: SignCommand) -> Result<(), SoldrError> {
         },
     }
     Ok(())
+}
+
+#[derive(Deserialize)]
+pub(crate) struct WorkerGrant {
+    pub origin: String,
+    pub token: String,
+}
+
+pub(crate) async fn discover_worker() -> io::Result<Option<WorkerGrant>> {
+    let directory = home_dir()
+        .map_err(io::Error::other)?
+        .join(".soldr")
+        .join("forge-ci");
+    let Some(credential) = load(&directory)? else {
+        return Ok(None);
+    };
+    let response = client()?
+        .post(WORKER_URL)
+        .bearer_auth(&credential.token)
+        .send()
+        .await
+        .map_err(network_error)?;
+    match response.status() {
+        StatusCode::NO_CONTENT => Ok(None),
+        StatusCode::OK => response.json().await.map(Some).map_err(network_error),
+        StatusCode::UNAUTHORIZED => Err(io::Error::other(
+            "Forge CI rejected the saved credential. Run soldr sign in to reconnect.",
+        )),
+        status => Err(io::Error::other(format!(
+            "Forge CI worker discovery failed ({status})."
+        ))),
+    }
 }
 
 fn client() -> io::Result<Client> {

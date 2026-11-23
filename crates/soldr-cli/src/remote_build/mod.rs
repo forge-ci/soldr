@@ -1,6 +1,7 @@
 //! Whole-workspace builds on a trusted runner reached over an SSH tunnel.
 
 mod artifacts;
+mod auth;
 mod control;
 mod manifest;
 mod retention;
@@ -15,15 +16,15 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
 use prost::Message;
-use soldr_fetch::fetch::LoopbackPostClient;
+use soldr_fetch::fetch::RemoteBuildHttpClient;
 
 use self::wire::{Action, Blob, Session, Start};
 
 #[derive(Args)]
 pub(crate) struct RemoteArgs {
-    /// File containing the same randomly generated token on client and runner.
+    /// Shared token file for a runner reached over an SSH tunnel.
     #[arg(long)]
-    token_file: PathBuf,
+    token_file: Option<PathBuf>,
     #[command(subcommand)]
     command: RemoteCommand,
 }
@@ -32,6 +33,9 @@ pub(crate) struct RemoteArgs {
 enum RemoteCommand {
     /// Serve remote build sessions on a loopback interface.
     Serve {
+        /// File containing the separate Forge CI worker grant signing key.
+        #[arg(long)]
+        forge_key_file: Option<PathBuf>,
         #[arg(long, default_value = "127.0.0.1:7744")]
         listen: SocketAddr,
         #[arg(long)]
@@ -45,8 +49,8 @@ enum RemoteCommand {
     },
     /// Run a command against the current Git commit on the runner.
     Run {
-        #[arg(long, default_value = "127.0.0.1:7744")]
-        endpoint: SocketAddr,
+        #[arg(long)]
+        endpoint: Option<SocketAddr>,
         #[arg(long, default_value = "target/attestation.json")]
         attestation: PathBuf,
         /// Optional JSON identifying a repository, user, and commit lineage.
@@ -89,20 +93,29 @@ enum BuildAction {
 }
 
 pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
-    let token = std::fs::read_to_string(args.token_file)?;
-    let token = token.trim();
-    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(io::Error::other(
-            "Remote build token file must contain 64 hexadecimal characters.",
-        ));
-    }
-    match args.command {
+    let RemoteArgs {
+        token_file,
+        command,
+    } = args;
+    match command {
         RemoteCommand::Serve {
+            forge_key_file,
             listen,
             root,
             slots,
             artifact_streams,
-        } => server::serve(listen, root, token, slots, artifact_streams).await,
+        } => {
+            let auth = match (forge_key_file.as_deref(), token_file.as_deref()) {
+                (Some(path), None) => auth::RunnerAuth::forge(path)?,
+                (None, token) => auth::RunnerAuth::tunnel(&read_tunnel_token(token)?),
+                (Some(_), Some(_)) => {
+                    return Err(io::Error::other(
+                        "Use one of --forge-key-file or --token-file.",
+                    ));
+                }
+            };
+            server::serve(listen, root, auth, slots, artifact_streams).await
+        }
         RemoteCommand::Run {
             endpoint,
             attestation,
@@ -121,7 +134,7 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
                 snapshot::verify_parent(&directory, &snapshot.commit, manifest.parent())?;
             }
             let manifest_json = manifest.as_ref().map(serde_json::to_vec).transpose()?;
-            let client = Client::new(endpoint, token)?;
+            let client = connect_for_run(token_file.as_deref(), endpoint).await?;
             let action = match action {
                 BuildAction::Build => Action::Build,
                 BuildAction::Test => Action::Test,
@@ -165,6 +178,7 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             session,
             globs,
         } => {
+            let token = read_tunnel_token(token_file.as_deref())?;
             let client = Client::new(endpoint, token)?;
             artifacts::download(&client, &session, &out, globs).await?;
             Ok(0)
@@ -172,12 +186,48 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
     }
 }
 
-struct Client<'a> {
-    http: LoopbackPostClient,
-    token: &'a str,
+fn read_tunnel_token(path: Option<&std::path::Path>) -> io::Result<String> {
+    let path = path.ok_or_else(|| io::Error::other("This command requires --token-file."))?;
+    let token = std::fs::read_to_string(path)?;
+    let token = token.trim();
+    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(io::Error::other(
+            "Remote build token file must contain 64 hexadecimal characters.",
+        ));
+    }
+    Ok(token.to_owned())
 }
 
-impl<'a> Client<'a> {
+async fn connect_for_run(
+    token_file: Option<&std::path::Path>,
+    endpoint: Option<SocketAddr>,
+) -> io::Result<Client> {
+    if let Some(path) = token_file {
+        let endpoint = endpoint.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 7744)));
+        return Client::new(endpoint, read_tunnel_token(Some(path))?);
+    }
+    if endpoint.is_some() {
+        return Err(io::Error::other("--endpoint requires --token-file."));
+    }
+    let grant = crate::forge_sign_in::discover_worker()
+        .await?
+        .ok_or_else(|| {
+            io::Error::other(
+                "No Forge CI worker is configured. Check your account with soldr sign status.",
+            )
+        })?;
+    Ok(Client {
+        http: RemoteBuildHttpClient::https_worker(&grant.origin)?,
+        token: grant.token,
+    })
+}
+
+struct Client {
+    http: RemoteBuildHttpClient,
+    token: String,
+}
+
+impl Client {
     async fn upload_workspace(
         &self,
         session: &Session,
@@ -232,7 +282,7 @@ impl<'a> Client<'a> {
             std::time::Duration::from_secs(60),
             self.http.get(
                 &format!("/v1/sessions/{session}/artifact"),
-                self.token,
+                &self.token,
                 &[("path", "attestation.json")],
                 wire::MAX_FRAME + 1024 * 1024,
             ),
@@ -255,9 +305,9 @@ impl<'a> Client<'a> {
         Ok(code)
     }
 
-    fn new(endpoint: SocketAddr, token: &'a str) -> io::Result<Self> {
+    fn new(endpoint: SocketAddr, token: String) -> io::Result<Self> {
         Ok(Self {
-            http: LoopbackPostClient::with_http2(endpoint, true)?,
+            http: RemoteBuildHttpClient::with_http2(endpoint, true)?,
             token,
         })
     }
@@ -279,12 +329,33 @@ impl<'a> Client<'a> {
             .http
             .post(
                 &format!("/v1/{operation}"),
-                self.token,
+                &self.token,
                 "application/x-protobuf+zstd",
                 body,
                 wire::MAX_FRAME + 1024 * 1024,
             )
             .await?;
         wire::decode(&data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn remote_run_accepts_forge_ci_and_tunnel_invocations() {
+        for prefix in [vec![], vec!["--token-file", "token-file"]] {
+            let mut cli = vec!["soldr", "remote"];
+            cli.extend(prefix.iter().copied());
+            cli.extend(["run", "build"]);
+            let args = crate::cli_args::Cli::try_parse_from(cli).unwrap();
+            let crate::cli_args::Commands::Remote(args) = args.command else {
+                panic!("expected remote command");
+            };
+            assert_eq!(args.token_file.is_some(), !prefix.is_empty());
+            assert!(matches!(args.command, RemoteCommand::Run { .. }));
+        }
     }
 }
