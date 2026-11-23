@@ -7,7 +7,7 @@ use std::time::Duration;
 use cap_fs_ext::DirExt;
 use cap_std::{ambient_authority, fs::Dir};
 
-use super::wire::{Action, Blob, Capabilities, Session, Start};
+use super::wire::{Action, Blob, Capabilities, Start};
 use super::{artifacts, control, snapshot, Client};
 
 pub(crate) const WORKER_BUILD_ENV: &str = "SOLDR_FORGE_WORKER_BUILD";
@@ -53,10 +53,9 @@ pub(crate) async fn try_build(
             return Ok(None);
         }
     };
-    let session: Session = client
-        .post(
-            "start",
-            &Start {
+    let session = client
+        .start_session(
+            Start {
                 commit: snapshot.commit,
                 files: snapshot.files,
                 action: match mode {
@@ -67,14 +66,9 @@ pub(crate) async fn try_build(
                 working_tree: true,
                 ..Start::default()
             },
+            snapshot.blobs,
         )
         .await?;
-    if !session.working_tree_accepted {
-        return Err(io::Error::other(
-            "Forge CI worker did not accept the worktree.",
-        ));
-    }
-    client.upload_workspace(&session, snapshot.blobs).await?;
     eprintln!("Forge CI build session {}", session.id);
     let code = match control::receive(&client, &session.id).await {
         Err(error) if control::terminal_blocked(&error) => return Ok(Some(1)),

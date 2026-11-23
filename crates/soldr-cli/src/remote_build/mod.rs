@@ -150,11 +150,9 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
                 BuildAction::Dylint => Action::Dylint,
                 BuildAction::Lint => Action::Lint,
             };
-            let wants_manifest = manifest_json.is_some();
-            let session: Session = client
-                .post(
-                    "start",
-                    &Start {
+            let session = client
+                .start_session(
+                    Start {
                         commit: snapshot.commit,
                         files: snapshot.files,
                         action: action as i32,
@@ -163,19 +161,9 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
                         manifest_json,
                         working_tree,
                     },
+                    snapshot.blobs,
                 )
                 .await?;
-            if wants_manifest && !session.manifest_accepted {
-                return Err(io::Error::other(
-                    "remote runner does not support session manifests; upgrade the runner",
-                ));
-            }
-            if working_tree && !session.working_tree_accepted {
-                return Err(io::Error::other(
-                    "remote runner does not support worktree snapshots; upgrade the runner",
-                ));
-            }
-            client.upload_workspace(&session, snapshot.blobs).await?;
             eprintln!("Remote build session {}", session.id);
             let code = match client.finish_run(&session.id, &attestation).await {
                 // A diagnostic could write to the same blocked pipe.
@@ -245,6 +233,26 @@ impl Client {
             http: RemoteBuildHttpClient::https_worker(&grant.origin)?,
             token: grant.token,
         })
+    }
+
+    async fn start_session(
+        &self,
+        request: Start,
+        blobs: std::collections::BTreeMap<String, Vec<u8>>,
+    ) -> io::Result<Session> {
+        let session: Session = self.post("start", &request).await?;
+        if request.manifest_json.is_some() && !session.manifest_accepted {
+            return Err(io::Error::other(
+                "remote runner does not support session manifests; upgrade the runner",
+            ));
+        }
+        if request.working_tree && !session.working_tree_accepted {
+            return Err(io::Error::other(
+                "remote runner does not support worktree snapshots; upgrade the runner",
+            ));
+        }
+        self.upload_workspace(&session, blobs).await?;
+        Ok(session)
     }
 
     async fn upload_workspace(
