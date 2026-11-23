@@ -689,4 +689,6 @@ mod scrub_pool_tests;
 #[cfg(test)]
 mod signal_tests;
 #[cfg(test)]
+mod run_prepare_tests;
+#[cfg(test)]
 mod tests;
