@@ -126,19 +126,8 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
         }
         command => command,
     };
-    let token_file = args.token_file.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--token-file is required for serve, run and fetch",
-        )
-    })?;
-    let token = std::fs::read_to_string(token_file)?;
+    let token = read_token(args.token_file)?;
     let token = token.trim();
-    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(io::Error::other(
-            "Remote build token file must contain 64 hexadecimal characters.",
-        ));
-    }
     match command {
         RemoteCommand::Serve {
             listen,
@@ -146,17 +135,7 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             slots,
             artifact_streams,
             peer_key,
-        } => {
-            let listener = peer::loopback_listener(listen).await?;
-            let address = listener.local_addr()?;
-            let serve = server::serve(listener, root, token, slots, artifact_streams);
-            if let Some(key) = peer_key {
-                let (code, ()) = tokio::try_join!(serve, peer::serve(&key, address))?;
-                Ok(code)
-            } else {
-                serve.await
-            }
-        }
+        } => serve(listen, root, token, slots, artifact_streams, peer_key).await,
         RemoteCommand::Run {
             endpoint,
             attestation,
@@ -224,6 +203,41 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             Ok(0)
         }
         RemoteCommand::PeerId { .. } | RemoteCommand::Connect { .. } => unreachable!(),
+    }
+}
+
+fn read_token(path: Option<PathBuf>) -> io::Result<String> {
+    let token_file = path.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--token-file is required for serve, run and fetch",
+        )
+    })?;
+    let token = std::fs::read_to_string(token_file)?;
+    if token.trim().len() != 64 || !token.trim().bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(io::Error::other(
+            "Remote build token file must contain 64 hexadecimal characters.",
+        ));
+    }
+    Ok(token)
+}
+
+async fn serve(
+    listen: SocketAddr,
+    root: PathBuf,
+    token: &str,
+    slots: Option<u32>,
+    artifact_streams: u8,
+    peer_key: Option<PathBuf>,
+) -> io::Result<i32> {
+    let listener = peer::loopback_listener(listen).await?;
+    let address = listener.local_addr()?;
+    let serve = server::serve(listener, root, token, slots, artifact_streams);
+    if let Some(key) = peer_key {
+        let (code, ()) = tokio::try_join!(serve, peer::serve(&key, address))?;
+        Ok(code)
+    } else {
+        serve.await
     }
 }
 

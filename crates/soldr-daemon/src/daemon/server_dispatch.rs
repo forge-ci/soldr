@@ -6,73 +6,10 @@ async fn handle_connection<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    use running_process::broker::backend_sdk::MuxPoll;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::time::timeout;
+    use tokio::io::AsyncReadExt;
 
-    let mux = soldr_backend_endpoint_mux(control.daemon_identity.clone());
-    let mut prefix = [0_u8; CONTROL_FRAME_HEADER_BYTES];
-    if !matches!(
-        timeout(HANDSHAKE_READ_TIMEOUT, stream.read_exact(&mut prefix)).await,
-        Ok(Ok(_))
-    ) {
+    let Some(req) = read_control_request(&mut stream, &mut control).await else {
         return Ok(());
-    }
-    let mut buffered = prefix.to_vec();
-    loop {
-        match mux.poll(&buffered) {
-            Ok(MuxPoll::Legacy) => break,
-            Ok(MuxPoll::NeedMoreBytes) => {
-                let mut chunk = [0_u8; 4096];
-                let read = match timeout(HANDSHAKE_READ_TIMEOUT, stream.read(&mut chunk)).await {
-                    Ok(Ok(0)) | Err(_) => return Ok(()),
-                    Ok(Ok(n)) => n,
-                    Ok(Err(_)) => return Ok(()),
-                };
-                buffered.extend_from_slice(&chunk[..read]);
-            }
-            Ok(MuxPoll::ProbeAnswered { reply, .. }) => {
-                // A probe is how a route is judged live, so it still waits for
-                // `State`: soldr#3169 moves receipt earlier, not readiness.
-                if control.state().await.is_none() {
-                    return Ok(());
-                }
-                let _ = timeout(HANDSHAKE_READ_TIMEOUT, stream.write_all(&reply)).await;
-                let _ = timeout(HANDSHAKE_READ_TIMEOUT, stream.flush()).await;
-                return Ok(());
-            }
-            Ok(MuxPoll::Payload { .. }) | Err(_) => {
-                // #1853: never drop a socket with the peer's bytes still
-                // queued — see `drain_then_close`.
-                drain_then_close(&mut stream).await;
-                return Ok(());
-            }
-        }
-    }
-
-    // #1853: check the peer's version explicitly rather than letting the
-    // decode fail. A version mismatch is a known, diagnosable condition, and
-    // reporting it as an opaque transport reset is what made this cost a day
-    // to attribute downstream.
-    if buffered.len() >= CONTROL_FRAME_HEADER_BYTES {
-        let peer_version = u32::from_le_bytes(
-            buffered[4..CONTROL_FRAME_HEADER_BYTES]
-                .try_into()
-                .expect("slice of CONTROL_FRAME_HEADER_BYTES-4 bytes is always 4 bytes wide"),
-        );
-        if peer_version != PROTOCOL_VERSION {
-            reject_version_mismatch(&mut stream, peer_version).await;
-            return Ok(());
-        }
-    }
-
-    let req: Request = match read_frame_async_with_prefix(&mut stream, &buffered).await {
-        Ok(r) => r,
-        Err(error) => {
-            tracing::debug!(%error, "soldr-daemon: dropping undecodable IPC frame");
-            drain_then_close(&mut stream).await;
-            return Ok(());
-        }
     };
     let _in_flight = if matches!(req, Request::AcquireResidentCapacity { .. }) {
         None
@@ -80,8 +17,8 @@ where
         match Arc::clone(&control.in_flight).try_acquire_owned() {
             Ok(permit) => Some(permit),
             Err(_) => {
-                let _ = write_frame_async(&mut stream, &Response::Error(control_busy_message()))
-                    .await;
+                let _ =
+                    write_frame_async(&mut stream, &Response::Error(control_busy_message())).await;
                 return Ok(());
             }
         }
@@ -116,6 +53,78 @@ where
         _ = reader.read(&mut probe) => {
             tracing::debug!("soldr-daemon: client hung up; abandoning read-only request");
             Ok(())
+        }
+    }
+}
+
+async fn read_control_request<S>(stream: &mut S, control: &mut ControlContext) -> Option<Request>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use running_process::broker::backend_sdk::MuxPoll;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::timeout;
+
+    let mux = soldr_backend_endpoint_mux(control.daemon_identity.clone());
+    let mut prefix = [0_u8; CONTROL_FRAME_HEADER_BYTES];
+    if !matches!(
+        timeout(HANDSHAKE_READ_TIMEOUT, stream.read_exact(&mut prefix)).await,
+        Ok(Ok(_))
+    ) {
+        return None;
+    }
+    let mut buffered = prefix.to_vec();
+    loop {
+        match mux.poll(&buffered) {
+            Ok(MuxPoll::Legacy) => break,
+            Ok(MuxPoll::NeedMoreBytes) => {
+                let mut chunk = [0_u8; 4096];
+                let read = match timeout(HANDSHAKE_READ_TIMEOUT, stream.read(&mut chunk)).await {
+                    Ok(Ok(0)) | Err(_) => return None,
+                    Ok(Ok(n)) => n,
+                    Ok(Err(_)) => return None,
+                };
+                buffered.extend_from_slice(&chunk[..read]);
+            }
+            Ok(MuxPoll::ProbeAnswered { reply, .. }) => {
+                // A probe is how a route is judged live, so it still waits for
+                // `State`: soldr#3169 moves receipt earlier, not readiness.
+                control.state().await?;
+                let _ = timeout(HANDSHAKE_READ_TIMEOUT, stream.write_all(&reply)).await;
+                let _ = timeout(HANDSHAKE_READ_TIMEOUT, stream.flush()).await;
+                return None;
+            }
+            Ok(MuxPoll::Payload { .. }) | Err(_) => {
+                // #1853: never drop a socket with the peer's bytes still
+                // queued — see `drain_then_close`.
+                drain_then_close(stream).await;
+                return None;
+            }
+        }
+    }
+
+    // #1853: check the peer's version explicitly rather than letting the
+    // decode fail. A version mismatch is a known, diagnosable condition, and
+    // reporting it as an opaque transport reset is what made this cost a day
+    // to attribute downstream.
+    if buffered.len() >= CONTROL_FRAME_HEADER_BYTES {
+        let peer_version = u32::from_le_bytes(
+            buffered[4..CONTROL_FRAME_HEADER_BYTES]
+                .try_into()
+                .expect("slice of CONTROL_FRAME_HEADER_BYTES-4 bytes is always 4 bytes wide"),
+        );
+        if peer_version != PROTOCOL_VERSION {
+            reject_version_mismatch(stream, peer_version).await;
+            return None;
+        }
+    }
+
+    match read_frame_async_with_prefix(stream, &buffered).await {
+        Ok(request) => Some(request),
+        Err(error) => {
+            tracing::debug!(%error, "soldr-daemon: dropping undecodable IPC frame");
+            drain_then_close(stream).await;
+            None
         }
     }
 }
@@ -211,9 +220,7 @@ where
             if permits == 0 {
                 let _ = write_frame_async(
                     &mut stream,
-                    &Response::Error(
-                        "resident capacity requires at least one permit".to_string(),
-                    ),
+                    &Response::Error("resident capacity requires at least one permit".to_string()),
                 )
                 .await;
                 return Ok(());
@@ -243,9 +250,7 @@ where
                 Err(error) => {
                     let _ = write_frame_async(
                         &mut stream,
-                        &Response::Error(format!(
-                            "acquire resident compile capacity: {error}"
-                        )),
+                        &Response::Error(format!("acquire resident compile capacity: {error}")),
                     )
                     .await;
                     return Ok(());
@@ -662,15 +667,14 @@ where
                 save_elapsed_ms,
             };
             let db_path = state.db_path.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                cook_index::upsert(&db_path, &key, &entry)
-            })
-            .await
-            .unwrap_or_else(|error| {
-                Err(crate::cache_lib::target_registry::RegistryError::Io(
-                    std::io::Error::other(format!("cook record task failed: {error}")),
-                ))
-            });
+            let result =
+                tokio::task::spawn_blocking(move || cook_index::upsert(&db_path, &key, &entry))
+                    .await
+                    .unwrap_or_else(|error| {
+                        Err(crate::cache_lib::target_registry::RegistryError::Io(
+                            std::io::Error::other(format!("cook record task failed: {error}")),
+                        ))
+                    });
             match result {
                 Ok(()) => {
                     let _ = write_frame_async(&mut stream, &Response::Ack).await;
@@ -765,12 +769,9 @@ mod resident_capacity_tests {
             Response::ResidentCapacityAcquired { permits: 2 }
         ));
         assert!(!dropped.load(Ordering::SeqCst));
-        crate::daemon::ipc::write_frame_async(
-            &mut client,
-            &Request::ReleaseResidentCapacity,
-        )
-        .await
-        .expect("release request");
+        crate::daemon::ipc::write_frame_async(&mut client, &Request::ReleaseResidentCapacity)
+            .await
+            .expect("release request");
         assert!(matches!(
             crate::daemon::ipc::read_frame_async::<_, Response>(&mut client)
                 .await

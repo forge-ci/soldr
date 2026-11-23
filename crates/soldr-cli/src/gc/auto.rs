@@ -224,36 +224,44 @@ fn sweep_stale_scratch(paths: &SoldrPaths, now_ms: i64) -> u64 {
     removed
 }
 
+fn acquire_background_lease(
+    paths: &SoldrPaths,
+    log_path: &std::path::Path,
+) -> Option<crate::cache_lib::build_active::MaintenanceLease> {
+    // Yield to builds while keeping the retry cooldown in effect.
+    if build_activity_active(paths) {
+        tracing::debug!("auto-GC background tick deferred: build active");
+        let _ = append_auto_gc_log_line(
+            log_path,
+            "auto-gc status=deferred reason=build_active stage=preamble",
+        );
+        return None;
+    }
+    match crate::cache_lib::build_active::MaintenanceLease::try_acquire(paths) {
+        Ok(Some(lease)) => Some(lease),
+        Ok(None) => {
+            defer_for_active_build(log_path, "root_lease");
+            None
+        }
+        Err(error) => {
+            let _ = append_auto_gc_log_line(
+                log_path,
+                &format!("auto-gc status=deferred reason=root_lease_failed error={error}"),
+            );
+            None
+        }
+    }
+}
+
 #[expect(clippy::too_many_lines, reason = "baseline, zackees/ci.yml#229")]
 fn run_auto_gc_background(paths: SoldrPaths, log_path: std::path::PathBuf) {
     use crate::cache_lib::auto_gc::DiskFreeProbe as _;
     use crate::cache_lib::auto_gc::VolumeProbe as _;
     let start = std::time::Instant::now();
 
-    // Yield to builds while keeping the retry cooldown in effect.
-    if build_activity_active(&paths) {
-        tracing::debug!("auto-GC background tick deferred: build active");
-        let _ = append_auto_gc_log_line(
-            &log_path,
-            "auto-gc status=deferred reason=build_active stage=preamble",
-        );
+    let Some(maintenance_lease) = acquire_background_lease(&paths, &log_path) else {
         return;
-    }
-    let maintenance_lease =
-        match crate::cache_lib::build_active::MaintenanceLease::try_acquire(&paths) {
-            Ok(Some(lease)) => lease,
-            Ok(None) => {
-                defer_for_active_build(&log_path, "root_lease");
-                return;
-            }
-            Err(error) => {
-                let _ = append_auto_gc_log_line(
-                    &log_path,
-                    &format!("auto-gc status=deferred reason=root_lease_failed error={error}"),
-                );
-                return;
-            }
-        };
+    };
 
     // Issue #1286 (F5): record that a sweep actually STARTED. Before
     // this line the log could only ever contain deferrals and tier
