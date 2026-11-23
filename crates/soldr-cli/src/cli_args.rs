@@ -327,6 +327,11 @@ pub(crate) use crate::builtin_verbs::{
 pub(crate) enum Commands {
     /// Run whole-workspace builds on a remote runner.
     Remote(crate::remote_build::RemoteArgs),
+    /// Pair Soldr with your Forge CI account.
+    Sign {
+        #[command(subcommand)]
+        command: crate::forge_sign_in::SignCommand,
+    },
     /// Build the workspace via soldr's blessed cross-compile path
     ///
     /// `soldr build --target X` is the **blessed-default surface** for

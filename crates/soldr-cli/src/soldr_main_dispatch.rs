@@ -174,6 +174,7 @@ async fn dispatch_state_command(command: Commands, flags: DispatchFlags) -> Resu
     match command {
         Commands::Save(args) => guarded_exit(save_load::run_save(args)),
         Commands::Hydrate(args) => guarded_exit(save_load::run_load(args)),
+        Commands::Sign { command } => crate::forge_sign_in::run(command).await,
         Commands::Status { json } => run_status_command(json, flags.cache_enabled),
         Commands::Clean => cache::clear_zccache_cache(),
         Commands::Purge => cache::purge_soldr_cache(),
