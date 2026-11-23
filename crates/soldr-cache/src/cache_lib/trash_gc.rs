@@ -30,12 +30,39 @@ pub struct SweepReport {
 /// daemon writes on every maintenance pass.
 pub const MAX_REPORTED_REASONS: usize = 5;
 
+/// A separate lock keeps the trash sweeper away from in-flight detachments.
+/// Callers may hold the build lease, so contention must never block.
+pub(super) fn try_trash_reclaim_lock(
+    root: &std::path::Path,
+    shared: bool,
+) -> std::io::Result<Option<std::fs::File>> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(root.join("trash-reclaim.lock"))?;
+    let result = if shared {
+        fs2::FileExt::try_lock_shared(&file)
+    } else {
+        fs2::FileExt::try_lock_exclusive(&file)
+    };
+    match result {
+        Ok(()) => Ok(Some(file)),
+        Err(error) if super::cargo_lock::lock_is_held(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 pub fn sweep_trash(paths: &SoldrPaths) -> std::io::Result<SweepReport> {
     let mut report = SweepReport::default();
     if !paths.root.exists() {
         return Ok(report);
     }
     crate::cache_lib::path_safety::validate_owned_directory(&paths.root, &paths.root)?;
+    let Some(_lease) = try_trash_reclaim_lock(&paths.root, false)? else {
+        return Ok(report);
+    };
     let entries = match std::fs::read_dir(&paths.root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(report),
