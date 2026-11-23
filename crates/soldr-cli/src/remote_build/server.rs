@@ -46,7 +46,13 @@ pub(super) async fn serve(
         .route("/v1/sessions/{id}/artifacts.json", get(get_inventory))
         .route("/v1/sessions/{id}/artifact", get(get_artifact))
         .layer(DefaultBodyLimit::max(wire::MAX_FRAME + 1024 * 1024))
-        .with_state((root.canonicalize()?, auth, slot_limit, artifact_streams));
+        .with_state((
+            root.canonicalize()?,
+            auth,
+            slot_limit,
+            artifact_streams,
+            retention::Connection::default(),
+        ));
     let listener = tokio::net::TcpListener::bind(listen).await?;
     eprintln!(
         "soldr remote listening at http://{}",
