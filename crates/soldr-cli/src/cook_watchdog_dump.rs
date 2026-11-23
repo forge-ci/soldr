@@ -24,6 +24,7 @@ struct ProcessSnapshot {
     pid: u32,
     parent_pid: Option<u32>,
     name: String,
+    exe: Option<PathBuf>,
     cmd: Vec<String>,
     status: String,
     run_time_secs: u64,
@@ -119,6 +120,7 @@ fn live_process_snapshot() -> Vec<ProcessSnapshot> {
             pid: process.pid().as_u32(),
             parent_pid: process.parent().map(sysinfo::Pid::as_u32),
             name: process.name().to_string(),
+            exe: process.exe().map(std::path::Path::to_path_buf),
             cmd: process.cmd().to_vec(),
             status: format!("{:?}", process.status()),
             run_time_secs: process.run_time(),
@@ -140,23 +142,16 @@ fn descendants_of(table: &[ProcessSnapshot], root_pid: u32) -> Vec<&ProcessSnaps
     result
 }
 
-/// Best-effort discovery of soldr daemon/broker processes on the host, for
-/// forensic context alongside the cook child tree. Mirrors the
-/// `name().starts_with("soldr")` filter already used by
-/// `broker_inventory::live_process_table`.
+/// Discover Soldr services for the forensic dump. Always exclude the
+/// watchdog process because attaching would suspend its own timeout.
 fn soldr_service_processes(table: &[ProcessSnapshot], current_pid: u32) -> Vec<&ProcessSnapshot> {
     table
         .iter()
         .filter(|process| {
-            // A debugger attaching to this watchdog's own process would
-            // suspend the thread that drains the debugger's output and
-            // enforces its timeout.
             process.pid != current_pid
-                && process.name.starts_with("soldr")
-                && process
-                    .cmd
-                    .iter()
-                    .any(|arg| arg.contains("daemon") || arg.contains("broker"))
+                && process.exe.as_deref().is_some_and(|exe| {
+                    crate::broker_inventory::Role::of_process(exe, &process.cmd).is_some()
+                })
         })
         .collect()
 }
@@ -285,14 +280,16 @@ mod tests {
             pid,
             parent_pid: None,
             name: name.into(),
+            exe: Some(PathBuf::from(name)),
             cmd: vec![arg.into()],
             status: String::new(),
             run_time_secs: 0,
         };
         let table = [
-            snapshot(10, "soldr-dylint", "--crate-name=zccache_daemon"),
+            snapshot(10, "soldr-daemon", "/bin/soldr-daemon"),
             snapshot(11, "soldr-daemon", "/bin/soldr-daemon"),
-            snapshot(12, "rustc", "--crate-name=zccache_daemon"),
+            snapshot(12, "soldr-dylint", "--crate-name=zccache_daemon"),
+            snapshot(13, "soldr", "--target-dir=daemon-build"),
         ];
 
         let services = soldr_service_processes(&table, 10);
