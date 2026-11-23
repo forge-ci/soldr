@@ -265,6 +265,9 @@ fn supported_args(args: &[String], mode: BuildMode) -> bool {
             | "--tests"
             | "--benches"
                 if value.is_none() => {}
+            "--" if mode == BuildMode::CargoClippy && value.is_none() => {
+                return supported_clippy_lints(args);
+            }
             "--no-run" if mode == BuildMode::CargoTestCompile && value.is_none() => {}
             "--check" | "--host-only" | "--cross-dylint"
                 if mode == BuildMode::Lint && value.is_none() => {}
@@ -294,6 +297,41 @@ fn supported_args(args: &[String], mode: BuildMode) -> bool {
                 }
             }
             _ => return false,
+        }
+    }
+    true
+}
+
+fn supported_clippy_lints<'a>(mut args: impl Iterator<Item = &'a String>) -> bool {
+    while let Some(arg) = args.next() {
+        let name = if let Some((flag, name)) = arg.split_once('=') {
+            if !matches!(flag, "--allow" | "--warn" | "--deny" | "--forbid") {
+                return false;
+            }
+            name
+        } else if matches!(
+            arg.as_str(),
+            "-A" | "-W" | "-D" | "-F" | "--allow" | "--warn" | "--deny" | "--forbid"
+        ) {
+            let Some(name) = args.next() else {
+                return false;
+            };
+            name
+        } else if let Some(name) = ["-A", "-W", "-D", "-F"]
+            .into_iter()
+            .find_map(|flag| arg.strip_prefix(flag))
+        {
+            name
+        } else {
+            return false;
+        };
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'_' | b'-'))
+            || name.starts_with('-')
+        {
+            return false;
         }
     }
     true
@@ -486,6 +524,18 @@ mod tests {
             BuildMode::for_cargo("clippy", &[]),
             Some(BuildMode::CargoClippy)
         );
+        for args in [
+            vec!["--", "-D", "warnings"],
+            vec!["--", "-Dwarnings", "--allow=clippy::match_same_arms"],
+        ] {
+            let args = args.into_iter().map(String::from).collect::<Vec<_>>();
+            assert!(supported_args(&args, BuildMode::CargoClippy));
+            assert!(!supported_args(&args, BuildMode::Cargo));
+        }
+        for args in [vec!["--", "-D"], vec!["--", "--emit=metadata"]] {
+            let args = args.into_iter().map(String::from).collect::<Vec<_>>();
+            assert!(!supported_args(&args, BuildMode::CargoClippy));
+        }
         assert_eq!(BuildMode::for_cargo("test", &[]), None);
         assert_eq!(
             BuildMode::for_cargo("test", &no_run),
