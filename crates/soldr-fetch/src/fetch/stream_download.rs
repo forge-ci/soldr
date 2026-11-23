@@ -244,6 +244,8 @@
 //! for the same terminal reasons it always did.
 
 pub(crate) mod forge_http;
+mod forge_pairing;
+pub use forge_pairing::ForgePairingClient;
 
 use std::io::Write;
 use std::path::Path;
