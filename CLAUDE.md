@@ -32,6 +32,26 @@ Mode is detected automatically from argv[1]: path-to-rustc → cache mode, built
 
 **soldr wraps rustc, NOT cargo.** This is the most important design decision: cargo owns build orchestration, soldr owns per-unit caching. See DESIGN.md "Why no `soldr build`" for rationale. As of #685 (phase 2 of #682) `soldr test` / `soldr clippy` / etc. are accepted as **dispatch shorthand** for `soldr cargo test` / `soldr cargo clippy` — they route through the cargo front door and do not become soldr-native verbs (the `Commands::Cargo` arm is still where the work happens).
 
+## Remote builds run on one worker
+
+Assign each whole build or attestation to one worker through
+[`soldr remote run`](docs/REMOTE_BUILD.md). Keep the workspace, pinned toolchain,
+generated files, Cargo target tree, and compiler cache on that worker. Use the
+E640's CPU and RAM for Cargo's parallel work. On Btrfs, use reflinks to give
+sessions writable copies of warm state. Return logs, attestations, and requested
+artifacts to the client. Use additional machines for independent builds.
+
+We retired the `soldr dist` experiment, which tried to distribute individual
+compiler invocations across machines in the style of distcc or Incredibuild.
+Direct joblets did execute remotely, but the experiment did not establish a
+reliable relay-only build or a performance win. In Rust and native builds, a
+compiler invocation can read build-script outputs, files opened by proc macros,
+headers, libraries, linker scripts, and sysroot files. Maintaining a complete
+input set and synchronized toolchain across workers is necessary for correct
+cache hits, and staging those inputs and transferring outputs can erase the
+parallelism gains. Keep per-compiler distribution out of the build and
+attestation workflow.
+
 ## Two build paths — blessed vs legacy (soldr#1010)
 
 `soldr build --target <triple>` is the **blessed-default surface**; `soldr cargo build --target <triple>` is the **explicit legacy passthrough**. Both invoke cargo under the hood — the difference is the toolchain stack each surface mounts and which behaviors evolve at each level:
