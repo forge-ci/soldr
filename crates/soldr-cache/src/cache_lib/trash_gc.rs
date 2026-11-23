@@ -50,7 +50,10 @@ pub(super) fn try_trash_reclaim_lock(
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
             let metadata = std::fs::symlink_metadata(&path)?;
             if !metadata.is_file() || super::path_safety::is_link_or_reparse(&metadata) {
-                return Err(Error::new(ErrorKind::InvalidInput, "invalid trash lock file"));
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "invalid trash lock file",
+                ));
             }
             options.open(&path)?
         }
