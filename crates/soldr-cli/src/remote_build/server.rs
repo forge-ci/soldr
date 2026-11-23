@@ -16,13 +16,14 @@ use prost::Message;
 
 use crate::platform::{fs::permissions, wait};
 
+use super::access::SessionAccess;
 use super::auth::RunnerAuth;
 use super::slots;
 use super::snapshot::{digest, relative_path};
 use super::wire::{self, Action, Artifact, Artifacts, Blob, Fetch, ResultFrame, Session, Start};
 use super::{artifacts, control, manifest, retention};
 
-type RunnerState = (PathBuf, RunnerAuth, Option<u32>, u8);
+type RunnerState = (PathBuf, RunnerAuth, Option<u32>, u8, retention::Connection);
 
 pub(super) async fn serve(
     listen: std::net::SocketAddr,
@@ -60,7 +61,7 @@ pub(super) async fn serve(
 }
 
 async fn handle(
-    State((root, auth, slot_limit, artifact_streams)): State<RunnerState>,
+    State((root, auth, slot_limit, artifact_streams, worker)): State<RunnerState>,
     ConnectInfo(connection): ConnectInfo<retention::Connection>,
     RoutePath(operation): RoutePath<String>,
     headers: HeaderMap,
@@ -73,23 +74,25 @@ async fn handle(
     {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
-    if !auth.authorized(&headers, operation == "start") {
+    let Some(access) = SessionAccess::authorize(&auth, &headers, operation == "start") else {
         return StatusCode::UNAUTHORIZED.into_response();
-    }
+    };
+    let connection = access.outputs(connection, worker);
     if let Some(id) = operation.strip_prefix("run-stream/") {
         let Ok(id) = key(id, 32) else {
             return StatusCode::BAD_REQUEST.into_response();
         };
         let id = id.to_owned();
-        let output = match connection.allocate_for_stream(&root, &id).await {
+        let output = match access.allocate_for_stream(connection, &root, &id).await {
             Ok(output) => output,
-            Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+            Err(error) => return request_error(error),
         };
         return control::stream_run(move |sink| {
             run_session(&root, &id, slot_limit, Some(sink), &output).map(|_| ())
         });
     }
     match tokio::task::spawn_blocking(move || {
+        access.check_operation(&root, &operation)?;
         if let Some(id) = operation.strip_prefix("run/") {
             let id = key(id, 32)?;
             let output = connection.allocate(&root, id)?;
@@ -105,7 +108,14 @@ async fn handle(
         if let Some(id) = operation.strip_prefix("artifact/") {
             return artifacts::serve(&finished_output(&root, id, &connection)?.path, &body);
         }
-        let data = dispatch(&root, &operation, &body, artifact_streams, &connection)?;
+        let data = dispatch(
+            &root,
+            &operation,
+            &body,
+            artifact_streams,
+            &connection,
+            &access,
+        )?;
         Ok::<_, io::Error>(
             ([("content-type", "application/x-protobuf+zstd")], data).into_response(),
         )
@@ -113,7 +123,7 @@ async fn handle(
     .await
     {
         Ok(Ok(response)) => response,
-        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+        Ok(Err(error)) => request_error(error),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }
 }
@@ -129,16 +139,18 @@ struct ArtifactQuery {
 }
 
 async fn get_inventory(
-    State((root, auth, _, limit)): State<RunnerState>,
+    State((root, auth, _, limit, worker)): State<RunnerState>,
     ConnectInfo(connection): ConnectInfo<retention::Connection>,
     RoutePath(id): RoutePath<String>,
     Query(query): Query<InventoryQuery>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    if !auth.authorized(&headers, false) {
+    let Some(access) = SessionAccess::authorize(&auth, &headers, false) else {
         return StatusCode::UNAUTHORIZED.into_response();
-    }
+    };
+    let connection = access.outputs(connection, worker);
     artifact_response(move || {
+        access.check(&root, &id)?;
         let globs = match query.globs {
             Some(globs) => serde_json::from_str(&globs)?,
             None => vec!["**".into()],
@@ -151,15 +163,16 @@ async fn get_inventory(
 }
 
 async fn get_artifact(
-    State((root, auth, _, _)): State<RunnerState>,
+    State((root, auth, _, _, worker)): State<RunnerState>,
     ConnectInfo(connection): ConnectInfo<retention::Connection>,
     RoutePath(id): RoutePath<String>,
     Query(query): Query<ArtifactQuery>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    if !auth.authorized(&headers, false) {
+    let Some(access) = SessionAccess::authorize(&auth, &headers, false) else {
         return StatusCode::UNAUTHORIZED.into_response();
-    }
+    };
+    let connection = access.outputs(connection, worker);
     let compress = headers
         .get_all("accept-encoding")
         .iter()
@@ -175,6 +188,7 @@ async fn get_artifact(
                     .is_some_and(|q| q > 0.0 && q <= 1.0)
         });
     artifact_response(move || {
+        access.check(&root, &id)?;
         let output = finished_output(&root, &id, &connection)?;
         artifacts::serve_file(&output.path, &query.path, compress, false)
     })
@@ -186,11 +200,16 @@ async fn artifact_response(
 ) -> axum::response::Response {
     match tokio::task::spawn_blocking(task).await {
         Ok(Ok(response)) => response,
-        Ok(Err(error)) if error.kind() == io::ErrorKind::NotFound => {
-            StatusCode::NOT_FOUND.into_response()
-        }
-        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+        Ok(Err(error)) => request_error(error),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+fn request_error(error: io::Error) -> axum::response::Response {
+    if error.kind() == io::ErrorKind::NotFound {
+        StatusCode::NOT_FOUND.into_response()
+    } else {
+        (StatusCode::BAD_REQUEST, error.to_string()).into_response()
     }
 }
 
@@ -222,7 +241,7 @@ fn finished_output(
     })
 }
 
-fn key(value: &str, len: usize) -> io::Result<&str> {
+pub(super) fn key(value: &str, len: usize) -> io::Result<&str> {
     if value.len() == len
         && value
             .bytes()
@@ -240,6 +259,7 @@ fn dispatch(
     body: &[u8],
     artifact_streams: u8,
     connection: &retention::Connection,
+    access: &SessionAccess,
 ) -> io::Result<Vec<u8>> {
     let parts: Vec<_> = operation.split('/').collect();
     match parts.as_slice() {
@@ -249,7 +269,7 @@ fn dispatch(
                 .triple(),
             working_tree_builds: true,
         }),
-        ["start"] => start(root, wire::decode(body)?),
+        ["start"] => start(root, wire::decode(body)?, access),
         ["blob", hash] => store_blob(root, hash, wire::decode(body)?),
         ["workspace", id] => store_workspace(root, key(id, 32)?, wire::decode(body)?),
         ["artifact-list", id] => artifacts::inventory(
@@ -284,7 +304,7 @@ fn store_workspace(root: &Path, id: &str, batch: wire::WorkspaceBatch) -> io::Re
     wire::encode(&Blob::default())
 }
 
-fn start(root: &Path, request: Start) -> io::Result<Vec<u8>> {
+fn start(root: &Path, request: Start, access: &SessionAccess) -> io::Result<Vec<u8>> {
     if request.commit.len() != 40 && request.commit.len() != 64 {
         return Err(io::Error::other("invalid commit ID"));
     }
@@ -327,6 +347,7 @@ fn start(root: &Path, request: Start) -> io::Result<Vec<u8>> {
     let id = hex::encode(random);
     let directory = root.join("sessions").join(&id);
     fs::create_dir(&directory)?;
+    access.record(&directory)?;
     fs::write(
         directory.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest)?,

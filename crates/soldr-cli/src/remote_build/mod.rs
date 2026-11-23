@@ -1,5 +1,6 @@
 //! Whole-workspace builds on a trusted runner reached over an SSH tunnel.
 
+mod access;
 mod artifacts;
 mod auth;
 pub(crate) mod auto;

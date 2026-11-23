@@ -9,12 +9,12 @@ fn remote_worktree_session_acknowledges_snapshot_without_a_manifest() {
         working_tree: true,
         ..Start::default()
     };
-    let result = start(root.path(), request.clone()).unwrap();
+    let result = start(root.path(), request.clone(), &SessionAccess::default()).unwrap();
     let session: Session = wire::decode(&result).unwrap();
     assert!(session.working_tree_accepted);
     assert!(!session.manifest_accepted);
     request.manifest_json = Some(b"null".to_vec());
-    assert!(start(root.path(), request).is_err());
+    assert!(start(root.path(), request, &SessionAccess::default()).is_err());
 }
 
 #[test]
@@ -36,6 +36,7 @@ fn every_session_persists_its_manifest_before_source_upload() {
                 manifest_json: accepted.then(|| serde_json::to_vec(&value).unwrap()),
                 ..Start::default()
             },
+            &SessionAccess::default(),
         )
         .unwrap();
         let session: Session = wire::decode(&response).unwrap();

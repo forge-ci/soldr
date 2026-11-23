@@ -23,10 +23,10 @@ verified successful artifacts in the local target directory.
 
 Run the worker in its dedicated build environment with
 `soldr remote serve --forge-key-file /path/to/key --root /path/to/state`.
-Put a TLS endpoint in front of the loopback listener. The endpoint must
-preserve a dedicated upstream HTTP/2 connection for each client connection
-through artifact download. The worker key must match the service's configured
-worker key. A grant can start builds for 15 minutes and access sessions for
+Put an HTTPS endpoint in front of the loopback listener. Signed sessions
+authorize build and artifact requests with the original grant, so the proxy can
+open or reuse upstream connections. The worker key must match the service's
+configured worker key. A grant can start builds for 15 minutes and access sessions for
 four hours after that. Configure the worker origin only once its HTTPS
 endpoint is reachable.
 
@@ -80,10 +80,11 @@ Each stream sends binary Zstandard at level 9. The client verifies the
 uncompressed size and SHA-256 of every file before publishing the
 download directory.
 
-Downloads start after the runner reports the build result. New session
-artifacts are available only on the HTTP connection that started the
-build. The runner stages them under `artifact-tmp/` and starts a four-hour
-countdown when it publishes the artifacts. Disconnecting releases the
+Downloads start after the runner reports the build result. For SSH tunnel
+sessions, artifacts stay on the HTTP connection that started the build.
+Signed Forge CI sessions can fetch artifacts across connections with their
+original grant. The runner stages archives under `artifact-tmp/` and starts a
+four-hour countdown at publication. Disconnecting an SSH tunnel releases its
 archive as soon as in-flight work lets go of it. The runner also checks
 for expired directories left by a crash at startup and once a minute.
 Use `--fetch-out` and `--fetch` on the original run to save the files locally.
