@@ -88,13 +88,20 @@ fn run_signal_case(signal: TestSignal, debug: bool, ignore: bool) {
         "interruption must fail"
     );
     let deadline = Instant::now() + Duration::from_secs(3);
-    while cleanup.0[1..].iter().any(|pid| inspect::is_alive(*pid)) && Instant::now() < deadline {
+    loop {
+        let survivor = cleanup.0[1..]
+            .iter()
+            .copied()
+            .find(|pid| inspect::is_alive(*pid));
+        let Some(pid) = survivor else {
+            break;
+        };
+        assert!(
+            Instant::now() < deadline,
+            "PID {pid} survived {signal:?} (cargo PID {cargo_pid})"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(
-        cleanup.0[1..].iter().all(|pid| !inspect::is_alive(*pid)),
-        "cargo {cargo_pid} survived {signal:?}"
-    );
     assert!(output.pipes_closed, "cargo retained its inherited pipes");
     cleanup.0.clear();
     if signal != TestSignal::Kill {
