@@ -42,6 +42,9 @@ fn run_signal_case(signal: TestSignal, debug: bool, ignore: bool) {
     command
         .args(["--no-cache", "cargo", "build"])
         .current_dir(&workspace)
+        // ci-test keeps its stages in one group. This fixture exercises Cargo
+        // in a separate group owned by the nested Soldr process.
+        .env_remove("SOLDR_INTERNAL_INHERIT_PROCESS_GROUP")
         .env("SOLDR_TEST_CARGO_BIN", &cargo)
         .env("SOLDR_TEST_RUSTC_BIN", &rustc)
         .env("SOLDR_CACHE_DIR", root.join("cache"))
