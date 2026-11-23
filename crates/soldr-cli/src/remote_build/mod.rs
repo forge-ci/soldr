@@ -370,6 +370,7 @@ impl Client {
                 &self.token,
                 &[("path", "attestation.json")],
                 wire::MAX_FRAME + 1024 * 1024,
+                "zstd",
             ),
         )
         .await

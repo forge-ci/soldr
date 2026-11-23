@@ -238,6 +238,7 @@ pub(super) async fn download(
             &client.token,
             &[("globs", &globs)],
             wire::MAX_FRAME,
+            "identity",
         )
         .await?;
     let list: Inventory = serde_json::from_slice(&list)?;

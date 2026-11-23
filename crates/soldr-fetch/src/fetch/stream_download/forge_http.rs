@@ -82,15 +82,18 @@ impl RemoteBuildHttpClient {
         Self::read_response(response, max_response).await
     }
 
-    /// Fetch a resource with a bounded response body.
+    /// Fetch a bounded response with the specified encoding and return its raw bytes.
     pub async fn get(
         &self,
         path: &str,
         token: &str,
         query: &[(&str, &str)],
         max_response: usize,
+        accept_encoding: &str,
     ) -> std::io::Result<Vec<u8>> {
-        let response = self.get_stream(path, token, query).await?;
+        let response = self
+            .get_with_encoding(path, token, query, accept_encoding)
+            .await?;
         Self::read_response(response, max_response).await
     }
 
@@ -101,13 +104,23 @@ impl RemoteBuildHttpClient {
         token: &str,
         query: &[(&str, &str)],
     ) -> std::io::Result<reqwest::Response> {
+        self.get_with_encoding(path, token, query, "zstd").await
+    }
+
+    async fn get_with_encoding(
+        &self,
+        path: &str,
+        token: &str,
+        query: &[(&str, &str)],
+        accept_encoding: &str,
+    ) -> std::io::Result<reqwest::Response> {
         if !path.starts_with('/') {
             return Err(std::io::Error::other("HTTP service path must begin with /"));
         }
         self.http
             .get(format!("{}{path}", self.origin))
             .query(query)
-            .header("accept-encoding", "zstd")
+            .header("accept-encoding", accept_encoding)
             .bearer_auth(token)
             .send()
             .await
