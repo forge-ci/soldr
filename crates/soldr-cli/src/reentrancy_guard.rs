@@ -310,17 +310,13 @@ pub(crate) fn enforce_and_mark(raw_args: &[String], compiler_callback: bool) -> 
     let wrapper_invocation = raw_args
         .get(1)
         .is_some_and(|arg| crate::wrapper::is_wrapper_invocation(arg));
+    let subcommand = raw_args.get(1).map(String::as_str);
+    let lint_extra_command = matches!(subcommand, Some("cargo" | "dylint" | "rustup"));
     let sanctioned_edges: Vec<&str> = SANCTIONED_EDGE_ENV_VARS
         .iter()
         .copied()
         .filter(|name| std::env::var_os(name).is_some())
-        .filter(|name| {
-            *name != LINT_EXTRA_EDGE
-                || matches!(
-                    raw_args.get(1).map(String::as_str),
-                    Some("cargo" | "dylint" | "rustup")
-                )
-        })
+        .filter(|name| *name != LINT_EXTRA_EDGE || lint_extra_command)
         .collect();
     let parent_role = std::env::var(IN_SOLDR_ROLE_ENV)
         .ok()
