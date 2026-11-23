@@ -263,6 +263,8 @@ fn run_auto_gc_background(paths: SoldrPaths, log_path: std::path::PathBuf) {
         return;
     };
 
+    let maintenance_started = std::time::Instant::now();
+
     // Issue #1286 (F5): record that a sweep actually STARTED. Before
     // this line the log could only ever contain deferrals and tier
     // actions, so "GC ran but found nothing to do" and "GC never ran"
@@ -432,6 +434,17 @@ fn run_auto_gc_background(paths: SoldrPaths, log_path: std::path::PathBuf) {
         }
     }
 
+    // Detached trash has no live build paths. Recursive deletion there
+    // must not hold the root-wide build lease.
+    drop(maintenance_lease);
+    let _ = append_auto_gc_log_line(
+        &log_path,
+        &format!(
+            "auto-gc stage=root_lease_released elapsed_ms={}",
+            maintenance_started.elapsed().as_millis()
+        ),
+    );
+
     // `release-worktree` trash sweep (#710 follow-up). Runs every
     // throttle window so the per-volume `~/.soldr/trash-*/` buckets
     // get reclaimed without requiring the user to call
@@ -451,7 +464,6 @@ fn run_auto_gc_background(paths: SoldrPaths, log_path: std::path::PathBuf) {
         }
     }
 
-    drop(maintenance_lease);
     run_stale_target_pass(&paths, &validated, &log_path);
 
     if !validated.enabled {
