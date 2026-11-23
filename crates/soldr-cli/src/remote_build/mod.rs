@@ -1,8 +1,10 @@
-//! Whole-workspace builds on a trusted runner reached over an SSH tunnel.
+//! Whole-workspace builds on a trusted runner.
 
 mod artifacts;
 mod control;
 mod manifest;
+mod oauth;
+mod peer;
 mod retention;
 mod server;
 mod slots;
@@ -23,19 +25,39 @@ use self::wire::{Action, Blob, Session, Start};
 pub(crate) struct RemoteArgs {
     /// File containing the same randomly generated token on client and runner.
     #[arg(long)]
-    token_file: PathBuf,
+    token_file: Option<PathBuf>,
     #[command(subcommand)]
     command: RemoteCommand,
 }
 
 #[derive(Subcommand)]
 enum RemoteCommand {
+    /// Create or read a persistent peer identity and print its public ID.
+    PeerId {
+        #[arg(long)]
+        key: PathBuf,
+    },
+    /// Maintain a peer connection and forward local HTTP/2 connections to it.
+    Connect {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        runner: iroh::EndpointId,
+        /// Route through Forge even when a direct UDP path is available.
+        #[arg(long)]
+        relay_only: bool,
+        #[arg(long, default_value = "127.0.0.1:7744")]
+        listen: SocketAddr,
+    },
     /// Serve remote build sessions on a loopback interface.
     Serve {
         #[arg(long, default_value = "127.0.0.1:7744")]
         listen: SocketAddr,
         #[arg(long)]
         root: PathBuf,
+        /// Persistent peer key. Enables the Forge relay transport.
+        #[arg(long)]
+        peer_key: Option<PathBuf>,
         /// Override the automatic slot count. Zero disables warm slots.
         #[arg(long, value_parser = clap::value_parser!(u32).range(0..=1024))]
         slots: Option<u32>,
@@ -89,20 +111,31 @@ enum BuildAction {
 }
 
 pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
-    let token = std::fs::read_to_string(args.token_file)?;
+    let command = match args.command {
+        RemoteCommand::PeerId { key } => {
+            println!("{}", peer::identity(&key)?.public());
+            return Ok(0);
+        }
+        RemoteCommand::Connect {
+            key,
+            runner,
+            listen,
+            relay_only,
+        } => {
+            return peer::connect(&key, runner, listen, relay_only).await;
+        }
+        command => command,
+    };
+    let token = read_token(args.token_file)?;
     let token = token.trim();
-    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(io::Error::other(
-            "Remote build token file must contain 64 hexadecimal characters.",
-        ));
-    }
-    match args.command {
+    match command {
         RemoteCommand::Serve {
             listen,
             root,
             slots,
             artifact_streams,
-        } => server::serve(listen, root, token, slots, artifact_streams).await,
+            peer_key,
+        } => serve(listen, root, token, slots, artifact_streams, peer_key).await,
         RemoteCommand::Run {
             endpoint,
             attestation,
@@ -169,6 +202,42 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             artifacts::download(&client, &session, &out, globs).await?;
             Ok(0)
         }
+        RemoteCommand::PeerId { .. } | RemoteCommand::Connect { .. } => unreachable!(),
+    }
+}
+
+fn read_token(path: Option<PathBuf>) -> io::Result<String> {
+    let token_file = path.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--token-file is required for serve, run and fetch",
+        )
+    })?;
+    let token = std::fs::read_to_string(token_file)?;
+    if token.trim().len() != 64 || !token.trim().bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(io::Error::other(
+            "Remote build token file must contain 64 hexadecimal characters.",
+        ));
+    }
+    Ok(token)
+}
+
+async fn serve(
+    listen: SocketAddr,
+    root: PathBuf,
+    token: &str,
+    slots: Option<u32>,
+    artifact_streams: u8,
+    peer_key: Option<PathBuf>,
+) -> io::Result<i32> {
+    let listener = peer::loopback_listener(listen).await?;
+    let address = listener.local_addr()?;
+    let serve = server::serve(listener, root, token, slots, artifact_streams);
+    if let Some(key) = peer_key {
+        let (code, ()) = tokio::try_join!(serve, peer::serve(&key, address))?;
+        Ok(code)
+    } else {
+        serve.await
     }
 }
 

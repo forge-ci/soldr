@@ -51,7 +51,41 @@ skip = [
     { name = "serde_spanned", version = "=1.1.3" },
     { name = "winnow", version = "=1.0.5" },
     { name = "digest", version = "=0.11.3" },
-    { name = "sha2", version = "=0.11.0" },
+    { name = "sha2", version = "=0.11.1" },
+    # Iroh 1.5 requires reqwest 0.13 and wasm-streams 0.5. The existing
+    # Soldr HTTP client still uses reqwest 0.12 and wasm-streams 0.4.
+    { name = "reqwest", version = "=0.13.5" },
+    { name = "wasm-streams", version = "=0.5.0" },
+    # Iroh's network stack requires newer APIs while its resolver, netdev
+    # and the existing Soldr dependency graph still pin the other versions.
+    { name = "base64", version = "=0.23.1" },
+    { name = "lru", version = "=0.19.1" },
+    { name = "strum", version = "=0.28.0" },
+    { name = "strum_macros", version = "=0.28.0" },
+    # Iroh-relay's num_enum uses the TOML 1.x proc-macro-crate stack.
+    { name = "toml_edit", version = "=0.25.20+spec-1.1.0" },
+    # netdev uses JNI 0.21 (jni-sys 0.3 and thiserror 1); Iroh's DNS
+    # and rustls platform verifier use JNI 0.22.
+    { name = "jni", version = "=0.21.1" },
+    { name = "jni-sys", version = "=0.3.1" },
+    { name = "thiserror", version = "=1.0.69" },
+    { name = "thiserror-impl", version = "=1.0.69" },
+    # netdev uses the windows 0.100 family. Soldr's Windows platform
+    # layer and existing dependencies still use the older support APIs.
+    { name = "windows-implement", version = "=0.100.0" },
+    { name = "windows-interface", version = "=0.100.0" },
+    { name = "windows-link", version = "=0.100.0" },
+    { name = "windows-result", version = "=0.100.0" },
+    { name = "windows-strings", version = "=0.100.0" },
+    # JNI 0.21 pins windows-sys 0.45 (target crates 0.42); sysinfo uses 0.52.
+    { name = "windows-targets", version = "=0.42.2" },
+    { name = "windows_aarch64_gnullvm", version = "=0.42.2" },
+    { name = "windows_aarch64_msvc", version = "=0.42.2" },
+    { name = "windows_i686_gnu", version = "=0.42.2" },
+    { name = "windows_i686_msvc", version = "=0.42.2" },
+    { name = "windows_x86_64_gnu", version = "=0.42.2" },
+    { name = "windows_x86_64_gnullvm", version = "=0.42.2" },
+    { name = "windows_x86_64_msvc", version = "=0.42.2" },
     # errno/rustix/tempfile still cap at 0.52, reached only through
     # prost-build's build-dependency tree (amalgamated zccache-protocol and
     # running-process). The #2406 convergence covered the runtime tree;

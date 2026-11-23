@@ -17,12 +17,11 @@ where
     let stdout_len = body.stdout.len();
     let stderr_len = body.stderr.len();
     let mut stdout_chunks = 0usize;
-    let mut stderr_chunks = 0usize;
 
     let wire_stdout_started = std::time::Instant::now();
     for chunk in body.stdout.chunks(CHUNK_BYTES) {
-        if let Err(err) = sink.emit_stdout_chunk(chunk).await {
-            return Err(crate::daemon::disconnect::report_reply_write_failure(
+        sink.emit_stdout_chunk(chunk).await.map_err(|err| {
+            crate::daemon::disconnect::report_reply_write_failure(
                 paths,
                 compile_id,
                 lifecycle,
@@ -30,8 +29,8 @@ where
                 "stdout_chunk",
                 err,
                 body.exit_code,
-            ));
-        }
+            )
+        })?;
         stdout_chunks += 1;
         tracing::debug!(
             target: "soldr::daemon::compile_stream",
@@ -46,32 +45,8 @@ where
         compile_id,
     );
 
-    let wire_stderr_started = std::time::Instant::now();
-    for chunk in body.stderr.chunks(CHUNK_BYTES) {
-        if let Err(err) = sink.emit_stderr_chunk(chunk).await {
-            return Err(crate::daemon::disconnect::report_reply_write_failure(
-                paths,
-                compile_id,
-                lifecycle,
-                inner_started,
-                "stderr_chunk",
-                err,
-                body.exit_code,
-            ));
-        }
-        stderr_chunks += 1;
-        tracing::debug!(
-            target: "soldr::daemon::compile_stream",
-            bytes = chunk.len(),
-            chunk_index = stderr_chunks - 1,
-            "stderr chunk emitted",
-        );
-    }
-    crate::daemon::compile_trace::record(
-        "wire_stderr",
-        wire_stderr_started.elapsed().as_micros() as u64,
-        compile_id,
-    );
+    let stderr_chunks =
+        stream_compile_stderr(sink, body, paths, compile_id, lifecycle, inner_started).await?;
 
     tracing::debug!(
         target: "soldr::daemon::compile_stream",
@@ -115,6 +90,44 @@ where
     res
 }
 
+async fn stream_compile_stderr<Sink: crate::daemon::compile_sink::CompileOutputSink>(
+    sink: &mut Sink,
+    body: &crate::daemon::protocol::CompileResponseBody,
+    paths: &crate::core::SoldrPaths,
+    compile_id: &str,
+    lifecycle: Option<&crate::daemon::protocol::CompileLifecycle>,
+    inner_started: std::time::Instant,
+) -> std::io::Result<usize> {
+    let mut stderr_chunks = 0usize;
+    let wire_stderr_started = std::time::Instant::now();
+    for chunk in body.stderr.chunks(CHUNK_BYTES) {
+        sink.emit_stderr_chunk(chunk).await.map_err(|err| {
+            crate::daemon::disconnect::report_reply_write_failure(
+                paths,
+                compile_id,
+                lifecycle,
+                inner_started,
+                "stderr_chunk",
+                err,
+                body.exit_code,
+            )
+        })?;
+        stderr_chunks += 1;
+        tracing::debug!(
+            target: "soldr::daemon::compile_stream",
+            bytes = chunk.len(),
+            chunk_index = stderr_chunks - 1,
+            "stderr chunk emitted",
+        );
+    }
+    crate::daemon::compile_trace::record(
+        "wire_stderr",
+        wire_stderr_started.elapsed().as_micros() as u64,
+        compile_id,
+    );
+    Ok(stderr_chunks)
+}
+
 /// Monotonic per-daemon compile counter. The id is stable within one
 /// daemon process and meaningless across restarts — exactly the scope
 /// the `SOLDR_DAEMON_TRACE` JSONL is designed for.
@@ -152,7 +165,12 @@ fn hex_lower(bytes: &[u8; 32]) -> String {
 /// control-request clock, so without this a build running past the idle
 /// timeout lost its daemon mid-flight and every in-flight compile saw
 /// "SESSION relay closed before Exit".
-fn idle_exit_due(idle_for: Duration, idle_timeout: Duration, inflight_compiles: usize, maintenance_active: bool) -> bool {
+fn idle_exit_due(
+    idle_for: Duration,
+    idle_timeout: Duration,
+    inflight_compiles: usize,
+    maintenance_active: bool,
+) -> bool {
     inflight_compiles == 0 && !maintenance_active && idle_for >= idle_timeout
 }
 
@@ -166,7 +184,12 @@ async fn run_idle_watchdog(state: Arc<State>, idle_timeout: Duration) {
             state.touch_activity();
             continue;
         }
-        if idle_exit_due(state.idle_for(), idle_timeout, inflight, state.maintenance_activity.is_active()) {
+        if idle_exit_due(
+            state.idle_for(),
+            idle_timeout,
+            inflight,
+            state.maintenance_activity.is_active(),
+        ) {
             // Tag the exit reason BEFORE notifying so the main task's
             // post-shutdown lifecycle JSONL emit picks `died-idle`.
             state.exit_via_idle.store(true, Ordering::Relaxed);
@@ -226,7 +249,12 @@ mod idle_watchdog_tests {
     #[test]
     fn an_idle_daemon_exits_only_after_the_timeout() {
         let timeout = Duration::from_secs(1800);
-        assert!(!idle_exit_due(timeout - Duration::from_secs(1), timeout, 0, false));
+        assert!(!idle_exit_due(
+            timeout - Duration::from_secs(1),
+            timeout,
+            0,
+            false
+        ));
         assert!(idle_exit_due(timeout, timeout, 0, false));
     }
 }

@@ -41,6 +41,7 @@ fs2 = { workspace = true }
 getrandom = "0.4"
 globset = "0.4"
 hex = { workspace = true }
+iroh = { version = "1.5.0", default-features = false, features = ["tls-ring"] }
 interprocess = { version = "2", features = ["tokio"] }
 jwalk = { workspace = true }
 prost = { workspace = true }
@@ -98,9 +99,9 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+reqwest = { workspace = true }
 soldr-platform = { path = "../soldr-platform" }
 filetime = { workspace = true }
-reqwest = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 # `start_paused = true` for cook_watchdog's non-real-time async tests.
