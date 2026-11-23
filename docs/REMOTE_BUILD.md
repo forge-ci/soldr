@@ -7,8 +7,8 @@ peer connection or an SSH tunnel between machines.
 
 ## Forge CI pairing
 
-Run `soldr sign in` and approve the pairing code with GitHub at
-`https://forge-ci.com/soldr/pair`. Once Forge CI has a worker configured,
+Run `soldr pair` and approve the prefilled pairing in your browser with GitHub.
+`soldr sign in` uses the same pairing flow. Once Forge CI has a worker configured,
 `soldr remote run build` uses the saved account to request a worker grant.
 The worker receives that grant over HTTPS and never sees the device credential.
 
@@ -26,7 +26,8 @@ verified successful artifacts in the local target directory.
 
 Plain `soldr lint` delegates the Rust suite from a supported Git workspace root
 after pairing and writes the worker's result to `target/attestation.json`.
-The worker checks formatting without changing files in the client checkout.
+When lint would normally fix formatting, Soldr runs that step locally before
+sending the worktree. The worker then checks formatting.
 If no compatible worker is available, lint runs locally. Repository extra
 commands and the explicit `lint rust --attest` evidence workflow run locally.
 
