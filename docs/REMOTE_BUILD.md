@@ -24,6 +24,12 @@ invocation is unsupported.
 After the remote build starts, Soldr returns its result and installs the
 verified successful artifacts in the local target directory.
 
+Plain `soldr lint` delegates the Rust suite from a supported Git workspace root
+after pairing and writes the worker's result to `target/attestation.json`.
+When enabled, formatting fixes run locally before the working tree is sent.
+If no compatible worker is available, lint runs locally. Repository extra
+commands and the explicit `lint rust --attest` evidence workflow run locally.
+
 Run the worker in its dedicated build environment with
 `soldr remote serve --forge-key-file /path/to/key --root /path/to/state`.
 Put an HTTPS endpoint in front of the loopback listener. Signed sessions

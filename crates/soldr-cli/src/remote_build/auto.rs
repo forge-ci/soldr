@@ -1,7 +1,7 @@
 //! Dispatch supported ordinary builds to the signed-in Forge CI worker.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use cap_fs_ext::DirExt;
@@ -20,6 +20,7 @@ pub(crate) enum BuildMode {
     CargoCheck,
     CargoClippy,
     CargoTestCompile,
+    Lint,
 }
 
 impl BuildMode {
@@ -40,6 +41,7 @@ impl BuildMode {
             Self::CargoCheck => Action::CargoCheck,
             Self::CargoClippy => Action::CargoClippy,
             Self::CargoTestCompile => Action::CargoTestCompile,
+            Self::Lint => Action::Lint,
         }
     }
 }
@@ -60,17 +62,75 @@ pub(crate) async fn try_build(
     cache_enabled: bool,
     mode: BuildMode,
 ) -> io::Result<Option<i32>> {
+    let Some((client, root)) = find_worker(args, cache_enabled, mode).await? else {
+        return Ok(None);
+    };
+    let Some(session) = start_worktree(&client, &root, args, mode).await? else {
+        return Ok(None);
+    };
+    eprintln!("Forge CI build session {}", session.id);
+    let code = match control::receive(&client, &session.id).await {
+        Err(error) if control::terminal_blocked(&error) => return Ok(Some(1)),
+        result => result?,
+    };
+    if code == 0 {
+        download_target(&root, &client, &session.id).await?;
+    }
+    Ok(Some(code))
+}
+
+pub(crate) struct LintWorker {
+    client: Client,
+    root: PathBuf,
+}
+
+impl LintWorker {
+    pub(crate) async fn connect(args: &[String], cache_enabled: bool) -> io::Result<Option<Self>> {
+        if crate::core::flag("CARGO_NET_OFFLINE") {
+            return Ok(None);
+        }
+        let flags = match args.split_first() {
+            Some((suite, flags)) if suite == "rust" => flags,
+            _ => args,
+        };
+        Ok(find_worker(flags, cache_enabled, BuildMode::Lint)
+            .await?
+            .map(|(client, root)| Self { client, root }))
+    }
+
+    pub(crate) async fn run(self, args: &[String]) -> io::Result<Option<i32>> {
+        let mut remote_args = args.to_vec();
+        if remote_args.first().is_none_or(|arg| arg != "rust") {
+            remote_args.insert(0, "rust".into());
+        }
+        if !remote_args.iter().any(|arg| arg == "--check") {
+            remote_args.push("--check".into());
+        }
+        let Some(session) =
+            start_worktree(&self.client, &self.root, &remote_args, BuildMode::Lint).await?
+        else {
+            return Ok(None);
+        };
+        eprintln!("Forge CI lint session {}", session.id);
+        let path = self.root.join("target/attestation.json");
+        let code = match self.client.finish_run(&session.id, &path).await {
+            Err(error) if control::terminal_blocked(&error) => return Ok(Some(1)),
+            result => result?,
+        };
+        crate::exit_guard::mark_spoke();
+        eprintln!("Forge CI lint attestation: {}", path.display());
+        Ok(Some(code))
+    }
+}
+
+async fn find_worker(
+    args: &[String],
+    cache_enabled: bool,
+    mode: BuildMode,
+) -> io::Result<Option<(Client, PathBuf)>> {
     if !cache_enabled || !can_delegate(args, mode) {
         return Ok(None);
     }
-    let client = match worker(mode).await {
-        Ok(Some(client)) => client,
-        Ok(None) => return Ok(None),
-        Err(error) => {
-            eprintln!("Forge CI worker unavailable ({error}). Building locally.");
-            return Ok(None);
-        }
-    };
     let cwd = std::env::current_dir()?;
     let Ok(root) = snapshot::worktree_root(&cwd) else {
         return Ok(None);
@@ -82,14 +142,29 @@ pub(crate) async fn try_build(
     {
         return Ok(None);
     }
-    let snapshot = match snapshot::capture_worktree(&root) {
+    match worker(mode).await {
+        Ok(client) => Ok(client.map(|client| (client, root))),
+        Err(error) => {
+            eprintln!("Forge CI worker unavailable ({error}). Running locally.");
+            Ok(None)
+        }
+    }
+}
+
+async fn start_worktree(
+    client: &Client,
+    root: &Path,
+    args: &[String],
+    mode: BuildMode,
+) -> io::Result<Option<super::wire::Session>> {
+    let snapshot = match snapshot::capture_worktree(root) {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            eprintln!("Forge CI could not capture this worktree ({error}). Building locally.");
+            eprintln!("Forge CI could not capture this worktree ({error}). Running locally.");
             return Ok(None);
         }
     };
-    let session = client
+    client
         .start_session(
             Start {
                 commit: snapshot.commit,
@@ -105,16 +180,8 @@ pub(crate) async fn try_build(
             },
             snapshot.blobs,
         )
-        .await?;
-    eprintln!("Forge CI build session {}", session.id);
-    let code = match control::receive(&client, &session.id).await {
-        Err(error) if control::terminal_blocked(&error) => return Ok(Some(1)),
-        result => result?,
-    };
-    if code == 0 {
-        download_target(&root, &client, &session.id).await?;
-    }
-    Ok(Some(code))
+        .await
+        .map(Some)
 }
 
 async fn worker(mode: BuildMode) -> io::Result<Option<Client>> {
@@ -136,7 +203,7 @@ fn supports_build(capabilities: &Capabilities, host: &str, mode: BuildMode) -> b
     capabilities.working_tree_builds
         && capabilities.host == host
         && match mode {
-            BuildMode::Blessed | BuildMode::Cargo => true,
+            BuildMode::Blessed | BuildMode::Cargo | BuildMode::Lint => true,
             BuildMode::CargoCheck => capabilities.cargo_check,
             BuildMode::CargoClippy | BuildMode::CargoTestCompile => capabilities
                 .compile_actions
@@ -183,6 +250,8 @@ fn supported_args(args: &[String], mode: BuildMode) -> bool {
             | "--benches"
                 if value.is_none() => {}
             "--no-run" if mode == BuildMode::CargoTestCompile && value.is_none() => {}
+            "--check" | "--host-only" | "--cross-dylint"
+                if mode == BuildMode::Lint && value.is_none() => {}
             "--target" => {
                 if !value
                     .or_else(|| args.next().map(String::as_str))
