@@ -163,6 +163,21 @@ mod sweep_reporting_tests {
     // soldr#2199: a drained bucket is residue. Leaving it reads as "trash
     // still pending" to anyone inspecting the root.
     #[test]
+    fn trash_lock_does_not_create_a_dangling_link_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("soldr");
+        std::fs::create_dir(&root).unwrap();
+        let outside = temp.path().join("outside");
+        let link = root.join("trash-reclaim.lock");
+        if crate::platform::fs::links::create(&outside.to_string_lossy(), &link, false).is_err() {
+            return;
+        }
+
+        assert!(try_trash_reclaim_lock(&root, true).is_err());
+        assert!(!outside.exists());
+    }
+
+    #[test]
     fn an_emptied_bucket_is_removed() {
         let temp = tempfile::tempdir().expect("tempdir");
         let bucket = temp.path().join("trash-C");
