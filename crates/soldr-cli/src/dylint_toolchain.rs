@@ -424,15 +424,15 @@ pub(crate) fn prepare_resolved(
     let prepared_identity = plan.cache_identity();
     let inherited =
         non_empty_env(PREPARED_IDENTITY_ENV_VAR).as_deref() == Some(prepared_identity.as_str());
-    // The parent already qualified this channel and published the shared marker.
-    if inherited && is_fully_qualified_nightly(&plan.channel) {
-        return Ok(plan);
-    }
     if !inherited {
         ensure_installed(&plan)?;
         verify_installed_identity(&plan)?;
     }
-    plan.channel = qualify_toolchain_name(&plan.channel)?;
+    // An inherited identity covers the toolchain but does not guarantee that
+    // the marker exists in this invocation's cache root.
+    if !inherited || !is_fully_qualified_nightly(&plan.channel) {
+        plan.channel = qualify_toolchain_name(&plan.channel)?;
+    }
     if let Some(version) = major_minor(&plan.compiler_release) {
         if let Err(error) = write_prepared_marker(&version, &plan) {
             eprintln!("soldr: failed to write dylint prepared marker: {error}");
