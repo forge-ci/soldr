@@ -2,8 +2,8 @@
 
 Install the same source-built Soldr on the client and runner. Use a runner
 account dedicated to trusted builds. Cargo build scripts and tests run with
-that account's permissions. Both endpoints bind to loopback and the SSH
-tunnel authenticates and encrypts the connection between machines.
+that account's permissions. The HTTP listeners bind to loopback. Use a Soldr
+peer connection or an SSH tunnel between machines.
 
 ## Forge CI pairing
 
@@ -43,6 +43,42 @@ each machine.
 (umask 077 && openssl rand -hex 32 > "$HOME/.soldr-remote-token")
 scp "$HOME/.soldr-remote-token" build-runner:.soldr-remote-token
 ```
+
+## Persistent peer connection
+
+On the runner, create a persistent identity and enroll its public ID with the
+Forge signaling operator. The operator configures the GitHub user IDs allowed
+to use that runner.
+
+```sh
+soldr remote peer-id --key "$HOME/.soldr/remote-peer.key"
+soldr remote --token-file "$HOME/.soldr-remote-token" serve \
+  --root "$HOME/.soldr/remote-build" --peer-key "$HOME/.soldr/remote-peer.key"
+```
+
+Start the gateway on the client and leave it running across builds. The first
+connection prompts you to open GitHub's device authorization page and enter a
+code. Forge checks your GitHub account and grants access for 24 hours, bound to
+the two endpoint IDs. The key files stay on their original machines.
+
+```sh
+soldr remote connect --key "$HOME/.soldr/remote-peer.key" --runner "$RUNNER_PEER_ID"
+```
+
+Both peers reach `https://signal.forge-ci.com` outbound. Iroh establishes an
+encrypted, authenticated connection and uses a direct UDP path when available.
+The gateway logs when the selected path changes between `direct` and `relay`.
+Add `--relay-only` to require the relay path. The gateway keeps the connection
+alive between builds and reconnects after a drop. A build interrupted by a
+complete connection loss must be run again.
+
+Run `soldr remote --token-file "$HOME/.soldr-remote-token" run lint` from the
+client checkout. The gateway forwards the existing HTTP/2 connection,
+including logs and artifact requests, through the peer connection. The runner
+checks OAuth authorization against the authenticated peer ID, then checks the
+build token on every HTTP request.
+
+## SSH connection
 
 On the runner, start Soldr inside the build environment.
 

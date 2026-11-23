@@ -26,17 +26,12 @@ use super::{artifacts, control, manifest, retention};
 type RunnerState = (PathBuf, RunnerAuth, Option<u32>, u8, retention::Connection);
 
 pub(super) async fn serve(
-    listen: std::net::SocketAddr,
+    listener: tokio::net::TcpListener,
     root: PathBuf,
     auth: RunnerAuth,
     slot_limit: Option<u32>,
     artifact_streams: u8,
 ) -> io::Result<i32> {
-    if !listen.ip().is_loopback() {
-        return Err(io::Error::other(
-            "Remote build must bind to loopback. Connect through an SSH tunnel.",
-        ));
-    }
     fs::create_dir_all(root.join("blobs"))?;
     fs::create_dir_all(root.join("sessions"))?;
     retention::prepare(&root)?;
@@ -53,7 +48,6 @@ pub(super) async fn serve(
             artifact_streams,
             retention::Connection::default(),
         ));
-    let listener = tokio::net::TcpListener::bind(listen).await?;
     eprintln!(
         "soldr remote listening at http://{}",
         listener.local_addr()?

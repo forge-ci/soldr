@@ -47,7 +47,7 @@ pub use rustup_init::{
     BootstrapReport, NO_BOOTSTRAP_ENV_VAR, RUSTUP_INIT_TRIPLE_ENV_VAR, RUSTUP_INIT_URL_ENV_VAR,
 };
 pub use stream_download::forge_http::{ForgeCiHttp, LoopbackPostClient, RemoteBuildHttpClient};
-pub use stream_download::pypi_has_version;
+pub use stream_download::{pypi_has_version, ForgeSignalClient};
 
 pub mod apple_sdk;
 pub mod archive;
