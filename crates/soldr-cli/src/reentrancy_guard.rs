@@ -71,6 +71,8 @@ pub const IN_SOLDR_ROLE_ENV: &str = "IN_SOLDR_ROLE";
 /// The edge a user-facing global-version probe/delegation carries.
 const GLOBAL_DELEGATION_EDGE: &str = "SOLDR_GLOBAL_DELEGATING";
 
+pub(crate) const LINT_EXTRA_EDGE: &str = "SOLDR_INTERNAL_LINT_EXTRA";
+
 /// Internal spawn edges that legitimately re-enter Soldr. Each variable is
 /// set by exactly one sanctioned producer at its spawn/exec boundary; their
 /// presence identifies the edge without argv guessing.
@@ -81,6 +83,7 @@ const SANCTIONED_EDGE_ENV_VARS: &[&str] = &[
     "SOLDR_INTERNAL_INHERIT_PROCESS_GROUP",
     "SOLDR_TRAMPOLINING",
     GLOBAL_DELEGATION_EDGE,
+    LINT_EXTRA_EDGE,
     // soldr#2739: self-relocation re-runs soldr from `~/.soldr/runtime/` and
     // is a *spawn*, not an exec -- the child has its own pid, so the same-pid
     // self-exec rule cannot recognise it and it read as an unsanctioned
@@ -155,7 +158,11 @@ pub(crate) fn own_role(raw_args: &[String], wrapper_invocation: bool) -> Role {
 /// `is_delegation_exempt` already stops a broker from reaching the probe, so
 /// this is the structural backstop for that policy, not its only enforcement.
 fn edge_permitted(parent_role: Option<Role>, edge: &str) -> bool {
-    !(parent_role == Some(Role::Broker) && edge == GLOBAL_DELEGATION_EDGE)
+    match edge {
+        LINT_EXTRA_EDGE => parent_role == Some(Role::FrontDoor),
+        GLOBAL_DELEGATION_EDGE => parent_role != Some(Role::Broker),
+        _ => true,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,10 +310,13 @@ pub(crate) fn enforce_and_mark(raw_args: &[String], compiler_callback: bool) -> 
     let wrapper_invocation = raw_args
         .get(1)
         .is_some_and(|arg| crate::wrapper::is_wrapper_invocation(arg));
+    let subcommand = raw_args.get(1).map(String::as_str);
+    let lint_extra_command = matches!(subcommand, Some("cargo" | "dylint" | "rustup"));
     let sanctioned_edges: Vec<&str> = SANCTIONED_EDGE_ENV_VARS
         .iter()
         .copied()
         .filter(|name| std::env::var_os(name).is_some())
+        .filter(|name| *name != LINT_EXTRA_EDGE || lint_extra_command)
         .collect();
     let parent_role = std::env::var(IN_SOLDR_ROLE_ENV)
         .ok()
@@ -335,6 +345,7 @@ pub(crate) fn enforce_and_mark(raw_args: &[String], compiler_callback: bool) -> 
     // entry; leaving it set would hand the same exemption to every descendant,
     // since env vars are inherited transitively.
     std::env::remove_var(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR);
+    std::env::remove_var(LINT_EXTRA_EDGE);
 
     // Stamp unconditionally, after judgment: children inherit OUR pid, and
     // a wrapper-shaped entry refreshes ownership to itself exactly as
