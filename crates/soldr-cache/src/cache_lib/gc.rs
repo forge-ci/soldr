@@ -428,9 +428,12 @@ pub fn delete_candidate_dir(candidate: GcCandidate) -> GcDeleteOutcome {
 pub fn detach_candidate_dir(
     candidate: GcCandidate,
     root: &Path,
-) -> (GcDeleteOutcome, Option<PathBuf>) {
+) -> (GcDeleteOutcome, Option<DetachedCandidate>) {
     let mut detached = None;
     let outcome = remove_candidate_dir(candidate, |path| {
+        let lock = super::trash_gc::try_trash_reclaim_lock(root, true)?.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::WouldBlock, "trash sweep is active")
+        })?;
         let trash = root.join("trash-gc-targets");
         std::fs::create_dir_all(&trash)?;
         super::path_safety::validate_owned_directory(root, &trash)?;
@@ -438,7 +441,12 @@ pub fn detach_candidate_dir(
             .prefix("target-")
             .tempdir_in(trash)?;
         match std::fs::rename(path, staging.path().join("target")) {
-            Ok(()) => detached = Some(staging.keep()),
+            Ok(()) => {
+                detached = Some(DetachedCandidate {
+                    path: staging.keep(),
+                    _lock: lock,
+                })
+            }
             // Root-local trash may be on a different filesystem. Preserve
             // the existing cleanup on volumes that cannot rename into it.
             Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
@@ -451,17 +459,23 @@ pub fn detach_candidate_dir(
     (outcome, detached)
 }
 
+/// An owned detached target protected from concurrent trash sweeps.
+pub struct DetachedCandidate {
+    path: PathBuf,
+    _lock: std::fs::File,
+}
+
 /// Reclaim a target that is already detached from its original build path.
 pub fn reclaim_detached_candidate(
     mut outcome: GcDeleteOutcome,
-    detached: &Path,
+    detached: DetachedCandidate,
 ) -> GcDeleteOutcome {
-    if let Err(error) = std::fs::remove_dir_all(detached) {
+    if let Err(error) = std::fs::remove_dir_all(&detached.path) {
         if error.kind() != std::io::ErrorKind::NotFound {
             outcome.removed = false;
             outcome.error = Some(format!(
                 "reclaiming detached target {}: {error}",
-                detached.display()
+                detached.path.display()
             ));
         }
     }

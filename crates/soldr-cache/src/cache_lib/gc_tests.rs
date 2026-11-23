@@ -683,12 +683,16 @@ fn detached_target_reclamation_leaves_recreated_build_path_intact() {
     assert!(outcome.removed, "{:?}", outcome.error);
     let detached = detached.expect("same-volume detachment");
     assert!(!target.exists());
-    assert!(detached.join("target/CACHEDIR.TAG").is_file());
+    let staging = detached.path.clone();
+    let paths = crate::core::SoldrPaths::with_root(scratch.path().to_path_buf());
+    let report = super::super::trash_gc::sweep_trash(&paths).unwrap();
+    assert_eq!(report.removed, 0);
+    assert!(staging.join("target/CACHEDIR.TAG").is_file());
 
     std::fs::create_dir(&target).unwrap();
     std::fs::write(target.join("live"), b"new build").unwrap();
-    let outcome = reclaim_detached_candidate(outcome, &detached);
+    let outcome = reclaim_detached_candidate(outcome, detached);
     assert!(outcome.removed, "{:?}", outcome.error);
-    assert!(!detached.exists());
+    assert!(!staging.exists());
     assert_eq!(std::fs::read(target.join("live")).unwrap(), b"new build");
 }

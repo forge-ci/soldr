@@ -122,7 +122,7 @@ pub(super) fn reclaim_candidate(
     let (outcome, detached) = detach_candidate_dir(candidate, &paths.root);
     drop(lease);
     match detached {
-        Some(path) => reclaim_detached_candidate(outcome, &path),
+        Some(path) => reclaim_detached_candidate(outcome, path),
         None => outcome,
     }
 }
