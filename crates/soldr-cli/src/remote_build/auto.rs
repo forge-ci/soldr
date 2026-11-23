@@ -4,8 +4,11 @@ use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use cap_fs_ext::DirExt;
-use cap_std::{ambient_authority, fs::Dir};
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, OpenOptions},
+};
 
 use super::wire::{Action, Blob, Capabilities, Start};
 use super::{artifacts, control, snapshot, Client};
@@ -73,8 +76,13 @@ pub(crate) async fn try_build(
         Err(error) if control::terminal_blocked(&error) => return Ok(Some(1)),
         result => result?,
     };
-    if code == 0 {
-        download_target(&root, &client, &session.id).await?;
+    if code == 0
+        && matches!(
+            mode,
+            BuildMode::Blessed | BuildMode::Cargo | BuildMode::CargoTestCompile
+        )
+    {
+        download_target(&root, &client, &session.id, mode).await?;
     }
     Ok(Some(code))
 }
@@ -323,7 +331,12 @@ fn uses_default_target_dir(root: &Path) -> bool {
     })
 }
 
-async fn download_target(root: &Path, client: &Client, session: &str) -> io::Result<()> {
+async fn download_target(
+    root: &Path,
+    client: &Client,
+    session: &str,
+    mode: BuildMode,
+) -> io::Result<()> {
     let local = Dir::open_ambient_dir(root, ambient_authority())?;
     let staging = tempfile::tempdir_in(root)?;
     let out = staging.path().join("artifacts");
@@ -335,7 +348,16 @@ async fn download_target(root: &Path, client: &Client, session: &str) -> io::Res
         Err(error) => return Err(error),
     };
     let target = local_target(&local, Path::new("target"))?;
-    merge_target(&remote, &target)
+    if mode == BuildMode::CargoTestCompile {
+        let tests = local_target(&target, Path::new("forge-ci-tests"))?;
+        source.rename("target", &tests, session)?;
+        eprintln!(
+            "Forge CI test artifacts: {}",
+            root.join("target/forge-ci-tests").join(session).display()
+        );
+        return Ok(());
+    }
+    publish_build_products(&remote, &target, true)
 }
 
 fn local_target(parent: &Dir, name: &Path) -> io::Result<Dir> {
@@ -347,24 +369,64 @@ fn local_target(parent: &Dir, name: &Path) -> io::Result<Dir> {
     parent.open_dir_nofollow(name)
 }
 
-fn merge_target(source: &Dir, local: &Dir) -> io::Result<()> {
+fn publish_build_products(source: &Dir, local: &Dir, top_level: bool) -> io::Result<()> {
+    for entry in source.entries()? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !entry.file_type()?.is_dir() || name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let path = Path::new(&name);
+        let source_profile = source.open_dir_nofollow(path)?;
+        let local_profile = local_target(local, path)?;
+        if top_level && name.to_str().is_some_and(portable_target) {
+            publish_build_products(&source_profile, &local_profile, false)?;
+        } else {
+            publish_locked_profile(&source_profile, &local_profile)?;
+        }
+    }
+    Ok(())
+}
+
+fn publish_locked_profile(source: &Dir, local: &Dir) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .follow(FollowSymlinks::No);
+    let mut locks = Vec::new();
+    // Cargo uses separate build and artifact locks on newer toolchains.
+    for name in [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"] {
+        let lock = local.open_with(name, &options)?.into_std();
+        lock.try_lock().map_err(|error| {
+            io::Error::other(format!(
+                "Could not lock local Cargo outputs ({name}): {error}"
+            ))
+        })?;
+        locks.push(lock);
+    }
+    publish_profile_products(source, local, true)
+}
+
+fn publish_profile_products(source: &Dir, local: &Dir, include_examples: bool) -> io::Result<()> {
     for entry in source.entries()? {
         let entry = entry?;
         let name = entry.file_name();
         let path = Path::new(&name);
         let kind = entry.file_type()?;
-        if name == ".cargo-lock" || name == ".rustc_info.json" {
-            continue;
-        }
-        if kind.is_dir() {
-            merge_target(
+        if kind.is_file()
+            && !name.to_string_lossy().starts_with('.')
+            && path.extension().is_none_or(|extension| extension != "d")
+        {
+            source.rename(path, local, path)?;
+        } else if include_examples && name == "examples" && kind.is_dir() {
+            publish_profile_products(
                 &source.open_dir_nofollow(path)?,
                 &local_target(local, path)?,
+                false,
             )?;
-        } else if kind.is_file() {
-            source.rename(path, local, path)?;
-        } else {
-            return Err(io::Error::other("Unexpected Forge CI artifact type."));
         }
     }
     Ok(())
@@ -450,9 +512,12 @@ mod tests {
         stage.write(".cargo-lock", b"remote lock").unwrap();
         target.write("binary", b"old").unwrap();
         target.write("other", b"still here").unwrap();
-        merge_target(&stage, &target).unwrap();
+        let fingerprint = local_target(&stage, Path::new(".fingerprint")).unwrap();
+        fingerprint.write("worker", b"remote-only state").unwrap();
+        publish_locked_profile(&stage, &target).unwrap();
         assert_eq!(target.read("binary").unwrap(), b"new");
         assert_eq!(target.read("other").unwrap(), b"still here");
-        assert!(!target.exists(".cargo-lock"));
+        assert!(target.read(".cargo-lock").unwrap().is_empty());
+        assert!(!target.exists(".fingerprint"));
     }
 }

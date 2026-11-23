@@ -521,13 +521,8 @@ pub(crate) async fn run_lint(
                 // soldr#3958: one folded summary for the whole plan.
                 return lint_steps::run_porcelain(steps, cache_enabled, trust_inherited_soldr_env);
             }
-            if let Some(code) = try_remote_lint(
-                args,
-                &mut steps,
-                cache_enabled,
-                trust_inherited_soldr_env,
-            )
-            .await?
+            if let Some(code) =
+                try_remote_lint(args, &mut steps, cache_enabled, trust_inherited_soldr_env).await?
             {
                 return Ok(code);
             }
