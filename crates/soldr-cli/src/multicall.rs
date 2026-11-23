@@ -225,17 +225,18 @@ fn strip_self_from_path(argv0: &str) {
 /// itself. For a trampoline they do not: `current_exe()` is the real soldr
 /// binary, off in the install tree, and scrubbing *that* directory would leave
 /// the shim dir on `PATH` while removing something that belonged there.
+/// Keep the invoked spelling for matching entries in `PATH`.
 fn current_shim_dir(argv0: &str) -> Option<PathBuf> {
     Path::new(argv0)
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .map(canonicalize_or_self)
+        .map(Path::to_path_buf)
         .or_else(|| {
             env::current_exe()
                 .ok()
                 .as_deref()
                 .and_then(Path::parent)
-                .map(canonicalize_or_self)
+                .map(Path::to_path_buf)
         })
 }
 
@@ -244,21 +245,32 @@ fn canonicalize_or_self(path: &Path) -> PathBuf {
 }
 
 fn filter_path(existing: &str, shim_dir: &Path, separator: char) -> String {
+    // PATH may contain the symlink spelling that invoked the shim.
+    let canonical = canonicalize_or_self(shim_dir);
     let shim_str = shim_dir.to_string_lossy();
+    let canonical_str = canonical.to_string_lossy();
+    let windows =
+        crate::platform::host::facts::os() == crate::platform::host::facts::HostOs::Windows;
+    let same_path = |first: &str, second: &str| {
+        if windows {
+            first.eq_ignore_ascii_case(second)
+        } else {
+            first == second
+        }
+    };
     let mut out = String::with_capacity(existing.len());
     let mut first = true;
     for entry in existing.split(separator) {
         if entry.is_empty() {
             continue;
         }
-        let matches = if crate::platform::host::facts::os()
-            == crate::platform::host::facts::HostOs::Windows
+        if same_path(entry, &shim_str)
+            || same_path(entry, &canonical_str)
+            || (shim_dir != canonical
+                && Path::new(entry)
+                    .canonicalize()
+                    .is_ok_and(|path| same_path(&path.to_string_lossy(), &canonical_str)))
         {
-            entry.eq_ignore_ascii_case(&shim_str)
-        } else {
-            entry == shim_str
-        };
-        if matches {
             continue;
         }
         if !first {
@@ -628,6 +640,41 @@ mod tests {
         let shim = PathBuf::from("/opt/.soldr/v0.8/shims");
         let path = "/usr/bin:/opt/.soldr/v0.8/shims:/usr/local/bin";
         assert_eq!(filter_path(path, &shim, ':'), "/usr/bin:/usr/local/bin");
+    }
+
+    #[test]
+    fn filter_path_removes_aliases_of_a_symlinked_shim_directory() {
+        use crate::platform::host::facts::{os, HostOs};
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real-shims");
+        let alias = root.path().join("alias");
+        let alternate = root.path().join("alternate");
+        std::fs::create_dir(&real).unwrap();
+        for link in [&alias, &alternate] {
+            if let Err(error) =
+                crate::platform::fs::links::create(&real.to_string_lossy(), link, true)
+            {
+                if os() == HostOs::Windows {
+                    return;
+                }
+                panic!("failed to create fixture symlink: {error}");
+            }
+        }
+
+        let shim_dir = current_shim_dir(alias.join("rustup").to_str().unwrap()).unwrap();
+        let canonical = real.canonicalize().unwrap();
+        let separator = if os() == HostOs::Windows { ';' } else { ':' };
+        let path = format!(
+            "{}{separator}keep-one{separator}{}/{separator}{}{separator}keep-two",
+            alias.display(),
+            alternate.display(),
+            canonical.display(),
+        );
+        assert_eq!(
+            filter_path(&path, &shim_dir, separator),
+            format!("keep-one{separator}keep-two"),
+        );
     }
 
     #[test]
