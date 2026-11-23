@@ -35,6 +35,16 @@ pub(crate) struct RemoteArgs {
 
 #[derive(Subcommand)]
 enum RemoteCommand {
+    #[command(hide = true)]
+    TestRuntime {
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        requests: PathBuf,
+        #[arg(last = true, num_args = 1..)]
+        argv: Vec<String>,
+    },
+
     /// Create or read a persistent peer identity and print its public ID.
     PeerId {
         #[arg(long)]
@@ -125,6 +135,12 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
         command,
     } = args;
     match command {
+        RemoteCommand::TestRuntime {
+            source,
+            requests,
+            argv,
+        } => server::run_test_program(&source, &requests, &argv).await,
+
         RemoteCommand::PeerId { key } => {
             println!("{}", peer::identity(&key)?.public());
             Ok(0)
@@ -164,12 +180,12 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             } else {
                 snapshot::capture(&directory)?
             };
-            let manifest = manifest::read(manifest.as_deref(), &snapshot.commit)?;
-            if let Some(manifest) = &manifest {
-                snapshot::verify_parent(&directory, &snapshot.commit, manifest.parent())?;
-            }
-            let manifest_json = manifest.as_ref().map(serde_json::to_vec).transpose()?;
+            let manifest_json =
+                verified_manifest(&directory, &snapshot.commit, manifest.as_deref())?;
             let client = connect_for_run(token_file.as_deref(), endpoint).await?;
+            if snapshot.commit.is_empty() {
+                require_unborn_worktree_support(&client).await?;
+            }
             let action = match action {
                 BuildAction::Build => Action::Build,
                 BuildAction::Test => Action::Test,
@@ -214,6 +230,28 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             Ok(0)
         }
     }
+}
+
+fn verified_manifest(
+    directory: &std::path::Path,
+    commit: &str,
+    path: Option<&std::path::Path>,
+) -> io::Result<Option<Vec<u8>>> {
+    let manifest = manifest::read(path, commit)?;
+    if let Some(manifest) = &manifest {
+        snapshot::verify_parent(directory, commit, manifest.parent())?;
+    }
+    Ok(manifest.as_ref().map(serde_json::to_vec).transpose()?)
+}
+
+async fn require_unborn_worktree_support(client: &Client) -> io::Result<()> {
+    let capabilities: wire::Capabilities = client.post("capabilities", &Blob::default()).await?;
+    if !capabilities.worktree_without_commit {
+        return Err(io::Error::other(
+            "remote worker does not support worktrees without a base commit",
+        ));
+    }
+    Ok(())
 }
 
 fn server_auth(
@@ -446,3 +484,5 @@ mod tests {
         }
     }
 }
+
+mod test_runtime_env;

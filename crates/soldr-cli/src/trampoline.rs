@@ -902,6 +902,11 @@ fn log_hit(binary: &Path) {
     }
 }
 
+pub(crate) fn plan_run(args: &[String]) -> FellThroughPlan {
+    let (cleaned_args, _) = strip_no_trampoline_flag(args);
+    fell_through_plan(parse_run_args(&cleaned_args), cleaned_args)
+}
+
 fn fell_through_plan(parsed: Option<ParsedRunArgs>, cleaned_args: Vec<String>) -> FellThroughPlan {
     let (binary_path, sidecar_path, dep_info_path) = match parsed.as_ref() {
         Some(p) => match resolve_bin_name(p) {

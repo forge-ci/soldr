@@ -8,7 +8,7 @@ use ring::hmac;
 use super::snapshot::digest;
 
 const LAUNCH_WINDOW_SECONDS: u64 = 900;
-const SESSION_WINDOW_SECONDS: u64 = 4 * 60 * 60;
+pub(super) const SESSION_WINDOW_SECONDS: u64 = 4 * 60 * 60;
 
 #[derive(Clone)]
 pub(super) enum RunnerAuth {

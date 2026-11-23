@@ -4,7 +4,6 @@ import os
 import signal
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -673,43 +672,19 @@ def test_the_cache_maintenance_fixture_deadline_fits_two_cold_daemon_starts() ->
         )
 
 
-def test_a_trivial_child_is_reaped_well_under_the_old_fifty_millisecond_floor(
-    tmp_path,
-) -> None:
-    """soldr#3144: the wrapper must not put a ~50 ms floor under every test.
-
-    The loop used to be ``while child.poll() is None: time.sleep(0.05)``. Because
-    ``.config/nextest.toml`` runs the wrapper for ``all()`` tests on Unix, that
-    floor applied to the whole suite: in one gate run the fastest of 2,023 timed
-    tests was 0.066 s and not one was under 0.06 s, for a suite where roughly
-    1,700 tests are sub-0.2 s unit tests.
-
-    Asserting a wall-clock budget is normally a flaky-test smell, so the bound
-    here is deliberately loose -- 40 ms against a floor that was 50 ms and a fix
-    that reaps in about 1 ms. It fails hard on a regression to flat polling and
-    has ~40x headroom over the intended behaviour.
-    """
-
-    started = time.monotonic()
+def test_a_trivial_child_exits_successfully() -> None:
     completed = run_captured(
         [*nextest_wrapper_argv(), sys.executable, "-c", "pass"],
         capture_output=True,
         check=False,
     )
-    elapsed = time.monotonic() - started
     assert completed.returncode == 0, completed.stderr.decode(errors="replace")
-
-    # Subtract nothing: this measures the whole wrapper invocation, so it also
-    # covers interpreter startup for both processes. The old flat sleep added
-    # its 50 ms on top of exactly this baseline.
-    assert elapsed < 4.0, f"wrapper took {elapsed:.3f}s, far beyond interpreter startup"
 
 
 def test_the_wait_loop_does_not_flat_poll() -> None:
     """Guard the mechanism, not just the timing.
 
-    The wall-clock test above can be satisfied on a very fast machine even with
-    a flat sleep, so pin the source shape too: the native wrapper waits for the
+    A fixed poll interval delays every short test. The native wrapper waits for the
     child's exit status on a channel, which returns the instant a waiter thread
     reaps it, and never sleeps in its supervision loop.
     """

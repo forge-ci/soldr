@@ -14,7 +14,19 @@ use cap_std::{
 use super::wire::{Action, Blob, Capabilities, Start};
 use super::{artifacts, control, snapshot, Client};
 
+mod test_local;
+mod test_runtime;
+
 pub(crate) const WORKER_BUILD_ENV: &str = "SOLDR_FORGE_WORKER_BUILD";
+
+/// Cargo invokes this callback solely to return the local test result.
+pub(crate) fn runtime_edge(args: &[String]) -> Option<&'static str> {
+    (crate::core::flag(WORKER_BUILD_ENV)
+        && args.get(1).is_some_and(|arg| arg == "remote")
+        && args.get(2).is_some_and(|arg| arg == "test-runtime"))
+    .then_some("forge-test-runtime")
+}
+
 const PROBE_DEADLINE: Duration = Duration::from_secs(3);
 const WORKER_PROBE_ATTEMPTS: usize = 3;
 
@@ -25,16 +37,22 @@ pub(crate) enum BuildMode {
     CargoCheck,
     CargoClippy,
     CargoTestCompile,
+    CargoTestLocal,
+    CargoTestRuntime,
     Lint,
 }
 
 impl BuildMode {
     fn for_cargo(verb: &str, args: &[String]) -> Option<Self> {
+        let no_run = args
+            .iter()
+            .take_while(|arg| *arg != "--")
+            .any(|arg| arg == "--no-run");
         match verb {
             "build" => Some(Self::Cargo),
             "check" => Some(Self::CargoCheck),
             "clippy" => Some(Self::CargoClippy),
-            "test" if args.iter().any(|arg| arg == "--no-run") => Some(Self::CargoTestCompile),
+            "test" if no_run => Some(Self::CargoTestCompile),
             _ => None,
         }
     }
@@ -45,7 +63,8 @@ impl BuildMode {
             Self::Cargo => Action::CargoBuild,
             Self::CargoCheck => Action::CargoCheck,
             Self::CargoClippy => Action::CargoClippy,
-            Self::CargoTestCompile => Action::CargoTestCompile,
+            Self::CargoTestCompile | Self::CargoTestLocal => Action::CargoTestCompile,
+            Self::CargoTestRuntime => Action::CargoTestRuntime,
             Self::Lint => Action::Lint,
         }
     }
@@ -56,10 +75,180 @@ pub(crate) async fn try_cargo(
     args: &[String],
     cache_enabled: bool,
 ) -> io::Result<Option<i32>> {
+    if verb == "run"
+        && !crate::cargo_front_door::porcelain::enabled()
+        && args
+            .iter()
+            .take_while(|arg| arg.as_str() != "--")
+            .any(|arg| arg == "--target" || arg.starts_with("--target="))
+    {
+        // Local target preparation adds Cargo config and compiler environment.
+        // Offer the original arguments to Forge before configuring this host.
+        let mut invocation = vec!["run".to_owned()];
+        invocation.extend_from_slice(args);
+        let plan = crate::trampoline::plan_run(&invocation);
+        return try_run(&plan, cache_enabled).await;
+    }
     let Some(mode) = BuildMode::for_cargo(verb, args) else {
-        return Ok(None);
+        return if verb == "test" {
+            let args = normalize_workspace_alias(args, BuildMode::CargoTestLocal);
+            test_local::try_test(&args, cache_enabled).await
+        } else {
+            Ok(None)
+        };
     };
     try_build(args, cache_enabled, mode).await
+}
+
+pub(crate) async fn try_run(
+    plan: &crate::trampoline::FellThroughPlan,
+    cache_enabled: bool,
+) -> io::Result<Option<i32>> {
+    let (Some(parsed), Some(binary)) = (&plan.parsed, &plan.binary_path) else {
+        return Ok(None);
+    };
+    if parsed.toolchain.is_some()
+        || crate::core::flag("CARGO_NET_OFFLINE")
+        || std::env::vars_os().any(|(name, _)| {
+            let name = name.to_string_lossy();
+            name.starts_with("CARGO_TARGET_") && name.ends_with("_RUNNER")
+        })
+    {
+        return Ok(None);
+    }
+
+    let Some((_, arguments)) = plan.cleaned_args.split_first() else {
+        return Ok(None);
+    };
+    let build_end = arguments
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(arguments.len());
+    let mut build_args = arguments[..build_end].to_vec();
+    if let Some(target) = parsed.target.as_deref() {
+        let Ok(host) = crate::core::TargetTriple::host() else {
+            return Ok(None);
+        };
+        if target != host.triple()
+            || build_args
+                .iter()
+                .filter(|arg| arg.as_str() == "--target" || arg.starts_with("--target="))
+                .count()
+                != 1
+        {
+            return Ok(None);
+        }
+    }
+    if parsed.bin.is_none() {
+        let Some(name) = crate::trampoline::resolve_bin_name(parsed).ok().flatten() else {
+            return Ok(None);
+        };
+        build_args.extend(["--bin".into(), name]);
+    }
+    let Some((client, root, work_dir)) =
+        find_worker(&build_args, cache_enabled, BuildMode::Cargo).await?
+    else {
+        return Ok(None);
+    };
+    let cwd = std::env::current_dir()?;
+    if !uses_direct_run(&cwd, &root) {
+        return Ok(None);
+    }
+    let Some(relative) = binary
+        .strip_prefix(&root)
+        .ok()
+        .and_then(artifact_executable_path)
+    else {
+        return Ok(None);
+    };
+    let Some(session) =
+        start_worktree(&client, &root, work_dir, &build_args, BuildMode::Cargo).await?
+    else {
+        return Ok(None);
+    };
+    eprintln!("Forge CI build session {}", session.id);
+    let code = receive_build(&client, &root, &session.id).await?;
+    if code != 0 {
+        return Ok(Some(code));
+    }
+
+    let staging = tempfile::tempdir_in(&root)?;
+    let output = staging.path().join("artifacts");
+    let executable = output.join(&relative);
+    artifacts::download(&client, &session.id, &output, vec![relative]).await?;
+    // Keep the downloaded executable alive until the user's program exits.
+    crate::exit_guard::mark_spoke();
+    let status = tokio::process::Command::new(&executable)
+        .args(&parsed.trailing)
+        .status()
+        .await?;
+    Ok(Some(status.code().unwrap_or(1)))
+}
+
+fn artifact_executable_path(path: &Path) -> Option<String> {
+    let components: Option<Vec<_>> = path
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(name) => name.to_str().filter(|name| {
+                name.bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+            }),
+            _ => None,
+        })
+        .collect();
+    let components = components?;
+    (components.first() == Some(&"target")).then(|| components.join("/"))
+}
+
+fn uses_direct_run(cwd: &Path, root: &Path) -> bool {
+    cwd.ancestors()
+        .take_while(|directory| directory.starts_with(root))
+        .all(|directory| {
+            ["config.toml", "config"].iter().all(|filename| {
+                match std::fs::read_to_string(directory.join(".cargo").join(filename)) {
+                    Ok(text) => text.parse::<toml::Table>().is_ok_and(|config| {
+                        !config.contains_key("target")
+                            && !config
+                                .get("build")
+                                .is_some_and(|build| build.get("target").is_some())
+                    }),
+                    Err(error) => error.kind() == io::ErrorKind::NotFound,
+                }
+            })
+        })
+}
+
+async fn receive_build(client: &Client, root: &Path, session: &str) -> io::Result<i32> {
+    let session = super::server::key(session, 32)?;
+    let code = match control::receive(client, session).await {
+        Err(error) if control::terminal_blocked(&error) => return Ok(1),
+        result => result?,
+    };
+
+    download_attestation(client, root, session).await?;
+    Ok(code)
+}
+
+async fn download_attestation(client: &Client, root: &Path, session: &str) -> io::Result<()> {
+    let session = super::server::key(session, 32)?;
+    crate::exit_guard::mark_spoke();
+    let staging = tempfile::tempdir_in(root)?;
+    let output = staging.path().join("artifacts");
+    artifacts::download(client, session, &output, vec!["attestation.json".into()]).await?;
+
+    let source = Dir::open_ambient_dir(&output, ambient_authority())?;
+    let local = Dir::open_ambient_dir(root, ambient_authority())?;
+    let target = local_target(&local, Path::new("target"))?;
+    let attestations = local_target(&target, Path::new("forge-ci-attestations"))?;
+    let name = format!("{session}.json");
+    source.rename("attestation.json", &attestations, &name)?;
+    eprintln!(
+        "Forge CI build attestation: {}",
+        root.join("target/forge-ci-attestations")
+            .join(name)
+            .display()
+    );
+    Ok(())
 }
 
 pub(crate) async fn try_build(
@@ -67,6 +256,8 @@ pub(crate) async fn try_build(
     cache_enabled: bool,
     mode: BuildMode,
 ) -> io::Result<Option<i32>> {
+    let args = normalize_workspace_alias(args, mode);
+    let args = args.as_ref();
     let Some((client, root, work_dir)) = find_worker(args, cache_enabled, mode).await? else {
         return Ok(None);
     };
@@ -74,10 +265,7 @@ pub(crate) async fn try_build(
         return Ok(None);
     };
     eprintln!("Forge CI build session {}", session.id);
-    let code = match control::receive(&client, &session.id).await {
-        Err(error) if control::terminal_blocked(&error) => return Ok(Some(1)),
-        result => result?,
-    };
+    let code = receive_build(&client, &root, &session.id).await?;
     if code == 0
         && matches!(
             mode,
@@ -87,6 +275,30 @@ pub(crate) async fn try_build(
         download_target(&root, &client, &session.id, mode).await?;
     }
     Ok(Some(code))
+}
+
+fn normalize_workspace_alias(args: &[String], mode: BuildMode) -> std::borrow::Cow<'_, [String]> {
+    if !matches!(
+        mode,
+        BuildMode::Cargo
+            | BuildMode::CargoCheck
+            | BuildMode::CargoClippy
+            | BuildMode::CargoTestCompile
+            | BuildMode::CargoTestLocal
+    ) || !args
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| arg == "--all")
+    {
+        return std::borrow::Cow::Borrowed(args);
+    }
+    let mut normalized = args.to_vec();
+    for arg in normalized.iter_mut().take_while(|arg| arg.as_str() != "--") {
+        if arg == "--all" {
+            *arg = "--workspace".into();
+        }
+    }
+    std::borrow::Cow::Owned(normalized)
 }
 
 pub(crate) struct LintWorker {
@@ -175,7 +387,10 @@ async fn find_worker(
         };
         Some(directory)
     };
-    match worker(mode, work_dir.is_some()).await {
+    let Ok(commit) = snapshot::worktree_commit(&root) else {
+        return Ok(None);
+    };
+    match worker(mode, work_dir.is_some(), commit.is_empty()).await {
         Ok(client) => Ok(client.map(|client| (client, root, work_dir))),
         Err(error) => {
             eprintln!("Forge CI worker unavailable ({error}). Running locally.");
@@ -227,12 +442,18 @@ async fn start_worktree(
         .map(Some)
 }
 
-async fn worker(mode: BuildMode, subdirectory: bool) -> io::Result<Option<Client>> {
+async fn worker(
+    mode: BuildMode,
+    subdirectory: bool,
+    without_commit: bool,
+) -> io::Result<Option<Client>> {
     retry_worker(crate::forge_sign_in::discover_worker, |grant| async move {
         let client = Client::forge(grant)?;
         let capabilities: Capabilities = client.post("capabilities", &Blob::default()).await?;
         let host = crate::core::TargetTriple::host().map_err(io::Error::other)?;
         let supported = (!subdirectory || capabilities.worktree_subdirectories)
+            && (!without_commit || capabilities.worktree_without_commit)
+            && (mode != BuildMode::CargoTestLocal || capabilities.test_executables)
             && supports_build(&capabilities, &host.triple(), mode);
         Ok(supported.then_some(client))
     })
@@ -250,8 +471,14 @@ where
     let mut result = Ok(None);
     for _ in 0..WORKER_PROBE_ATTEMPTS {
         // Each fresh grant gives the gateway another chance to route the build.
-        let Some(grant) = probe_request(discover()).await? else {
-            return Ok(None);
+        let grant = match probe_request(discover()).await {
+            Ok(Some(grant)) => grant,
+            Ok(None) => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return Err(error),
+            Err(error) => {
+                result = Err(error);
+                continue;
+            }
         };
         result = probe_request(probe(grant)).await;
         if matches!(result, Ok(Some(_))) {
@@ -273,7 +500,10 @@ fn supports_build(capabilities: &Capabilities, host: &str, mode: BuildMode) -> b
         && match mode {
             BuildMode::Blessed | BuildMode::Cargo | BuildMode::Lint => true,
             BuildMode::CargoCheck => capabilities.cargo_check,
-            BuildMode::CargoClippy | BuildMode::CargoTestCompile => capabilities
+            BuildMode::CargoClippy
+            | BuildMode::CargoTestCompile
+            | BuildMode::CargoTestLocal
+            | BuildMode::CargoTestRuntime => capabilities
                 .compile_actions
                 .contains(&(mode.action() as i32)),
         }
@@ -549,10 +779,18 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn unavailable_worker_is_retried_with_a_fresh_grant() {
-        let mut grants = ["first", "second"].into_iter();
+    async fn discovery_and_probe_failures_are_retried_with_a_fresh_grant() {
+        let mut grants = [
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "discovery timed out",
+            )),
+            Ok(Some("first")),
+            Ok(Some("second")),
+        ]
+        .into_iter();
         let selected = retry_worker(
-            || std::future::ready(Ok(grants.next())),
+            || std::future::ready(grants.next().unwrap()),
             |grant| async move {
                 match grant {
                     "first" => Err(io::Error::new(io::ErrorKind::ConnectionRefused, "offline")),
@@ -568,6 +806,13 @@ mod tests {
     #[test]
     fn remote_build_routing_only_accepts_supported_arguments() {
         let supported_args = |args: &[String]| super::supported_args(args, BuildMode::Cargo);
+        let workspace_alias = ["--all".to_owned(), "--locked".to_owned()];
+        let normalized = normalize_workspace_alias(&workspace_alias, BuildMode::Cargo);
+        assert_eq!(normalized.as_ref(), ["--workspace", "--locked"]);
+        assert!(supported_args(&normalized));
+        let test_args = ["--all".to_owned(), "--".to_owned(), "--all".to_owned()];
+        let normalized = normalize_workspace_alias(&test_args, BuildMode::CargoTestLocal);
+        assert_eq!(normalized.as_ref(), ["--workspace", "--", "--all"]);
         assert!(supported_args(&[]));
         assert!(supported_args(&["--release".into(), "--locked".into()]));
         assert!(supported_args(&[

@@ -136,11 +136,29 @@ pub(super) fn worktree_root(directory: &Path) -> io::Result<PathBuf> {
     Ok(PathBuf::from(utf8(&root)?.trim_end_matches(['\r', '\n'])))
 }
 
+pub(super) fn worktree_commit(root: &Path) -> io::Result<String> {
+    match git(root, &["rev-parse", "--verify", "HEAD^{commit}"]) {
+        Ok(commit) => Ok(utf8(&commit)?.trim().to_owned()),
+        Err(error) => {
+            let head = git(root, &["symbolic-ref", "--quiet", "HEAD"])?;
+            let head = utf8(&head)?.trim();
+            let result = wait::output_for(
+                git_command(root).args(["show-ref", "--verify", "--quiet", head]),
+                wait::PROBE,
+            )?;
+            if result.status.code() == Some(1) {
+                Ok(String::new())
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
 /// Snapshot the actual files Cargo sees without modifying the Git index.
 pub(super) fn capture_worktree(directory: &Path) -> io::Result<Snapshot> {
-    let commit = git(directory, &["rev-parse", "--verify", "HEAD^{commit}"])?;
-    let commit = utf8(&commit)?.trim().to_owned();
     let root = worktree_root(directory)?;
+    let commit = worktree_commit(&root)?;
     let listing = git(
         &root,
         &[
@@ -299,6 +317,27 @@ fn read_blob(object: &str, mut input: impl Write, mut output: impl BufRead) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_worktree_snapshot_without_base_commit_preserves_git_ignores() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path();
+        git(root, &["init"]).unwrap();
+        std::fs::write(root.join(".gitignore"), "/private\n").unwrap();
+        std::fs::write(root.join("private"), "excluded").unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[workspace]").unwrap();
+
+        let snapshot = capture_worktree(root).unwrap();
+        assert!(snapshot.commit.is_empty());
+        let paths: Vec<_> = snapshot
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
+        assert_eq!(paths, [".gitignore", "Cargo.toml"]);
+        assert!(capture(root).is_err());
+        assert!(git(root, &["ls-files", "--cached"]).unwrap().is_empty());
+    }
 
     #[test]
     fn remote_worktree_snapshot_captures_edits_and_excludes_ignored_files() {

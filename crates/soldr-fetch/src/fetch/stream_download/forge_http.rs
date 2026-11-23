@@ -100,7 +100,8 @@ impl RemoteBuildHttpClient {
         self.get_with_encoding(path, token, query, "zstd").await
     }
 
-    async fn get_with_encoding(
+    /// Open an authenticated streaming GET with an explicit response encoding.
+    pub async fn get_with_encoding(
         &self,
         path: &str,
         token: &str,

@@ -129,7 +129,7 @@ const EXCERPT_FOLLOW: usize = 3;
 pub(super) const FAILURE_EXIT_CODE: i32 = 1;
 
 /// Is the porcelain mode requested for this process?
-pub(super) fn enabled() -> bool {
+pub(crate) fn enabled() -> bool {
     crate::core::flag(PORCELAIN_ENV_VAR)
 }
 

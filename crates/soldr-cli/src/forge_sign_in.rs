@@ -61,7 +61,10 @@ pub(crate) async fn discover_worker() -> io::Result<Option<WorkerGrant>> {
     match status {
         204 => Ok(None),
         200 => Ok(Some(serde_json::from_slice(&body)?)),
-        401 => Err(rejected_credential()),
+        401 => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            rejected_credential(),
+        )),
         _ => Err(io::Error::other(format!(
             "Forge CI worker discovery failed (HTTP {status})."
         ))),
