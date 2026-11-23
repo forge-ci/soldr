@@ -130,6 +130,8 @@ pub(crate) const SOLDR_BUILTIN_VERBS: &[&str] = &[
     "gc",
     "purge-targets", // alias of `gc`
     "remote",
+    "sign",
+    "pair",
     "rustup",
     "toolchain",
     "bootstrap",

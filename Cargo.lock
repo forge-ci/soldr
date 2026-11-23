@@ -4149,6 +4149,7 @@ dependencies = [
  "prost",
  "rayon",
  "reqwest 0.12.28",
+ "ring",
  "running-process",
  "rusqlite",
  "semver",

@@ -1,6 +1,9 @@
 //! Whole-workspace builds on a trusted runner.
 
+mod access;
 mod artifacts;
+mod auth;
+pub(crate) mod auto;
 mod control;
 mod manifest;
 mod oauth;
@@ -17,13 +20,13 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
 use prost::Message;
-use soldr_fetch::fetch::LoopbackPostClient;
+use soldr_fetch::fetch::RemoteBuildHttpClient;
 
 use self::wire::{Action, Blob, Session, Start};
 
 #[derive(Args)]
 pub(crate) struct RemoteArgs {
-    /// File containing the same randomly generated token on client and runner.
+    /// Shared token file for a runner reached over an SSH tunnel.
     #[arg(long)]
     token_file: Option<PathBuf>,
     #[command(subcommand)]
@@ -51,6 +54,9 @@ enum RemoteCommand {
     },
     /// Serve remote build sessions on a loopback interface.
     Serve {
+        /// File containing the separate Forge CI worker grant signing key.
+        #[arg(long)]
+        forge_key_file: Option<PathBuf>,
         #[arg(long, default_value = "127.0.0.1:7744")]
         listen: SocketAddr,
         #[arg(long)]
@@ -65,12 +71,15 @@ enum RemoteCommand {
         #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u8).range(1..=8))]
         artifact_streams: u8,
     },
-    /// Run a command against the current Git commit on the runner.
+    /// Run a command against a Git checkout on the runner.
     Run {
-        #[arg(long, default_value = "127.0.0.1:7744")]
-        endpoint: SocketAddr,
+        #[arg(long)]
+        endpoint: Option<SocketAddr>,
         #[arg(long, default_value = "target/attestation.json")]
         attestation: PathBuf,
+        /// Build the current worktree, including uncommitted and nonignored files.
+        #[arg(long, conflicts_with = "manifest")]
+        working_tree: bool,
         /// Optional JSON identifying a repository, user, and commit lineage.
         #[arg(long)]
         manifest: Option<PathBuf>,
@@ -111,34 +120,36 @@ enum BuildAction {
 }
 
 pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
-    let command = match args.command {
+    let RemoteArgs {
+        token_file,
+        command,
+    } = args;
+    match command {
         RemoteCommand::PeerId { key } => {
             println!("{}", peer::identity(&key)?.public());
-            return Ok(0);
+            Ok(0)
         }
         RemoteCommand::Connect {
             key,
             runner,
             listen,
             relay_only,
-        } => {
-            return peer::connect(&key, runner, listen, relay_only).await;
-        }
-        command => command,
-    };
-    let token = read_token(args.token_file)?;
-    let token = token.trim();
-    match command {
+        } => peer::connect(&key, runner, listen, relay_only).await,
         RemoteCommand::Serve {
+            forge_key_file,
             listen,
             root,
             slots,
             artifact_streams,
             peer_key,
-        } => serve(listen, root, token, slots, artifact_streams, peer_key).await,
+        } => {
+            let auth = server_auth(forge_key_file.as_deref(), token_file.as_deref())?;
+            serve(listen, root, auth, slots, artifact_streams, peer_key).await
+        }
         RemoteCommand::Run {
             endpoint,
             attestation,
+            working_tree,
             manifest,
             fetch_out,
             fetch,
@@ -148,39 +159,38 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             args,
         } => {
             let directory = std::env::current_dir()?;
-            let snapshot = snapshot::capture(&directory)?;
+            let snapshot = if working_tree {
+                snapshot::capture_worktree(&directory)?
+            } else {
+                snapshot::capture(&directory)?
+            };
             let manifest = manifest::read(manifest.as_deref(), &snapshot.commit)?;
             if let Some(manifest) = &manifest {
                 snapshot::verify_parent(&directory, &snapshot.commit, manifest.parent())?;
             }
             let manifest_json = manifest.as_ref().map(serde_json::to_vec).transpose()?;
-            let client = Client::new(endpoint, token)?;
+            let client = connect_for_run(token_file.as_deref(), endpoint).await?;
             let action = match action {
                 BuildAction::Build => Action::Build,
                 BuildAction::Test => Action::Test,
                 BuildAction::Dylint => Action::Dylint,
                 BuildAction::Lint => Action::Lint,
             };
-            let wants_manifest = manifest_json.is_some();
-            let session: Session = client
-                .post(
-                    "start",
-                    &Start {
+            let session = client
+                .start_session(
+                    Start {
                         commit: snapshot.commit,
                         files: snapshot.files,
                         action: action as i32,
                         args,
                         cache_zstd_level,
                         manifest_json,
+                        working_tree,
+                        work_dir: None,
                     },
+                    snapshot.blobs,
                 )
                 .await?;
-            if wants_manifest && !session.manifest_accepted {
-                return Err(io::Error::other(
-                    "remote runner does not support session manifests; upgrade the runner",
-                ));
-            }
-            client.upload_workspace(&session, snapshot.blobs).await?;
             eprintln!("Remote build session {}", session.id);
             let code = match client.finish_run(&session.id, &attestation).await {
                 // A diagnostic could write to the same blocked pipe.
@@ -198,41 +208,38 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             session,
             globs,
         } => {
+            let token = read_tunnel_token(token_file.as_deref())?;
             let client = Client::new(endpoint, token)?;
             artifacts::download(&client, &session, &out, globs).await?;
             Ok(0)
         }
-        RemoteCommand::PeerId { .. } | RemoteCommand::Connect { .. } => unreachable!(),
     }
 }
 
-fn read_token(path: Option<PathBuf>) -> io::Result<String> {
-    let token_file = path.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--token-file is required for serve, run and fetch",
-        )
-    })?;
-    let token = std::fs::read_to_string(token_file)?;
-    if token.trim().len() != 64 || !token.trim().bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(io::Error::other(
-            "Remote build token file must contain 64 hexadecimal characters.",
-        ));
+fn server_auth(
+    forge_key_file: Option<&std::path::Path>,
+    token_file: Option<&std::path::Path>,
+) -> io::Result<auth::RunnerAuth> {
+    match (forge_key_file, token_file) {
+        (Some(path), None) => auth::RunnerAuth::forge(path),
+        (None, token) => Ok(auth::RunnerAuth::tunnel(&read_tunnel_token(token)?)),
+        (Some(_), Some(_)) => Err(io::Error::other(
+            "Use one of --forge-key-file or --token-file.",
+        )),
     }
-    Ok(token)
 }
 
 async fn serve(
     listen: SocketAddr,
     root: PathBuf,
-    token: &str,
+    auth: auth::RunnerAuth,
     slots: Option<u32>,
     artifact_streams: u8,
     peer_key: Option<PathBuf>,
 ) -> io::Result<i32> {
     let listener = peer::loopback_listener(listen).await?;
     let address = listener.local_addr()?;
-    let serve = server::serve(listener, root, token, slots, artifact_streams);
+    let serve = server::serve(listener, root, auth, slots, artifact_streams);
     if let Some(key) = peer_key {
         let (code, ()) = tokio::try_join!(serve, peer::serve(&key, address))?;
         Ok(code)
@@ -241,12 +248,72 @@ async fn serve(
     }
 }
 
-struct Client<'a> {
-    http: LoopbackPostClient,
-    token: &'a str,
+fn read_tunnel_token(path: Option<&std::path::Path>) -> io::Result<String> {
+    let path = path.ok_or_else(|| io::Error::other("This command requires --token-file."))?;
+    let token = std::fs::read_to_string(path)?;
+    let token = token.trim();
+    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(io::Error::other(
+            "Remote build token file must contain 64 hexadecimal characters.",
+        ));
+    }
+    Ok(token.to_owned())
 }
 
-impl<'a> Client<'a> {
+async fn connect_for_run(
+    token_file: Option<&std::path::Path>,
+    endpoint: Option<SocketAddr>,
+) -> io::Result<Client> {
+    if let Some(path) = token_file {
+        let endpoint = endpoint.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 7744)));
+        return Client::new(endpoint, read_tunnel_token(Some(path))?);
+    }
+    if endpoint.is_some() {
+        return Err(io::Error::other("--endpoint requires --token-file."));
+    }
+    let grant = crate::forge_sign_in::discover_worker()
+        .await?
+        .ok_or_else(|| {
+            io::Error::other(
+                "No Forge CI worker is configured. Check your account with soldr sign status.",
+            )
+        })?;
+    Client::forge(grant)
+}
+
+struct Client {
+    http: RemoteBuildHttpClient,
+    token: String,
+}
+
+impl Client {
+    fn forge(grant: crate::forge_sign_in::WorkerGrant) -> io::Result<Self> {
+        Ok(Self {
+            http: RemoteBuildHttpClient::https_worker(&grant.origin)?,
+            token: grant.token,
+        })
+    }
+
+    async fn start_session(
+        &self,
+        request: Start,
+        blobs: std::collections::BTreeMap<String, Vec<u8>>,
+    ) -> io::Result<Session> {
+        let session: Session = self.post("start", &request).await?;
+        if request.manifest_json.is_some() && !session.manifest_accepted {
+            return Err(io::Error::other(
+                "remote runner does not support session manifests; upgrade the runner",
+            ));
+        }
+        if request.working_tree && !session.working_tree_accepted {
+            return Err(io::Error::other(
+                "remote runner does not support worktree snapshots; upgrade the runner",
+            ));
+        }
+        self.upload_workspace(&session, blobs).await?;
+        Ok(session)
+    }
+
     async fn upload_workspace(
         &self,
         session: &Session,
@@ -301,9 +368,10 @@ impl<'a> Client<'a> {
             std::time::Duration::from_secs(60),
             self.http.get(
                 &format!("/v1/sessions/{session}/artifact"),
-                self.token,
+                &self.token,
                 &[("path", "attestation.json")],
                 wire::MAX_FRAME + 1024 * 1024,
+                "zstd",
             ),
         )
         .await
@@ -324,9 +392,9 @@ impl<'a> Client<'a> {
         Ok(code)
     }
 
-    fn new(endpoint: SocketAddr, token: &'a str) -> io::Result<Self> {
+    fn new(endpoint: SocketAddr, token: String) -> io::Result<Self> {
         Ok(Self {
-            http: LoopbackPostClient::with_http2(endpoint, true)?,
+            http: RemoteBuildHttpClient::with_http2(endpoint, true)?,
             token,
         })
     }
@@ -348,12 +416,33 @@ impl<'a> Client<'a> {
             .http
             .post(
                 &format!("/v1/{operation}"),
-                self.token,
+                &self.token,
                 "application/x-protobuf+zstd",
                 body,
                 wire::MAX_FRAME + 1024 * 1024,
             )
             .await?;
         wire::decode(&data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn remote_run_accepts_forge_ci_and_tunnel_invocations() {
+        for prefix in [vec![], vec!["--token-file", "token-file"]] {
+            let mut cli = vec!["soldr", "remote"];
+            cli.extend(prefix.iter().copied());
+            cli.extend(["run", "build"]);
+            let args = crate::cli_args::Cli::try_parse_from(cli).unwrap();
+            let crate::cli_args::Commands::Remote(args) = args.command else {
+                panic!("expected remote command");
+            };
+            assert_eq!(args.token_file.is_some(), !prefix.is_empty());
+            assert!(matches!(args.command, RemoteCommand::Run { .. }));
+        }
     }
 }

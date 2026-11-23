@@ -40,14 +40,14 @@ pub(crate) mod segmented_download;
 /// soldr#2310 — whole-source-tree acquisition via GitHub codeload zips.
 pub mod source_zip;
 pub(crate) mod stream_download;
-pub use stream_download::{pypi_has_version, ForgeSignalClient, LoopbackPostClient};
-
 pub use rustup_init::{
     auto_bootstrap_if_missing, auto_bootstrap_if_missing_blocking, bootstrap_rustup,
     bootstrap_rustup_blocking, discover_rustup, managed_cargo_home, managed_rustup_home,
     managed_rustup_path, rustup_init_download_url, rustup_init_host_triple, AutoBootstrapOutcome,
     BootstrapReport, NO_BOOTSTRAP_ENV_VAR, RUSTUP_INIT_TRIPLE_ENV_VAR, RUSTUP_INIT_URL_ENV_VAR,
 };
+pub use stream_download::forge_http::{ForgeCiHttp, LoopbackPostClient, RemoteBuildHttpClient};
+pub use stream_download::{pypi_has_version, ForgePairingClient, ForgeSignalClient};
 
 pub mod apple_sdk;
 pub mod archive;

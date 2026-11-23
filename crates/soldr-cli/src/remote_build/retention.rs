@@ -89,19 +89,6 @@ impl Connected<axum::serve::IncomingStream<'_, tokio::net::TcpListener>> for Con
 }
 
 impl Connection {
-    pub(super) async fn allocate_for_stream(
-        &self,
-        root: &Path,
-        id: &str,
-    ) -> io::Result<Arc<OutputDirectory>> {
-        let owner = self.clone();
-        let root = root.to_owned();
-        let id = id.to_owned();
-        tokio::task::spawn_blocking(move || owner.allocate(&root, &id))
-            .await
-            .map_err(io::Error::other)?
-    }
-
     pub(super) fn allocate(&self, root: &Path, id: &str) -> io::Result<Arc<OutputDirectory>> {
         let mut outputs = self.0.entries.lock();
         if outputs.contains_key(id) {

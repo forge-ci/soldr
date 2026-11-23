@@ -40,6 +40,7 @@
       "libc",
       "prost",
       "rayon",
+      "ring",
       "running-process",
       "rusqlite",
       "semver",

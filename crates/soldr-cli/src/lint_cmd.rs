@@ -516,10 +516,15 @@ pub(crate) async fn run_lint(
         LintMode::Rust => {
             // soldr#3378: resolved (and validated) before any compile starts.
             let cross_targets = plan.resolve_cross_targets()?;
-            let steps = plan.rust_plan(false, &cross_targets)?;
+            let mut steps = plan.rust_plan(false, &cross_targets)?;
             if cargo_front_door::porcelain_lint::requested() {
                 // soldr#3958: one folded summary for the whole plan.
                 return lint_steps::run_porcelain(steps, cache_enabled, trust_inherited_soldr_env);
+            }
+            if let Some(code) =
+                try_remote_lint(args, &mut steps, cache_enabled, trust_inherited_soldr_env).await?
+            {
+                return Ok(code);
             }
             lint_steps::run_planned_steps(steps, cache_enabled, trust_inherited_soldr_env).await
         }
@@ -555,6 +560,39 @@ pub(crate) async fn run_lint(
             .await
         }
     }
+}
+
+async fn try_remote_lint(
+    args: &[String],
+    steps: &mut Vec<PlannedStep>,
+    cache_enabled: bool,
+    trust_inherited_soldr_env: bool,
+) -> Result<Option<i32>, SoldrError> {
+    if steps
+        .iter()
+        .any(|step| matches!(step, PlannedStep::Extra(_)))
+    {
+        return Ok(None);
+    }
+    let Some(worker) = crate::remote_build::auto::LintWorker::connect(args, cache_enabled).await?
+    else {
+        return Ok(None);
+    };
+    if steps
+        .first()
+        .is_some_and(|step| step.label() == lint_steps::FMT_FIX_LABEL)
+    {
+        let code = lint_steps::run_planned_steps(
+            vec![steps.remove(0)],
+            cache_enabled,
+            trust_inherited_soldr_env,
+        )
+        .await?;
+        if code != 0 {
+            return Ok(Some(code));
+        }
+    }
+    Ok(worker.run(args).await?)
 }
 
 /// Run the `ci` policy suite (soldr#2038). Pure filesystem scan over the
