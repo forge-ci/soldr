@@ -21,8 +21,10 @@ Rust triples and target aliases. Custom target JSON paths remain local.
 Each compile-only action requires worker support. Ordinary tests still run
 locally. Soldr uses the local path when worker discovery fails or the
 invocation is unsupported.
-After the remote build starts, Soldr returns its result and installs the
-verified successful artifacts in the local target directory.
+After a successful remote build, Soldr installs verified build products in
+their local Cargo profile directories. Compile-only tests are downloaded to
+`target/forge-ci-tests/<session>`, and Soldr prints that path. Cargo check and
+Clippy return diagnostics and status.
 
 Plain `soldr lint` delegates the Rust suite from a supported Git workspace root
 after pairing and writes the worker's result to `target/attestation.json`.
