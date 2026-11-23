@@ -67,10 +67,10 @@ pub(crate) async fn try_build(
     cache_enabled: bool,
     mode: BuildMode,
 ) -> io::Result<Option<i32>> {
-    let Some((client, root)) = find_worker(args, cache_enabled, mode).await? else {
+    let Some((client, root, work_dir)) = find_worker(args, cache_enabled, mode).await? else {
         return Ok(None);
     };
-    let Some(session) = start_worktree(&client, &root, args, mode).await? else {
+    let Some(session) = start_worktree(&client, &root, work_dir, args, mode).await? else {
         return Ok(None);
     };
     eprintln!("Forge CI build session {}", session.id);
@@ -105,7 +105,7 @@ impl LintWorker {
         };
         Ok(find_worker(flags, cache_enabled, BuildMode::Lint)
             .await?
-            .map(|(client, root)| Self { client, root }))
+            .map(|(client, root, _)| Self { client, root }))
     }
 
     pub(crate) async fn run(self, args: &[String]) -> io::Result<Option<i32>> {
@@ -123,8 +123,14 @@ impl LintWorker {
         {
             remote_args.push("--color=always".into());
         }
-        let Some(session) =
-            start_worktree(&self.client, &self.root, &remote_args, BuildMode::Lint).await?
+        let Some(session) = start_worktree(
+            &self.client,
+            &self.root,
+            None,
+            &remote_args,
+            BuildMode::Lint,
+        )
+        .await?
         else {
             return Ok(None);
         };
@@ -144,7 +150,7 @@ async fn find_worker(
     args: &[String],
     cache_enabled: bool,
     mode: BuildMode,
-) -> io::Result<Option<(Client, PathBuf)>> {
+) -> io::Result<Option<(Client, PathBuf, Option<String>)>> {
     if !cache_enabled || !can_delegate(args, mode) {
         return Ok(None);
     }
@@ -152,15 +158,25 @@ async fn find_worker(
     let Ok(root) = snapshot::worktree_root(&cwd) else {
         return Ok(None);
     };
-    if root != cwd
-        || !root.join("Cargo.toml").is_file()
-        || !uses_default_target_dir(&root)
+    if !root.join("Cargo.toml").is_file()
+        || !uses_default_target_dir(&cwd, &root)
         || std::fs::symlink_metadata(root.join("target")).is_ok_and(|entry| !entry.is_dir())
     {
         return Ok(None);
     }
-    match worker(mode).await {
-        Ok(client) => Ok(client.map(|client| (client, root))),
+    let work_dir = if cwd == root {
+        None
+    } else {
+        if mode == BuildMode::Lint {
+            return Ok(None);
+        }
+        let Some(directory) = workspace_subdirectory(&root, &cwd).await else {
+            return Ok(None);
+        };
+        Some(directory)
+    };
+    match worker(mode, work_dir.is_some()).await {
+        Ok(client) => Ok(client.map(|client| (client, root, work_dir))),
         Err(error) => {
             eprintln!("Forge CI worker unavailable ({error}). Running locally.");
             Ok(None)
@@ -171,6 +187,7 @@ async fn find_worker(
 async fn start_worktree(
     client: &Client,
     root: &Path,
+    work_dir: Option<String>,
     args: &[String],
     mode: BuildMode,
 ) -> io::Result<Option<super::wire::Session>> {
@@ -181,6 +198,14 @@ async fn start_worktree(
             return Ok(None);
         }
     };
+    if work_dir.as_ref().is_some_and(|directory| {
+        !snapshot
+            .files
+            .iter()
+            .any(|file| Path::new(&file.path).starts_with(directory))
+    }) {
+        return Ok(None);
+    }
     client
         .start_session(
             Start {
@@ -193,6 +218,7 @@ async fn start_worktree(
                     .cloned()
                     .collect(),
                 working_tree: true,
+                work_dir,
                 ..Start::default()
             },
             snapshot.blobs,
@@ -201,12 +227,14 @@ async fn start_worktree(
         .map(Some)
 }
 
-async fn worker(mode: BuildMode) -> io::Result<Option<Client>> {
+async fn worker(mode: BuildMode, subdirectory: bool) -> io::Result<Option<Client>> {
     retry_worker(crate::forge_sign_in::discover_worker, |grant| async move {
         let client = Client::forge(grant)?;
         let capabilities: Capabilities = client.post("capabilities", &Blob::default()).await?;
         let host = crate::core::TargetTriple::host().map_err(io::Error::other)?;
-        Ok(supports_build(&capabilities, &host.triple(), mode).then_some(client))
+        let supported = (!subdirectory || capabilities.worktree_subdirectories)
+            && supports_build(&capabilities, &host.triple(), mode);
+        Ok(supported.then_some(client))
     })
     .await
 }
@@ -368,11 +396,36 @@ fn portable_target(target: &str) -> bool {
         && crate::target_alias::resolve_soldr_target(target).is_ok()
 }
 
-fn uses_default_target_dir(root: &Path) -> bool {
+async fn workspace_subdirectory(root: &Path, cwd: &Path) -> Option<String> {
+    let relative = cwd
+        .strip_prefix(root)
+        .ok()?
+        .to_str()?
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    snapshot::relative_path(&relative).ok()?;
+    let result = tokio::process::Command::new(std::env::current_exe().ok()?)
+        .args([
+            "cargo",
+            "locate-project",
+            "--workspace",
+            "--message-format",
+            "plain",
+        ])
+        .current_dir(cwd)
+        .output()
+        .await
+        .ok()?;
+    let manifest = std::str::from_utf8(&result.stdout)
+        .ok()?
+        .trim_end_matches(['\r', '\n']);
+    (result.status.success() && Path::new(manifest) == root.join("Cargo.toml")).then_some(relative)
+}
+
+fn uses_default_target_dir(cwd: &Path, root: &Path) -> bool {
     let cargo_home = crate::core::resolve_cargo_home();
-    let directories = root
+    let directories = cwd
         .ancestors()
-        .map(|ancestor| (ancestor.join(".cargo"), ancestor == root))
+        .map(|ancestor| (ancestor.join(".cargo"), ancestor.starts_with(root)))
         .chain(cargo_home.into_iter().map(|home| (home, false)));
     directories.into_iter().all(|(directory, in_repo)| {
         ["config.toml", "config"].iter().all(|name| {

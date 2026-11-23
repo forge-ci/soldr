@@ -10,6 +10,7 @@ message Start {
   optional sint32 cache_zstd_level = 5;
   optional bytes manifest_json = 6;
   bool working_tree = 7;
+  optional string work_dir = 8;
 }
 
 message Source {
@@ -42,6 +43,7 @@ message Capabilities {
   bool working_tree_builds = 2;
   bool cargo_check = 3;
   repeated Action compile_actions = 4;
+  bool worktree_subdirectories = 5;
 }
 
 message Blob {

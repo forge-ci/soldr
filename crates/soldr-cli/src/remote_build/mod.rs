@@ -186,6 +186,7 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
                         cache_zstd_level,
                         manifest_json,
                         working_tree,
+                        work_dir: None,
                     },
                     snapshot.blobs,
                 )

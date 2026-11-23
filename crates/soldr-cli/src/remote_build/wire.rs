@@ -20,6 +20,8 @@ pub(super) struct Start {
     pub manifest_json: Option<Vec<u8>>,
     #[prost(bool, tag = "7")]
     pub working_tree: bool,
+    #[prost(string, optional, tag = "8")]
+    pub work_dir: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -89,6 +91,8 @@ pub(super) struct Capabilities {
     pub cargo_check: bool,
     #[prost(enumeration = "Action", repeated, tag = "4")]
     pub compile_actions: Vec<i32>,
+    #[prost(bool, tag = "5")]
+    pub worktree_subdirectories: bool,
 }
 
 impl Capabilities {
@@ -99,6 +103,7 @@ impl Capabilities {
                 .triple(),
             working_tree_builds: true,
             cargo_check: true,
+            worktree_subdirectories: true,
             compile_actions: [Action::CargoClippy, Action::CargoTestCompile]
                 .into_iter()
                 .map(|action| action as i32)

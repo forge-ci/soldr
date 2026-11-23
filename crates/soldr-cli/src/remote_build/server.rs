@@ -309,6 +309,12 @@ fn start(root: &Path, request: Start, access: &SessionAccess) -> io::Result<Vec<
             "worktree builds cannot carry a commit manifest",
         ));
     }
+    if let Some(directory) = &request.work_dir {
+        relative_path(directory)?;
+        if !request.working_tree {
+            return Err(io::Error::other("work directory requires a worktree build"));
+        }
+    }
     let manifest = manifest::decode(request.manifest_json.as_deref(), &request.commit)?;
     Action::try_from(request.action).map_err(io::Error::other)?;
     let mut missing = std::collections::BTreeSet::new();
@@ -509,6 +515,7 @@ fn run(
         "slot": lease.as_ref().map(|lease| lease.slot),
         "action": action,
         "args": request.args,
+        "work_dir": request.work_dir,
         "exit_code": result_code,
         "command_exit_code": exit_code,
         "cache_saved": cache_saved,
@@ -548,9 +555,19 @@ fn execute_action(
     let mut arguments = compile_args(action, &request.args, build_output)?;
     let full_lint = action == Action::Lint && arguments == ["rust", "--check"];
     let action = action.worker_command(&mut arguments);
+    let directory = match &request.work_dir {
+        Some(directory) => {
+            let directory = fs::canonicalize(source.join(relative_path(directory)?))?;
+            if !directory.starts_with(fs::canonicalize(source)?) || !directory.is_dir() {
+                return Err(io::Error::other("work directory is outside the snapshot"));
+            }
+            directory
+        }
+        None => source.to_path_buf(),
+    };
     let result = transcript.run(
         runner_soldr(soldr, cache_root)
-            .current_dir(source)
+            .current_dir(directory)
             .env("CARGO_TARGET_DIR", build_output.join("target"))
             .arg(action)
             .args(&arguments),

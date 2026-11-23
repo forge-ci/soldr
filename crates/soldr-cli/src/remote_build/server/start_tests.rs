@@ -18,6 +18,26 @@ fn remote_worktree_session_acknowledges_snapshot_without_a_manifest() {
 }
 
 #[test]
+fn remote_work_directory_requires_a_relative_worktree_path() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("sessions")).unwrap();
+    let mut request = Start {
+        commit: "a".repeat(40),
+        working_tree: true,
+        work_dir: Some("crates/cli".into()),
+        ..Start::default()
+    };
+    assert!(start(root.path(), request.clone(), &SessionAccess::default()).is_ok());
+    request.working_tree = false;
+    assert!(start(root.path(), request.clone(), &SessionAccess::default()).is_err());
+    request.working_tree = true;
+    for path in ["../outside", "/outside", "crates/../cli"] {
+        request.work_dir = Some(path.into());
+        assert!(start(root.path(), request.clone(), &SessionAccess::default()).is_err());
+    }
+}
+
+#[test]
 fn every_session_persists_its_manifest_before_source_upload() {
     let root = tempfile::tempdir().unwrap();
     fs::create_dir(root.path().join("sessions")).unwrap();
