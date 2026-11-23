@@ -403,18 +403,15 @@ async fn workspace_subdirectory(root: &Path, cwd: &Path) -> Option<String> {
         .to_str()?
         .replace(std::path::MAIN_SEPARATOR, "/");
     snapshot::relative_path(&relative).ok()?;
-    let result = tokio::process::Command::new(std::env::current_exe().ok()?)
-        .args([
-            "cargo",
-            "locate-project",
-            "--workspace",
-            "--message-format",
-            "plain",
-        ])
-        .current_dir(cwd)
-        .output()
-        .await
-        .ok()?;
+    let tool = crate::binaries::resolve_toolchain_binary("cargo").ok()?;
+    let mut probe = std::process::Command::new(&tool);
+    crate::binaries::apply_resolved_toolchain_homes(&mut probe, &tool);
+    probe
+        .args(["locate-project", "--workspace", "--message-format", "plain"])
+        .env_remove("MAKEFLAGS")
+        .env_remove("CARGO_MAKEFLAGS")
+        .current_dir(cwd);
+    let result = tokio::process::Command::from(probe).output().await.ok()?;
     let manifest = std::str::from_utf8(&result.stdout)
         .ok()?
         .trim_end_matches(['\r', '\n']);
