@@ -74,11 +74,6 @@ pub(crate) fn run_toolchain_passthrough(tool: &str, args: &[String]) -> Result<i
     crate::fallback_detach::detach_outputs_for_toolchain(tool, args)?;
     let mut command = std::process::Command::new(&binary);
     command.args(args);
-    if tool == "cargo" {
-        command
-            .env_remove("MAKEFLAGS")
-            .env_remove("CARGO_MAKEFLAGS");
-    }
     crate::binaries::apply_resolved_toolchain_homes(&mut command, &binary);
     suppress_windows_console_window(&mut command);
     let status = run_toolchain_command(&mut command, &format!("{tool} passthrough"))?;

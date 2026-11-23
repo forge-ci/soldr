@@ -114,6 +114,9 @@ pub(crate) fn maybe_dispatch(raw_args: &[String]) -> Option<MulticallDispatch> {
             {
                 // Dylint asks each lint package for its metadata before building.
                 // The parent has prepared the nightly and this probe cannot compile.
+                // Forward the probe before the CLI runtime starts.
+                env::remove_var("MAKEFLAGS");
+                env::remove_var("CARGO_MAKEFLAGS");
                 let code = crate::toolchain::run_toolchain_passthrough(tool, forwarded)
                     .unwrap_or_else(|error| {
                         eprintln!("soldr: {error}");
