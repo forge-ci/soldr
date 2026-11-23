@@ -407,6 +407,17 @@ fn install_and_observe_explicit_nightly(channel: &str) -> Result<DylintToolchain
     })
 }
 
+/// Whether a nested Cargo shim can reuse the parent's prepared nightly.
+pub(crate) fn prepared_scope_is_inherited() -> bool {
+    let Some(channel) = non_empty_env(TOOLCHAIN_ENV_VAR) else {
+        return false;
+    };
+    let Some(prepared) = non_empty_env(PREPARED_IDENTITY_ENV_VAR) else {
+        return false;
+    };
+    plan_from_retained_environment(&channel).is_ok_and(|plan| plan.cache_identity() == prepared)
+}
+
 pub(crate) fn prepare_resolved(
     mut plan: DylintToolchainPlan,
 ) -> Result<DylintToolchainPlan, SoldrError> {

@@ -106,6 +106,21 @@ pub(crate) fn maybe_dispatch(raw_args: &[String]) -> Option<MulticallDispatch> {
     match classify_argv0(argv0)? {
         ShimIdentity::Toolchain(tool) => {
             strip_self_from_path(argv0);
+            let forwarded = &raw_args[1..];
+            if tool == "cargo"
+                && is_dylint_package_metadata_probe(forwarded)
+                && env::var_os("SOLDR_PORCELAIN").is_none()
+                && crate::dylint_toolchain::prepared_scope_is_inherited()
+            {
+                // Dylint asks each lint package for its metadata before building.
+                // The parent has prepared the nightly and this probe cannot compile.
+                let code = crate::toolchain::run_toolchain_passthrough(tool, forwarded)
+                    .unwrap_or_else(|error| {
+                        eprintln!("soldr: {error}");
+                        1
+                    });
+                return Some(MulticallDispatch::Exit(code));
+            }
             let mut args = Vec::with_capacity(raw_args.len());
             args.push(tool.to_string());
             args.extend(raw_args.iter().skip(1).cloned());
@@ -116,6 +131,12 @@ pub(crate) fn maybe_dispatch(raw_args: &[String]) -> Option<MulticallDispatch> {
         ShimIdentity::SoldrDaemon => Some(MulticallDispatch::Exit(crate::daemon_entry::run())),
         ShimIdentity::SoldrDylint => Some(MulticallDispatch::Exit(run_soldr_dylint(raw_args))),
     }
+}
+
+fn is_dylint_package_metadata_probe(args: &[String]) -> bool {
+    args.iter()
+        .map(String::as_str)
+        .eq(["metadata", "--format-version", "1", "--no-deps"])
 }
 
 pub(crate) fn toolchain_shim_should_defer_to_rustc_wrapper(raw_args: &[String]) -> bool {
@@ -717,4 +738,20 @@ mod tests {
             ))
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn dylint_probe_fast_path_matches_only_the_read_only_package_query() {
+    assert!(is_dylint_package_metadata_probe(&[
+        "metadata".into(),
+        "--format-version".into(),
+        "1".into(),
+        "--no-deps".into(),
+    ]));
+    assert!(!is_dylint_package_metadata_probe(&[
+        "metadata".into(),
+        "--format-version".into(),
+        "1".into(),
+    ]));
 }
