@@ -14,6 +14,7 @@ const API_URL: &str = "/api/v1/soldr/pairings";
 const SESSION_URL: &str = "/api/v1/soldr/session";
 const WORKER_URL: &str = "/api/v1/soldr/worker";
 const CREDENTIAL_FILE: &str = "credential.json";
+const MAX_PAIRING_SECONDS: u64 = 30 * 60;
 
 #[derive(clap::Subcommand)]
 pub(crate) enum SignCommand {
@@ -88,7 +89,7 @@ async fn sign_in(directory: &Path) -> io::Result<()> {
     let pairing: Pairing = serde_json::from_slice(&body)?;
     let code = pairing.user_code.as_bytes();
     if pairing.verification_uri != PAIR_URL
-        || !(1..=600).contains(&pairing.expires_in)
+        || !(1..=MAX_PAIRING_SECONDS).contains(&pairing.expires_in)
         || !(1..pairing.expires_in).contains(&pairing.interval)
         || code.len() != 11
         || code[5] != b'-'
