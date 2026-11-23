@@ -493,7 +493,7 @@ fn detach_target(path: &Path, root: &Path) -> std::io::Result<DetachedCandidate>
     let lock = super::trash_gc::try_trash_reclaim_lock(root, true)?.ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::WouldBlock, "trash sweep is active")
     })?;
-    let trash = root.join("trash-gc-targets");
+    let trash = root.join(super::trash_gc::DETACHED_TARGETS_DIR);
     std::fs::create_dir_all(&trash)?;
     super::path_safety::validate_owned_directory(root, &trash)?;
     let staging = tempfile::Builder::new().prefix("target-").tempdir_in(trash)?;

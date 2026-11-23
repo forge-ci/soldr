@@ -8,6 +8,9 @@
 use crate::core::SoldrPaths;
 use serde::Serialize;
 
+// Older sweepers only walk `trash-*` buckets and do not take our lock.
+pub(super) const DETACHED_TARGETS_DIR: &str = "gc-detached-targets";
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct SweepReport {
     pub removed: u64,
@@ -80,7 +83,7 @@ pub fn sweep_trash(paths: &SoldrPaths) -> std::io::Result<SweepReport> {
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if !name.to_string_lossy().starts_with("trash-") {
+        if name != DETACHED_TARGETS_DIR && !name.to_string_lossy().starts_with("trash-") {
             continue;
         }
         let metadata = match std::fs::symlink_metadata(entry.path()) {
@@ -175,6 +178,20 @@ mod sweep_reporting_tests {
 
         assert!(try_trash_reclaim_lock(&root, true).is_err());
         assert!(!outside.exists());
+    }
+
+    #[test]
+    fn sweep_reclaims_a_target_left_by_an_interrupted_detach() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_at(temp.path());
+        let bucket = paths.root.join(DETACHED_TARGETS_DIR);
+        let target = bucket.join("target-interrupted/target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("artifact"), b"stale").unwrap();
+
+        let report = sweep_trash(&paths).unwrap();
+        assert_eq!(report.removed, 1);
+        assert!(!bucket.exists());
     }
 
     #[test]
