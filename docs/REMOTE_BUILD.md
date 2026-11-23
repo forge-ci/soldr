@@ -26,7 +26,7 @@ verified successful artifacts in the local target directory.
 
 Plain `soldr lint` delegates the Rust suite from a supported Git workspace root
 after pairing and writes the worker's result to `target/attestation.json`.
-When enabled, formatting fixes run locally before the working tree is sent.
+The worker checks formatting without changing files in the client checkout.
 If no compatible worker is available, lint runs locally. Repository extra
 commands and the explicit `lint rust --attest` evidence workflow run locally.
 

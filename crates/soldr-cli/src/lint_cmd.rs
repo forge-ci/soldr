@@ -516,14 +516,12 @@ pub(crate) async fn run_lint(
         LintMode::Rust => {
             // soldr#3378: resolved (and validated) before any compile starts.
             let cross_targets = plan.resolve_cross_targets()?;
-            let mut steps = plan.rust_plan(false, &cross_targets)?;
+            let steps = plan.rust_plan(false, &cross_targets)?;
             if cargo_front_door::porcelain_lint::requested() {
                 // soldr#3958: one folded summary for the whole plan.
                 return lint_steps::run_porcelain(steps, cache_enabled, trust_inherited_soldr_env);
             }
-            if let Some(code) =
-                try_remote_lint(args, &mut steps, cache_enabled, trust_inherited_soldr_env).await?
-            {
+            if let Some(code) = try_remote_lint(args, &steps, cache_enabled).await? {
                 return Ok(code);
             }
             lint_steps::run_planned_steps(steps, cache_enabled, trust_inherited_soldr_env).await
@@ -564,17 +562,12 @@ pub(crate) async fn run_lint(
 
 async fn try_remote_lint(
     args: &[String],
-    steps: &mut Vec<PlannedStep>,
+    steps: &[PlannedStep],
     cache_enabled: bool,
-    trust_inherited_soldr_env: bool,
 ) -> Result<Option<i32>, SoldrError> {
-    let fmt_fix = steps
+    if steps
         .iter()
-        .position(|step| step.label() == lint_steps::FMT_FIX_LABEL);
-    if fmt_fix.is_some_and(|index| index != 0)
-        || steps
-            .iter()
-            .any(|step| matches!(step, PlannedStep::Extra(_)))
+        .any(|step| matches!(step, PlannedStep::Extra(_)))
     {
         return Ok(None);
     }
@@ -582,17 +575,6 @@ async fn try_remote_lint(
     else {
         return Ok(None);
     };
-    if fmt_fix.is_some() {
-        let code = lint_steps::run_planned_steps(
-            vec![steps.remove(0)],
-            cache_enabled,
-            trust_inherited_soldr_env,
-        )
-        .await?;
-        if code != 0 {
-            return Ok(Some(code));
-        }
-    }
     Ok(worker.run(args).await?)
 }
 

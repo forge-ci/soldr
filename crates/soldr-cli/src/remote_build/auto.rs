@@ -1,6 +1,6 @@
 //! Dispatch supported ordinary builds to the signed-in Forge CI worker.
 
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -105,6 +105,14 @@ impl LintWorker {
         }
         if !remote_args.iter().any(|arg| arg == "--check") {
             remote_args.push("--check".into());
+        }
+        if io::stderr().is_terminal()
+            && std::env::var_os("NO_COLOR").is_none()
+            && !remote_args
+                .iter()
+                .any(|arg| arg == "--color" || arg.starts_with("--color="))
+        {
+            remote_args.push("--color=always".into());
         }
         let Some(session) =
             start_worktree(&self.client, &self.root, &remote_args, BuildMode::Lint).await?
@@ -252,6 +260,14 @@ fn supported_args(args: &[String], mode: BuildMode) -> bool {
             "--no-run" if mode == BuildMode::CargoTestCompile && value.is_none() => {}
             "--check" | "--host-only" | "--cross-dylint"
                 if mode == BuildMode::Lint && value.is_none() => {}
+            "--color" if mode == BuildMode::Lint => {
+                if !matches!(
+                    value.or_else(|| args.next().map(String::as_str)),
+                    Some("auto" | "always" | "never")
+                ) {
+                    return false;
+                }
+            }
             "--target" => {
                 if !value
                     .or_else(|| args.next().map(String::as_str))
