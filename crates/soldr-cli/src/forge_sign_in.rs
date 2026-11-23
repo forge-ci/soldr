@@ -1,20 +1,16 @@
 //! Browser pairing and per-user credentials for Forge CI.
 
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
-use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use soldr_fetch::fetch::ForgeCiHttp;
 
 use crate::core::{home_dir, SoldrError, SoldrPaths};
 
-const PAIR_URL: &str = "https://forge-ci.com/soldr/pair";
-const API_URL: &str = "/api/v1/soldr/pairings";
 const SESSION_URL: &str = "/api/v1/soldr/session";
 const WORKER_URL: &str = "/api/v1/soldr/worker";
 const CREDENTIAL_FILE: &str = "credential.json";
-const MAX_PAIRING_SECONDS: u64 = 30 * 60;
 
 #[derive(clap::Subcommand)]
 pub(crate) enum SignCommand {
@@ -25,30 +21,21 @@ pub(crate) enum SignCommand {
 }
 
 #[derive(Deserialize)]
-struct Pairing {
-    device_code: String,
-    user_code: String,
-    verification_uri: String,
-    expires_in: u64,
-    interval: u64,
-}
-
-#[derive(Deserialize, Serialize)]
 struct Credential {
     token: String,
     github_login: Option<String>,
 }
 
 pub(crate) async fn run(command: SignCommand) -> Result<(), SoldrError> {
+    if matches!(command, SignCommand::In) {
+        return crate::pair_cmd::run().await;
+    }
     let directory = home_dir()?.join(".soldr").join("forge-ci");
-    match command {
-        SignCommand::In => sign_in(&directory).await?,
-        SignCommand::Status => match load_current(&directory, &SoldrPaths::new()?.root)? {
-            Some(credential) => {
-                check_session(&credential.token, credential.github_login.as_deref()).await?;
-            }
-            None => println!("Run soldr pair to connect this machine to Forge CI."),
-        },
+    match load_current(&directory, &SoldrPaths::new()?.root)? {
+        Some(credential) => {
+            check_session(&credential.token, credential.github_login.as_deref()).await?;
+        }
+        None => println!("Run soldr pair to connect this machine to Forge CI."),
     }
     Ok(())
 }
@@ -81,45 +68,6 @@ pub(crate) async fn discover_worker() -> io::Result<Option<WorkerGrant>> {
     }
 }
 
-async fn sign_in(directory: &Path) -> io::Result<()> {
-    let client = ForgeCiHttp::new()?;
-    let (status, body) = client.post(API_URL, None).await?;
-    if status != 201 {
-        return Err(io::Error::other(format!(
-            "Forge CI could not start pairing (HTTP {status})."
-        )));
-    }
-    let pairing: Pairing = serde_json::from_slice(&body)?;
-    let code = pairing.user_code.as_bytes();
-    if pairing.verification_uri != PAIR_URL
-        || !(1..=MAX_PAIRING_SECONDS).contains(&pairing.expires_in)
-        || !(1..pairing.expires_in).contains(&pairing.interval)
-        || code.len() != 11
-        || code[5] != b'-'
-        || !code[..5]
-            .iter()
-            .chain(&code[6..])
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-    {
-        return Err(io::Error::other("Forge CI returned an invalid pairing."));
-    }
-    println!("Open {PAIR_URL} and enter {}", pairing.user_code);
-    io::stdout().flush()?;
-    let credential = tokio::time::timeout(
-        Duration::from_secs(pairing.expires_in),
-        poll(&client, &pairing),
-    )
-    .await
-    .map_err(|_| expired())??;
-    save(directory, &credential)?;
-    if let Some(login) = &credential.github_login {
-        println!("Signed in to Forge CI as {login}.");
-    } else {
-        println!("Signed in to Forge CI.");
-    }
-    Ok(())
-}
-
 async fn check_session(token: &str, github_login: Option<&str>) -> io::Result<()> {
     let (status, _) = ForgeCiHttp::new()?.get(SESSION_URL, token).await?;
     match status {
@@ -138,41 +86,8 @@ async fn check_session(token: &str, github_login: Option<&str>) -> io::Result<()
     }
 }
 
-async fn poll(client: &ForgeCiHttp, pairing: &Pairing) -> io::Result<Credential> {
-    let interval = Duration::from_secs(pairing.interval);
-    let url = format!("{API_URL}/poll");
-    loop {
-        tokio::time::sleep(interval).await;
-        let (status, body) = client.post(&url, Some(&pairing.device_code)).await?;
-        match status {
-            202 => {}
-            200 => return Ok(serde_json::from_slice(&body)?),
-            404 | 410 => return Err(expired()),
-            _ => {
-                return Err(io::Error::other(format!(
-                    "Forge CI pairing failed (HTTP {status})."
-                )))
-            }
-        }
-    }
-}
-
 fn rejected_credential() -> io::Error {
-    io::Error::other("Forge CI rejected the saved credential. Run soldr sign in to reconnect.")
-}
-
-fn expired() -> io::Error {
-    io::Error::other("Forge CI pairing expired. Run soldr sign in to get a new code.")
-}
-
-fn save(directory: &Path, credential: &Credential) -> io::Result<()> {
-    std::fs::create_dir_all(directory)?;
-    running_process::broker::secure_dir::ensure_private_dir(directory)?;
-    let mut staged = tempfile::NamedTempFile::new_in(directory)?;
-    serde_json::to_writer(&mut staged, credential)?;
-    staged.as_file().sync_all()?;
-    staged.persist(directory.join(CREDENTIAL_FILE))?;
-    Ok(())
+    io::Error::other("Forge CI rejected the saved credential. Run soldr pair to reconnect.")
 }
 
 fn load(directory: &Path) -> io::Result<Option<Credential>> {
@@ -212,32 +127,13 @@ mod tests {
     }
 
     #[test]
-    fn credential_can_be_loaded_and_replaced() {
-        let temp = tempfile::tempdir().unwrap();
-        let directory = temp.path().join("forge-ci");
-        assert!(load(&directory).unwrap().is_none());
-        for token in ["initial", "replacement"] {
-            let credential = Credential {
-                token: token.into(),
-                github_login: Some("customer".into()),
-            };
-            save(&directory, &credential).unwrap();
-            let loaded = load(&directory).unwrap().unwrap();
-            assert_eq!(loaded.token, token);
-            assert_eq!(loaded.github_login.as_deref(), Some("customer"));
-        }
-    }
-
-    #[test]
     fn worker_uses_the_registration_from_soldr_pair() {
         let temp = tempfile::tempdir().unwrap();
         let directory = temp.path().join("forge-ci");
-        save(
-            &directory,
-            &Credential {
-                token: "old credential".into(),
-                github_login: Some("customer".into()),
-            },
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(
+            directory.join(CREDENTIAL_FILE),
+            r#"{"token":"old credential","github_login":"customer"}"#,
         )
         .unwrap();
         assert_eq!(
