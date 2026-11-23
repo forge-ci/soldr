@@ -143,15 +143,7 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             artifact_streams,
             peer_key,
         } => {
-            let auth = match (forge_key_file.as_deref(), token_file.as_deref()) {
-                (Some(path), None) => auth::RunnerAuth::forge(path)?,
-                (None, token) => auth::RunnerAuth::tunnel(&read_tunnel_token(token)?),
-                (Some(_), Some(_)) => {
-                    return Err(io::Error::other(
-                        "Use one of --forge-key-file or --token-file.",
-                    ));
-                }
-            };
+            let auth = server_auth(forge_key_file.as_deref(), token_file.as_deref())?;
             serve(listen, root, auth, slots, artifact_streams, peer_key).await
         }
         RemoteCommand::Run {
@@ -220,6 +212,19 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             artifacts::download(&client, &session, &out, globs).await?;
             Ok(0)
         }
+    }
+}
+
+fn server_auth(
+    forge_key_file: Option<&std::path::Path>,
+    token_file: Option<&std::path::Path>,
+) -> io::Result<auth::RunnerAuth> {
+    match (forge_key_file, token_file) {
+        (Some(path), None) => auth::RunnerAuth::forge(path),
+        (None, token) => Ok(auth::RunnerAuth::tunnel(&read_tunnel_token(token)?)),
+        (Some(_), Some(_)) => Err(io::Error::other(
+            "Use one of --forge-key-file or --token-file.",
+        )),
     }
 }
 
