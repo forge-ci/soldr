@@ -216,7 +216,7 @@ fn prepared_marker_roundtrip_hits_when_fresh_and_installed() {
     let plan = sample_plan();
     stub_installed_toolchain(rustup_home.path(), &plan.channel);
 
-    write_prepared_marker_at(soldr_root.path(), "1.94", &plan).expect("write marker");
+    write_prepared_marker_at(soldr_root.path(), "1.94", &plan, false).expect("write marker");
 
     let loaded = load_prepared_marker_from(
         soldr_root.path(),
@@ -237,7 +237,7 @@ fn prepared_marker_accepts_fully_qualified_toolchain_directory() {
     let directory = rustup_home.path().join("toolchains").join(&plan.channel);
     write_ready_toolchain(&directory);
 
-    write_prepared_marker_at(soldr_root.path(), "1.94", &plan).expect("write marker");
+    write_prepared_marker_at(soldr_root.path(), "1.94", &plan, false).expect("write marker");
 
     let loaded = load_prepared_marker_from(
         soldr_root.path(),
@@ -256,7 +256,7 @@ fn prepared_marker_rejected_when_ttl_expired() {
     let plan = sample_plan();
     stub_installed_toolchain(rustup_home.path(), &plan.channel);
 
-    write_prepared_marker_at(soldr_root.path(), "1.94", &plan).expect("write marker");
+    write_prepared_marker_at(soldr_root.path(), "1.94", &plan, false).expect("write marker");
 
     // "now" far in the future relative to the just-written marker's
     // mtime, well past a 1-second TTL.
@@ -278,7 +278,7 @@ fn prepared_marker_ttl_zero_never_trusts_marker() {
     let plan = sample_plan();
     stub_installed_toolchain(rustup_home.path(), &plan.channel);
 
-    write_prepared_marker_at(soldr_root.path(), "1.94", &plan).expect("write marker");
+    write_prepared_marker_at(soldr_root.path(), "1.94", &plan, false).expect("write marker");
 
     let loaded = load_prepared_marker_from(
         soldr_root.path(),
@@ -317,7 +317,7 @@ fn prepared_marker_rejected_when_toolchain_dir_missing() {
     let rustup_home = tempfile::tempdir().expect("rustup home tempdir");
     let plan = sample_plan();
 
-    write_prepared_marker_at(soldr_root.path(), "1.94", &plan).expect("write marker");
+    write_prepared_marker_at(soldr_root.path(), "1.94", &plan, false).expect("write marker");
 
     let loaded = load_prepared_marker_from(
         soldr_root.path(),
@@ -378,7 +378,7 @@ fn prepared_marker_rejects_a_partial_toolchain() {
     let manager_home = tempfile::tempdir().expect("manager home tempdir");
     let plan = sample_plan();
     stub_partial_toolchain(manager_home.path(), &plan.channel);
-    write_prepared_marker_at(soldr_root.path(), "1.94", &plan).expect("write marker");
+    write_prepared_marker_at(soldr_root.path(), "1.94", &plan, false).expect("write marker");
 
     assert_eq!(
         load_prepared_marker_from(

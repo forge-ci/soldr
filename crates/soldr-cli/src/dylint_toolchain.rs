@@ -430,11 +430,12 @@ pub(crate) fn prepare_resolved(
     }
     // An inherited identity covers the toolchain but does not guarantee that
     // the marker exists in this invocation's cache root.
-    if !inherited || !is_fully_qualified_nightly(&plan.channel) {
+    let preserve_marker = inherited && is_fully_qualified_nightly(&plan.channel);
+    if !preserve_marker {
         plan.channel = qualify_toolchain_name(&plan.channel)?;
     }
     if let Some(version) = major_minor(&plan.compiler_release) {
-        if let Err(error) = write_prepared_marker(&version, &plan) {
+        if let Err(error) = write_prepared_marker(&version, &plan, preserve_marker) {
             eprintln!("soldr: failed to write dylint prepared marker: {error}");
         }
     }
@@ -596,21 +597,41 @@ fn parse_marker_identity(line: &str) -> Option<DylintToolchainPlan> {
 /// Production entry point for persisting the warm-path marker after a
 /// successful cold-path prepare. Best-effort by contract — callers must
 /// not fail the run on a write error, only log it.
-fn write_prepared_marker(version: &str, plan: &DylintToolchainPlan) -> Result<(), SoldrError> {
+fn write_prepared_marker(
+    version: &str,
+    plan: &DylintToolchainPlan,
+    preserve_existing: bool,
+) -> Result<(), SoldrError> {
     let base_dir = SoldrPaths::new()?.root;
-    write_prepared_marker_at(&base_dir, version, plan)
+    write_prepared_marker_at(&base_dir, version, plan, preserve_existing)
 }
 
 fn write_prepared_marker_at(
     base_dir: &Path,
     version: &str,
     plan: &DylintToolchainPlan,
+    preserve_existing: bool,
 ) -> Result<(), SoldrError> {
+    use std::io::Write as _;
+
     let path = prepared_marker_path(base_dir, version);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, format!("{}\n", plan.cache_identity()))?;
+    let contents = format!("{}\n", plan.cache_identity());
+    if preserve_existing {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut file) => file.write_all(contents.as_bytes())?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        std::fs::write(path, contents)?;
+    }
     Ok(())
 }
 
