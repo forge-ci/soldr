@@ -73,7 +73,6 @@ pub fn cook_evict_pass(paths: &SoldrPaths, cfg: &CookConfig) -> CookEvictReport 
 /// Run cook GC while enforcing an optional absolute age that overrides
 /// `keep_per_origin`. Daemon full maintenance supplies this bound so even the
 /// newest entries in an otherwise abandoned origin eventually expire.
-#[expect(clippy::too_many_lines, reason = "baseline, zackees/ci.yml#229")]
 pub fn cook_evict_pass_with_absolute_age(
     paths: &SoldrPaths,
     cfg: &CookConfig,
@@ -83,22 +82,9 @@ pub fn cook_evict_pass_with_absolute_age(
     let now_unix_ms = current_unix_ms();
     let db_path = state_db_path(paths);
     let cook_dir = cook_cache_dir(paths);
-    match std::fs::symlink_metadata(&cook_dir) {
-        Ok(_) => {
-            if let Err(error) =
-                crate::cache_lib::path_safety::validate_owned_directory(&paths.root, &cook_dir)
-            {
-                tracing::warn!(error = %error, dir = %cook_dir.display(), "cook_evict_pass: unsafe cook root");
-                report.errors = report.errors.saturating_add(1);
-                return report;
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            tracing::warn!(error = %error, dir = %cook_dir.display(), "cook_evict_pass: cook root probe failed");
-            report.errors = report.errors.saturating_add(1);
-            return report;
-        }
+    if !cook_directory_is_safe(&paths.root, &cook_dir) {
+        report.errors = report.errors.saturating_add(1);
+        return report;
     }
 
     let entries = match cook_index::iter_entries(&db_path) {
@@ -178,48 +164,75 @@ pub fn cook_evict_pass_with_absolute_age(
         ));
     }
 
-    // Size cap: while sum(unprotected, surviving entries) > cap, evict LRU.
-    let cap_bytes = cfg.max_total_gb.saturating_mul(GIB);
-    if cap_bytes > 0 {
-        // Mark already-evicted indices so they don't count toward total.
-        let mut evicted_set: std::collections::HashSet<usize> =
-            evicted_indices.iter().copied().collect();
-        loop {
-            let mut total: u64 = 0;
-            for (i, (_, entry)) in entries.iter().enumerate() {
-                if evicted_set.contains(&i) {
-                    continue;
-                }
-                total = total.saturating_add(entry.size_bytes);
+    apply_size_cap(
+        &db_path,
+        &cook_dir,
+        &entries,
+        &protected,
+        evicted_indices,
+        cfg.max_total_gb.saturating_mul(GIB),
+        &mut report,
+    );
+    report
+}
+
+fn cook_directory_is_safe(root: &std::path::Path, cook_dir: &std::path::Path) -> bool {
+    match std::fs::symlink_metadata(cook_dir) {
+        Ok(_) => match crate::cache_lib::path_safety::validate_owned_directory(root, cook_dir) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(error = %error, dir = %cook_dir.display(), "cook_evict_pass: unsafe cook root");
+                false
             }
-            if total <= cap_bytes {
-                break;
-            }
-            // Find unprotected LRU survivor.
-            let victim = entries
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| !evicted_set.contains(i) && !protected[*i])
-                .min_by_key(|(_, (_, entry))| entry.last_used_unix_ms);
-            let Some((idx, (_, entry))) = victim else {
-                // Nothing left to evict — only protected entries
-                // remain. Log and stop; the pass is best-effort.
-                break;
-            };
-            let sha = entry.sha256;
-            let size = entry.size_bytes;
-            if apply_eviction(&db_path, &cook_dir, sha, &mut report) {
-                report.size_evicted = report.size_evicted.saturating_add(1);
-                report.bytes_freed = report.bytes_freed.saturating_add(size);
-                evicted_set.insert(idx);
-            } else {
-                // Avoid an infinite loop if eviction keeps failing.
-                evicted_set.insert(idx);
-            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => {
+            tracing::warn!(error = %error, dir = %cook_dir.display(), "cook_evict_pass: cook root probe failed");
+            false
         }
     }
+}
 
-    report
+fn apply_size_cap(
+    db_path: &std::path::Path,
+    cook_dir: &std::path::Path,
+    entries: &[(cook_index::CookKey, cook_index::CookEntry)],
+    protected: &[bool],
+    evicted_indices: Vec<usize>,
+    cap_bytes: u64,
+    report: &mut CookEvictReport,
+) {
+    if cap_bytes == 0 {
+        return;
+    }
+
+    let mut evicted_set: std::collections::HashSet<_> = evicted_indices.into_iter().collect();
+    loop {
+        let total = entries
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !evicted_set.contains(i))
+            .fold(0u64, |total, (_, (_, entry))| {
+                total.saturating_add(entry.size_bytes)
+            });
+        if total <= cap_bytes {
+            break;
+        }
+        let victim = entries
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !evicted_set.contains(i) && !protected[*i])
+            .min_by_key(|(_, (_, entry))| entry.last_used_unix_ms);
+        let Some((idx, (_, entry))) = victim else {
+            break;
+        };
+        if apply_eviction(db_path, cook_dir, entry.sha256, report) {
+            report.size_evicted = report.size_evicted.saturating_add(1);
+            report.bytes_freed = report.bytes_freed.saturating_add(entry.size_bytes);
+        }
+        // Skip failed evictions for this pass so an I/O failure cannot loop.
+        evicted_set.insert(idx);
+    }
 }
 
 /// Unlink `<sha256>.tar.zst`, then drop its `cook_index_v2` row.
