@@ -941,7 +941,7 @@ fn run_soldr_target_purge_background(
             budget_exhausted = true;
             break;
         }
-        let _maintenance_lease = match background_log {
+        let maintenance_lease = match background_log {
             Some(log_path) => {
                 let Some(lease) = try_target_maintenance(paths, log_path) else {
                     break;
@@ -955,7 +955,7 @@ fn run_soldr_target_purge_background(
         };
         on_volume_matched += 1;
         let bytes = cand.size_bytes;
-        let outcome = crate::cache_lib::gc::delete_candidate_dir(cand);
+        let outcome = super::discovery::reclaim_candidate(paths, cand, maintenance_lease);
         if outcome.removed {
             reclaimed = reclaimed.saturating_add(bytes);
             if background_log.is_none() {

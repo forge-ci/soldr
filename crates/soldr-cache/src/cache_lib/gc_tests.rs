@@ -671,3 +671,24 @@ fn empty_startup_scan_is_throttled() {
     assert!(marker.is_file(), "successful empty scan must write marker");
     assert!(!startup_warning_due(&marker).unwrap());
 }
+
+#[test]
+fn detached_target_reclamation_leaves_recreated_build_path_intact() {
+    let scratch = tempfile::tempdir().unwrap();
+    let target = scratch.path().join("target");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("CACHEDIR.TAG"), b"Signature: 8a477f597d28d172").unwrap();
+    let candidate = candidate(target.to_str().unwrap(), false, 60, 1);
+    let (outcome, detached) = detach_candidate_dir(candidate, scratch.path());
+    assert!(outcome.removed, "{:?}", outcome.error);
+    let detached = detached.expect("same-volume detachment");
+    assert!(!target.exists());
+    assert!(detached.join("target/CACHEDIR.TAG").is_file());
+
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("live"), b"new build").unwrap();
+    let outcome = reclaim_detached_candidate(outcome, &detached);
+    assert!(outcome.removed, "{:?}", outcome.error);
+    assert!(!detached.exists());
+    assert_eq!(std::fs::read(target.join("live")).unwrap(), b"new build");
+}

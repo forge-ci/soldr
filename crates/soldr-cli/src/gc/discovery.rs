@@ -108,6 +108,25 @@ pub(super) fn daemon_gc_scan_with_rows(
         .map_err(|error| SoldrError::Other(format!("gc scan failed: {error}")))
 }
 
+pub(super) fn reclaim_candidate(
+    paths: &crate::core::SoldrPaths,
+    candidate: crate::cache_lib::gc::GcCandidate,
+    maintenance_lease: Option<crate::cache_lib::build_active::MaintenanceLease>,
+) -> crate::cache_lib::gc::GcDeleteOutcome {
+    use crate::cache_lib::gc::{
+        delete_candidate_dir, detach_candidate_dir, reclaim_detached_candidate,
+    };
+    let Some(lease) = maintenance_lease else {
+        return delete_candidate_dir(candidate);
+    };
+    let (outcome, detached) = detach_candidate_dir(candidate, &paths.root);
+    drop(lease);
+    match detached {
+        Some(path) => reclaim_detached_candidate(outcome, &path),
+        None => outcome,
+    }
+}
+
 pub(super) fn target_still_cold(
     target: &std::path::Path,
     options: &crate::cache_lib::gc::GcOptions,

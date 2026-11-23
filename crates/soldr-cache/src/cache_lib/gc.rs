@@ -420,6 +420,58 @@ pub fn purge_one(
 }
 
 pub fn delete_candidate_dir(candidate: GcCandidate) -> GcDeleteOutcome {
+    remove_candidate_dir(candidate, |path| std::fs::remove_dir_all(path))
+}
+
+/// Detach a target under the same guards as deletion. The caller can release
+/// its build lease before recursively reclaiming the detached tree.
+pub fn detach_candidate_dir(
+    candidate: GcCandidate,
+    root: &Path,
+) -> (GcDeleteOutcome, Option<PathBuf>) {
+    let mut detached = None;
+    let outcome = remove_candidate_dir(candidate, |path| {
+        let trash = root.join("trash-gc-targets");
+        std::fs::create_dir_all(&trash)?;
+        super::path_safety::validate_owned_directory(root, &trash)?;
+        let staging = tempfile::Builder::new()
+            .prefix("target-")
+            .tempdir_in(trash)?;
+        match std::fs::rename(path, staging.path().join("target")) {
+            Ok(()) => detached = Some(staging.keep()),
+            // Root-local trash may be on a different filesystem. Preserve
+            // the existing cleanup on volumes that cannot rename into it.
+            Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+                std::fs::remove_dir_all(path)?;
+            }
+            Err(error) => return Err(error),
+        }
+        Ok(())
+    });
+    (outcome, detached)
+}
+
+/// Reclaim a target that is already detached from its original build path.
+pub fn reclaim_detached_candidate(
+    mut outcome: GcDeleteOutcome,
+    detached: &Path,
+) -> GcDeleteOutcome {
+    if let Err(error) = std::fs::remove_dir_all(detached) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            outcome.removed = false;
+            outcome.error = Some(format!(
+                "reclaiming detached target {}: {error}",
+                detached.display()
+            ));
+        }
+    }
+    outcome
+}
+
+fn remove_candidate_dir(
+    candidate: GcCandidate,
+    remove: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> GcDeleteOutcome {
     if !candidate.path.exists() {
         return GcDeleteOutcome {
             candidate,
@@ -470,7 +522,7 @@ pub fn delete_candidate_dir(candidate: GcCandidate) -> GcDeleteOutcome {
             removed: false,
         };
     }
-    match std::fs::remove_dir_all(&candidate.path) {
+    match remove(&candidate.path) {
         Ok(()) => GcDeleteOutcome {
             candidate,
             removed: true,
