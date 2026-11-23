@@ -1,6 +1,6 @@
 //! Dispatch supported ordinary builds to the signed-in Forge CI worker.
 
-use std::io::{self, IsTerminal};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -114,8 +114,7 @@ impl LintWorker {
         if !remote_args.iter().any(|arg| arg == "--check") {
             remote_args.push("--check".into());
         }
-        if io::stderr().is_terminal()
-            && std::env::var_os("NO_COLOR").is_none()
+        if crate::color_choice::stderr_enabled()
             && !remote_args
                 .iter()
                 .any(|arg| arg == "--color" || arg.starts_with("--color="))
