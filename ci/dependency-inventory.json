@@ -34,6 +34,7 @@
       "globset",
       "hex",
       "interprocess",
+      "iroh",
       "jwalk",
       "kernal-api",
       "libc",

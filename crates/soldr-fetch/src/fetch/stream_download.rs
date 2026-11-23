@@ -254,6 +254,63 @@ use sha2::{Digest, Sha256};
 pub(crate) const ASSET_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const ASSET_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const CONTROL_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
+/// Bounded JSON control requests to the Forge peer authorization service.
+#[derive(Clone)]
+pub struct ForgeSignalClient(reqwest::Client);
+
+impl ForgeSignalClient {
+    /// First-party relay and GitHub device authorization origin.
+    pub const ORIGIN: &str = "https://signal.forge-ci.com";
+
+    /// Construct a client pinned to the Forge origin, with no redirects.
+    pub fn new() -> std::io::Result<Self> {
+        super::net_guard::ensure_network_allowed("Forge remote peer authorization")
+            .map_err(std::io::Error::other)?;
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(12))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map(Self)
+            .map_err(std::io::Error::other)
+    }
+
+    /// Exchange typed JSON for a single authorization operation.
+    pub async fn post<Request: serde::Serialize, Response: serde::de::DeserializeOwned>(
+        &self,
+        operation: &str,
+        request: &Request,
+    ) -> std::io::Result<Response> {
+        if !matches!(operation, "start" | "poll" | "check") {
+            return Err(std::io::Error::other(
+                "invalid Forge authorization operation",
+            ));
+        }
+        let mut response = self
+            .0
+            .post(format!("{}/v1/remote/{operation}", Self::ORIGIN))
+            .json(request)
+            .send()
+            .await
+            .map_err(std::io::Error::other)?;
+        if !response.status().is_success() {
+            return Err(std::io::Error::other(format!(
+                "Forge peer authorization {operation}: HTTP {}",
+                response.status()
+            )));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(std::io::Error::other)? {
+            if bytes.len() + chunk.len() > 4096 {
+                return Err(std::io::Error::other(
+                    "Forge authorization response too large",
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes).map_err(std::io::Error::other)
+    }
+}
+
 /// Client for an authenticated HTTP service on a local tunnel endpoint.
 pub struct LoopbackPostClient {
     http: reqwest::Client,
@@ -266,11 +323,11 @@ impl LoopbackPostClient {
         Self::with_http2(endpoint, false)
     }
 
-    /// Select cleartext HTTP/2 for a loopback endpoint reached via SSH.
+    /// Select cleartext HTTP/2 for a loopback endpoint reached through a tunnel or peer gateway.
     pub fn with_http2(endpoint: std::net::SocketAddr, http2: bool) -> std::io::Result<Self> {
         if !endpoint.ip().is_loopback() {
             return Err(std::io::Error::other(
-                "Remote build endpoint must be a loopback SSH tunnel.",
+                "Remote build endpoint must be a loopback tunnel or peer gateway.",
             ));
         }
         let builder = reqwest::Client::builder()
