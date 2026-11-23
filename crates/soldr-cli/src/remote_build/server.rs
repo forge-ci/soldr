@@ -283,6 +283,11 @@ fn start(root: &Path, request: Start) -> io::Result<Vec<u8>> {
         return Err(io::Error::other("invalid commit ID"));
     }
     key(&request.commit, request.commit.len())?;
+    if request.working_tree && request.manifest_json.is_some() {
+        return Err(io::Error::other(
+            "worktree builds cannot carry a commit manifest",
+        ));
+    }
     let manifest = manifest::decode(request.manifest_json.as_deref(), &request.commit)?;
     Action::try_from(request.action).map_err(io::Error::other)?;
     let mut missing = std::collections::BTreeSet::new();
@@ -325,6 +330,7 @@ fn start(root: &Path, request: Start) -> io::Result<Vec<u8>> {
         id,
         missing: missing.into_iter().collect(),
         manifest_accepted: manifest.is_some(),
+        working_tree_accepted: request.working_tree,
     })
 }
 
@@ -469,7 +475,8 @@ fn run(
     let attestation = serde_json::to_vec_pretty(&serde_json::json!({
         "schema_version": 1,
         "session": id,
-        "commit": request.commit,
+        "commit": (!request.working_tree).then_some(&request.commit),
+        "base_commit": request.working_tree.then_some(&request.commit),
         "manifest": manifest,
         "slot": lease.as_ref().map(|lease| lease.slot),
         "action": action,
@@ -950,6 +957,23 @@ fn fetch(output: &Path, request: Fetch) -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod start_tests {
     use super::*;
+
+    #[test]
+    fn remote_worktree_session_acknowledges_snapshot_without_a_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("sessions")).unwrap();
+        let mut request = Start {
+            commit: "a".repeat(40),
+            working_tree: true,
+            ..Start::default()
+        };
+        let result = start(root.path(), request.clone()).unwrap();
+        let session: Session = wire::decode(&result).unwrap();
+        assert!(session.working_tree_accepted);
+        assert!(!session.manifest_accepted);
+        request.manifest_json = Some(b"null".to_vec());
+        assert!(start(root.path(), request).is_err());
+    }
 
     #[test]
     fn every_session_persists_its_manifest_before_source_upload() {

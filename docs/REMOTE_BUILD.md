@@ -79,9 +79,13 @@ archive as soon as in-flight work lets go of it. The runner also checks
 for expired directories left by a crash at startup and once a minute.
 Use `--fetch-out` and `--fetch` on the original run to save the files locally.
 
-The client requires a commit and a clean Git status, including untracked
-files. Ignored build outputs stay local. The client reads sources from the
-committed Git tree. The runner
+By default the client requires a commit and a clean Git status, including
+untracked files, and reads sources from the committed Git tree. Pass
+`--working-tree` to include the current bytes of tracked files and nonignored
+new files, including local edits and deletions. Worktree builds require a
+base commit and a worker that acknowledges this mode. They report a base
+commit rather than claiming the files match that commit. They do not accept a
+commit manifest. Ignored, untracked build outputs stay local. The runner
 asks for SHA-256 blobs missing from its disk store, then materializes each
 session in a fresh directory. The HTTP bodies use Zstandard-compressed
 Protocol Buffers. A single request or response can carry up to 256 MiB of

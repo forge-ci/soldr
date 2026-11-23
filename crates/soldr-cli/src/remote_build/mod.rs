@@ -47,12 +47,15 @@ enum RemoteCommand {
         #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u8).range(1..=8))]
         artifact_streams: u8,
     },
-    /// Run a command against the current Git commit on the runner.
+    /// Run a command against a Git checkout on the runner.
     Run {
         #[arg(long)]
         endpoint: Option<SocketAddr>,
         #[arg(long, default_value = "target/attestation.json")]
         attestation: PathBuf,
+        /// Build the current worktree, including uncommitted and nonignored files.
+        #[arg(long, conflicts_with = "manifest")]
+        working_tree: bool,
         /// Optional JSON identifying a repository, user, and commit lineage.
         #[arg(long)]
         manifest: Option<PathBuf>,
@@ -119,6 +122,7 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
         RemoteCommand::Run {
             endpoint,
             attestation,
+            working_tree,
             manifest,
             fetch_out,
             fetch,
@@ -128,7 +132,11 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             args,
         } => {
             let directory = std::env::current_dir()?;
-            let snapshot = snapshot::capture(&directory)?;
+            let snapshot = if working_tree {
+                snapshot::capture_worktree(&directory)?
+            } else {
+                snapshot::capture(&directory)?
+            };
             let manifest = manifest::read(manifest.as_deref(), &snapshot.commit)?;
             if let Some(manifest) = &manifest {
                 snapshot::verify_parent(&directory, &snapshot.commit, manifest.parent())?;
@@ -152,12 +160,18 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
                         args,
                         cache_zstd_level,
                         manifest_json,
+                        working_tree,
                     },
                 )
                 .await?;
             if wants_manifest && !session.manifest_accepted {
                 return Err(io::Error::other(
                     "remote runner does not support session manifests; upgrade the runner",
+                ));
+            }
+            if working_tree && !session.working_tree_accepted {
+                return Err(io::Error::other(
+                    "remote runner does not support worktree snapshots; upgrade the runner",
                 ));
             }
             client.upload_workspace(&session, snapshot.blobs).await?;

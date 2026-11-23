@@ -9,6 +9,7 @@ message Start {
   repeated string args = 4;
   optional sint32 cache_zstd_level = 5;
   optional bytes manifest_json = 6;
+  bool working_tree = 7;
 }
 
 message Source {
@@ -29,6 +30,7 @@ message Session {
   string id = 1;
   repeated string missing = 2;
   bool manifest_accepted = 3;
+  bool working_tree_accepted = 4;
 }
 
 message Blob {

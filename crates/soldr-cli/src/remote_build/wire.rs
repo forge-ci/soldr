@@ -18,6 +18,8 @@ pub(super) struct Start {
     pub cache_zstd_level: Option<i32>,
     #[prost(bytes = "vec", optional, tag = "6")]
     pub manifest_json: Option<Vec<u8>>,
+    #[prost(bool, tag = "7")]
+    pub working_tree: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -49,6 +51,8 @@ pub(super) struct Session {
     pub missing: Vec<String>,
     #[prost(bool, tag = "3")]
     pub manifest_accepted: bool,
+    #[prost(bool, tag = "4")]
+    pub working_tree_accepted: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]
