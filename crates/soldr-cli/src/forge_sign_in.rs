@@ -4,15 +4,15 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
 
-use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
+use soldr_fetch::fetch::ForgeCiHttp;
 
 use crate::core::{home_dir, SoldrError};
 
 const PAIR_URL: &str = "https://forge-ci.com/soldr/pair";
-const API_URL: &str = "https://forge-ci.com/api/v1/soldr/pairings";
-const SESSION_URL: &str = "https://forge-ci.com/api/v1/soldr/session";
-const WORKER_URL: &str = "https://forge-ci.com/api/v1/soldr/worker";
+const API_URL: &str = "/api/v1/soldr/pairings";
+const SESSION_URL: &str = "/api/v1/soldr/session";
+const WORKER_URL: &str = "/api/v1/soldr/worker";
 const CREDENTIAL_FILE: &str = "credential.json";
 
 #[derive(clap::Subcommand)]
@@ -64,44 +64,28 @@ pub(crate) async fn discover_worker() -> io::Result<Option<WorkerGrant>> {
     let Some(credential) = load(&directory)? else {
         return Ok(None);
     };
-    let response = client()?
-        .post(WORKER_URL)
-        .bearer_auth(&credential.token)
-        .send()
-        .await
-        .map_err(network_error)?;
-    match response.status() {
-        StatusCode::NO_CONTENT => Ok(None),
-        StatusCode::OK => response.json().await.map(Some).map_err(network_error),
-        StatusCode::UNAUTHORIZED => Err(io::Error::other(
-            "Forge CI rejected the saved credential. Run soldr sign in to reconnect.",
-        )),
-        status => Err(io::Error::other(format!(
-            "Forge CI worker discovery failed ({status})."
+    let (status, body) = ForgeCiHttp::new()?
+        .post(WORKER_URL, Some(&credential.token))
+        .await?;
+    match status {
+        204 => Ok(None),
+        200 => Ok(Some(serde_json::from_slice(&body)?)),
+        401 => Err(rejected_credential()),
+        _ => Err(io::Error::other(format!(
+            "Forge CI worker discovery failed (HTTP {status})."
         ))),
     }
 }
 
-fn client() -> io::Result<Client> {
-    Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(network_error)
-}
-
 async fn sign_in(directory: &Path) -> io::Result<()> {
-    let client = client()?;
-    let pairing: Pairing = client
-        .post(API_URL)
-        .send()
-        .await
-        .map_err(network_error)?
-        .error_for_status()
-        .map_err(network_error)?
-        .json()
-        .await
-        .map_err(network_error)?;
+    let client = ForgeCiHttp::new()?;
+    let (status, body) = client.post(API_URL, None).await?;
+    if status != 201 {
+        return Err(io::Error::other(format!(
+            "Forge CI could not start pairing (HTTP {status})."
+        )));
+    }
+    let pairing: Pairing = serde_json::from_slice(&body)?;
     let code = pairing.user_code.as_bytes();
     if pairing.verification_uri != PAIR_URL
         || !(1..=600).contains(&pairing.expires_in)
@@ -129,59 +113,46 @@ async fn sign_in(directory: &Path) -> io::Result<()> {
 }
 
 async fn check_session(credential: &Credential) -> io::Result<()> {
-    let response = client()?
-        .get(SESSION_URL)
-        .bearer_auth(&credential.token)
-        .send()
-        .await
-        .map_err(network_error)?;
-    match response.status() {
-        StatusCode::NO_CONTENT => {
+    let (status, _) = ForgeCiHttp::new()?
+        .get(SESSION_URL, &credential.token)
+        .await?;
+    match status {
+        204 => {
             println!("Connected to Forge CI as {}.", credential.github_login);
             Ok(())
         }
-        StatusCode::UNAUTHORIZED => Err(io::Error::other(
-            "Forge CI rejected the saved credential. Run soldr sign in to reconnect.",
-        )),
-        status => Err(io::Error::other(format!(
-            "Forge CI session check failed ({status})."
+        401 => Err(rejected_credential()),
+        _ => Err(io::Error::other(format!(
+            "Forge CI session check failed (HTTP {status})."
         ))),
     }
 }
 
-async fn poll(client: &Client, pairing: &Pairing) -> io::Result<Credential> {
+async fn poll(client: &ForgeCiHttp, pairing: &Pairing) -> io::Result<Credential> {
     let interval = Duration::from_secs(pairing.interval);
     let url = format!("{API_URL}/poll");
     loop {
         tokio::time::sleep(interval).await;
-        let response = client
-            .post(&url)
-            .bearer_auth(&pairing.device_code)
-            .send()
-            .await
-            .map_err(network_error)?;
-        match response.status() {
-            StatusCode::ACCEPTED => {}
-            StatusCode::OK => return response.json().await.map_err(network_error),
-            StatusCode::NOT_FOUND | StatusCode::GONE => return Err(expired()),
-            status => {
+        let (status, body) = client.post(&url, Some(&pairing.device_code)).await?;
+        match status {
+            202 => {}
+            200 => return Ok(serde_json::from_slice(&body)?),
+            404 | 410 => return Err(expired()),
+            _ => {
                 return Err(io::Error::other(format!(
-                    "Forge CI pairing failed ({status})."
-                )));
+                    "Forge CI pairing failed (HTTP {status})."
+                )))
             }
         }
     }
 }
 
-fn expired() -> io::Error {
-    io::Error::other("Forge CI pairing expired. Run soldr sign in to get a new code.")
+fn rejected_credential() -> io::Error {
+    io::Error::other("Forge CI rejected the saved credential. Run soldr sign in to reconnect.")
 }
 
-fn network_error(error: reqwest::Error) -> io::Error {
-    io::Error::other(format!(
-        "Forge CI pairing request failed: {}",
-        error.without_url()
-    ))
+fn expired() -> io::Error {
+    io::Error::other("Forge CI pairing expired. Run soldr sign in to get a new code.")
 }
 
 fn save(directory: &Path, credential: &Credential) -> io::Result<()> {

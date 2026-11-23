@@ -39,7 +39,6 @@
       "libc",
       "prost",
       "rayon",
-      "reqwest",
       "ring",
       "running-process",
       "rusqlite",
