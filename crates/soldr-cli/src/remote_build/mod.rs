@@ -2,6 +2,7 @@
 
 mod artifacts;
 mod auth;
+pub(crate) mod auto;
 mod control;
 mod manifest;
 mod retention;
@@ -230,10 +231,7 @@ async fn connect_for_run(
                 "No Forge CI worker is configured. Check your account with soldr sign status.",
             )
         })?;
-    Ok(Client {
-        http: RemoteBuildHttpClient::https_worker(&grant.origin)?,
-        token: grant.token,
-    })
+    Client::forge(grant)
 }
 
 struct Client {
@@ -242,6 +240,13 @@ struct Client {
 }
 
 impl Client {
+    fn forge(grant: crate::forge_sign_in::WorkerGrant) -> io::Result<Self> {
+        Ok(Self {
+            http: RemoteBuildHttpClient::https_worker(&grant.origin)?,
+            token: grant.token,
+        })
+    }
+
     async fn upload_workspace(
         &self,
         session: &Session,

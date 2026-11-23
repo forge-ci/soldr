@@ -12,6 +12,15 @@ Run `soldr sign in` and approve the pairing code with GitHub at
 `soldr remote run build` uses the saved account to request a worker grant.
 The worker receives that grant over HTTPS and never sees the device credential.
 
+After pairing, `soldr build` and `soldr cargo build` can also select the worker from a Git
+workspace root. This sends tracked worktree files and nonignored new files to
+Forge CI. Automatic routing currently covers builds for the matching host
+with the default target directory and common package, feature, profile, and
+binary selection flags. When worker
+discovery fails or the invocation is unsupported, Soldr uses the local path.
+After the remote build starts, Soldr returns its result and installs the
+verified successful artifacts in the local target directory.
+
 Run the worker in its dedicated build environment with
 `soldr remote serve --forge-key-file /path/to/key --root /path/to/state`.
 Put a TLS endpoint in front of the loopback listener. The endpoint must

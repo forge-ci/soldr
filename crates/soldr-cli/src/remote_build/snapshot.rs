@@ -131,14 +131,18 @@ pub(super) fn capture(directory: &Path) -> io::Result<Snapshot> {
     Ok(snapshot)
 }
 
+pub(super) fn worktree_root(directory: &Path) -> io::Result<PathBuf> {
+    let root = git(directory, &["rev-parse", "--show-toplevel"])?;
+    Ok(PathBuf::from(utf8(&root)?.trim_end_matches(['\r', '\n'])))
+}
+
 /// Snapshot the actual files Cargo sees without modifying the Git index.
 pub(super) fn capture_worktree(directory: &Path) -> io::Result<Snapshot> {
     let commit = git(directory, &["rev-parse", "--verify", "HEAD^{commit}"])?;
     let commit = utf8(&commit)?.trim().to_owned();
-    let root = git(directory, &["rev-parse", "--show-toplevel"])?;
-    let root = Path::new(utf8(&root)?.trim_end_matches(['\r', '\n']));
+    let root = worktree_root(directory)?;
     let listing = git(
-        root,
+        &root,
         &[
             "ls-files",
             "-z",
@@ -147,7 +151,7 @@ pub(super) fn capture_worktree(directory: &Path) -> io::Result<Snapshot> {
             "--exclude-standard",
         ],
     )?;
-    let directory = fs::Dir::open_ambient_dir(root, ambient_authority())?;
+    let directory = fs::Dir::open_ambient_dir(&root, ambient_authority())?;
     let mut files = Vec::new();
     let mut blobs = BTreeMap::new();
     let mut remaining = 1024 * 1024 * 1024;

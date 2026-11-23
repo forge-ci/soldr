@@ -41,6 +41,7 @@ pub(super) enum Action {
     Test = 1,
     Dylint = 2,
     Lint = 3,
+    CargoBuild = 4,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -53,6 +54,14 @@ pub(super) struct Session {
     pub manifest_accepted: bool,
     #[prost(bool, tag = "4")]
     pub working_tree_accepted: bool,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct Capabilities {
+    #[prost(string, tag = "1")]
+    pub host: String,
+    #[prost(bool, tag = "2")]
+    pub working_tree_builds: bool,
 }
 
 #[derive(Clone, PartialEq, Message)]

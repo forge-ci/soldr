@@ -24,6 +24,7 @@ enum Action {
   TEST = 1;
   DYLINT = 2;
   LINT = 3;
+  CARGO_BUILD = 4;
 }
 
 message Session {
@@ -31,6 +32,11 @@ message Session {
   repeated string missing = 2;
   bool manifest_accepted = 3;
   bool working_tree_accepted = 4;
+}
+
+message Capabilities {
+  string host = 1;
+  bool working_tree_builds = 2;
 }
 
 message Blob {

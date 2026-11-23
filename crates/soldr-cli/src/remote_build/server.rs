@@ -243,6 +243,12 @@ fn dispatch(
 ) -> io::Result<Vec<u8>> {
     let parts: Vec<_> = operation.split('/').collect();
     match parts.as_slice() {
+        ["capabilities"] => wire::encode(&wire::Capabilities {
+            host: crate::core::TargetTriple::host()
+                .map_err(io::Error::other)?
+                .triple(),
+            working_tree_builds: true,
+        }),
         ["start"] => start(root, wire::decode(body)?),
         ["blob", hash] => store_blob(root, hash, wire::decode(body)?),
         ["workspace", id] => store_workspace(root, key(id, 32)?, wire::decode(body)?),
@@ -517,13 +523,17 @@ fn execute_action(
     transcript: &Transcript,
 ) -> io::Result<(std::process::Output, &'static str, bool)> {
     let action = Action::try_from(request.action).map_err(io::Error::other)?;
-    let arguments = compile_args(action, &request.args, build_output)?;
+    let mut arguments = compile_args(action, &request.args, build_output)?;
+    if action == Action::CargoBuild {
+        arguments.insert(0, "build".into());
+    }
     let full_lint = action == Action::Lint && arguments == ["rust", "--check"];
     let action = match action {
         Action::Build => "build",
         Action::Test => "test",
         Action::Dylint => "dylint",
         Action::Lint => "lint",
+        Action::CargoBuild => "cargo",
     };
     let result = transcript.run(
         runner_soldr(soldr, cache_root)
@@ -827,7 +837,8 @@ fn runner_soldr(executable: &Path, cache_root: &Path) -> Command {
     let mut command = Command::new(executable);
     command
         .env(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR, "1")
-        .env("SOLDR_CACHE_DIR", cache_root);
+        .env("SOLDR_CACHE_DIR", cache_root)
+        .env(super::auto::WORKER_BUILD_ENV, "1");
     command
 }
 
