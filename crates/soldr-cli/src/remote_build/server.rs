@@ -389,7 +389,13 @@ fn lock_session(root: &Path, session: &Path, request: &Start) -> io::Result<fs::
         .create(true)
         .truncate(false)
         .open(root.join("build.lock"))?;
-    wait::lock_exclusive_announced(&lock, wait::LONG_LOCK, "remote build runner")?;
+    // A private worktree and output directory can share the compiler daemon.
+    // Slot allocation and whole-cache exports need the worker to themselves.
+    if request.manifest_json.is_some() || request.cache_zstd_level.is_some() {
+        wait::lock_exclusive_announced(&lock, wait::LONG_LOCK, "remote build runner")?;
+    } else {
+        wait::lock_shared_for(&lock, wait::LONG_LOCK)?;
+    }
     fs::OpenOptions::new()
         .write(true)
         .create_new(true)

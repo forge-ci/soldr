@@ -119,8 +119,8 @@ Use the session ID printed by `remote run`. The same command accepts
 `test`, `dylint`, or `lint` in place of `build` and forwards arguments to that
 Soldr command from the repository root. To export the runner's Soldr cache,
 pass `--cache-zstd-level 3` before the action and include `cache.tar.zst`
-among the fetch globs. The runner serializes builds and cache exports
-against its dedicated compiler cache. The fetch destination must be a new
+among the fetch globs. Cache exports wait for other sessions to finish before reading the worker's
+compiler cache. The fetch destination must be a new
 directory with an existing parent. Give the fetch exclusive use of that
 destination path until it completes. Artifact paths retain their relative layout.
 An explicit Cargo `--target-dir` is relative to the session's fetchable
@@ -222,7 +222,8 @@ the session's fetch directory. An identical successful run can also reuse
 files that still match its recorded output inventory. Failed commands still
 publish their logs and metadata. A client disconnect leaves the build running
 until its child exits or times out, so a slot cannot be reused while a
-detached build is writing to it. Build execution remains serialized.
+detached build is writing to it. Private workspaces can run concurrently.
+Sessions using warm slots or exporting the cache still take the exclusive lock.
 
 For a manifested session, `lint` defaults to `soldr lint rust --check`.
 After a successful full Rust lint, the runner attempts a separate
