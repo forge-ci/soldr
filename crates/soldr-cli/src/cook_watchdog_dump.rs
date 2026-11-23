@@ -47,7 +47,7 @@ pub(crate) fn write_stall_dump(paths: &SoldrPaths, phase: &str) -> std::io::Resu
     let table = live_process_snapshot();
     let this_pid = std::process::id();
     let descendants = descendants_of(&table, this_pid);
-    let daemon_and_broker = soldr_service_processes(&table);
+    let daemon_and_broker = soldr_service_processes(&table, this_pid);
 
     write_process_list(&dir.join("cook-descendants.txt"), &descendants)?;
     write_process_list(&dir.join("daemon-broker.txt"), &daemon_and_broker)?;
@@ -144,11 +144,15 @@ fn descendants_of(table: &[ProcessSnapshot], root_pid: u32) -> Vec<&ProcessSnaps
 /// forensic context alongside the cook child tree. Mirrors the
 /// `name().starts_with("soldr")` filter already used by
 /// `broker_inventory::live_process_table`.
-fn soldr_service_processes(table: &[ProcessSnapshot]) -> Vec<&ProcessSnapshot> {
+fn soldr_service_processes(table: &[ProcessSnapshot], current_pid: u32) -> Vec<&ProcessSnapshot> {
     table
         .iter()
         .filter(|process| {
-            process.name.starts_with("soldr")
+            // A debugger attaching to this watchdog's own process would
+            // suspend the thread that drains the debugger's output and
+            // enforces its timeout.
+            process.pid != current_pid
+                && process.name.starts_with("soldr")
                 && process
                     .cmd
                     .iter()
@@ -268,5 +272,31 @@ fn terminate_pid_best_effort(pid: u32) {
     system.refresh_processes_specifics(ProcessRefreshKind::new());
     if let Some(process) = system.process(Pid::from_u32(pid)) {
         let _ = process.kill_with(Signal::Term);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_backtraces_exclude_the_watchdog_process() {
+        let snapshot = |pid, name: &str, arg: &str| ProcessSnapshot {
+            pid,
+            parent_pid: None,
+            name: name.into(),
+            cmd: vec![arg.into()],
+            status: String::new(),
+            run_time_secs: 0,
+        };
+        let table = [
+            snapshot(10, "soldr-dylint", "--crate-name=zccache_daemon"),
+            snapshot(11, "soldr-daemon", "/bin/soldr-daemon"),
+            snapshot(12, "rustc", "--crate-name=zccache_daemon"),
+        ];
+
+        let services = soldr_service_processes(&table, 10);
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].pid, 11);
     }
 }
