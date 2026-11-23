@@ -29,10 +29,10 @@ ssh -N -L 127.0.0.1:7744:127.0.0.1:7744 build-runner
 From a clean checkout of this repository, build the standalone example.
 
 ```sh
-soldr remote --token-file "$HOME/.soldr-remote-token" run build -- \
-  --locked --manifest-path examples/remote-build-demo/Cargo.toml
-soldr remote --token-file "$HOME/.soldr-remote-token" fetch --out target/remote-demo SESSION_ID \
-  'target/debug/soldr-remote-demo' 'attestation.json'
+soldr remote --token-file "$HOME/.soldr-remote-token" run \
+  --fetch-out target/remote-demo \
+  --fetch 'target/debug/soldr-remote-demo' --fetch attestation.json \
+  build -- --locked --manifest-path examples/remote-build-demo/Cargo.toml
 ```
 
 Use the session ID printed by `remote run`. The same command accepts
@@ -53,15 +53,13 @@ Each stream sends binary Zstandard at level 9. The client verifies the
 uncompressed size and SHA-256 of every file before publishing the
 download directory.
 
-To reuse the build connection for downloads, request artifacts on the run
-command. Downloads start after the runner reports the build result.
-
-```sh
-soldr remote --token-file "$HOME/.soldr-remote-token" run \
-  --fetch-out target/remote-demo \
-  --fetch 'target/debug/soldr-remote-demo' --fetch attestation.json \
-  build -- --locked --manifest-path examples/remote-build-demo/Cargo.toml
-```
+Downloads start after the runner reports the build result. New session
+artifacts are available only on the HTTP connection that started the
+build. The runner stages them under `artifact-tmp/` and starts a four-hour
+countdown when it publishes the artifacts. Disconnecting releases the
+archive as soon as in-flight work lets go of it. The runner also checks
+for expired directories left by a crash at startup and once a minute.
+Use `--fetch-out` and `--fetch` on the original run to save the files locally.
 
 The client requires a commit and a clean Git status, including untracked
 files. Ignored build outputs stay local. The client reads sources from the
@@ -143,11 +141,10 @@ detached build is writing to it. Build execution remains serialized.
 
 For a manifested session, `lint` defaults to `soldr lint rust --check`.
 After a successful full Rust lint, the runner attempts a separate
-`soldr cook` and stores a content-addressed archive under `cook/` in its
-state root. The attestation reports `cook_ready` and `cook_archive_sha256`.
-Fetch the archive as `cook.tar.zst` from the completed lint session.
-The same dependency recipe reuses its archive on subsequent requests in
-that slot. The runner materializes a committed source snapshot without Git
+`soldr cook` and publishes `cook.tar.zst` under the session's temporary output.
+The attestation reports `cook_ready` and `cook_archive_sha256`. Request the
+archive with `--fetch cook.tar.zst` on the lint run.
+The runner materializes a committed source snapshot without Git
 history. Use the remote session attestation for this workflow.
 
 When launching the server inside a Bosn job configured with
@@ -195,8 +192,11 @@ runner's advertised limit.
    the finished session. Each transfer can fail and be retried independently.
 
 The runner supports the content-addressed setup and upload path today.
-Use `remote run --stream` or `--fetch-out` for live output and batches of
-missing workspace blobs compressed at Zstandard level 9. The finished
+Runs stream live output and send missing workspace blobs in batches
+compressed at Zstandard level 9. The runner spools logs to disk. Blank
+NDJSON lines keep a quiet stream active every 15 seconds. The client
+waits 30 seconds for response headers and 60 seconds between body reads.
+The finished
 session postamble points to `GET /v1/sessions/{id}/artifacts.json`.
 Download each file with `GET /v1/sessions/{id}/artifact?path=<relative-path>`.
 Mutual TLS, Git patch application, and the rsync side channel are extensions.

@@ -9,12 +9,95 @@ use axum::body::{Body, Bytes};
 use axum::response::{IntoResponse, Response};
 use futures_util::stream;
 use serde::Serialize;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::{wire, Client};
 use crate::platform::wait::block_on_handle_for;
 
 const MAX_LINE: usize = 16 * 1024 * 1024;
+const HEARTBEAT: Duration = Duration::from_secs(15);
+const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+struct Terminal(mpsc::Sender<TerminalLine>);
+
+struct TerminalLine {
+    stderr: bool,
+    text: String,
+    done: oneshot::Sender<io::Result<()>>,
+}
+
+#[derive(Debug)]
+struct TerminalBlocked;
+
+impl std::fmt::Display for TerminalBlocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("local output is blocked")
+    }
+}
+
+impl std::error::Error for TerminalBlocked {}
+
+pub(super) fn terminal_blocked(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<TerminalBlocked>())
+}
+
+impl Terminal {
+    fn start() -> Self {
+        let (tx, mut rx) = mpsc::channel::<TerminalLine>(1);
+        let runtime = tokio::runtime::Handle::current();
+        // Keep terminal writes out of Tokio's blocking pool. An external
+        // pipe can stay full after a timeout and must not hold runtime exit.
+        std::thread::spawn(move || {
+            while let Ok(Some(line)) =
+                block_on_handle_for(&runtime, rx.recv(), crate::platform::wait::WHOLE_COMMAND)
+            {
+                let result = if line.stderr {
+                    print_line(io::stderr().lock(), &line.text)
+                } else {
+                    print_line(io::stdout().lock(), &line.text)
+                };
+                let _ = line.done.send(result);
+            }
+        });
+        Self(tx)
+    }
+
+    async fn write(&self, stderr: bool, text: &str) -> io::Result<()> {
+        let (done, result) = oneshot::channel();
+        tokio::time::timeout(IDLE_TIMEOUT, async {
+            self.0
+                .send(TerminalLine {
+                    stderr,
+                    text: text.to_owned(),
+                    done,
+                })
+                .await
+                .map_err(io::Error::other)?;
+            result.await.map_err(io::Error::other)?
+        })
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, TerminalBlocked))?
+    }
+}
+
+fn print_line(mut output: impl Write, text: &str) -> io::Result<()> {
+    output.write_all(text.as_bytes())?;
+    output.flush()
+}
+
+async fn body_read<T>(future: impl std::future::Future<Output = T>) -> io::Result<T> {
+    tokio::time::timeout(IDLE_TIMEOUT, future)
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "remote control stream was idle for 60 seconds",
+            )
+        })
+}
 
 pub(super) struct Sink {
     tx: mpsc::Sender<io::Result<Bytes>>,
@@ -70,22 +153,48 @@ pub(super) fn stream_run(
             let _ = sink.send(&serde_json::json!({"error": error.to_string()}));
         }
     });
-    let body = Body::from_stream(stream::unfold(rx, |mut rx| async {
-        rx.recv().await.map(|chunk| (chunk, rx))
-    }));
-    ([("content-type", "application/x-ndjson")], body).into_response()
+    (
+        [
+            ("content-type", "application/x-ndjson"),
+            ("cache-control", "no-store"),
+        ],
+        heartbeat_body(rx),
+    )
+        .into_response()
+}
+
+fn heartbeat_body(rx: mpsc::Receiver<io::Result<Bytes>>) -> Body {
+    let heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + HEARTBEAT, HEARTBEAT);
+    Body::from_stream(stream::unfold(
+        (rx, heartbeat),
+        |(mut rx, mut heartbeat)| async {
+            let chunk = tokio::select! {
+                biased;
+                chunk = rx.recv() => chunk?,
+                _ = heartbeat.tick() => Ok(Bytes::from_static(b"\n")),
+            };
+            Some((chunk, (rx, heartbeat)))
+        },
+    ))
 }
 
 pub(super) async fn receive(client: &Client<'_>, session: &str) -> io::Result<i32> {
-    let mut response = client
-        .http
-        .post_stream(
+    let mut response = tokio::time::timeout(
+        HEADER_TIMEOUT,
+        client.http.post_stream(
             &format!("/v1/run-stream/{session}"),
             client.token,
             "application/x-protobuf+zstd",
             wire::encode(&wire::Blob::default())?,
+        ),
+    )
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "remote control response headers timed out",
         )
-        .await?;
+    })??;
     if !response.status().is_success()
         || response
             .headers()
@@ -102,8 +211,12 @@ pub(super) async fn receive(client: &Client<'_>, session: &str) -> io::Result<i3
     let mut pending = Vec::new();
     let mut exit = None;
     let mut artifacts = false;
+    let terminal = Terminal::start();
     let manifest_path = super::artifacts::manifest_path(session);
-    while let Some(chunk) = response.chunk().await.map_err(io::Error::other)? {
+    while let Some(chunk) = body_read(response.chunk())
+        .await?
+        .map_err(io::Error::other)?
+    {
         for part in chunk.split_inclusive(|&byte| byte == b'\n') {
             if part.len() > MAX_LINE + 1 - pending.len() {
                 return Err(io::Error::other(
@@ -112,7 +225,14 @@ pub(super) async fn receive(client: &Client<'_>, session: &str) -> io::Result<i3
             }
             pending.extend_from_slice(part);
             if part.last() == Some(&b'\n') {
-                receive_line(&pending, &mut exit, &mut artifacts, &manifest_path)?;
+                receive_line(
+                    &pending,
+                    &mut exit,
+                    &mut artifacts,
+                    &manifest_path,
+                    &terminal,
+                )
+                .await?;
                 pending.clear();
             }
         }
@@ -125,12 +245,16 @@ pub(super) async fn receive(client: &Client<'_>, session: &str) -> io::Result<i3
     exit.ok_or_else(|| io::Error::other("remote control stream omitted the return code"))
 }
 
-fn receive_line(
+async fn receive_line(
     line: &[u8],
     exit: &mut Option<i32>,
     artifacts: &mut bool,
     manifest_path: &str,
+    terminal: &Terminal,
 ) -> io::Result<()> {
+    if line == b"\n" {
+        return Ok(());
+    }
     let record: serde_json::Value = serde_json::from_slice(line)?;
     if let Some(error) = record.get("error").and_then(serde_json::Value::as_str) {
         return Err(io::Error::other(error.to_owned()));
@@ -155,16 +279,45 @@ fn receive_line(
         .filter(|_| exit.is_none())
         .ok_or_else(|| io::Error::other("invalid remote output record"))?;
     match record.get("type").and_then(serde_json::Value::as_str) {
-        Some("o") => {
-            let mut output = io::stdout().lock();
-            output.write_all(text.as_bytes())?;
-            output.flush()
-        }
-        Some("e") => {
-            let mut output = io::stderr().lock();
-            output.write_all(text.as_bytes())?;
-            output.flush()
-        }
+        Some("o") => terminal.write(false, text).await,
+        Some("e") => terminal.write(true, text).await,
         _ => Err(io::Error::other("invalid remote output stream code")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::StreamExt;
+
+    #[tokio::test(start_paused = true)]
+    async fn quiet_stream_emits_heartbeats_and_closes_with_the_sender() {
+        let (sender, receiver) = mpsc::channel(1);
+        let mut body = heartbeat_body(receiver).into_data_stream();
+        assert_eq!(
+            body.next().await.unwrap().unwrap(),
+            Bytes::from_static(b"\n")
+        );
+        let mut exit = None;
+        let mut artifacts = false;
+        receive_line(
+            b"\n",
+            &mut exit,
+            &mut artifacts,
+            "/artifacts.json",
+            &Terminal::start(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(exit, None);
+        assert!(!artifacts);
+        drop(sender);
+        assert!(body.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_control_body_errors_after_the_idle_limit() {
+        let error = body_read(std::future::pending::<()>()).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 }
