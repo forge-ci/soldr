@@ -96,7 +96,6 @@ fn span_is_in_scope(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
 fn is_boundary_file(filename: &str) -> bool {
     const BOUNDARY_SUFFIXES: &[&str] = &[
         "fetch/stream_download.rs",
-        "fetch/stream_download/forge_http.rs",
         "fetch/segmented_download.rs",
         "fetch/segmented_download_tests.rs",
         "fetch/segmented_download_tests_extra.rs",

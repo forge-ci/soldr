@@ -407,6 +407,36 @@ pub(crate) fn asset_http_client_with_protocol(
         .map_err(|error| SoldrError::Network(error.to_string()))
 }
 
+/// Keep credentials on the configured worker or control-plane origin.
+fn forge_http_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+}
+
+async fn send_forge_request(
+    request: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, reqwest::Error> {
+    request.send().await
+}
+
+async fn read_forge_body(
+    mut response: reqwest::Response,
+    limit: usize,
+    size_error: &str,
+    map_error: impl Fn(reqwest::Error) -> std::io::Error,
+) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(&map_error)? {
+        if chunk.len() > limit - bytes.len() {
+            return Err(std::io::Error::other(size_error.to_owned()));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 /// Build a GET request through the fetch boundary.
 pub(crate) fn get_request(client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
     client.get(url)

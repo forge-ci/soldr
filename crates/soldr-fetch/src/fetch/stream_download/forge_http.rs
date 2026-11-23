@@ -22,7 +22,7 @@ impl RemoteBuildHttpClient {
                 "Remote build endpoint must be a loopback SSH tunnel.",
             ));
         }
-        let builder = Self::builder();
+        let builder = super::forge_http_builder();
         let builder = if http2 {
             builder.http2_prior_knowledge()
         } else {
@@ -51,7 +51,7 @@ impl RemoteBuildHttpClient {
                 "Remote build worker must be an HTTPS origin.",
             ));
         }
-        let http = Self::builder()
+        let http = super::forge_http_builder()
             .https_only(true)
             .http2_prior_knowledge()
             .build()
@@ -60,13 +60,6 @@ impl RemoteBuildHttpClient {
             http,
             origin: origin.origin().ascii_serialization(),
         })
-    }
-
-    fn builder() -> reqwest::ClientBuilder {
-        reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
     }
 
     /// Post a frame and return its response with a bounded body size.
@@ -117,33 +110,31 @@ impl RemoteBuildHttpClient {
         if !path.starts_with('/') {
             return Err(std::io::Error::other("HTTP service path must begin with /"));
         }
-        self.http
-            .get(format!("{}{path}", self.origin))
+        let request = super::get_request(&self.http, &format!("{}{path}", self.origin))
             .query(query)
             .header("accept-encoding", accept_encoding)
-            .bearer_auth(token)
-            .send()
+            .bearer_auth(token);
+        super::send_forge_request(request)
             .await
             .map_err(std::io::Error::other)
     }
 
     async fn read_response(
-        mut response: reqwest::Response,
+        response: reqwest::Response,
         max_response: usize,
     ) -> std::io::Result<Vec<u8>> {
-        let mut data = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(std::io::Error::other)? {
-            if chunk.len() > max_response - data.len() {
-                return Err(std::io::Error::other(
-                    "HTTP service response exceeds its size limit",
-                ));
-            }
-            data.extend_from_slice(&chunk);
-        }
-        if !response.status().is_success() {
+        let status = response.status();
+        let data = super::read_forge_body(
+            response,
+            max_response,
+            "HTTP service response exceeds its size limit",
+            std::io::Error::other,
+        )
+        .await?;
+        if !status.is_success() {
             return Err(std::io::Error::other(format!(
                 "remote build {}: {}",
-                response.status(),
+                status,
                 String::from_utf8_lossy(&data)
             )));
         }
@@ -161,12 +152,11 @@ impl RemoteBuildHttpClient {
         if !path.starts_with('/') {
             return Err(std::io::Error::other("HTTP service path must begin with /"));
         }
-        self.http
-            .post(format!("{}{path}", self.origin))
+        let request = super::post_request(&self.http, &format!("{}{path}", self.origin))
             .header("content-type", content_type)
             .bearer_auth(token)
-            .body(body)
-            .send()
+            .body(body);
+        super::send_forge_request(request)
             .await
             .map_err(std::io::Error::other)
     }
@@ -180,7 +170,7 @@ impl ForgeCiHttp {
     pub fn new() -> std::io::Result<Self> {
         super::super::net_guard::ensure_network_allowed("Forge CI")
             .map_err(std::io::Error::other)?;
-        let http = RemoteBuildHttpClient::builder()
+        let http = super::forge_http_builder()
             .https_only(true)
             .timeout(Duration::from_secs(15))
             .build()
@@ -213,24 +203,27 @@ impl ForgeCiHttp {
         if !path.starts_with('/') {
             return Err(std::io::Error::other("Forge CI route must begin with /"));
         }
-        let request = self
-            .0
-            .request(method, format!("https://forge-ci.com{path}"));
+        let url = format!("https://forge-ci.com{path}");
+        let request = if method == reqwest::Method::POST {
+            super::post_request(&self.0, &url)
+        } else {
+            super::get_request(&self.0, &url)
+        };
         let request = match credential {
             Some(credential) => request.bearer_auth(credential),
             None => request,
         };
-        let mut response = request.send().await.map_err(forge_http_error)?;
+        let response = super::send_forge_request(request)
+            .await
+            .map_err(forge_http_error)?;
         let status = response.status().as_u16();
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(forge_http_error)? {
-            if chunk.len() > MAX_BODY - body.len() {
-                return Err(std::io::Error::other(
-                    "Forge CI response exceeds its size limit",
-                ));
-            }
-            body.extend_from_slice(&chunk);
-        }
+        let body = super::read_forge_body(
+            response,
+            MAX_BODY,
+            "Forge CI response exceeds its size limit",
+            forge_http_error,
+        )
+        .await?;
         Ok((status, body))
     }
 }
