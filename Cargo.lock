@@ -4095,7 +4095,7 @@ dependencies = [
 
 [[package]]
 name = "soldr-cache"
-version = "0.9.56"
+version = "0.9.57"
 dependencies = [
  "filetime",
  "fs2",
@@ -4119,7 +4119,7 @@ dependencies = [
 
 [[package]]
 name = "soldr-cli"
-version = "0.9.56"
+version = "0.9.57"
 dependencies = [
  "axum",
  "cap-fs-ext",
@@ -4168,7 +4168,7 @@ dependencies = [
 
 [[package]]
 name = "soldr-core"
-version = "0.9.56"
+version = "0.9.57"
 dependencies = [
  "kernal-api",
  "libc",
@@ -4186,7 +4186,7 @@ dependencies = [
 
 [[package]]
 name = "soldr-daemon"
-version = "0.9.56"
+version = "0.9.57"
 dependencies = [
  "console-subscriber",
  "filetime",
@@ -4215,7 +4215,7 @@ dependencies = [
 
 [[package]]
 name = "soldr-fetch"
-version = "0.9.56"
+version = "0.9.57"
 dependencies = [
  "bzip2",
  "flate2",
@@ -4241,7 +4241,7 @@ dependencies = [
 
 [[package]]
 name = "soldr-nextest-wrapper"
-version = "0.9.56"
+version = "0.9.57"
 dependencies = [
  "kernal-api",
  "soldr-core",
@@ -4252,7 +4252,7 @@ dependencies = [
 
 [[package]]
 name = "soldr-platform"
-version = "0.9.56"
+version = "0.9.57"
 dependencies = [
  "fs2",
  "interprocess",
