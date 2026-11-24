@@ -49,19 +49,7 @@ pub(super) async fn try_test(args: &[String], cache_enabled: bool) -> io::Result
         test_args.insert(0, filter);
     }
     if !crate::core::flag("SOLDR_FORGE_LOCAL_TEST_RUNTIME") {
-        let mode = BuildMode::CargoTestWorker;
-        let Some((client, root, work_dir)) = find_worker(&compile, cache_enabled, mode).await?
-        else {
-            return Ok(None);
-        };
-        if !uses_direct_run(&std::env::current_dir()?, &root) {
-            return Ok(None);
-        }
-        let Some(session) = start_worktree(&client, &root, work_dir, args, mode).await? else {
-            return Ok(None);
-        };
-        eprintln!("Forge CI build session {}", session.id);
-        return receive_build(&client, &root, &session.id).await.map(Some);
+        return run_on_worker(args, &compile, cache_enabled).await;
     }
     if let Some(code) = test_runtime::try_relay(args, &compile, cache_enabled).await? {
         return Ok(Some(code));
@@ -129,6 +117,25 @@ pub(super) async fn try_test(args: &[String], cache_enabled: bool) -> io::Result
         }
     }
     Ok(Some(exit))
+}
+
+async fn run_on_worker(
+    args: &[String],
+    compile: &[String],
+    cache_enabled: bool,
+) -> io::Result<Option<i32>> {
+    let mode = BuildMode::CargoTestWorker;
+    let Some((client, root, work_dir)) = find_worker(compile, cache_enabled, mode).await? else {
+        return Ok(None);
+    };
+    if !uses_direct_run(&std::env::current_dir()?, &root) {
+        return Ok(None);
+    }
+    let Some(session) = start_worktree(&client, &root, work_dir, args, mode).await? else {
+        return Ok(None);
+    };
+    eprintln!("Forge CI build session {}", session.id);
+    receive_build(&client, &root, &session.id).await.map(Some)
 }
 
 fn resolve_tests(
