@@ -713,7 +713,7 @@ fn inherited_limit(name: &str) -> Option<String> {
 }
 
 fn workspace_metadata_fingerprint(root: &Path, config: &[String]) -> Result<String, SoldrError> {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = kernal_api::hash::Blake3Hasher::new();
     hasher.update(b"soldr-ci-test-workspace-metadata-v1\0");
     for path in std::iter::once(root.join("Cargo.toml"))
         .chain(std::iter::once(root.join("Cargo.lock")))
@@ -737,7 +737,7 @@ fn workspace_metadata_fingerprint(root: &Path, config: &[String]) -> Result<Stri
         }
         hasher.update(&[0]);
     }
-    Ok(hasher.finalize().to_hex().to_string())
+    Ok(hasher.finalize().to_hex())
 }
 
 /// The key every Dylint target tree is named by: the host-qualified toolchain

@@ -14,8 +14,7 @@ name = "soldr-nextest-wrapper"
 path = "src/main.rs"
 
 [dependencies]
-# Keep this standalone runner independent of the platform and broker stack.
-sha2 = "=0.10.9"
+kernal-api = { workspace = true, features = ["hash-sha256"] }
 soldr-core = { path = "../soldr-core" }
 soldr-platform = { path = "../soldr-platform" }
 wait-timeout = { workspace = true }

@@ -12,7 +12,6 @@
       "rusqlite",
       "serde",
       "serde_json",
-      "strum",
       "tar",
       "tempfile",
       "thiserror",
@@ -23,7 +22,6 @@
     ],
     "soldr-cli": [
       "axum",
-      "blake3",
       "cap-fs-ext",
       "cap-std",
       "clap",
@@ -104,7 +102,6 @@
       "semver",
       "serde",
       "serde_json",
-      "strum",
       "tar",
       "tempfile",
       "thiserror",
@@ -116,11 +113,10 @@
       "zstd"
     ],
     "soldr-nextest-wrapper": [
-      "sha2",
+      "kernal-api",
       "wait-timeout"
     ],
     "soldr-platform": [
-      "blake3",
       "fs2",
       "interprocess",
       "kernal-api",

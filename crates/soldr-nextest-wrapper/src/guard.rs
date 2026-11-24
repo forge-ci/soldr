@@ -11,7 +11,7 @@ use crate::memory::{
 };
 use crate::tail::OutputTail;
 use crate::write_stderr;
-use sha2::{Digest, Sha256};
+use kernal_api::hash::sha256_bytes;
 use soldr_platform::process::test_child;
 use soldr_platform::sync::Mutex;
 use std::path::{Path, PathBuf};
@@ -141,8 +141,7 @@ pub fn infra_record_name(identity: &str) -> String {
     if encoded.len() <= 200 {
         return encoded;
     }
-    let digest = Sha256::digest(identity.as_bytes());
-    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex = sha256_bytes(identity.as_bytes()).to_hex();
     format!("{}~{}", &encoded[..160], &hex[..16])
 }
 
