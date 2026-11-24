@@ -101,12 +101,21 @@ pub(super) async fn try_test(args: &[String], cache_enabled: bool) -> io::Result
         .map(|(executable, _)| executable.clone())
         .collect();
     artifacts::download(&client, &session.id, &output, requested).await?;
+    run_downloaded_tests(&output, tests, &test_args, no_fail_fast).await
+}
+
+async fn run_downloaded_tests(
+    output: &Path,
+    tests: Vec<(String, PathBuf)>,
+    test_args: &[String],
+    no_fail_fast: bool,
+) -> io::Result<Option<i32>> {
     let mut exit = 0;
     for (executable, cwd) in tests {
         let path = output.join(&executable);
         eprintln!("Running {}", executable);
         let mut command = tokio::process::Command::new(path);
-        command.current_dir(cwd).args(&test_args);
+        command.current_dir(cwd).args(test_args);
         crate::exit_guard::mark_spoke();
         let status = command.status().await?;
         if !status.success() {
