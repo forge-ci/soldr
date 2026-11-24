@@ -21,7 +21,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
@@ -231,8 +231,8 @@ fn split_line_ending(line: &str) -> (&str, &str) {
 }
 
 fn record_hash(data: &[u8]) -> String {
-    let digest = Sha256::digest(data);
-    format!("sha256={}", base64_urlsafe_nopad(&digest))
+    let digest = Sha256Hasher::digest(data);
+    format!("sha256={}", base64_urlsafe_nopad(digest.as_bytes()))
 }
 
 fn base64_urlsafe_nopad(bytes: &[u8]) -> String {

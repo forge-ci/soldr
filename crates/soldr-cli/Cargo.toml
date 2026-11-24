@@ -52,11 +52,7 @@ rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 semver = { workspace = true }
-sha2 = { workspace = true }
-# Same exact pin as crates/soldr-platform: pre-1.0 kernal-api resolves to one
-# release across the fleet (guard: version_lockstep.rs). Feature-gated so the
-# facade stays cheap; `text-similarity` provides `kernal_api::text`.
-kernal-api = { version = "=0.1.40", default-features = false, features = ["text-similarity"] }
+kernal-api = { workspace = true, features = ["hash-sha256", "text-similarity"] }
 sysinfo = "0.30"
 tar = { workspace = true }
 tempfile = { workspace = true }

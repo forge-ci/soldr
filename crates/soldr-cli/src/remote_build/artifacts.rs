@@ -1,7 +1,7 @@
 //! Indexed, bounded-memory artifact transfers over independent HTTP/2 streams.
 
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Cursor, Read, Write};
+use std::io::{self, BufWriter, Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,8 +10,8 @@ use axum::body::{Body, Bytes};
 use axum::response::{IntoResponse, Response};
 use futures_util::{stream, TryStreamExt};
 use globset::{GlobBuilder, GlobSetBuilder};
+use kernal_api::hash::{sha256_reader, Sha256Hasher};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
 use super::snapshot::relative_path;
@@ -89,14 +89,14 @@ pub(super) fn inventory_json(
             })
             .collect::<io::Result<Vec<_>>>()?
             .join("/");
-        let file = open_artifact(output, &path)?;
-        let mut hash = Sha256::new();
-        let size_bytes = io::copy(&mut io::BufReader::new(file), &mut hash)?;
+        let mut file = open_artifact(output, &path)?;
+        let sha256 = sha256_reader(&mut file, u64::MAX)?.to_hex();
+        let size_bytes = file.stream_position()?;
         entries.push(Entry {
             mime_type: artifact_mime_type(&absolute).into(),
             path,
             size_bytes,
-            sha256: hex::encode(hash.finalize()),
+            sha256,
             executable: permissions::mode(&absolute).is_some_and(|mode| mode & 0o111 != 0),
         });
     }
@@ -321,7 +321,7 @@ fn save(path: PathBuf, entry: &Entry, rx: mpsc::Receiver<io::Result<Bytes>>) -> 
         current: Cursor::new(Bytes::new()),
         runtime: tokio::runtime::Handle::current(),
     })?;
-    let mut hash = Sha256::new();
+    let mut hash = Sha256Hasher::new();
     let mut size = 0;
     let mut writer = BufWriter::new(file.as_file_mut());
     let mut buf = [0; 64 * 1024];
@@ -339,7 +339,7 @@ fn save(path: PathBuf, entry: &Entry, rx: mpsc::Receiver<io::Result<Bytes>>) -> 
     }
     writer.flush()?;
     drop(writer);
-    if size != entry.size_bytes || hex::encode(hash.finalize()) != entry.sha256 {
+    if size != entry.size_bytes || hash.finalize().to_hex() != entry.sha256 {
         return Err(io::Error::other(format!(
             "remote artifact checksum mismatch: {}",
             entry.path

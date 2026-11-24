@@ -1,7 +1,7 @@
 //! Workspace capability declarations and tree-bound lint evidence.
 use crate::core::{SoldrError, SoldrPaths};
+use kernal_api::hash::Sha256Hasher;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -255,7 +255,7 @@ fn client_work(work: &[Work]) -> Result<ClientWork, SoldrError> {
         v: 1,
         kind: "client-work",
         checks,
-        digest: hex::encode(Sha256::digest(bytes)),
+        digest: Sha256Hasher::digest(bytes).to_hex(),
     })
 }
 

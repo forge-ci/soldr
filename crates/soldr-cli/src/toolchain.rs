@@ -9,8 +9,8 @@ use crate::{
     apply_implicit_toolchain_homes, resolve_toolchain_binary, resolve_toolchain_binary_for_channel,
     rustup_binary,
 };
+use kernal_api::hash::Sha256Hasher;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -552,7 +552,7 @@ fn cargo_prepare_memo_path(
     identity: ToolchainIdentity,
 ) -> Option<PathBuf> {
     let encoded = serde_json::to_vec(&CargoPrepareFingerprint { key, identity }).ok()?;
-    let digest = Sha256::digest(encoded);
+    let digest = Sha256Hasher::digest(encoded);
     Some(
         paths
             .cache
@@ -581,7 +581,7 @@ fn file_identity(path: &Path, hash_contents: bool) -> Option<FileIdentity> {
         )
     };
     let sha256 = if hash_contents {
-        let digest = Sha256::digest(std::fs::read(path).ok()?);
+        let digest = Sha256Hasher::digest(std::fs::read(path).ok()?);
         Some(format!("{digest:x}"))
     } else {
         None

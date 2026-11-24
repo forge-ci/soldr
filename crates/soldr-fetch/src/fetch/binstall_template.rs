@@ -214,8 +214,7 @@ impl BinstallMeta {
     /// Parse a crate's `Cargo.toml`. A crate with no binstall table yields
     /// all-`None` metadata, i.e. the default guesses.
     pub(crate) fn from_cargo_toml(text: &str, target: &TargetTriple) -> Result<Self, SoldrError> {
-        let doc: toml::Value = text
-            .parse()
+        let doc: toml::Value = toml::from_str(text)
             .map_err(|e| SoldrError::Other(format!("binstall: invalid Cargo.toml: {e}")))?;
         let package = doc.get("package");
         let repo = package

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use sha2::Digest;
+use kernal_api::hash::Sha256Hasher;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use url::Url;
@@ -58,7 +58,7 @@ pub(crate) async fn materialize_catalogue_entry(
         AssetTransport::Multipart { parts } => {
             materialize_catalogue_parts(&cache, parts).await?;
             let mut output = tempfile::NamedTempFile::new_in(cache.join("assets"))?;
-            let mut hasher = sha2::Sha256::new();
+            let mut hasher = Sha256Hasher::new();
             let mut bytes = 0u64;
             for part in parts {
                 let object = cache.join("parts").join(&part.sha256);
@@ -67,7 +67,7 @@ pub(crate) async fn materialize_catalogue_entry(
                 bytes = bytes.saturating_add(copied);
             }
             output.flush()?;
-            let sha256 = hex::encode(hasher.finalize());
+            let sha256 = hasher.finalize().to_hex();
             if sha256 != entry.sha256 || bytes != entry.size_bytes {
                 return Err(SoldrError::Other(format!(
                     "catalogue multipart asset {} failed final size/hash verification",
@@ -535,15 +535,15 @@ pub(crate) fn cached_asset(
 
 fn sha256_file(path: &Path) -> Result<(String, u64), SoldrError> {
     let mut file = std::fs::File::open(path)?;
-    let mut hasher = sha2::Sha256::new();
-    let bytes = std::io::copy(&mut file, &mut hasher)?;
-    Ok((hex::encode(hasher.finalize()), bytes))
+    let mut hasher = Sha256Hasher::new();
+    let bytes = copy_and_hash(&mut file, &mut std::io::sink(), &mut hasher)?;
+    Ok((hasher.finalize().to_hex(), bytes))
 }
 
 pub(crate) fn copy_and_hash<W: Write>(
     reader: &mut std::fs::File,
     writer: &mut W,
-    hasher: &mut sha2::Sha256,
+    hasher: &mut Sha256Hasher,
 ) -> Result<u64, SoldrError> {
     use std::io::Read;
     let mut bytes = 0u64;

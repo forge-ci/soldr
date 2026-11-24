@@ -64,7 +64,7 @@ fn manifests_to_check(manifest_dir: &Path, lock_dir: &Path) -> Option<Vec<PathBu
     let mut out = vec![manifest_dir.join("Cargo.toml"), lock_dir.join("Cargo.toml")];
     let members = std::fs::read_to_string(lock_dir.join("Cargo.toml"))
         .ok()
-        .and_then(|text| text.parse::<toml::Value>().ok())
+        .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
         .and_then(|value| value.get("workspace")?.get("members")?.as_array().cloned())
         .unwrap_or_default();
     for member in members.iter().filter_map(toml::Value::as_str) {
@@ -91,7 +91,7 @@ fn manifests_to_check(manifest_dir: &Path, lock_dir: &Path) -> Option<Vec<PathBu
 fn manifest_declares_no_dependencies(manifest: &Path) -> bool {
     let Some(value) = std::fs::read_to_string(manifest)
         .ok()
-        .and_then(|text| text.parse::<toml::Value>().ok())
+        .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
     else {
         return false;
     };

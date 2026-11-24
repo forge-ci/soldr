@@ -123,7 +123,7 @@ pub(crate) fn cargo_config_rustflags(root: &std::path::Path, target_triple: &str
         let Ok(contents) = std::fs::read_to_string(root.join(relative)) else {
             continue;
         };
-        let Ok(value) = contents.parse::<toml::Value>() else {
+        let Ok(value) = toml::from_str::<toml::Value>(&contents) else {
             continue;
         };
         let target_flags = value

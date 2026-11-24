@@ -20,8 +20,8 @@
 //!    `permissive` mode it installs and prints a `trust: unverified` warning.
 
 use crate::core::SoldrError;
+use kernal_api::hash::Sha256Hasher;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -139,9 +139,9 @@ fn is_hex64(s: &str) -> bool {
 
 /// Compute the canonical SHA-256 hex digest of a downloaded archive.
 pub fn sha256_of(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     hasher.update(bytes);
-    hex::encode(hasher.finalize())
+    hasher.finalize().to_hex()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
