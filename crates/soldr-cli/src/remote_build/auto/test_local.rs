@@ -54,6 +54,9 @@ pub(super) async fn try_test(args: &[String], cache_enabled: bool) -> io::Result
         else {
             return Ok(None);
         };
+        if !uses_direct_run(&std::env::current_dir()?, &root) {
+            return Ok(None);
+        }
         let Some(session) = start_worktree(&client, &root, work_dir, args, mode).await? else {
             return Ok(None);
         };
