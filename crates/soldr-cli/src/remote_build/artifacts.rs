@@ -89,9 +89,7 @@ pub(super) fn inventory_json(
             })
             .collect::<io::Result<Vec<_>>>()?
             .join("/");
-        let mut file = open_artifact(output, &path)?;
-        let sha256 = sha256_reader(&mut file, u64::MAX)?.to_hex();
-        let size_bytes = file.stream_position()?;
+        let (size_bytes, sha256) = checksum(open_artifact(output, &path)?)?;
         entries.push(Entry {
             mime_type: artifact_mime_type(&absolute).into(),
             path,
@@ -105,6 +103,11 @@ pub(super) fn inventory_json(
         max_parallel: usize::from(artifact_streams),
         files: entries,
     })?)
+}
+
+pub(super) fn checksum(mut file: File) -> io::Result<(u64, String)> {
+    let sha256 = sha256_reader(&mut file, u64::MAX)?.to_hex();
+    Ok((file.stream_position()?, sha256))
 }
 
 pub(super) fn manifest_path(session: &str) -> String {
@@ -250,10 +253,40 @@ pub(super) async fn download(
     let staging = Arc::new(tempfile::tempdir_in(parent)?);
     stream::iter(list.files.into_iter().map(Ok))
         .try_for_each_concurrent(parallel, |entry| {
-            download_one(client, session, Arc::clone(&staging), entry)
+            download_one(client, session, Arc::clone(&staging), entry, false)
         })
         .await?;
     fs::rename(staging.path(), out)
+}
+
+pub(super) async fn download_test_executable(
+    client: &Client,
+    session: &str,
+    staging: Arc<tempfile::TempDir>,
+    path: String,
+    size_bytes: u64,
+    sha256: String,
+) -> io::Result<PathBuf> {
+    let staged = staging.path().join(relative_path(&path)?);
+    let executable = staging
+        .path()
+        .join(crate::platform::executable::name::native("test"));
+    download_one(
+        client,
+        session,
+        staging,
+        Entry {
+            path,
+            size_bytes,
+            sha256,
+            executable: true,
+            mime_type: default_mime_type(),
+        },
+        true,
+    )
+    .await?;
+    tokio::fs::rename(staged, &executable).await?;
+    Ok(executable)
 }
 
 async fn download_one(
@@ -261,6 +294,7 @@ async fn download_one(
     session: &str,
     staging: Arc<tempfile::TempDir>,
     entry: Entry,
+    accept_identity: bool,
 ) -> io::Result<()> {
     let path = staging.path().join(relative_path(&entry.path)?);
     let mut response = tokio::time::timeout(
@@ -272,13 +306,13 @@ async fn download_one(
         ),
     )
     .await??;
-    if !response.status().is_success()
-        || response
-            .headers()
-            .get("content-encoding")
-            .and_then(|value| value.to_str().ok())
-            != Some("zstd")
-    {
+    let encoding = response
+        .headers()
+        .get("content-encoding")
+        .and_then(|value| value.to_str().ok());
+    let compressed = encoding == Some("zstd");
+    let identity = accept_identity && matches!(encoding, None | Some("identity"));
+    if !response.status().is_success() || !(compressed || identity) {
         return Err(io::Error::other(format!(
             "remote artifact {}: expected a zstd response, got HTTP {}",
             entry.path,
@@ -288,7 +322,7 @@ async fn download_one(
     let (tx, rx) = mpsc::channel(CHUNK_QUEUE);
     let writer = tokio::task::spawn_blocking(move || {
         let _staging = staging;
-        save(path, &entry, rx)
+        save(path, &entry, rx, compressed)
     });
     let transfer = async {
         while let Some(chunk) = tokio::time::timeout(IO_IDLE, response.chunk())
@@ -312,21 +346,31 @@ async fn download_one(
     writer.await.map_err(io::Error::other)?
 }
 
-fn save(path: PathBuf, entry: &Entry, rx: mpsc::Receiver<io::Result<Bytes>>) -> io::Result<()> {
+fn save(
+    path: PathBuf,
+    entry: &Entry,
+    rx: mpsc::Receiver<io::Result<Bytes>>,
+    compressed: bool,
+) -> io::Result<()> {
     let parent = super::server::parent(&path)?;
     fs::create_dir_all(parent)?;
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    let mut decoder = zstd::stream::read::Decoder::new(ChunkReader {
+    let chunks = ChunkReader {
         rx,
         current: Cursor::new(Bytes::new()),
         runtime: tokio::runtime::Handle::current(),
-    })?;
+    };
+    let mut reader: Box<dyn Read> = if compressed {
+        Box::new(zstd::stream::read::Decoder::new(chunks)?)
+    } else {
+        Box::new(chunks)
+    };
     let mut hash = Sha256Hasher::new();
     let mut size = 0;
     let mut writer = BufWriter::new(file.as_file_mut());
     let mut buf = [0; 64 * 1024];
     loop {
-        let read = decoder.read(&mut buf)?;
+        let read = reader.read(&mut buf)?;
         if read == 0 {
             break;
         }

@@ -88,7 +88,15 @@ async fn handle(
             Err(error) => return request_error(error),
         };
         return control::stream_run(move |sink| {
-            run_session(&root, &id, slot_limit, Some(sink), &output).map(|_| ())
+            let result = run_session(&root, &id, slot_limit, Some(sink), &output);
+            if let Err(error) = &result {
+                if !output.path().join("output/attestation.json").is_file() {
+                    if let Err(publish_error) = publish_session_failure(&root, &id, error) {
+                        eprintln!("soldr remote session {id}: {error}; recording failure: {publish_error}");
+                    }
+                }
+            }
+            result.map(|_| ())
         });
     }
     match tokio::task::spawn_blocking(move || {
@@ -189,6 +197,9 @@ async fn get_artifact(
         });
     artifact_response(move || {
         access.check(&root, &id)?;
+        if let Some(path) = query.path.strip_prefix("test-runtime/") {
+            return runtime::serve(&root, &id, path, compress);
+        }
         let output = finished_output(&root, &id, &connection)?;
         artifacts::serve_file(&output.path, &query.path, compress, false)
     })
@@ -213,33 +224,12 @@ fn request_error(error: io::Error) -> axum::response::Response {
     }
 }
 
-struct FinishedOutput {
-    path: PathBuf,
-    _retention: Option<std::sync::Arc<retention::OutputDirectory>>,
-}
-
-fn finished_output(
-    root: &Path,
-    id: &str,
-    connection: &retention::Connection,
-) -> io::Result<FinishedOutput> {
-    let id = key(id, 32)?;
-    let leased = connection.output(id);
-    let path = leased.as_ref().map_or_else(
-        || root.join("sessions").join(id).join("output"),
-        |lease| lease.path().join("output"),
-    );
-    if !path.join("attestation.json").is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "remote artifact session unavailable",
-        ));
-    }
-    Ok(FinishedOutput {
-        path,
-        _retention: leased,
-    })
-}
+mod execution;
+mod output;
+mod runtime;
+pub(super) use runtime::run_test_program;
+mod test_outputs;
+use output::{finished_output, publish_session_failure};
 
 pub(super) fn key(value: &str, len: usize) -> io::Result<&str> {
     if value.len() == len
@@ -281,6 +271,15 @@ fn dispatch(
 }
 
 fn store_workspace(root: &Path, id: &str, batch: wire::WorkspaceBatch) -> io::Result<Vec<u8>> {
+    if let Some(reply) = batch.runtime_reply {
+        if !batch.blobs.is_empty() {
+            return Err(io::Error::other(
+                "a test runtime reply cannot include workspace blobs",
+            ));
+        }
+        return runtime::store_result(root, id, reply);
+    }
+
     let request =
         Start::decode(fs::read(root.join("sessions").join(id).join("start.pb"))?.as_slice())?;
     let expected: std::collections::HashSet<_> = request
@@ -300,10 +299,12 @@ fn store_workspace(root: &Path, id: &str, batch: wire::WorkspaceBatch) -> io::Re
 }
 
 fn start(root: &Path, request: Start, access: &SessionAccess) -> io::Result<Vec<u8>> {
-    if request.commit.len() != 40 && request.commit.len() != 64 {
-        return Err(io::Error::other("invalid commit ID"));
+    if !request.working_tree || !request.commit.is_empty() {
+        if request.commit.len() != 40 && request.commit.len() != 64 {
+            return Err(io::Error::other("invalid commit ID"));
+        }
+        key(&request.commit, request.commit.len())?;
     }
-    key(&request.commit, request.commit.len())?;
     if request.working_tree && request.manifest_json.is_some() {
         return Err(io::Error::other(
             "worktree builds cannot carry a commit manifest",
@@ -468,13 +469,14 @@ fn run(
 
     let soldr = std::env::current_exe()?;
     let transcript = Transcript::new(parent(output)?, sink)?;
-    let (result, action, full_lint) = execute_action(
+    let (result, action, full_lint) = execution::execute_action(
         &soldr,
         &cache_root,
         &source,
         &build_output,
         &request,
         &transcript,
+        &session.join("test-runtime"),
     )?;
     let exit_code = result.status.code().unwrap_or(1);
     let mut stderr = result.stderr;
@@ -510,7 +512,7 @@ fn run(
         "schema_version": 1,
         "session": id,
         "commit": (!request.working_tree).then_some(&request.commit),
-        "base_commit": request.working_tree.then_some(&request.commit),
+        "base_commit": (request.working_tree && !request.commit.is_empty()).then_some(&request.commit),
         "manifest": manifest,
         "slot": lease.as_ref().map(|lease| lease.slot),
         "action": action,
@@ -543,38 +545,6 @@ fn run(
     Ok(result)
 }
 
-fn execute_action(
-    soldr: &Path,
-    cache_root: &Path,
-    source: &Path,
-    build_output: &Path,
-    request: &Start,
-    transcript: &Transcript,
-) -> io::Result<(std::process::Output, &'static str, bool)> {
-    let action = Action::try_from(request.action).map_err(io::Error::other)?;
-    let mut arguments = compile_args(action, &request.args, build_output)?;
-    let full_lint = action == Action::Lint && arguments == ["rust", "--check"];
-    let action = action.worker_command(&mut arguments);
-    let directory = match &request.work_dir {
-        Some(directory) => {
-            let directory = fs::canonicalize(source.join(relative_path(directory)?))?;
-            if !directory.starts_with(fs::canonicalize(source)?) || !directory.is_dir() {
-                return Err(io::Error::other("work directory is outside the snapshot"));
-            }
-            directory
-        }
-        None => source.to_path_buf(),
-    };
-    let result = transcript.run(
-        runner_soldr(soldr, cache_root)
-            .current_dir(directory)
-            .env("CARGO_TARGET_DIR", build_output.join("target"))
-            .arg(action)
-            .args(&arguments),
-    )?;
-    Ok((result, action, full_lint))
-}
-
 fn publish_result(
     archive: &retention::OutputDirectory,
     result: &ResultFrame,
@@ -600,7 +570,7 @@ fn publish_result(
             transcript.start.elapsed().as_secs_f64(),
             result.exit_code,
             id,
-        )?;
+        );
     }
     Ok(())
 }

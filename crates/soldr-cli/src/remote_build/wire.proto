@@ -29,6 +29,7 @@ enum Action {
   CARGO_CHECK = 5;
   CARGO_CLIPPY = 6;
   CARGO_TEST_COMPILE = 7;
+  CARGO_TEST_RUNTIME = 8;
 }
 
 message Session {
@@ -38,12 +39,20 @@ message Session {
   bool working_tree_accepted = 4;
 }
 
+message TestRuntimeResult {
+  int32 code = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+}
+
 message Capabilities {
   string host = 1;
   bool working_tree_builds = 2;
   bool cargo_check = 3;
   repeated Action compile_actions = 4;
   bool worktree_subdirectories = 5;
+  bool test_executables = 6;
+  bool worktree_without_commit = 7;
 }
 
 message Blob {
@@ -52,6 +61,12 @@ message Blob {
 
 message WorkspaceBatch {
   repeated WorkspaceBlob blobs = 1;
+  TestRuntimeReply runtime_reply = 2;
+}
+
+message TestRuntimeReply {
+  string invocation = 1;
+  TestRuntimeResult result = 2;
 }
 
 message WorkspaceBlob {

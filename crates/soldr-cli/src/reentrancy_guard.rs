@@ -317,6 +317,7 @@ pub(crate) fn enforce_and_mark(raw_args: &[String], compiler_callback: bool) -> 
         .copied()
         .filter(|name| std::env::var_os(name).is_some())
         .filter(|name| *name != LINT_EXTRA_EDGE || lint_extra_command)
+        .chain(crate::remote_build::auto::runtime_edge(raw_args))
         .collect();
     let parent_role = std::env::var(IN_SOLDR_ROLE_ENV)
         .ok()

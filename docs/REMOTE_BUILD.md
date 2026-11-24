@@ -14,17 +14,31 @@ The worker receives that grant over HTTPS and never sees the device credential.
 
 After pairing, builds, Cargo check, Clippy, and `soldr test --no-run` can
 select a worker from a Git workspace root. Cargo shorthands and their explicit
-`soldr cargo` forms share the same routing. This sends tracked worktree files and nonignored new files to Forge CI. Automatic routing
-requires a matching worker host and the default target directory. It supports
-common package, feature, profile, and binary selection flags, plus explicit
-Rust triples and target aliases. Custom target JSON paths remain local.
-Each compile-only action requires worker support. Ordinary tests still run
-locally. Soldr uses the local path when worker discovery fails or the
-invocation is unsupported.
-After a successful remote build, Soldr installs verified build products in
-their local Cargo profile directories. Compile-only tests are downloaded to
-`target/forge-ci-tests/<session>`, and Soldr prints that path. Cargo check and
-Clippy return diagnostics and status.
+`soldr cargo` forms share the same routing. Soldr sends tracked worktree files
+and nonignored new files. A compatible worker can build a Git worktree before
+its first commit.
+
+Automatic routing requires a matching worker host and the default target
+directory. It supports common package, feature, profile, and binary selection
+flags, plus explicit Rust triples and target aliases for compile-only actions.
+With a native target and the default runner, supported `soldr run` invocations
+compile remotely and execute locally. Supported `soldr test` invocations
+compile and run on the worker so Cargo's generated files and compile-time
+paths remain accessible. Tests use the worker environment. Custom target JSON
+files and custom runners use the local path.
+
+Set `SOLDR_FORGE_LOCAL_TEST_RUNTIME=1` to try local execution of tests with
+portable artifacts. Tests that use worker-specific paths require worker
+execution. The local relay captures test output and sends it back to the
+worker for Cargo or Rustdoc to report.
+
+After a remote build, check, Clippy run, or test compile finishes, Soldr
+downloads the worker's attestation to
+`target/forge-ci-attestations/<session>.json` and prints the path. The record
+identifies the worker, input files, and compile exit status. A regular build
+also installs its verified build products in the local Cargo profile
+directories. `soldr test --no-run` puts its products in
+`target/forge-ci-tests/<session>` and prints that path.
 
 Plain `soldr lint` delegates the Rust suite from a supported Git workspace root
 after pairing and writes the worker's result to `target/attestation.json`.

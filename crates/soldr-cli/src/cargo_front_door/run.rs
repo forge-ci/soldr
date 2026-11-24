@@ -72,6 +72,13 @@ async fn run_cargo_front_door_ungated(
         FrontDoorArgs::Executed(code) => return Ok(code),
         FrontDoorArgs::Cargo(normalized) => normalized,
     };
+    if let Some(plan) = normalized.trampoline_plan.as_ref() {
+        if normalized.explicit_toolchain.is_none() && !porcelain::enabled() {
+            if let Some(code) = crate::remote_build::auto::try_run(plan, cache_enabled).await? {
+                return Ok(code);
+            }
+        }
+    }
     let mut prepared =
         prepare_child_cargo(&setup, &normalized, cache_enabled, &mut profile).await?;
     let mut session = FrontDoorBuildSession::begin(&mut prepared, &mut profile)?;

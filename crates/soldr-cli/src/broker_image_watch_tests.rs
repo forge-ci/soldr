@@ -8,6 +8,7 @@ const TICK: Duration = Duration::from_millis(2);
 
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
+        .start_paused(true)
         .enable_all()
         .build()
         .expect("runtime")
