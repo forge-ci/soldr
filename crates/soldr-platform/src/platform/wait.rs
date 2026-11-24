@@ -186,7 +186,7 @@ pub fn output_for(
     })
 }
 
-fn spawn_for_output(command: &mut std::process::Command) -> io::Result<Child> {
+pub(crate) fn spawn_for_output(command: &mut Command) -> io::Result<Child> {
     use std::process::Stdio;
     command
         .stdin(Stdio::null())

@@ -42,3 +42,7 @@ pub fn arg0(command: &mut Command, name: &str) {
     use std::os::unix::process::CommandExt;
     command.arg0(name);
 }
+
+#[cfg(test)]
+#[path = "command_wait_tests.rs"]
+mod wait_tests;
