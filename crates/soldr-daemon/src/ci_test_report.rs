@@ -5,8 +5,8 @@
 //! never affects Cargo's freshness decision or the compiler result.
 
 use crate::daemon::protocol::CompileRequest;
+use kernal_api::hash::Sha256Hasher;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -125,13 +125,13 @@ fn normalized_identity(request: &CompileRequest) -> Identity {
         rustflags.clone().unwrap_or_default(),
     ];
     canonical.push(request.cwd.clone());
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     for field in canonical {
         hasher.update(field.as_bytes());
         hasher.update([0]);
     }
     Identity {
-        digest: hex::encode(hasher.finalize()),
+        digest: hasher.finalize().to_hex(),
         compiler,
         crate_name,
         crate_types,

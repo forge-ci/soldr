@@ -16,10 +16,12 @@
 
 use std::fs::File;
 use std::io;
-use std::process::{Child, ExitStatus};
+use std::process::{Child, Command, ExitStatus};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+use wait_timeout::ChildExt;
 
 /// Budget for a child that does a whole build or install with inherited
 /// output (`cargo build`, `rustup toolchain install`, a source build): long
@@ -139,7 +141,6 @@ pub fn join_for<T>(
 /// Wait for a child to exit, at most `bound`. On timeout the child is
 /// killed and reaped (bounded) and `TimedOut` is returned.
 pub fn wait_for(child: &mut Child, bound: Duration) -> io::Result<ExitStatus> {
-    use wait_timeout::ChildExt;
     if let Some(status) = child.wait_timeout(bound)? {
         return Ok(status);
     }
@@ -149,7 +150,8 @@ pub fn wait_for(child: &mut Child, bound: Duration) -> io::Result<ExitStatus> {
 }
 
 /// Run `command` with stdout and stderr captured and stdin closed, waiting
-/// at most `bound` for it to exit. On expiry the child is killed. For crates
+/// at most `bound` for it to exit. The command is owned by this invocation
+/// and its process group is terminated on expiry. For crates
 /// below soldr-core; others use soldr-core's `command_output_with_timeout*`,
 /// which add inactivity budgets and context-rich errors.
 pub fn output_for(
@@ -158,6 +160,7 @@ pub fn output_for(
 ) -> io::Result<std::process::Output> {
     use std::io::Read;
     let mut child = spawn_for_output(command)?;
+    let started = Instant::now();
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
     let stdout_reader = std::thread::spawn(move || {
@@ -174,10 +177,8 @@ pub fn output_for(
         }
         buf
     });
-    let status = wait_for(&mut child, bound)?;
-    // The child is reaped; its pipes close unless a grandchild inherited them.
-    let stdout = join_for(stdout_reader, HELPER_JOIN).unwrap_or_default();
-    let stderr = join_for(stderr_reader, HELPER_JOIN).unwrap_or_default();
+    let (status, stdout, stderr) =
+        finish_owned_output(&mut child, started, bound, stdout_reader, stderr_reader)?;
     Ok(std::process::Output {
         status,
         stdout,
@@ -185,13 +186,13 @@ pub fn output_for(
     })
 }
 
-fn spawn_for_output(command: &mut std::process::Command) -> io::Result<Child> {
+pub(crate) fn spawn_for_output(command: &mut Command) -> io::Result<Child> {
     use std::process::Stdio;
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    spawn_owned(command)
 }
 
 /// Capture both pipes and report each line as it is read.
@@ -249,6 +250,7 @@ pub fn output_for_observed(
     }
 
     let mut child = spawn_for_output(command)?;
+    let started = Instant::now();
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let on_line = Arc::new(on_line);
@@ -258,13 +260,11 @@ pub fn output_for_observed(
     });
     let stderr =
         std::thread::spawn(move || drain(stderr, true, capture_limit, |s, line| on_line(s, line)));
-    let status = wait_for(&mut child, bound)?;
-    let collect =
-        |reader| join_for(reader, HELPER_JOIN).map_err(|(_, error)| io::Error::from(error));
+    let (status, stdout, stderr) = finish_owned_output(&mut child, started, bound, stdout, stderr)?;
     Ok(std::process::Output {
         status,
-        stdout: collect(stdout)??,
-        stderr: collect(stderr)??,
+        stdout: stdout?,
+        stderr: stderr?,
     })
 }
 
@@ -283,6 +283,50 @@ fn complete_utf8_prefix(bytes: &[u8]) -> usize {
         }
         _ => bytes.len(),
     }
+}
+
+// These commands are synchronous work owned by the caller. Persistent
+// services must use the separate daemon launch path.
+fn spawn_owned(command: &mut Command) -> io::Result<Child> {
+    super::process::command::configure_process_group(command);
+    super::process::command::configure_parent_death(command);
+    let _spawn = super::process::spawn_exclusion::spawn_shared();
+    command.spawn()
+}
+
+fn finish_owned_output<T>(
+    child: &mut Child,
+    started: Instant,
+    bound: Duration,
+    stdout: JoinHandle<T>,
+    stderr: JoinHandle<T>,
+) -> io::Result<(ExitStatus, T, T)> {
+    let remaining = || bound.saturating_sub(started.elapsed());
+    // Keep the group leader unreaped while draining. If a descendant holds
+    // the pipe after the leader exits, its process group is still ours to kill.
+    let collect = |reader| {
+        join_for(reader, remaining()).map_err(|(_, error)| match error {
+            WaitError::TimedOut(_) => WaitError::TimedOut(bound),
+            error => error,
+        })
+    };
+    let result = (|| {
+        let stdout = collect(stdout)?;
+        let stderr = collect(stderr)?;
+        let status = child
+            .wait_timeout(remaining())?
+            .ok_or(WaitError::TimedOut(bound))?;
+        Ok((status, stdout, stderr))
+    })();
+    if result.is_err() {
+        terminate_owned(child);
+    }
+    result
+}
+
+fn terminate_owned(child: &mut Child) {
+    let _ = super::process::terminate::terminate_tree(child);
+    let _ = child.wait_timeout(Duration::from_secs(5));
 }
 
 /// Run `command` with its stdio as configured (typically inherited) and wait

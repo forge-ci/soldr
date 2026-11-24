@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::core::SoldrError;
 use crate::platform::sync::Mutex;
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
 
@@ -930,7 +930,7 @@ fn sha256_of_file(file: &std::fs::File) -> std::io::Result<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut reader = file.try_clone()?;
     reader.seek(SeekFrom::Start(0))?;
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     let mut buf = [0u8; 1 << 20];
     loop {
         let n = reader.read(&mut buf)?;
@@ -939,7 +939,7 @@ fn sha256_of_file(file: &std::fs::File) -> std::io::Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hex::encode(hasher.finalize()))
+    Ok(hasher.finalize().to_hex())
 }
 
 // ---- positional (pwrite/seek_write) file I/O so N concurrent segment

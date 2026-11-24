@@ -1,7 +1,7 @@
 //! Indexed, bounded-memory artifact transfers over independent HTTP/2 streams.
 
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Cursor, Read, Write};
+use std::io::{self, BufWriter, Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,8 +10,8 @@ use axum::body::{Body, Bytes};
 use axum::response::{IntoResponse, Response};
 use futures_util::{stream, TryStreamExt};
 use globset::{GlobBuilder, GlobSetBuilder};
+use kernal_api::hash::{sha256_reader, Sha256Hasher};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
 use super::snapshot::relative_path;
@@ -105,10 +105,9 @@ pub(super) fn inventory_json(
     })?)
 }
 
-pub(super) fn checksum(file: File) -> io::Result<(u64, String)> {
-    let mut hash = Sha256::new();
-    let size = io::copy(&mut io::BufReader::new(file), &mut hash)?;
-    Ok((size, hex::encode(hash.finalize())))
+pub(super) fn checksum(mut file: File) -> io::Result<(u64, String)> {
+    let sha256 = sha256_reader(&mut file, u64::MAX)?.to_hex();
+    Ok((file.stream_position()?, sha256))
 }
 
 pub(super) fn manifest_path(session: &str) -> String {
@@ -366,7 +365,7 @@ fn save(
     } else {
         Box::new(chunks)
     };
-    let mut hash = Sha256::new();
+    let mut hash = Sha256Hasher::new();
     let mut size = 0;
     let mut writer = BufWriter::new(file.as_file_mut());
     let mut buf = [0; 64 * 1024];
@@ -384,7 +383,7 @@ fn save(
     }
     writer.flush()?;
     drop(writer);
-    if size != entry.size_bytes || hex::encode(hash.finalize()) != entry.sha256 {
+    if size != entry.size_bytes || hash.finalize().to_hex() != entry.sha256 {
         return Err(io::Error::other(format!(
             "remote artifact checksum mismatch: {}",
             entry.path

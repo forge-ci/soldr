@@ -575,18 +575,12 @@ fn json_escape(value: &str) -> String {
 }
 
 fn sha256_of_file(path: &Path) -> Result<String, SoldrError> {
-    use sha2::{Digest, Sha256};
-    let mut file =
+    use kernal_api::hash::sha256_reader;
+    let file =
         File::open(path).map_err(|e| SoldrError::Other(format!("open {}: {e}", path.display())))?;
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)
-        .map_err(|e| SoldrError::Other(format!("hash {}: {e}", path.display())))?;
-    let digest = hasher.finalize();
-    let mut hex = String::with_capacity(64);
-    for byte in digest.iter() {
-        hex.push_str(&format!("{byte:02x}"));
-    }
-    Ok(hex)
+    sha256_reader(file, u64::MAX)
+        .map(|digest| digest.to_hex())
+        .map_err(|e| SoldrError::Other(format!("hash {}: {e}", path.display())))
 }
 
 #[cfg(test)]

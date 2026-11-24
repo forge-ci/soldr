@@ -41,8 +41,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use kernal_api::hash::Sha256Hasher;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use crate::core::SoldrPaths;
 
@@ -253,14 +253,14 @@ fn percent_of(value: u64, percent: u64) -> u64 {
 /// Lower-case hex SHA-256 of `args` joined by NUL. The compile journal records
 /// the same `args`, so an offline reader computes the same key for each row.
 pub(crate) fn args_digest(args: &[String]) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     for arg in args {
         hasher.update(arg.as_bytes());
         hasher.update([0u8]);
     }
     let digest = hasher.finalize();
     let mut out = String::with_capacity(64);
-    for byte in digest {
+    for byte in digest.as_bytes() {
         out.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
         out.push(char::from(b"0123456789abcdef"[usize::from(byte & 0x0F)]));
     }

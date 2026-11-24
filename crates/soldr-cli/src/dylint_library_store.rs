@@ -20,8 +20,8 @@
 
 use std::path::{Path, PathBuf};
 
+use kernal_api::hash::Sha256Hasher;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 const CLOSURE_CACHE_NAME: &str = ".soldr-dependency-closure-v1.json";
 
@@ -35,7 +35,7 @@ struct ClosureCache {
 /// has a stable dependency graph until one of its dependency inputs changes.
 /// Other workspace shapes continue through graph resolution on every run.
 fn closure_fingerprint(workspace_root: &Path, libraries: &[PathBuf]) -> Option<String> {
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     hash_input(
         &mut hasher,
         b"workspace",
@@ -110,7 +110,7 @@ fn closure_fingerprint(workspace_root: &Path, libraries: &[PathBuf]) -> Option<S
             value.as_encoded_bytes(),
         );
     }
-    Some(format!("{:x}", hasher.finalize()))
+    Some(hasher.finalize().to_hex())
 }
 
 fn write_closure_cache(path: &Path, cache: &ClosureCache) -> std::io::Result<()> {
@@ -122,7 +122,7 @@ fn write_closure_cache(path: &Path, cache: &ClosureCache) -> std::io::Result<()>
     Ok(())
 }
 
-fn hash_cargo_config(hasher: &mut Sha256, path: &Path) -> Option<()> {
+fn hash_cargo_config(hasher: &mut Sha256Hasher, path: &Path) -> Option<()> {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(()),
@@ -143,7 +143,7 @@ fn hash_cargo_config(hasher: &mut Sha256, path: &Path) -> Option<()> {
     Some(())
 }
 
-fn hash_input(hasher: &mut Sha256, name: &[u8], bytes: &[u8]) {
+fn hash_input(hasher: &mut Sha256Hasher, name: &[u8], bytes: &[u8]) {
     hasher.update((name.len() as u64).to_le_bytes());
     hasher.update(name);
     hasher.update((bytes.len() as u64).to_le_bytes());
@@ -230,7 +230,7 @@ impl StoreInputs {
 
     fn store_dir(&self, store_root: &Path, channel: &str, triple: &str) -> PathBuf {
         let Self { libraries, closure } = self;
-        let mut hasher = Sha256::new();
+        let mut hasher = Sha256Hasher::new();
         hasher.update(b"soldr-dylint-libraries-v2\0");
         hasher.update(channel.as_bytes());
         hasher.update(b"\0target\0");
@@ -256,7 +256,10 @@ impl StoreInputs {
             }
         }
         let digest = hasher.finalize();
-        let key: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+        let key: String = digest.as_bytes()[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         store_root.join(format!("{channel}-{triple}-{key}"))
     }
 }

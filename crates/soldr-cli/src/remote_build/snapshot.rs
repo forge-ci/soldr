@@ -5,7 +5,7 @@ use std::process::Command;
 
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::{ambient_authority, fs};
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 
 use crate::platform::wait;
 
@@ -63,7 +63,7 @@ pub(super) fn verify_parent(
 }
 
 pub(super) fn digest(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
+    Sha256Hasher::digest(bytes).to_hex()
 }
 
 pub(super) fn relative_path(path: &str) -> io::Result<&Path> {

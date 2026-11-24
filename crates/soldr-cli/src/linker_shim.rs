@@ -8,7 +8,7 @@
 //! path substitution that runs just before a shim is materialized.
 
 use crate::core::SoldrError;
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -140,7 +140,7 @@ fn write_linker_shim(
     stem: &str,
     body: &str,
 ) -> Result<PathBuf, SoldrError> {
-    let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
+    let digest = format!("{:x}", Sha256Hasher::digest(body.as_bytes()));
     let dir = paths
         .bin
         .join("linker-shims")

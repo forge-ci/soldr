@@ -132,7 +132,7 @@ pub(crate) fn resolve_bin_name(parsed: &ParsedRunArgs) -> Result<Option<String>,
     let text = fs::read_to_string(&manifest_path).map_err(|err| {
         SoldrError::Other(format!("read manifest {}: {err}", manifest_path.display()))
     })?;
-    let value: toml::Value = text.parse().map_err(|err| {
+    let value: toml::Value = toml::from_str(&text).map_err(|err| {
         SoldrError::Other(format!("parse manifest {}: {err}", manifest_path.display()))
     })?;
 
