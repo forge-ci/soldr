@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 
 use crate::core::SoldrError;
 
@@ -116,7 +116,7 @@ pub fn ensure_case_overlay(
     if !text.contains("\"external-contents\"") {
         return Ok(None);
     }
-    let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+    let digest = format!("{:x}", Sha256Hasher::digest(text.as_bytes()));
     let path = xwin_dir.join(format!(
         "soldr-case-overlay-{OVERLAY_FORMAT_VERSION}-{}.yaml",
         &digest[..20]

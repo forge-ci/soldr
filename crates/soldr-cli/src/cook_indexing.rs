@@ -183,7 +183,7 @@ fn recipe_locked_path_versions(
     else {
         return std::collections::BTreeMap::new();
     };
-    let Ok(lock) = lock.parse::<toml::Value>() else {
+    let Ok(lock) = toml::from_str::<toml::Value>(lock) else {
         return std::collections::BTreeMap::new();
     };
     let mut versions = std::collections::BTreeMap::<String, Vec<String>>::new();
@@ -221,8 +221,7 @@ fn recipe_excluded_paths(recipe: &serde_json::Value) -> Vec<String> {
     let Some(contents) = root.get("contents").and_then(|value| value.as_str()) else {
         return Vec::new();
     };
-    contents
-        .parse::<toml::Value>()
+    toml::from_str::<toml::Value>(contents)
         .ok()
         .and_then(|doc| doc.get("workspace")?.get("exclude")?.as_array().cloned())
         .unwrap_or_default()
@@ -237,7 +236,7 @@ fn rewrite_excluded_paths_to_registry(
     excluded: &[String],
     locked_versions: &std::collections::BTreeMap<String, Vec<String>>,
 ) -> (String, usize, usize) {
-    let Ok(mut doc) = contents.parse::<toml::Value>() else {
+    let Ok(mut doc) = toml::from_str::<toml::Value>(contents) else {
         return (contents.to_string(), 0, 0);
     };
     let mut rewritten = 0usize;
@@ -411,7 +410,7 @@ pub(crate) fn unmaterializable_path_deps(recipe: &serde_json::Value) -> Vec<(Str
         let Some(contents) = manifest.get("contents").and_then(|c| c.as_str()) else {
             continue;
         };
-        let Ok(doc) = contents.parse::<toml::Value>() else {
+        let Ok(doc) = toml::from_str::<toml::Value>(contents) else {
             continue;
         };
         let owner_dir = manifest_dir_of(rel);

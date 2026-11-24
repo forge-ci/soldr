@@ -12,8 +12,8 @@ use crate::dylint_cook_tree::CookTree;
 use crate::dylint_libraries::canonical_channel;
 use crate::dylint_toolchain::DylintToolchainPlan;
 use fs2::FileExt;
+use kernal_api::hash::Sha256Hasher;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -548,7 +548,7 @@ fn build_output(
         .join("dylint")
         .join(args.tree.directory())
         .join(args.tree.channel_segment(&plan.channel, &host));
-    let mut digest = Sha256::new();
+    let mut digest = Sha256Hasher::new();
     digest.update(b"soldr-dylint-cook-v1\0");
     digest.update(args.tree.name().as_bytes());
     digest.update([0]);
@@ -559,7 +559,7 @@ fn build_output(
     digest.update(plan.compiler_commit.as_bytes());
     digest.update([0]);
     digest.update(semantic_input_hash(root, args)?.as_bytes());
-    let cache_key = hex::encode(digest.finalize());
+    let cache_key = digest.finalize().to_hex();
     let marker = DylintCookMarker {
         schema_version: SCHEMA_VERSION,
         cache_key: cache_key.clone(),
@@ -685,7 +685,7 @@ fn semantic_input_hash(root: &Path, args: &DylintCookArgs) -> Result<String, Sol
             environment.insert(key, value);
         }
     }
-    let mut digest = Sha256::new();
+    let mut digest = Sha256Hasher::new();
     for (path, bytes) in entries {
         hash_field(&mut digest, path.as_bytes());
         hash_field(&mut digest, &bytes);
@@ -701,10 +701,10 @@ fn semantic_input_hash(root: &Path, args: &DylintCookArgs) -> Result<String, Sol
             .map_err(|error| SoldrError::Other(format!("environment encoding failed: {error}")))?,
     );
     hash_field(&mut digest, WRAPPER_IDENTITY.as_bytes());
-    Ok(hex::encode(digest.finalize()))
+    Ok(digest.finalize().to_hex())
 }
 
-fn hash_field(digest: &mut Sha256, bytes: &[u8]) {
+fn hash_field(digest: &mut Sha256Hasher, bytes: &[u8]) {
     digest.update((bytes.len() as u64).to_le_bytes());
     digest.update(bytes);
 }

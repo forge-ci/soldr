@@ -253,7 +253,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::core::SoldrError;
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 
 pub(crate) const ASSET_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const ASSET_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
@@ -721,7 +721,7 @@ async fn stream_response_to_temp_file_inner_direct(
     permit.mark_streaming();
 
     let mut file = tempfile::NamedTempFile::new_in(soldr_core::core::ensure_temp_root())?;
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     let mut bytes = 0_u64;
     let started = tokio::time::Instant::now();
 
@@ -756,7 +756,7 @@ async fn stream_response_to_temp_file_inner_direct(
 
     Ok(DownloadedAsset {
         file,
-        sha256: hex::encode(hasher.finalize()),
+        sha256: hasher.finalize().to_hex(),
         bytes,
     })
 }

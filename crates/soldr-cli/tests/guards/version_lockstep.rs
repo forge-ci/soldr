@@ -272,16 +272,31 @@ fn kernal_api_version_matches_across_the_fleet() {
     let locked_kernal = kernal_versions[0];
 
     // (ii) soldr's manifest pin equals the locked version.
-    let manifest = root.join("crates/soldr-platform/Cargo.toml");
-    let line = dependency_line(&manifest, "dependencies", "kernal-api")
-        .expect("crates/soldr-platform/Cargo.toml must depend on kernal-api");
-    let manifest_kernal = extract_dependency_version(&line).expect(
-        "crates/soldr-platform/Cargo.toml's kernal-api dependency must pin an exact version",
-    );
+    let manifest = root.join("Cargo.toml");
+    let line = dependency_line(&manifest, "workspace.dependencies", "kernal-api")
+        .expect("the workspace must depend on kernal-api");
+    let manifest_kernal = extract_dependency_version(&line)
+        .expect("the workspace kernal-api dependency must pin an exact version");
+    for member in [
+        "soldr-cache",
+        "soldr-cli",
+        "soldr-core",
+        "soldr-daemon",
+        "soldr-fetch",
+        "soldr-platform",
+    ] {
+        let manifest = root.join("crates").join(member).join("Cargo.toml");
+        let line = dependency_line(&manifest, "dependencies", "kernal-api")
+            .unwrap_or_else(|| panic!("{member} must depend on kernal-api"));
+        assert!(
+            line.contains("workspace = true") && !line.contains("version"),
+            "{member} must inherit the workspace kernal-api pin: {line}"
+        );
+    }
     let expected_manifest_kernal = format!("={locked_kernal}");
     assert_eq!(
         manifest_kernal, expected_manifest_kernal,
-        "soldr#3297: crates/soldr-platform/Cargo.toml pins kernal-api {manifest_kernal} but \
+        "soldr#3297: the workspace pins kernal-api {manifest_kernal} but \
          Cargo.lock resolved kernal-api {locked_kernal}. Update the manifest pin to \
          \"{expected_manifest_kernal}\" (or refresh Cargo.lock) so both agree."
     );
@@ -297,7 +312,7 @@ fn kernal_api_version_matches_across_the_fleet() {
             assert_eq!(
                 zccache_kernal, locked_kernal,
                 "soldr#3297: the locked zccache package depends on kernal-api {zccache_kernal} but \
-                 soldr pins kernal-api {locked_kernal} in crates/soldr-platform/Cargo.toml. Move \
+                 soldr pins kernal-api {locked_kernal} in Cargo.toml. Move \
                  soldr's kernal-api pin to {zccache_kernal} (soldr#3297 Step 2 — the zccache bump)."
             );
         }
@@ -405,14 +420,6 @@ fn externalized_dependencies_are_exact_and_consistent() {
                 "crates/soldr-cli/Cargo.toml",
                 "crates/soldr-daemon/Cargo.toml",
                 "crates/soldr-platform/Cargo.toml",
-            ][..],
-        ),
-        (
-            "kernal-api",
-            "0.1.40",
-            &[
-                "crates/soldr-platform/Cargo.toml",
-                "crates/soldr-cli/Cargo.toml",
             ][..],
         ),
     ] {

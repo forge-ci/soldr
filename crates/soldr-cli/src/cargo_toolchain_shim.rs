@@ -46,8 +46,8 @@ fn materialize(
 ) -> Result<PathBuf, SoldrError> {
     let body = render(real_cargo, toolchain)?;
     let digest = {
-        use sha2::{Digest, Sha256};
-        format!("{:x}", Sha256::digest(body.as_bytes()))
+        use kernal_api::hash::Sha256Hasher;
+        format!("{:x}", Sha256Hasher::digest(body.as_bytes()))
     };
     let dir = paths
         .bin

@@ -22,7 +22,7 @@ prost = { workspace = true }
 running-process = { version = "=4.10.21", default-features = false, features = ["client", "client-async"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
+kernal-api = { workspace = true, features = ["hash-sha256"] }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 rusqlite = { workspace = true }

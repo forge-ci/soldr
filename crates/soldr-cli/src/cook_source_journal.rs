@@ -27,7 +27,7 @@ use crate::cook_source_snapshot::{
 };
 use crate::core::SoldrError;
 use fs2::FileExt;
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -263,8 +263,11 @@ fn git_dir_at(dir: &Path) -> Option<PathBuf> {
 }
 
 fn journal_paths(dir: &Path, root: &Path) -> (PathBuf, PathBuf) {
-    let digest = Sha256::digest(root.to_string_lossy().as_bytes());
-    let name: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let digest = Sha256Hasher::digest(root.to_string_lossy().as_bytes());
+    let name: String = digest.as_bytes()[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     (
         dir.join(format!("{name}.{JOURNAL_EXT}")),
         dir.join(format!("{name}.lock")),
@@ -354,8 +357,8 @@ pub(crate) fn encode(root: &Path, snapshot: &ProjectSourceSnapshot) -> Result<Ve
         put(&mut out, path_str(rel)?.as_bytes());
         put(&mut out, bytes);
     }
-    let digest = Sha256::digest(&out);
-    out.extend_from_slice(&digest);
+    let digest = Sha256Hasher::digest(&out);
+    out.extend_from_slice(digest.as_bytes());
     out.extend_from_slice(TRAILER);
     Ok(out)
 }
@@ -369,7 +372,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(PathBuf, ProjectSourceSnapshot), &
         return Err("bad header or trailer");
     }
     let (body, digest) = bytes.split_at(body_len);
-    if Sha256::digest(body).as_slice() != &digest[..32] {
+    if Sha256Hasher::digest(body).as_bytes() != &digest[..32] {
         return Err("checksum mismatch");
     }
     decode_body(&body[MAGIC.len()..])
