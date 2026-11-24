@@ -66,11 +66,10 @@ env:
 jobs:
   # Self-hosted forge pool (forge-ci/gh-runner docs/pool.md): when the repo
   # variable FORGE_POOL_LABELS holds a JSON label array, the x86_64 Linux lane
-  # asks pool-select right before it starts whether the pool's Ubuntu 26.04
-  # runners have an idle slot, for trusted events only (push to the default
-  # branch, merge_group, workflow_dispatch, schedule), and runs there only if
-  # so; otherwise, or on any error, it runs hosted. pool-select reads
-  # https://signal.forge-ci.com/v1/pool with no token. Pull requests and the
+  # asks pool-select for an online Dell when FORGE_POOL_LEASE_CLASS is set.
+  # The ledger holds capacity until that runner is ready. With the class
+  # unset, it checks idle listeners. Trusted events are default-branch
+  # pushes, merge_group, workflow_dispatch and schedule. Pull requests and the
   # other lanes never run the selector and stay hosted (fork safety). Unset
   # FORGE_POOL_LABELS to stop routing at once; unset the org variable
   # FORGE_QUICK_LABELS to run the selector itself on hosted runners (RUN-004).
@@ -87,17 +86,21 @@ jobs:
               && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)))
     runs-on: ${{ vars.FORGE_QUICK_LABELS != '' && fromJSON(vars.FORGE_QUICK_LABELS) || 'ubuntu-latest' }}
     timeout-minutes: 2
-    permissions: {}
+    permissions:
+      id-token: write
     outputs:
       runs-on: ${{ steps.select.outputs.runs-on || toJSON(inputs.runner) }}
     steps:
       - name: Select pool or hosted
         id: select
         continue-on-error: true
-        uses: forge-ci/ci.yml/actions/pool-select@a36bc81ad6ada5fb17398e3e7ba38435cc67a951
+        uses: forge-ci/ci.yml/actions/pool-select@ed73926bc2de1b5d71f50907cd93920daeecbe78
         with:
           labels: ${{ vars.FORGE_POOL_LABELS }}
           fallback: ${{ inputs.runner }}
+          source: ${{ vars.FORGE_POOL_LEASE_CLASS != '' && 'lease' || 'signal' }}
+          lease-class: ${{ vars.FORGE_POOL_LEASE_CLASS }}
+          count-room: "false"
 
   build-and-test:
     name: ${{ inputs.target }}
