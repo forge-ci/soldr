@@ -4108,7 +4108,6 @@ dependencies = [
  "serde_json",
  "soldr-core",
  "soldr-platform",
- "strum 0.27.2",
  "tar",
  "tempfile",
  "thiserror 2.0.20",
@@ -4123,7 +4122,6 @@ name = "soldr-cli"
 version = "0.9.56"
 dependencies = [
  "axum",
- "blake3",
  "cap-fs-ext",
  "cap-std",
  "clap",
@@ -4230,7 +4228,6 @@ dependencies = [
  "serde_json",
  "soldr-core",
  "soldr-platform",
- "strum 0.27.2",
  "tar",
  "tempfile",
  "thiserror 2.0.20",
@@ -4246,7 +4243,7 @@ dependencies = [
 name = "soldr-nextest-wrapper"
 version = "0.9.56"
 dependencies = [
- "sha2 0.10.9",
+ "kernal-api",
  "soldr-core",
  "soldr-platform",
  "tempfile",
@@ -4257,7 +4254,6 @@ dependencies = [
 name = "soldr-platform"
 version = "0.9.56"
 dependencies = [
- "blake3",
  "fs2",
  "interprocess",
  "kernal-api",

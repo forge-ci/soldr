@@ -21,7 +21,6 @@ publish = false
 
 [dependencies]
 thiserror = { workspace = true }
-blake3 = "1"
 interprocess = { version = "2", features = ["tokio"] }
 # Exact pin: kernal-api is pre-1.0, so per its COMPATIBILITY.md every
 # consumer must resolve the same release. This must equal the kernal-api

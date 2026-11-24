@@ -100,7 +100,7 @@ pub fn windows_pipe_from_executable_with_suffix(
     let encoded = percent_encode_pipe_leaf(logical.as_bytes());
     let overflowed = WINDOWS_PIPE_PREFIX.len() + encoded.len() > WINDOWS_PIPE_NAME_LIMIT;
     let (pipe_leaf, oversized_leaf) = if overflowed {
-        let digest = blake3::hash(logical.as_bytes());
+        let digest = kernal_api::hash::blake3_bytes(logical.as_bytes());
         let mut short = String::with_capacity(16);
         for byte in digest.as_bytes().iter().take(8) {
             use std::fmt::Write as _;

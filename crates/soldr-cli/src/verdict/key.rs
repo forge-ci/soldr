@@ -502,7 +502,7 @@ fn cargo_home_config() -> String {
     let Some(home) = home else {
         return "none".into();
     };
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = kernal_api::hash::Blake3Hasher::new();
     for name in ["config", "config.toml"] {
         if let Ok(bytes) = std::fs::read(home.join(name)) {
             hasher.update(name.as_bytes());
@@ -566,7 +566,7 @@ fn input_entries(
                 }
                 let bytes = std::fs::read(&full)
                     .map_err(|err| format!("cannot read uncommitted `{path}`: {err}"))?;
-                format!("dirty:{}", blake3::hash(&bytes).to_hex())
+                format!("dirty:{}", kernal_api::hash::blake3_bytes(&bytes).to_hex())
             }
         };
         entries.push((path.clone(), fingerprint));
@@ -576,12 +576,12 @@ fn input_entries(
     Ok((entries, dirty_count))
 }
 
-fn short(hash: blake3::Hash) -> String {
+fn short(hash: kernal_api::hash::Blake3Digest) -> String {
     hash.to_hex()[..32].to_string()
 }
 
 fn digest_entries<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> String {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = kernal_api::hash::Blake3Hasher::new();
     for (path, fingerprint) in entries {
         hasher
             .update(path.as_bytes())
@@ -676,7 +676,7 @@ fn common(
     let profile_json = serde_json::to_string(request.profile).unwrap_or_default();
     components.insert(
         "profile".into(),
-        short(blake3::hash(profile_json.as_bytes())),
+        short(kernal_api::hash::blake3_bytes(profile_json.as_bytes())),
     );
     Ok(Common {
         components,
@@ -773,7 +773,7 @@ pub(crate) fn digest_components(
     scope: &str,
     components: &BTreeMap<String, String>,
 ) -> String {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = kernal_api::hash::Blake3Hasher::new();
     hasher.update(
         format!(
             "schema\0{}\ntool\0{tool}\nscope\0{scope}\n",

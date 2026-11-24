@@ -24,7 +24,6 @@ serde_json = { workspace = true }
 kernal-api = { workspace = true, features = ["hash-sha256"] }
 tar = { workspace = true }
 thiserror = { workspace = true }
-strum = { workspace = true }
 tokio = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
