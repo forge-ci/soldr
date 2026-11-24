@@ -48,6 +48,18 @@ pub(super) async fn try_test(args: &[String], cache_enabled: bool) -> io::Result
         };
         test_args.insert(0, filter);
     }
+    if !crate::core::flag("SOLDR_FORGE_LOCAL_TEST_RUNTIME") {
+        let mode = BuildMode::CargoTestWorker;
+        let Some((client, root, work_dir)) = find_worker(&compile, cache_enabled, mode).await?
+        else {
+            return Ok(None);
+        };
+        let Some(session) = start_worktree(&client, &root, work_dir, args, mode).await? else {
+            return Ok(None);
+        };
+        eprintln!("Forge CI build session {}", session.id);
+        return receive_build(&client, &root, &session.id).await.map(Some);
+    }
     if let Some(code) = test_runtime::try_relay(args, &compile, cache_enabled).await? {
         return Ok(Some(code));
     }

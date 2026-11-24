@@ -37,6 +37,7 @@ pub(crate) enum BuildMode {
     CargoCheck,
     CargoClippy,
     CargoTestCompile,
+    CargoTestWorker,
     CargoTestLocal,
     CargoTestRuntime,
     Lint,
@@ -64,6 +65,7 @@ impl BuildMode {
             Self::CargoCheck => Action::CargoCheck,
             Self::CargoClippy => Action::CargoClippy,
             Self::CargoTestCompile | Self::CargoTestLocal => Action::CargoTestCompile,
+            Self::CargoTestWorker => Action::Test,
             Self::CargoTestRuntime => Action::CargoTestRuntime,
             Self::Lint => Action::Lint,
         }
@@ -498,7 +500,10 @@ fn supports_build(capabilities: &Capabilities, host: &str, mode: BuildMode) -> b
     capabilities.working_tree_builds
         && capabilities.host == host
         && match mode {
-            BuildMode::Blessed | BuildMode::Cargo | BuildMode::Lint => true,
+            BuildMode::Blessed
+            | BuildMode::Cargo
+            | BuildMode::CargoTestWorker
+            | BuildMode::Lint => true,
             BuildMode::CargoCheck => capabilities.cargo_check,
             BuildMode::CargoClippy
             | BuildMode::CargoTestCompile

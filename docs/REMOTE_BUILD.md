@@ -21,16 +21,16 @@ its first commit.
 Automatic routing requires a matching worker host and the default target
 directory. It supports common package, feature, profile, and binary selection
 flags, plus explicit Rust triples and target aliases for compile-only actions.
-With a native target and the default runner, supported `soldr run` and
-`soldr test` invocations compile remotely and execute locally with the caller's
-environment and working directory. This includes target selections such as
-`--test NAME` and `--all-targets`. When the worker supports the test relay,
-default test invocations and `soldr test --doc` also compile remotely. The
-workstation runs the test and doctest executables and returns their output and
-exit status to Cargo or Rustdoc. The relay carries Cargo package metadata and
-sets runtime manifest paths to the workstation checkout. Custom Rustdoc
-settings, custom target JSON files, and custom
-runners use the local path.
+With a native target and the default runner, supported `soldr run` invocations
+compile remotely and execute locally. Supported `soldr test` invocations
+compile and run on the worker so Cargo's generated files and compile-time
+paths remain accessible. Tests use the worker environment. Custom target JSON
+files and custom runners use the local path.
+
+Set `SOLDR_FORGE_LOCAL_TEST_RUNTIME=1` to try local execution of tests with
+portable artifacts. Tests that use worker-specific paths require worker
+execution. The local relay captures test output and sends it back to the
+worker for Cargo or Rustdoc to report.
 
 After a remote build, check, Clippy run, or test compile finishes, Soldr
 downloads the worker's attestation to
