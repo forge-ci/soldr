@@ -27,9 +27,8 @@ struct Node {
     dependencies: Vec<String>,
 }
 
-fn load(root: &Path) -> Result<Metadata, Box<dyn std::error::Error>> {
-    let cargo = crate::binaries::resolve_toolchain_binary("cargo")?;
-    let mut command = std::process::Command::new(&cargo);
+fn load(cargo: &Path, root: &Path) -> Result<Metadata, Box<dyn std::error::Error>> {
+    let mut command = std::process::Command::new(cargo);
     command
         .current_dir(root)
         .args(["metadata", "--format-version", "1"]);
@@ -61,36 +60,38 @@ pub(super) fn dependency_closure(
     libraries: &[PathBuf],
 ) -> Result<String, Box<dyn std::error::Error>> {
     let root = root.canonicalize()?;
+    let cargo = crate::binaries::resolve_toolchain_binary("cargo")?;
     // A virtual workspace may contain only excluded, standalone lint libraries.
     // Cargo cannot describe an empty workspace; each library still has a graph.
-    let workspace = load(&root).ok();
+    let workspace = load(&cargo, &root).ok();
+    let mut workspace_packages = BTreeMap::new();
+    for package in workspace.iter().flat_map(|metadata| &metadata.packages) {
+        if let Ok(path) = package.manifest_path.canonicalize() {
+            workspace_packages.entry(path).or_insert(package);
+        }
+    }
     let mut records = BTreeSet::new();
     for library in libraries {
         let manifest = library.join("Cargo.toml").canonicalize()?;
         // Excluded Dylint libraries commonly declare their own [workspace].
-        let standalone;
-        let metadata = if let Some(workspace) = workspace.as_ref().filter(|workspace| {
-            workspace.packages.iter().any(|p| {
-                p.manifest_path
-                    .canonicalize()
-                    .is_ok_and(|path| path == manifest)
-            })
-        }) {
-            workspace
-        } else {
-            standalone = load(library)?;
-            &standalone
-        };
+        if let Some((workspace, package)) =
+            workspace.as_ref().zip(workspace_packages.get(&manifest))
+        {
+            collect(workspace, &package.id, &mut records)?;
+            continue;
+        }
+        let metadata = load(&cargo, library)?;
         let package = metadata
             .packages
             .iter()
-            .find(|p| {
-                p.manifest_path
+            .find(|package| {
+                package
+                    .manifest_path
                     .canonicalize()
                     .is_ok_and(|path| path == manifest)
             })
             .ok_or("declared Dylint library missing from cargo metadata")?;
-        collect(metadata, &package.id, &mut records)?;
+        collect(&metadata, &package.id, &mut records)?;
     }
     Ok(records.into_iter().collect::<Vec<_>>().join("\n"))
 }
