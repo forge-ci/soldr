@@ -14,14 +14,13 @@ getrandom = "=0.4.3"
 if-addrs = "=0.13.4"
 fs2.workspace = true
 prost.workspace = true
-rustls = { version = "=0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
-webpki-roots = "=1.0.10"
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 soldr-platform = { path = "../soldr-platform" }
 tempfile.workspace = true
 tokio.workspace = true
-tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
 toml.workspace = true
 url.workspace = true
 

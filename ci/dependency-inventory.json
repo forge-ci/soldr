@@ -10,15 +10,14 @@
       "getrandom",
       "if-addrs",
       "prost",
-      "rustls",
+      "reqwest",
       "serde",
       "serde_json",
       "tempfile",
       "tokio",
       "tokio-tungstenite",
       "toml",
-      "url",
-      "webpki-roots"
+      "url"
     ],
     "soldr-cache": [
       "filetime",

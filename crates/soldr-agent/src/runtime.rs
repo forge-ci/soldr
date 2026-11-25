@@ -11,10 +11,14 @@ use tokio::{
     sync::watch,
 };
 use tokio_tungstenite::{
-    tungstenite::{protocol::WebSocketConfig, Message},
-    MaybeTlsStream, WebSocketStream,
+    tungstenite::{
+        handshake::{client::generate_key, derive_accept_key},
+        protocol::{Role, WebSocketConfig},
+        Message,
+    },
+    WebSocketStream,
 };
-type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+type Socket = WebSocketStream<reqwest::Upgraded>;
 const IO_LIMIT: Duration = Duration::from_secs(2);
 
 pub async fn run(config: Config, key: HostKey, mut shutdown: watch::Receiver<bool>) -> Result<()> {
@@ -96,18 +100,7 @@ async fn session_with_status(
 }
 async fn connect(config: &Config, key: &HostKey, url: &str) -> Result<Socket> {
     let handshake = async {
-        let ws = WebSocketConfig::default()
-            .max_message_size(Some(MAX_MESSAGE))
-            .max_frame_size(Some(MAX_MESSAGE));
-        // Never format tungstenite errors: protocol errors can embed frames/signatures.
-        let (mut socket, _) = tokio_tungstenite::connect_async_tls_with_config(
-            url,
-            Some(ws),
-            false,
-            Some(tls_connector()?),
-        )
-        .await
-        .map_err(connection_error)?;
+        let mut socket = open_socket(url).await?;
         let ToHost::Challenge { nonce } = receive(&mut socket).await? else {
             return Err("expected signal challenge".into());
         };
@@ -238,22 +231,107 @@ async fn health_request(mut stream: TcpStream, config: &Config) -> Result<()> {
     }).await.map_err(|_| "health request timed out")?
 }
 
-/// Choose our provider per connection rather than relying on process-global
-/// feature unification (dist/iroh may enable another Rustls provider).
-fn tls_connector() -> Result<tokio_tungstenite::Connector> {
-    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    Ok(tokio_tungstenite::Connector::Rustls(Arc::new(config)))
+/// Let reqwest own TLS and HTTP; tungstenite handles framing after the upgrade.
+async fn open_socket(url: &str) -> Result<Socket> {
+    use reqwest::header::{
+        CONNECTION, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_EXTENSIONS, SEC_WEBSOCKET_KEY,
+        SEC_WEBSOCKET_PROTOCOL, SEC_WEBSOCKET_VERSION, UPGRADE,
+    };
+
+    let mut url = url::Url::parse(url).map_err(|_| "invalid signal URL")?;
+    let scheme = match url.scheme() {
+        "wss" => "https",
+        "ws" => "http",
+        _ => return Err("invalid signal transport scheme".into()),
+    };
+    url.set_scheme(scheme)
+        .map_err(|()| "invalid signal URL scheme")?;
+
+    let key = generate_key();
+    let accept = derive_accept_key(key.as_bytes());
+    let response = reqwest::Client::builder()
+        .http1_only()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()?
+        .get(url)
+        .header(CONNECTION, "Upgrade")
+        .header(UPGRADE, "websocket")
+        .header(SEC_WEBSOCKET_VERSION, "13")
+        .header(SEC_WEBSOCKET_KEY, key)
+        .send()
+        .await
+        .map_err(|_| "signal HTTP upgrade request failed")?;
+
+    if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
+        return Err(format!("signal WebSocket upgrade refused: {}", response.status()).into());
+    }
+    let headers = response.headers();
+    let has_connection_upgrade = headers.get_all(CONNECTION).iter().any(|value| {
+        value.to_str().is_ok_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+        })
+    });
+    if !has_connection_upgrade
+        || !headers
+            .get(UPGRADE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+        || !headers
+            .get(SEC_WEBSOCKET_ACCEPT)
+            .is_some_and(|value| value == &accept)
+        || headers.contains_key(SEC_WEBSOCKET_EXTENSIONS)
+        || headers.contains_key(SEC_WEBSOCKET_PROTOCOL)
+    {
+        return Err("invalid signal WebSocket upgrade response".into());
+    }
+
+    let stream = response
+        .upgrade()
+        .await
+        .map_err(|_| "signal WebSocket upgrade failed")?;
+    let limits = WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE))
+        .max_frame_size(Some(MAX_MESSAGE));
+    Ok(WebSocketStream::from_raw_socket(stream, Role::Client, Some(limits)).await)
 }
+
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn tls_has_an_explicit_provider_without_sibling_features() {
-        assert!(super::tls_connector().is_ok());
+    use super::*;
+
+    #[tokio::test]
+    async fn rejects_an_upgrade_with_the_wrong_accept_key() {
+        use tokio_tungstenite::tungstenite::{
+            handshake::server::{Request, Response},
+            http::{header::SEC_WEBSOCKET_ACCEPT, HeaderValue},
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_hdr_async(stream, |_: &Request, mut response: Response| {
+                response.headers_mut().insert(
+                    SEC_WEBSOCKET_ACCEPT,
+                    HeaderValue::from_static("invalid-accept-key"),
+                );
+                Ok(response)
+            })
+            .await
+            .unwrap();
+        });
+
+        let error = tokio::time::timeout(IO_LIMIT, open_socket(&url))
+            .await
+            .expect("client upgrade deadline")
+            .expect_err("invalid accept key must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "invalid signal WebSocket upgrade response"
+        );
+        server.await.unwrap();
     }
 }
