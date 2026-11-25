@@ -37,6 +37,15 @@ impl RemoteBuildHttpClient {
 
     /// Use a TLS-authenticated HTTP/2 worker origin without redirects or proxies.
     pub fn https_worker(origin: &str) -> std::io::Result<Self> {
+        Self::https_origin(origin, true)
+    }
+
+    /// Use authenticated HTTPS with ordinary HTTP version negotiation.
+    pub fn https_service(origin: &str) -> std::io::Result<Self> {
+        Self::https_origin(origin, false)
+    }
+
+    fn https_origin(origin: &str, require_http2: bool) -> std::io::Result<Self> {
         let origin = reqwest::Url::parse(origin).map_err(std::io::Error::other)?;
         if origin.scheme() != "https"
             || origin.host_str().is_none()
@@ -51,11 +60,13 @@ impl RemoteBuildHttpClient {
                 "Remote build worker must be an HTTPS origin.",
             ));
         }
-        let http = super::forge_http_builder()
-            .https_only(true)
-            .http2_prior_knowledge()
-            .build()
-            .map_err(std::io::Error::other)?;
+        let builder = super::forge_http_builder().https_only(true);
+        let builder = if require_http2 {
+            builder.http2_prior_knowledge()
+        } else {
+            builder
+        };
+        let http = builder.build().map_err(std::io::Error::other)?;
         Ok(Self {
             http,
             origin: origin.origin().ascii_serialization(),

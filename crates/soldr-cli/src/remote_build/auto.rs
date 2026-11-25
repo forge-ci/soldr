@@ -106,6 +106,7 @@ pub(crate) async fn try_run(
     plan: &crate::trampoline::FellThroughPlan,
     cache_enabled: bool,
 ) -> io::Result<Option<i32>> {
+    let started = std::time::Instant::now();
     let (Some(parsed), Some(binary)) = (&plan.parsed, &plan.binary_path) else {
         return Ok(None);
     };
@@ -170,7 +171,9 @@ pub(crate) async fn try_run(
     };
     eprintln!("Forge CI build session {}", session.id);
     let code = receive_build(&client, &root, &session.id).await?;
+    let attestation_ms = started.elapsed().as_millis() as u64;
     if code != 0 {
+        finish_client_timing(&root, &session.id, started, attestation_ms, false);
         return Ok(Some(code));
     }
 
@@ -178,6 +181,7 @@ pub(crate) async fn try_run(
     let output = staging.path().join("artifacts");
     let executable = output.join(&relative);
     artifacts::download(&client, &session.id, &output, vec![relative]).await?;
+    finish_client_timing(&root, &session.id, started, attestation_ms, true);
     // Keep the downloaded executable alive until the user's program exits.
     crate::exit_guard::mark_spoke();
     let status = tokio::process::Command::new(&executable)
@@ -258,6 +262,7 @@ pub(crate) async fn try_build(
     cache_enabled: bool,
     mode: BuildMode,
 ) -> io::Result<Option<i32>> {
+    let started = std::time::Instant::now();
     let args = normalize_workspace_alias(args, mode);
     let args = args.as_ref();
     let Some((client, root, work_dir)) = find_worker(args, cache_enabled, mode).await? else {
@@ -268,15 +273,52 @@ pub(crate) async fn try_build(
     };
     eprintln!("Forge CI build session {}", session.id);
     let code = receive_build(&client, &root, &session.id).await?;
-    if code == 0
+    let attestation_ms = started.elapsed().as_millis() as u64;
+    let download = code == 0
         && matches!(
             mode,
             BuildMode::Blessed | BuildMode::Cargo | BuildMode::CargoTestCompile
-        )
-    {
+        );
+    if download {
         download_target(&root, &client, &session.id, mode).await?;
     }
+    finish_client_timing(&root, &session.id, started, attestation_ms, download);
     Ok(Some(code))
+}
+
+fn finish_client_timing(
+    root: &Path,
+    session: &str,
+    started: std::time::Instant,
+    attestation_ms: u64,
+    downloaded: bool,
+) {
+    let total_ms = started.elapsed().as_millis() as u64;
+    let result = record_client_timing(root, session, attestation_ms, total_ms, downloaded);
+    if let Err(error) = result {
+        eprintln!("soldr: could not record Forge CI client timing: {error}");
+    }
+}
+
+fn record_client_timing(
+    root: &Path,
+    session: &str,
+    attestation_ms: u64,
+    total_ms: u64,
+    downloaded: bool,
+) -> io::Result<()> {
+    use std::io::Write as _;
+
+    let session = super::server::key(session, 32)?;
+    let local = Dir::open_ambient_dir(root, ambient_authority())?;
+    let target = local_target(&local, Path::new("target"))?;
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let receipt =
+        crate::attestation_stats::client_receipt(session, attestation_ms, total_ms, downloaded)?;
+    local_target(&target, Path::new("forge-ci-client-timings"))?
+        .open_with(format!("{session}.json"), &options)?
+        .write_all(&receipt)
 }
 
 fn normalize_workspace_alias(args: &[String], mode: BuildMode) -> std::borrow::Cow<'_, [String]> {
@@ -323,6 +365,7 @@ impl LintWorker {
     }
 
     pub(crate) async fn run(self, args: &[String]) -> io::Result<Option<i32>> {
+        let started = std::time::Instant::now();
         let mut remote_args = args.to_vec();
         if remote_args.first().is_none_or(|arg| arg != "rust") {
             remote_args.insert(0, "rust".into());
@@ -354,6 +397,14 @@ impl LintWorker {
             Err(error) if control::terminal_blocked(&error) => return Ok(Some(1)),
             result => result?,
         };
+        let attestation_ms = started.elapsed().as_millis() as u64;
+        crate::attestation_stats::write_explicit_client_receipt(
+            &path,
+            &session.id,
+            started,
+            attestation_ms,
+            false,
+        );
         crate::exit_guard::mark_spoke();
         eprintln!("Forge CI lint attestation: {}", path.display());
         Ok(Some(code))
