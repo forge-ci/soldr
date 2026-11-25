@@ -179,6 +179,43 @@ pub fn scan(registry: &TargetRegistry, options: &GcOptions) -> Result<GcReport, 
     scan_snapshot(snapshot, options)
 }
 
+/// Check the allowlist and workspace lockfile age without walking the target.
+/// A caller that mutates the target must also acquire its Cargo locks.
+pub fn evaluate_target_metadata_guards(
+    target_dir: &Path,
+    workspace_root: &Path,
+    dev_roots: &[PathBuf],
+    stale_age_seconds: u64,
+    now_unix_seconds: i64,
+) -> GuardOutcome {
+    if !super::target_registry::is_under_any_root(target_dir, dev_roots) {
+        return GuardOutcome::Skipped(format!(
+            "outside configured gc.allowlist_roots ({} roots)",
+            dev_roots.len()
+        ));
+    }
+
+    let cargo_lock = workspace_root.join("Cargo.lock");
+    if let Ok(meta) = std::fs::metadata(&cargo_lock) {
+        if let Ok(modified) = meta.modified() {
+            if let Ok(elapsed) = modified
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+            {
+                let age = now_unix_seconds.saturating_sub(elapsed);
+                if (age as u64) < stale_age_seconds {
+                    return GuardOutcome::Skipped(format!(
+                        "Cargo.lock modified {} ago (< staleness threshold)",
+                        human_age(age)
+                    ));
+                }
+            }
+        }
+    }
+
+    GuardOutcome::Eligible
+}
+
 /// How old a tracked `target/` is, taking the *most recent* of two
 /// signals (soldr#2134).
 ///
@@ -420,6 +457,82 @@ pub fn purge_one(
 }
 
 pub fn delete_candidate_dir(candidate: GcCandidate) -> GcDeleteOutcome {
+    remove_candidate_dir(candidate, |path| std::fs::remove_dir_all(path))
+}
+
+/// Detach a target under the same guards as deletion. The caller can release
+/// its build lease before recursively reclaiming the detached tree.
+pub fn detach_candidate_dir(
+    candidate: GcCandidate,
+    root: &Path,
+) -> (GcDeleteOutcome, Option<DetachedCandidate>) {
+    let mut detached = None;
+    let outcome = remove_candidate_dir(candidate, |path| match detach_target(path, root) {
+        Ok(candidate) => {
+            detached = Some(candidate);
+            Ok(())
+        }
+        // Guarded direct deletion still frees space if a detach cannot
+        // allocate an inode or if the trash is on a different volume.
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::CrossesDevices
+                    | std::io::ErrorKind::StorageFull
+                    | std::io::ErrorKind::QuotaExceeded
+            ) =>
+        {
+            std::fs::remove_dir_all(path)
+        }
+        Err(error) => Err(error),
+    });
+    (outcome, detached)
+}
+
+fn detach_target(path: &Path, root: &Path) -> std::io::Result<DetachedCandidate> {
+    let lock = super::trash_gc::try_trash_reclaim_lock(root, true)?.ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::WouldBlock, "trash sweep is active")
+    })?;
+    let trash = root.join(super::trash_gc::DETACHED_TARGETS_DIR);
+    std::fs::create_dir_all(&trash)?;
+    super::path_safety::validate_owned_directory(root, &trash)?;
+    let staging = tempfile::Builder::new()
+        .prefix("target-")
+        .tempdir_in(trash)?;
+    std::fs::rename(path, staging.path().join("target"))?;
+    Ok(DetachedCandidate {
+        path: staging.keep(),
+        _lock: lock,
+    })
+}
+
+/// An owned detached target protected from concurrent trash sweeps.
+pub struct DetachedCandidate {
+    path: PathBuf,
+    _lock: std::fs::File,
+}
+
+/// Reclaim a target that is already detached from its original build path.
+pub fn reclaim_detached_candidate(
+    mut outcome: GcDeleteOutcome,
+    detached: DetachedCandidate,
+) -> GcDeleteOutcome {
+    if let Err(error) = std::fs::remove_dir_all(&detached.path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            outcome.removed = false;
+            outcome.error = Some(format!(
+                "reclaiming detached target {}: {error}",
+                detached.path.display()
+            ));
+        }
+    }
+    outcome
+}
+
+fn remove_candidate_dir(
+    candidate: GcCandidate,
+    remove: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> GcDeleteOutcome {
     if !candidate.path.exists() {
         return GcDeleteOutcome {
             candidate,
@@ -470,7 +583,7 @@ pub fn delete_candidate_dir(candidate: GcCandidate) -> GcDeleteOutcome {
             removed: false,
         };
     }
-    match std::fs::remove_dir_all(&candidate.path) {
+    match remove(&candidate.path) {
         Ok(()) => GcDeleteOutcome {
             candidate,
             removed: true,

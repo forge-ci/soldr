@@ -199,6 +199,57 @@ async fn prepare_child_cargo(
     })
 }
 
+/// A Dylint library build may use the nightly already prepared by its parent
+/// when the library manifest asks for nothing beyond that prepared toolchain.
+fn prepared_library_toolchain_covers_manifest(
+    args: &[String],
+    explicit_toolchain: Option<&str>,
+) -> bool {
+    if explicit_toolchain.is_some()
+        || first_cargo_subcommand(args) != Some("build")
+        || std::env::var("DYLINT_BUILDING_LIBRARIES").as_deref() != Ok("1")
+        || !crate::dylint_toolchain::prepared_scope_is_inherited()
+    {
+        return false;
+    }
+    let Ok(cwd) = std::env::current_dir() else {
+        return false;
+    };
+    let Ok(manifest) = crate::core::read_rust_toolchain_manifest_from_ancestors(&cwd) else {
+        return false;
+    };
+    let Ok(channel) = std::env::var(crate::dylint_toolchain::TOOLCHAIN_ENV_VAR) else {
+        return false;
+    };
+    prepared_nightly_covers_library_manifest(&channel, &manifest)
+}
+
+fn prepared_nightly_covers_library_manifest(
+    channel: &str,
+    manifest: &crate::core::RustToolchainManifest,
+) -> bool {
+    let canonical = crate::dylint_libraries::canonical_channel(channel);
+    crate::dylint_toolchain::is_fully_qualified_nightly(channel)
+        && manifest
+            .channel
+            .as_deref()
+            .is_some_and(|requested| requested == channel || requested == canonical)
+        && manifest
+            .profile
+            .as_deref()
+            .is_none_or(|profile| profile == "minimal")
+        && manifest.targets.as_deref().is_none_or(<[_]>::is_empty)
+        && manifest.soldr.is_none()
+        && manifest
+            .components
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .all(|component| {
+                crate::dylint_toolchain::REQUIRED_COMPONENTS.contains(&component.as_str())
+            })
+}
+
 /// The cargo/rustc pair (and the Dylint scope that may pick their channel).
 async fn resolve_cargo_toolchain(
     args: &[String],
@@ -222,11 +273,14 @@ async fn resolve_cargo_toolchain(
     // itself badly.
     maybe_hint_foreign_target_passthrough(args);
 
-    crate::toolchain::ensure_cargo_toolchain(explicit_toolchain)?;
+    if !prepared_library_toolchain_covers_manifest(args, explicit_toolchain) {
+        crate::toolchain::ensure_cargo_toolchain(explicit_toolchain)?;
+    }
     profile.mark("ensure_cargo_toolchain");
     let paths = SoldrPaths::new()?;
     paths.ensure_dirs()?;
     let dylint = prepare_dylint_scope(args, explicit_toolchain, &paths).await?;
+    profile.mark("prepare_dylint_scope");
     let effective_toolchain = dylint
         .plan
         .as_ref()

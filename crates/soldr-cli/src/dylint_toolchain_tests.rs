@@ -216,7 +216,7 @@ fn prepared_marker_roundtrip_hits_when_fresh_and_installed() {
     let plan = sample_plan();
     stub_installed_toolchain(rustup_home.path(), &plan.channel);
 
-    write_prepared_marker_at(soldr_root.path(), "1.94", &plan).expect("write marker");
+    write_prepared_marker_at(soldr_root.path(), "1.94", &plan, false).expect("write marker");
 
     let loaded = load_prepared_marker_from(
         soldr_root.path(),
@@ -237,7 +237,7 @@ fn prepared_marker_accepts_fully_qualified_toolchain_directory() {
     let directory = rustup_home.path().join("toolchains").join(&plan.channel);
     write_ready_toolchain(&directory);
 
-    write_prepared_marker_at(soldr_root.path(), "1.94", &plan).expect("write marker");
+    write_prepared_marker_at(soldr_root.path(), "1.94", &plan, false).expect("write marker");
 
     let loaded = load_prepared_marker_from(
         soldr_root.path(),
@@ -256,7 +256,7 @@ fn prepared_marker_rejected_when_ttl_expired() {
     let plan = sample_plan();
     stub_installed_toolchain(rustup_home.path(), &plan.channel);
 
-    write_prepared_marker_at(soldr_root.path(), "1.94", &plan).expect("write marker");
+    write_prepared_marker_at(soldr_root.path(), "1.94", &plan, false).expect("write marker");
 
     // "now" far in the future relative to the just-written marker's
     // mtime, well past a 1-second TTL.
@@ -278,7 +278,7 @@ fn prepared_marker_ttl_zero_never_trusts_marker() {
     let plan = sample_plan();
     stub_installed_toolchain(rustup_home.path(), &plan.channel);
 
-    write_prepared_marker_at(soldr_root.path(), "1.94", &plan).expect("write marker");
+    write_prepared_marker_at(soldr_root.path(), "1.94", &plan, false).expect("write marker");
 
     let loaded = load_prepared_marker_from(
         soldr_root.path(),
@@ -317,7 +317,7 @@ fn prepared_marker_rejected_when_toolchain_dir_missing() {
     let rustup_home = tempfile::tempdir().expect("rustup home tempdir");
     let plan = sample_plan();
 
-    write_prepared_marker_at(soldr_root.path(), "1.94", &plan).expect("write marker");
+    write_prepared_marker_at(soldr_root.path(), "1.94", &plan, false).expect("write marker");
 
     let loaded = load_prepared_marker_from(
         soldr_root.path(),
@@ -378,7 +378,7 @@ fn prepared_marker_rejects_a_partial_toolchain() {
     let manager_home = tempfile::tempdir().expect("manager home tempdir");
     let plan = sample_plan();
     stub_partial_toolchain(manager_home.path(), &plan.channel);
-    write_prepared_marker_at(soldr_root.path(), "1.94", &plan).expect("write marker");
+    write_prepared_marker_at(soldr_root.path(), "1.94", &plan, false).expect("write marker");
 
     assert_eq!(
         load_prepared_marker_from(
@@ -876,4 +876,20 @@ fn apply_to_command_strips_dylint_link_copy_library_env() {
         "apply_to_command must remove {DYLINT_LINK_COPY_LIBRARY_ENV_VAR} so cargo-dylint \
          always writes the toolchain-stamped library copy itself"
     );
+}
+
+#[test]
+fn prepared_library_child_leaves_parent_marker_untouched() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let _root = EnvVarGuard::set(crate::core::SOLDR_CACHE_DIR_ENV_VAR, root.path());
+    let mut plan = sample_plan();
+    plan.channel.push_str("-x86_64-unknown-linux-gnu");
+    let _prepared = EnvVarGuard::set(PREPARED_IDENTITY_ENV_VAR, plan.cache_identity());
+    let marker = prepared_marker_path(root.path(), "1.94");
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, "parent marker\n").unwrap();
+
+    assert_eq!(prepare_resolved(plan.clone()).unwrap(), plan);
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "parent marker\n");
 }
