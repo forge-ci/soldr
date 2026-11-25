@@ -8,6 +8,9 @@
 use crate::core::SoldrPaths;
 use serde::Serialize;
 
+// Older sweepers only walk `trash-*` buckets and do not take our lock.
+pub(super) const DETACHED_TARGETS_DIR: &str = "gc-detached-targets";
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct SweepReport {
     pub removed: u64,
@@ -30,12 +33,52 @@ pub struct SweepReport {
 /// daemon writes on every maintenance pass.
 pub const MAX_REPORTED_REASONS: usize = 5;
 
+/// A separate lock keeps the trash sweeper away from in-flight detachments.
+/// Callers may hold the build lease, so contention must never block.
+pub(super) fn try_trash_reclaim_lock(
+    root: &std::path::Path,
+    shared: bool,
+) -> std::io::Result<Option<std::fs::File>> {
+    use std::io::{Error, ErrorKind};
+
+    super::path_safety::validate_owned_directory(root, root)?;
+    let path = root.join("trash-reclaim.lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    let file = match options.clone().create_new(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if !metadata.is_file() || super::path_safety::is_link_or_reparse(&metadata) {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "invalid trash lock file",
+                ));
+            }
+            options.open(&path)?
+        }
+        Err(error) => return Err(error),
+    };
+    let result = if shared {
+        fs2::FileExt::try_lock_shared(&file)
+    } else {
+        fs2::FileExt::try_lock_exclusive(&file)
+    };
+    match result {
+        Ok(()) => Ok(Some(file)),
+        Err(error) if super::cargo_lock::lock_is_held(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 pub fn sweep_trash(paths: &SoldrPaths) -> std::io::Result<SweepReport> {
     let mut report = SweepReport::default();
     if !paths.root.exists() {
         return Ok(report);
     }
-    crate::cache_lib::path_safety::validate_owned_directory(&paths.root, &paths.root)?;
+    let Some(_lease) = try_trash_reclaim_lock(&paths.root, false)? else {
+        return Ok(report);
+    };
     let entries = match std::fs::read_dir(&paths.root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(report),
@@ -43,7 +86,7 @@ pub fn sweep_trash(paths: &SoldrPaths) -> std::io::Result<SweepReport> {
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if !name.to_string_lossy().starts_with("trash-") {
+        if name != DETACHED_TARGETS_DIR && !name.to_string_lossy().starts_with("trash-") {
             continue;
         }
         let metadata = match std::fs::symlink_metadata(entry.path()) {
@@ -125,6 +168,35 @@ mod sweep_reporting_tests {
 
     // soldr#2199: a drained bucket is residue. Leaving it reads as "trash
     // still pending" to anyone inspecting the root.
+    #[test]
+    fn trash_lock_does_not_create_a_dangling_link_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("soldr");
+        std::fs::create_dir(&root).unwrap();
+        let outside = temp.path().join("outside");
+        let link = root.join("trash-reclaim.lock");
+        if crate::platform::fs::links::create(&outside.to_string_lossy(), &link, false).is_err() {
+            return;
+        }
+
+        assert!(try_trash_reclaim_lock(&root, true).is_err());
+        assert!(!outside.exists());
+    }
+
+    #[test]
+    fn sweep_reclaims_a_target_left_by_an_interrupted_detach() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_at(temp.path());
+        let bucket = paths.root.join(DETACHED_TARGETS_DIR);
+        let target = bucket.join("target-interrupted/target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("artifact"), b"stale").unwrap();
+
+        let report = sweep_trash(&paths).unwrap();
+        assert_eq!(report.removed, 1);
+        assert!(!bucket.exists());
+    }
+
     #[test]
     fn an_emptied_bucket_is_removed() {
         let temp = tempfile::tempdir().expect("tempdir");

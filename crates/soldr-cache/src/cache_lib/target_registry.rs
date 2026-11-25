@@ -439,29 +439,15 @@ pub fn evaluate_safety_guards(
     stale_age_seconds: u64,
     now_unix_seconds: i64,
 ) -> GuardOutcome {
-    if !is_under_any_root(target_dir, dev_roots) {
-        return GuardOutcome::Skipped(format!(
-            "outside configured gc.allowlist_roots ({} roots)",
-            dev_roots.len()
-        ));
-    }
-
-    let cargo_lock = workspace_root.join("Cargo.lock");
-    if let Ok(meta) = std::fs::metadata(&cargo_lock) {
-        if let Ok(modified) = meta.modified() {
-            if let Ok(elapsed) = modified
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-            {
-                let age = now_unix_seconds.saturating_sub(elapsed);
-                if (age as u64) < stale_age_seconds {
-                    return GuardOutcome::Skipped(format!(
-                        "Cargo.lock modified {} ago (< staleness threshold)",
-                        human_age(age)
-                    ));
-                }
-            }
-        }
+    let metadata = super::gc::evaluate_target_metadata_guards(
+        target_dir,
+        workspace_root,
+        dev_roots,
+        stale_age_seconds,
+        now_unix_seconds,
+    );
+    if !matches!(metadata, GuardOutcome::Eligible) {
+        return metadata;
     }
 
     // A registry row can outlive a target directory and be replaced by a
