@@ -372,11 +372,33 @@ fn zccache_mode_flag_is_global_and_rejects_unknown_modes() {
 fn the_agent_capability_verb_parses_to_its_own_variant() {
     let parsed = Cli::parse_from(["soldr", "agent", "capabilities", "--json"]);
     match &parsed.command {
-        Commands::Agent { args } => assert_eq!(
-            args,
-            &["capabilities".to_string(), "--json".into()],
-            "the consumer's exact probe spelling must reach the handler"
-        ),
+        Commands::Agent { command } => assert!(matches!(
+            command,
+            crate::host_agent_cmd::AgentCommand::Capabilities { json: true }
+        )),
         _ => panic!("expected Commands::Agent"),
     }
+}
+
+#[test]
+fn host_agent_commands_parse_without_external_fetch() {
+    for args in [
+        vec!["soldr", "agent", "keygen", "--key", "host.key"],
+        vec![
+            "soldr",
+            "agent",
+            "run",
+            "--config",
+            "agent.toml",
+            "--key",
+            "host.key",
+        ],
+        vec!["soldr", "agent", "status", "--json", "--state-dir", "state"],
+    ] {
+        assert!(matches!(
+            Cli::try_parse_from(args).unwrap().command,
+            Commands::Agent { .. }
+        ));
+    }
+    assert!(Cli::try_parse_from(["soldr", "agent", "run", "--unknown"]).is_err());
 }

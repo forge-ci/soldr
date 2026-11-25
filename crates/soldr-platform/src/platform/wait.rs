@@ -287,7 +287,9 @@ fn complete_utf8_prefix(bytes: &[u8]) -> usize {
 
 // These commands are synchronous work owned by the caller. Persistent
 // services must use the separate daemon launch path.
-fn spawn_owned(command: &mut Command) -> io::Result<Child> {
+/// Start invocation-owned work with caller-configured stdio. The caller must
+/// enforce a deadline and terminate the process group on cancellation.
+pub fn spawn_owned(command: &mut Command) -> io::Result<Child> {
     super::process::command::configure_process_group(command);
     super::process::command::configure_parent_death(command);
     let _spawn = super::process::spawn_exclusion::spawn_shared();

@@ -1,0 +1,31 @@
+[package]
+name = "soldr-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+base64 = "=0.22.1"
+ed25519-dalek = "=3.0.0"
+futures-util = { version = "=0.3.33", features = ["sink"] }
+getrandom = "=0.4.3"
+if-addrs = "=0.13.4"
+fs2.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+soldr-fetch = { path = "../soldr-fetch" }
+soldr-platform = { path = "../soldr-platform" }
+tempfile.workspace = true
+tokio.workspace = true
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
+toml.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

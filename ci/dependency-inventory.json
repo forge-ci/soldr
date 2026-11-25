@@ -2,6 +2,22 @@
   "schema_version": 1,
   "comment": "Direct third-party dependencies per workspace crate (soldr#2752 Rule A). Regenerate with `python .github/scripts/check_dependency_inventory.py --write`, and expect the diff to be reviewed: adding an entry is adding a dependency.",
   "crates": {
+    "soldr-agent": [
+      "base64",
+      "ed25519-dalek",
+      "fs2",
+      "futures-util",
+      "getrandom",
+      "if-addrs",
+      "prost",
+      "serde",
+      "serde_json",
+      "tempfile",
+      "tokio",
+      "tokio-tungstenite",
+      "toml",
+      "url"
+    ],
     "soldr-cache": [
       "filetime",
       "fs2",

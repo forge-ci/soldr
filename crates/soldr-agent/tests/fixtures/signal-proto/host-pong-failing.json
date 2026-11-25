@@ -1,0 +1,11 @@
+{
+  "type": "pong",
+  "id": 42,
+  "checks": [
+    {
+      "name": "disk:/",
+      "ok": false,
+      "detail": "disk usage below 95 percent"
+    }
+  ]
+}

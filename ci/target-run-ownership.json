@@ -3,6 +3,13 @@
   "policy_issue": "soldr#2999",
   "source_classifications": [
     {
+      "id": "agent-linux-once",
+      "package": "soldr-agent",
+      "binary": "main",
+      "disposition": "native-linux-once",
+      "reason": "Phone-home validates Linux /proc boot facts, bounded child probes, temporary host keys and signal JSON on canonical Linux. Native process and permission mechanics reuse the platform capabilities already selected for replay."
+    },
+    {
       "id": "platform-target-replay",
       "package": "soldr-platform",
       "binary": "soldr_platform",

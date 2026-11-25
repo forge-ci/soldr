@@ -1,0 +1,28 @@
+{
+  "type": "hello",
+  "name": "fixture-host",
+  "sig": "ci5ytayi2S5nxzF9OXYslbuJqFOaxqiGoPAmWHVOmR6o0KMEtmJDvrGUwW+x4ThNOchwptpR9WvcfqTp2XCADw==",
+  "boot_id": "00000000-0000-4000-8000-000000000001",
+  "role": "shared",
+  "ips": [
+    "192.168.1.10",
+    "fd00::10"
+  ],
+  "uptime_s": 3600,
+  "versions": {
+    "soldr": "fixture",
+    "agent": "soldr agent",
+    "os": "NixOS"
+  },
+  "load": {
+    "cpus": 64,
+    "gh_jobs_running": 2,
+    "gh_cpus_reserved": 10
+  },
+  "dist": {
+    "node_id": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "relay_url": "https://relay.forge-ci.com",
+    "slots_total": 54,
+    "slots_free": 48
+  }
+}

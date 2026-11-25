@@ -891,7 +891,7 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         subcommand: DefenderExclusionsSubcommand,
     },
-    /// Report the agent-facing capability/version document (soldr#3924)
+    /// Host phone-home, enrollment keys, status and agent capabilities
     ///
     /// `soldr agent capabilities --json` prints one JSON object on one line
     /// describing the opt-in, versioned machine-facing mode this build
@@ -903,8 +903,8 @@ pub(crate) enum Commands {
     /// `schema_version` is not one the consumer understands. It must never
     /// infer support from a version string. See `soldr agent capabilities`.
     Agent {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        command: crate::host_agent_cmd::AgentCommand,
     },
     /// Show version
     #[command(hide = true)]

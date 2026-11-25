@@ -1,0 +1,14 @@
+{
+  "type": "heartbeat",
+  "load": {
+    "cpus": 64,
+    "gh_jobs_running": 2,
+    "gh_cpus_reserved": 10
+  },
+  "dist": {
+    "node_id": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "relay_url": "https://relay.forge-ci.com",
+    "slots_total": 54,
+    "slots_free": 48
+  }
+}
