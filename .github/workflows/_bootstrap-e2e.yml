@@ -67,6 +67,10 @@ jobs:
           submodules: recursive
           ref: ${{ inputs.source_ref }}
           path: soldr
+      - name: Enable Windows long paths
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -PropertyType DWord -Value 1 -Force | Out-Null; git config --global core.longpaths true
 
       - name: Enlarge swap (OOM headroom)
         shell: bash

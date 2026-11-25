@@ -1,0 +1,16 @@
+name: Enable Windows long paths
+description: Configure Win32 and Git long paths for CI builds and tests
+runs:
+  using: composite
+  steps:
+    - name: Configure Windows long paths
+      shell: pwsh
+      run: |
+        $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem'
+        if ((Get-ItemPropertyValue -Path $key -Name LongPathsEnabled -ErrorAction SilentlyContinue) -ne 1) {
+          New-ItemProperty -Path $key -Name LongPathsEnabled -PropertyType DWord -Value 1 -Force | Out-Null
+        }
+        if ((Get-ItemPropertyValue -Path $key -Name LongPathsEnabled) -ne 1) {
+          throw 'Windows long paths must be enabled on this runner.'
+        }
+        git config --global core.longpaths true

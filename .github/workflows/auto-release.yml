@@ -880,6 +880,9 @@ jobs:
             target: aarch64-pc-windows-msvc
 
     steps:
+      - name: Enable Windows long paths
+        shell: pwsh
+        run: New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -PropertyType DWord -Value 1 -Force | Out-Null; git config --global core.longpaths true
       # Checkout only for ci/smoke_release_artifacts.py — the smoke
       # logic lives in a testable Python file, not inline YAML.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -1228,6 +1231,9 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ needs.prepare.outputs.commit_sha }}
+      - name: Enable Windows long paths
+        shell: pwsh
+        run: New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -PropertyType DWord -Value 1 -Force | Out-Null; git config --global core.longpaths true
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.13"
@@ -1236,7 +1242,8 @@ jobs:
           enable-cache: false
       - name: Install and exercise the published Dylint surface
         shell: bash
-        run: uv run --no-project --python 3.13 ci/smoke_published_dylint.py --expected-version "${{ needs.prepare.outputs.version }}"
+        # Keep the MSVC linker input paths below MAX_PATH.
+        run: uv run --no-project --python 3.13 ci/smoke_published_dylint.py --expected-version "${{ needs.prepare.outputs.version }}" --state-root .dylint
 
   publish-npm:
     name: Publish npm package

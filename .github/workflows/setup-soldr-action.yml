@@ -52,6 +52,9 @@ jobs:
         with:
           ref: ${{ inputs.source_ref || github.sha }}
           submodules: recursive
+      - name: Enable Windows long paths
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/windows-long-paths
 
       - name: Enlarge swap (OOM headroom)
         if: runner.os == 'Linux'
