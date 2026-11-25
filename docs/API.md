@@ -6,7 +6,7 @@ For the product-level support contract about what counts as a supported external
 
 ## Overview
 
-soldr is a single front door for Rust tool execution and Rust builds.
+soldr is a single front door for Rust tool execution and Rust builds. Every shipped executable file is the same `soldr` image, either the binary itself or a link/copy alias (including `soldr-daemon`) dispatched by argv[0] through `crates/soldr-cli/src/multicall.rs`. Aliases may be created at staging, install, or runtime; new features use library crates and `soldr` subcommands. See [Key Design Rules](../CLAUDE.md#key-design-rules) for named non-shipped exceptions and the repository-wide guard.
 
 It has four invocation modes:
 
