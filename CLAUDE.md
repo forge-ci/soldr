@@ -163,6 +163,7 @@ Anything not registered falls through the generic External subcommand, which res
   | Package / executable | Reason |
   |---|---|
   | `soldr-nextest-wrapper` / `soldr-nextest-wrapper` | Test-only infrastructure, never shipped to users. Runs once per test, so must be tiny and fast to exec; must work from extracted Nextest archives containing no `soldr`; scoped test runs build it in seconds without linking the large Soldr binary. |
+  | `examples/remote-build-demo` / `soldr-remote-demo` | Non-shipped example used to verify that a remote build returns a runnable artifact. Its standalone workspace exercises the same manifest path as a downstream project. |
   | `ci/tokio-console-dump` (`soldr-tokio-console-dump`) / `soldr-tokio-console-dump` | Developer-only diagnostic client used by `ci/smoke_local.sh`, never shipped, with its own `[workspace]`. Keeps `console-api` / `tonic` out of the shipped binary's dependency graph. |
 
   Any new exception requires a named reason in this table, an owner-approved PR, and a corresponding guard allowlist entry.

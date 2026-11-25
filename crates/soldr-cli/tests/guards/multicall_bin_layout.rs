@@ -32,6 +32,11 @@ const ALLOWED_BINS: &[(&str, &str, &str)] = &[
         "soldr-nextest-wrapper",
     ),
     (
+        "examples/remote-build-demo/Cargo.toml",
+        "soldr-remote-demo",
+        "soldr-remote-demo",
+    ),
+    (
         "ci/tokio-console-dump/Cargo.toml",
         "soldr-tokio-console-dump",
         "soldr-tokio-console-dump",
