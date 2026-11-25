@@ -23,5 +23,4 @@ pub mod fetch;
 
 pub use reqwest::Response as RemoteBuildHttpResponse;
 
-mod signal_websocket;
-pub use signal_websocket::{open_signal_websocket, SignalWebSocketTransport};
+pub use fetch::stream_download::{open_signal_websocket, SignalWebSocketTransport};
