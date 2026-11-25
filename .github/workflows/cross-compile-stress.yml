@@ -87,6 +87,9 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Enable Windows long paths
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/windows-long-paths
       # Rust std for the cross target. soldr provisions the C cross toolchain
       # (sysroots, compiler, linker) itself — that machinery is what this sweep
       # stresses — so there is deliberately NO host apt/brew cross toolchain.

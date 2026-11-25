@@ -169,6 +169,9 @@ jobs:
         with:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
           submodules: recursive
+      - name: Enable Windows long paths
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/windows-long-paths
 
       # Make room before toolchain/cache hydration and archive extraction.
       - name: Reclaim unused hosted Linux SDKs

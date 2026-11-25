@@ -130,6 +130,18 @@ jobs:
       REPLAY_PARTITION: ${{ matrix.replay.value }}
       REPLAY_PARTITION_LABEL: ${{ matrix.replay.label }}
     steps:
+      - name: Enable Windows long paths
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem'
+          if ((Get-ItemPropertyValue -Path $key -Name LongPathsEnabled -ErrorAction SilentlyContinue) -ne 1) {
+            New-ItemProperty -Path $key -Name LongPathsEnabled -PropertyType DWord -Value 1 -Force | Out-Null
+          }
+          if ((Get-ItemPropertyValue -Path $key -Name LongPathsEnabled) -ne 1) {
+            throw 'Windows long paths must be enabled on this runner.'
+          }
+          git config --global core.longpaths true
       # Nextest archive replay needs the workspace manifest. Several contract
       # tests also inspect vendored sources, so preserve complete source context.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
