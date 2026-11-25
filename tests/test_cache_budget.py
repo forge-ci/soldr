@@ -576,6 +576,14 @@ def lineage_entries() -> list:
     return guard.normalize_entries(raw)
 
 
+def lineage_manifest() -> dict:
+    manifest = guard.load_manifest(MANIFEST)
+    # Keep the historical thresholds fixed so a later budget change cannot
+    # turn the legacy pruning rule into a pass for the recorded fixture.
+    manifest["budget"]["families"]["cook-layer"]["max_bytes"] = 2775 * 1024**2
+    return manifest
+
+
 def legacy_cook_candidates(on_main: list, lock: str) -> list:
     """The pre-#3347 rule: a shape matched only at the SAME soldr version."""
     bases = set()
@@ -599,7 +607,7 @@ def without(entries: list, dropped: list) -> list:
 
 def test_3347_fixture_is_red_raw() -> None:
     entries = lineage_entries()
-    manifest = guard.load_manifest(MANIFEST)
+    manifest = lineage_manifest()
     # Preserve the historical allocation that made this captured row red.
     manifest["budget"]["families"]["zccache-unit"]["max_bytes"] = 2091 * 1024**2
     problems = guard.budget_problems(MANIFEST, manifest, entries)
@@ -609,7 +617,7 @@ def test_3347_fixture_is_red_raw() -> None:
 
 def test_3347_legacy_policy_still_fails_after_its_reclaim() -> None:
     entries = lineage_entries()
-    manifest = guard.load_manifest(MANIFEST)
+    manifest = lineage_manifest()
     everything = guard.prune_candidates(entries, CURRENT_LOCK)
     new_cook = guard.cook_lineage_candidates(
         [e for e in entries if e.ref == "refs/heads/main"], CURRENT_LOCK
@@ -626,7 +634,7 @@ def test_3347_legacy_policy_still_fails_after_its_reclaim() -> None:
 
 def test_3347_lineage_policy_fits_every_family_and_total() -> None:
     entries = lineage_entries()
-    manifest = guard.load_manifest(MANIFEST)
+    manifest = lineage_manifest()
     candidates = guard.prune_candidates(entries, CURRENT_LOCK)
     effective = without(entries, candidates)
     assert guard.budget_problems(MANIFEST, manifest, effective) == []
