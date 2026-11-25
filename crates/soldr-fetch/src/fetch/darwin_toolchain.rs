@@ -1,6 +1,6 @@
 //! Linux-hosted Darwin Swift closure. Inputs and composed outputs are immutable,
 //! content-addressed, locked across processes, and published by directory rename.
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 use std::path::{Path, PathBuf};
 
 use super::manifest_lookup::{self, ManifestEntry, ManifestIndex};
@@ -77,12 +77,12 @@ pub struct DarwinToolchain {
 }
 
 fn identity(units: &[ManifestEntry]) -> String {
-    let mut h = Sha256::new();
+    let mut h = Sha256Hasher::new();
     h.update(format!("{FORMAT}\n{HOST}\n{TARGET}\n").as_bytes());
     for unit in units {
         h.update(format!("{} {} {}\n", unit.asset, unit.sha256, unit.size_bytes).as_bytes());
     }
-    hex::encode(h.finalize())
+    h.finalize().to_hex()
 }
 
 fn swift_common_args(sdk: &Path, resources: &Path) -> Vec<String> {

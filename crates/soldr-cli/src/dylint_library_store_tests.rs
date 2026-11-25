@@ -2,6 +2,42 @@
 
 use super::*;
 
+#[test]
+fn standalone_closure_fingerprint_ignores_source_but_tracks_dependency_inputs() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let library = root.join("one");
+    std::fs::create_dir_all(library.join("src")).unwrap();
+    let manifest = library.join(KEY_FILES[0]);
+    std::fs::write(
+        &manifest,
+        "[package]\nname = \"one\"\nversion = \"0.1.0\"\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        manifest.with_extension("lock"),
+        "version = 3\n[[package]]\nname = \"one\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let libraries = vec![library.clone()];
+    let before = closure_fingerprint(root, &libraries).unwrap();
+    std::fs::write(library.join("src/lib.rs"), "// changed\n").unwrap();
+    assert_eq!(Some(before.clone()), closure_fingerprint(root, &libraries));
+    std::fs::write(
+        &manifest,
+        "[package]\nname = \"one\"\nversion = \"0.2.0\"\n[workspace]\n",
+    )
+    .unwrap();
+    assert_ne!(Some(before), closure_fingerprint(root, &libraries));
+    std::fs::create_dir(root.join(".cargo")).unwrap();
+    std::fs::write(
+        root.join(".cargo/config.toml"),
+        "include = ['extra.toml']\n",
+    )
+    .unwrap();
+    assert_eq!(None, closure_fingerprint(root, &libraries));
+}
+
 fn package(root: &Path, name: &str, version: &str, dependencies: &str) {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("Cargo.toml"), format!(

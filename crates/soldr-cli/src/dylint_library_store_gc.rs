@@ -1,7 +1,7 @@
 //! Bounded pruning with backlinks to every target directory Soldr has linked.
 use crate::core::{SoldrError, SoldrPaths};
 use fs2::FileExt;
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 use std::path::{Path, PathBuf};
 
 pub(super) fn lock_store(root: &Path) -> std::io::Result<std::fs::File> {
@@ -19,8 +19,12 @@ pub(super) fn register_link(target: &Path, store: &Path) -> std::io::Result<()> 
     let target = target.canonicalize()?;
     let links = store.join(".soldr-links");
     std::fs::create_dir_all(&links)?;
-    let digest = Sha256::digest(target.to_string_lossy().as_bytes());
-    let name: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    let digest = Sha256Hasher::digest(target.to_string_lossy().as_bytes());
+    let name: String = digest
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     let backlink = links.join(name);
     if !backlink.exists() {
         crate::platform::fs::links::create(&target.to_string_lossy(), &backlink, true)?;

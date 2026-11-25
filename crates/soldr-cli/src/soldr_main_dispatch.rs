@@ -51,6 +51,10 @@ async fn dispatch_build_command(
     let command = crate::blaze_cmd::route_command(command);
     let handled = match command {
         Commands::Blaze { args, allow_ci } => exit_with(crate::blaze_cmd::run(&args, allow_ci)),
+        Commands::Pair => exit_with(crate::pair_cmd::run().await.map(|()| 0)),
+        Commands::Remote(args) => {
+            exit_with(crate::remote_build::run(args).await.map_err(Into::into))
+        }
         Commands::Build { args } => {
             run_blessed_build(args, cache_enabled, trust_inherited_soldr_env).await
         }
@@ -171,6 +175,7 @@ async fn dispatch_state_command(command: Commands, flags: DispatchFlags) -> Resu
     match command {
         Commands::Save(args) => guarded_exit(save_load::run_save(args)),
         Commands::Hydrate(args) => guarded_exit(save_load::run_load(args)),
+        Commands::Sign { command } => crate::forge_sign_in::run(command).await,
         Commands::Status { json } => run_status_command(json, flags.cache_enabled),
         Commands::Clean => cache::clear_zccache_cache(),
         Commands::Purge => cache::purge_soldr_cache(),
@@ -201,6 +206,8 @@ async fn dispatch_state_command(command: Commands, flags: DispatchFlags) -> Resu
         // Listed rather than `_` so a new command still fails to compile until
         // it is routed to a family.
         Commands::Build { .. }
+        | Commands::Remote(_)
+        | Commands::Pair
         | Commands::Blaze { .. }
         | Commands::Cc(_)
         | Commands::Cxx(_)

@@ -488,7 +488,7 @@ fn spawn_slow_wait_test_child() -> std::process::Child {
             command.args(["-c", "sleep 0.25"]);
             command
         };
-    configure_cargo_child_for_timeout(&mut command);
+    let _signals = prepare_cargo_child(&mut command).expect("configure child");
     command.spawn().expect("spawn slow fake Cargo child")
 }
 

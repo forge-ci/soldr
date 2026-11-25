@@ -37,6 +37,10 @@ PAIRS = [
         "crates/soldr-cache/src/cache_lib/manifest.proto",
         "crates/soldr-cache/src/cache_lib/save.rs",
     ),
+    (
+        "crates/soldr-cli/src/remote_build/wire.proto",
+        "crates/soldr-cli/src/remote_build/wire.rs",
+    ),
 ]
 
 

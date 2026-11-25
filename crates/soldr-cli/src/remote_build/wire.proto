@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+package soldr.remote.v1;
+
+message Start {
+  string commit = 1;
+  repeated Source files = 2;
+  Action action = 3;
+  repeated string args = 4;
+  optional sint32 cache_zstd_level = 5;
+  optional bytes manifest_json = 6;
+  bool working_tree = 7;
+  optional string work_dir = 8;
+}
+
+message Source {
+  string path = 1;
+  string digest = 2;
+  bool executable = 3;
+  bool symlink = 4;
+}
+
+enum Action {
+  BUILD = 0;
+  TEST = 1;
+  DYLINT = 2;
+  LINT = 3;
+  CARGO_BUILD = 4;
+  CARGO_CHECK = 5;
+  CARGO_CLIPPY = 6;
+  CARGO_TEST_COMPILE = 7;
+  CARGO_TEST_RUNTIME = 8;
+}
+
+message Session {
+  string id = 1;
+  repeated string missing = 2;
+  bool manifest_accepted = 3;
+  bool working_tree_accepted = 4;
+}
+
+message TestRuntimeResult {
+  int32 code = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+}
+
+message Capabilities {
+  string host = 1;
+  bool working_tree_builds = 2;
+  bool cargo_check = 3;
+  repeated Action compile_actions = 4;
+  bool worktree_subdirectories = 5;
+  bool test_executables = 6;
+  bool worktree_without_commit = 7;
+}
+
+message Blob {
+  bytes data = 1;
+}
+
+message WorkspaceBatch {
+  repeated WorkspaceBlob blobs = 1;
+  TestRuntimeReply runtime_reply = 2;
+}
+
+message TestRuntimeReply {
+  string invocation = 1;
+  TestRuntimeResult result = 2;
+}
+
+message WorkspaceBlob {
+  string digest = 1;
+  bytes data = 2;
+}
+
+message ResultFrame {
+  int32 exit_code = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+  bytes attestation = 4;
+}
+
+message Fetch {
+  repeated string globs = 1;
+}
+
+message Artifact {
+  string path = 1;
+  bytes data = 2;
+  bool executable = 3;
+}
+
+message Artifacts {
+  repeated Artifact files = 1;
+}

@@ -1,6 +1,6 @@
 use super::model::{
     CiTestPlan, CompileDomain, CompilerExecutionGroup, CookDecision, DylintTargetTrees, Invocation,
-    PlanScope, ResourceLimits, Stage, SubsumedStep, WorkspaceMetadata, PLAN_SCHEMA_VERSION,
+    ResourceLimits, Stage, SubsumedStep, WorkspaceMetadata, PLAN_SCHEMA_VERSION,
 };
 use crate::core::{SoldrError, TargetTriple};
 use std::path::{Path, PathBuf};
@@ -47,7 +47,8 @@ pub(crate) async fn freeze(
     })?;
     let nightly = resolve_dylint_plan(&root, &host).await?;
     let target_root = cargo_target_root(&root)?;
-    let stable_target = target_root.join(&target);
+    let stable_target =
+        super::canonical_profile::stable_target_dir(&root, invocation, &target_root, &target)?;
     let archive_file = invocation.no_run.then(|| {
         target_root
             .join("ci-test")
@@ -249,7 +250,6 @@ pub(crate) async fn freeze(
         nextest_test_threads.clone(),
     ]);
     nextest_args.extend(scope_args.clone());
-
     // Compile the selected test binaries before executing or archiving them.
     let mut nextest_compile = vec!["nextest".into(), "run".into(), "--no-run".into()];
     nextest_compile.extend(nextest_args.clone());
@@ -452,12 +452,7 @@ pub(crate) async fn freeze(
         target_triple: target.clone(),
         no_run: invocation.no_run,
         archive_file,
-        scope: PlanScope {
-            packages: invocation.scope.packages.clone(),
-            features: invocation.scope.features.clone(),
-            all_features: invocation.scope.all_features,
-            no_default_features: invocation.scope.no_default_features,
-        },
+        scope: super::canonical_profile::apply(&root, invocation, &target, &mut stages)?,
         domains,
         stages,
         subsumed_steps: vec![SubsumedStep {
@@ -713,7 +708,7 @@ fn inherited_limit(name: &str) -> Option<String> {
 }
 
 fn workspace_metadata_fingerprint(root: &Path, config: &[String]) -> Result<String, SoldrError> {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = kernal_api::hash::Blake3Hasher::new();
     hasher.update(b"soldr-ci-test-workspace-metadata-v1\0");
     for path in std::iter::once(root.join("Cargo.toml"))
         .chain(std::iter::once(root.join("Cargo.lock")))
@@ -737,7 +732,7 @@ fn workspace_metadata_fingerprint(root: &Path, config: &[String]) -> Result<Stri
         }
         hasher.update(&[0]);
     }
-    Ok(hasher.finalize().to_hex().to_string())
+    Ok(hasher.finalize().to_hex())
 }
 
 /// The key every Dylint target tree is named by: the host-qualified toolchain

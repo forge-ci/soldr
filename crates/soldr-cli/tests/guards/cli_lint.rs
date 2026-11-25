@@ -575,3 +575,46 @@ fn porcelain_lint_formats_in_place_before_the_fmt_check() {
     let names = step_names(&log);
     assert_eq!(names, vec!["fmt-fix", "fmt", "clippy"]);
 }
+
+#[test]
+fn declared_lint_extra_runs_soldr_cargo_in_strict_mode() {
+    let root = unique_temp_dir("lint-extra-strict-cargo");
+    fs::create_dir_all(root.join("src")).expect("workspace source dir");
+    let soldr = toml::Value::String(soldr_bin().to_string_lossy().into_owned());
+    fs::write(
+        root.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"lint_extra_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [workspace]\n[workspace.metadata.soldr.lint]\nsteps = [\"fmt\"]\n\
+             extra = [[{soldr}, \"cargo\", \"metadata\", \"--no-deps\", \"--format-version\", \"1\"]]\n"
+        ),
+    )
+    .expect("manifest");
+    fs::write(root.join("src/lib.rs"), "pub fn a() {}\n").expect("source");
+    for porcelain in ["0", "1"] {
+        let log = root.join(format!("cargo-{porcelain}.log"));
+        let cargo = install_logging_fake_cargo(&log);
+        let output = isolated_soldr_command()
+            .args(["--no-cache", "lint", "rust", "--check"])
+            .current_dir(&root)
+            .env("SOLDR_PORCELAIN", porcelain)
+            .env("SOLDR_REENTRANCY_GUARD", "strict")
+            .env("SOLDR_CACHE_DIR", root.join("cache"))
+            .env("SOLDR_TEST_CARGO_BIN", &cargo)
+            .output()
+            .expect("run soldr lint");
+        assert!(
+            output.status.success(),
+            "porcelain={porcelain}, stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let invocations = read_logged_cargo_invocations(&log);
+        let metadata = strings(&["metadata", "--no-deps", "--format-version", "1"]);
+        assert_eq!(
+            invocations.iter().filter(|args| **args == metadata).count(),
+            1,
+            "porcelain={porcelain}: {invocations:?}"
+        );
+    }
+}

@@ -24,7 +24,7 @@ publish = false
 # exactly one mimalloc in the binary and the dependency ownership lives with
 # the embedded crate that hosts the daemon. See `crates/soldr-cli/src/lib.rs`
 # for the `#[global_allocator]` declaration.
-running-process = { version = "=4.10.20", default-features = false, features = ["client", "client-async"] }
+running-process = { version = "=4.10.21", default-features = false, features = ["client", "client-async"] }
 soldr-agent = { path = "../soldr-agent" }
 soldr-cache = { path = "../soldr-cache" }
 soldr-daemon = { path = "../soldr-daemon" }
@@ -33,13 +33,16 @@ soldr-fetch = { path = "../soldr-fetch" }
 soldr-platform = { path = "../soldr-platform" }
 cap-fs-ext = { workspace = true }
 cap-std = { workspace = true }
-blake3 = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "query", "tokio"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 clap = { workspace = true }
 filetime = { workspace = true }
 fs2 = { workspace = true }
 getrandom = "0.4"
 globset = "0.4"
 hex = { workspace = true }
+ring = "0.17"
+iroh = { version = "1.5.0", default-features = false, features = ["tls-ring"] }
 interprocess = { version = "2", features = ["tokio"] }
 jwalk = { workspace = true }
 prost = { workspace = true }
@@ -49,11 +52,7 @@ rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 semver = { workspace = true }
-sha2 = { workspace = true }
-# Same exact pin as crates/soldr-platform: pre-1.0 kernal-api resolves to one
-# release across the fleet (guard: version_lockstep.rs). Feature-gated so the
-# facade stays cheap; `text-similarity` provides `kernal_api::text`.
-kernal-api = { version = "=0.1.33", default-features = false, features = ["text-similarity"] }
+kernal-api = { workspace = true, features = ["hash-sha256", "text-similarity"] }
 sysinfo = "0.30"
 tar = { workspace = true }
 tempfile = { workspace = true }
@@ -97,9 +96,9 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+reqwest = { workspace = true }
 soldr-platform = { path = "../soldr-platform" }
 filetime = { workspace = true }
-reqwest = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 # `start_paused = true` for cook_watchdog's non-real-time async tests.

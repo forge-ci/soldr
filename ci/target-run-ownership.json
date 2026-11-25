@@ -114,6 +114,7 @@
         "cli_cargo_linker",
         "cli_cargo_native_cc",
         "cli_cargo_nested_cargo_guard",
+        "cli_cargo_parent_death",
         "cli_cargo_run_trampoline",
         "cli_cargo_wrappers",
         "cli_exec",
@@ -227,7 +228,9 @@
       "id": "replay-windows-exit-guard",
       "package": "soldr-cli",
       "binary": "guards",
-      "modules": ["replay_nextest_windows"],
+      "modules": [
+        "replay_nextest_windows"
+      ],
       "disposition": "target-replay",
       "reason": "Windows waits for replay children and must preserve their failure diagnostics without an invented Soldr fault."
     },
@@ -235,7 +238,9 @@
       "id": "replay-guard-linux-once",
       "package": "soldr-cli",
       "binary": "guards",
-      "modules": ["replay_nextest"],
+      "modules": [
+        "replay_nextest"
+      ],
       "disposition": "native-linux-once",
       "reason": "The process fixture is a POSIX shell executable and asserts exact signal propagation; Windows target replay is exercised separately."
     },
@@ -305,6 +310,26 @@
       "binary": "wrapper",
       "disposition": "native-linux-once",
       "reason": "The native Nextest wrapper runs only in soldr ci-test's Linux Nextest stage (soldr#3453); its tests assert Linux session, signal, TMPDIR and exit-status behaviour and are inert elsewhere."
+    },
+    {
+      "id": "canonical-profile-plan",
+      "package": "soldr-cli",
+      "binary": "guards",
+      "modules": [
+        "canonical_profile_plan"
+      ],
+      "disposition": "native-linux-once",
+      "reason": "Asserts the profile-driven clippy/test argv a repository entry point emits; the decision is portable host-independent data, so canonical Linux validation covers it."
+    },
+    {
+      "id": "canonical-front-door",
+      "package": "soldr-cli",
+      "binary": "cargo_front_door",
+      "modules": [
+        "cli_cargo_canonical"
+      ],
+      "disposition": "native-linux-once",
+      "reason": "Spawns a stub cargo to assert warn/refuse argv decisions and the unification flag; the observable is the argument vector, not host behaviour, so canonical Linux validation covers it."
     }
   ],
   "replay_selectors": [
@@ -460,6 +485,32 @@
         "aarch64-pc-windows-msvc"
       ],
       "reason": "Replay only on targets with Windows locked-file deletion semantics."
+    },
+    {
+      "id": "cargo-parent-death-signal",
+      "source_id": "cargo-front-target-replay",
+      "test_name": "cli_cargo_parent_death::sigkill_of_soldr_kills_cargo_in_its_separate_group",
+      "targets": [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "reason": "Linux PR_SET_PDEATHSIG must kill Cargo even when its Soldr parent is SIGKILLed across a process-group boundary."
+    },
+    {
+      "id": "cargo-termination-forwarding",
+      "source_id": "cargo-front-target-replay",
+      "test_name": "cli_cargo_parent_death::cargo_receives_termination_and_interrupt_and_ignoring_child_is_killed",
+      "targets": [
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl"
+      ],
+      "reason": "POSIX SIGTERM/SIGINT delivery and forced process-group cleanup require native signal and child-lifetime semantics."
     },
     {
       "id": "cargo-timeout-process-tree",

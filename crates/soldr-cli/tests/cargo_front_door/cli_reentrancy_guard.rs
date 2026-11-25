@@ -336,3 +336,49 @@ fn a_direct_cargo_child_is_outside_the_entry_guard_boundary() {
         "the same marker rejects a nested Soldr entry below Cargo: {log}"
     );
 }
+
+#[test]
+fn lint_extra_edge_allows_rust_tools_from_front_door_only() {
+    for (role, args, allowed) in [
+        ("front-door", ["cargo", "--version"], true),
+        ("front-door", ["rustup", "--version"], true),
+        ("front-door", ["lint", "--help"], false),
+        ("broker", ["cargo", "--version"], false),
+    ] {
+        let output = guarded_soldr()
+            .env(soldr_cli::reentrancy_guard::GUARD_MODE_ENV, "strict")
+            .env(soldr_cli::reentrancy_guard::IN_SOLDR_ROLE_ENV, role)
+            .env("SOLDR_INTERNAL_LINT_EXTRA", "1")
+            .args(args)
+            .output()
+            .expect("spawn soldr");
+        assert_eq!(
+            output.status.success(),
+            allowed,
+            "{role} {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn lint_extra_edge_allows_dylint_from_front_door_only() {
+    let empty = tempfile::tempdir().expect("empty working directory");
+    for (role, args, allowed) in [
+        ("front-door", ["dylint", "prepare"], true),
+        ("front-door", ["dylint", "list"], true),
+        ("broker", ["dylint", "prepare"], false),
+    ] {
+        let output = guarded_soldr()
+            .current_dir(empty.path())
+            .env(soldr_cli::reentrancy_guard::GUARD_MODE_ENV, "strict")
+            .env(soldr_cli::reentrancy_guard::IN_SOLDR_ROLE_ENV, role)
+            .env("SOLDR_INTERNAL_LINT_EXTRA", "1")
+            .args(args)
+            .output()
+            .expect("spawn soldr");
+        let rejected = String::from_utf8_lossy(&output.stderr)
+            .contains("rejected unsanctioned Soldr re-entrancy");
+        assert_ne!(rejected, allowed, "{role} {args:?}");
+    }
+}

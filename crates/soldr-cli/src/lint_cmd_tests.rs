@@ -9,7 +9,7 @@ fn fmt_fix_formats_in_place_before_the_fmt_check() {
     let mut plan = LintPlan::parse(&[]).unwrap();
     assert!(!plan.check_only);
     plan.fmt_fix = true;
-    let steps = plan.rust_step_args(false, &[]).unwrap();
+    let steps = plan.rust_step_args(false, &[], None).unwrap();
     assert_eq!(
         steps[0],
         (
@@ -379,4 +379,55 @@ fn an_unknown_target_names_the_lint_surface_exactly_once() {
     );
     assert_eq!(message.matches("win-armm").count(), 1, "{message}");
     assert!(!message.contains("soldr build"), "{message}");
+}
+
+#[test]
+fn canonical_lint_clippy_argv_equals_the_front_door_command() {
+    use crate::cargo_front_door::canonical::{command, CompilingVerb};
+    let dir = tempfile::tempdir().unwrap();
+    for selection in [
+        "features = 'all'\npackages = 'workspace'\nexclude = ['skip']",
+        "features = ['b', 'a']\npackages = ['b', 'a']\ndefault-features = false\ndev-targets = false\ntarget = 'implicit'",
+    ] {
+        std::fs::write(dir.path().join("Cargo.toml"), format!("[workspace.metadata.soldr.cargo]\n{selection}\nclippy-args = ['-W', 'clippy::all']")).unwrap();
+        let (profile, _) = crate::cargo_metadata_canonical::profile_from(dir.path()).unwrap().unwrap();
+        let plan = LintPlan::parse(&strings(&["rust", "--check"])).unwrap();
+        let steps = plan.rust_plan_from(dir.path(), true, &[]).unwrap();
+        let clippy = steps.iter().find_map(|step| match step {
+            PlannedStep::Cargo { label, args } if label == "clippy" => Some(args),
+            _ => None,
+        }).unwrap();
+        let host = crate::core::TargetTriple::host().unwrap().triple();
+        let expected: Vec<String> = command(&profile, CompilingVerb::Clippy, &host).split_whitespace().skip(2).map(str::to_owned).collect();
+        assert_eq!(clippy, &expected);
+    }
+}
+
+#[test]
+fn canonical_lint_without_profile_keeps_historical_argv() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+    let plan = LintPlan::parse(&strings(&["rust", "--check"])).unwrap();
+    let steps = plan.rust_plan_from(dir.path(), false, &[]).unwrap();
+    assert!(matches!(&steps[1], PlannedStep::Cargo { args, .. }
+        if args == &strings(&["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"])));
+}
+
+#[test]
+fn canonical_lint_keeps_argument_boundaries_and_cross_target_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[workspace.metadata.soldr.cargo]\nclippy-args = ['--cfg', 'value with spaces']",
+    )
+    .unwrap();
+    let (profile, _) = crate::cargo_metadata_canonical::profile_from(dir.path())
+        .unwrap()
+        .unwrap();
+    let args = lint_clippy_args(Some(&profile), &[], Some("cross-target")).unwrap();
+    assert_eq!(args[args.len() - 1], "value with spaces");
+    assert_eq!(args.iter().filter(|arg| *arg == "--target").count(), 1);
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--target", "cross-target"]));
 }

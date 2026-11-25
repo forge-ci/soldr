@@ -240,6 +240,9 @@ fn command_output_with_timeout_inner(
     suggest_timeout_override: bool,
 ) -> Result<Output, SoldrError> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Tree termination requires a group owned by this child, never our own.
+    crate::platform::process::command::configure_process_group(command);
+    crate::platform::process::command::configure_parent_death(command);
     let mut child = {
         // soldr#3098: spawns share, staged writes exclude.
         let _spawn = spawn_exclusion::spawn_shared();
@@ -281,7 +284,7 @@ fn command_output_with_timeout_inner(
                 if !timed_out {
                     continue;
                 }
-                let kill_result = child.kill();
+                let kill_result = crate::platform::process::terminate::terminate_tree(&mut child);
                 let reap_result = child
                     .wait_timeout(Duration::from_secs(KILLED_COMMAND_OUTPUT_REAP_TIMEOUT_SECS));
                 let timeout_secs = timeout.as_secs();
@@ -301,7 +304,7 @@ fn command_output_with_timeout_inner(
                     ));
                 }
                 match kill_result {
-                    Ok(()) => message.push_str("; killed child process"),
+                    Ok(detail) => message.push_str(&format!("; killed child process: {detail:?}")),
                     Err(err) => message.push_str(&format!("; kill failed: {err}")),
                 }
                 match reap_result {
@@ -439,6 +442,33 @@ mod tests {
         );
         assert!(message.contains("killed child process"), "{message}");
         assert!(message.contains("reaped child process"), "{message}");
+    }
+
+    #[test]
+    fn command_output_timeout_kills_descendants() {
+        if crate::platform::host::facts::os() == crate::platform::host::facts::HostOs::Windows {
+            return;
+        }
+        let root = tempfile::tempdir().expect("fixture directory");
+        let pid_file = root.path().join("descendant.pid");
+        let error = command_output_with_timeout_duration(
+            Command::new("sh")
+                .args(["-c", "sleep 60 & echo $! > \"$DESCENDANT_PID\"; wait"])
+                .env("DESCENDANT_PID", &pid_file),
+            "probe with descendant",
+            Duration::from_secs(1),
+        )
+        .expect_err("probe must time out");
+        let pid = std::fs::read_to_string(pid_file)
+            .expect("descendant pid")
+            .trim()
+            .parse()
+            .expect("numeric pid");
+        let alive = crate::platform::process::inspect::is_alive(pid);
+        if alive {
+            let _ = crate::platform::process::terminate::signal_pid(pid, true);
+        }
+        assert!(!alive, "timeout left descendant {pid} alive: {error}");
     }
 
     /// The caller-selected probe deadline is deliberately different from the

@@ -209,6 +209,21 @@ fn workspace_member_dirs(root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// Filesystem-only member census shared with CI policy scanning. This has the
+/// same documented wildcard limits as the test-target census below.
+pub(crate) fn workspace_member_names(root: &Path) -> Vec<String> {
+    workspace_member_dirs(root)
+        .iter()
+        .filter_map(|dir| {
+            read_manifest(dir)?
+                .get("package")?
+                .get("name")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
 /// Expand one `[workspace].members` entry into concrete directories.
 ///
 /// Known limit: `*` matches within a single path component, which covers the

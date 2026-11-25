@@ -40,6 +40,8 @@ pub(crate) mod cache_annotations; // soldr#3924 — where those annotations go
 mod cache_plan;
 pub(crate) mod cache_states; // soldr#2302 — HIT/MISS annotations + stats
 pub(crate) mod cache_stats_file; // soldr#2302 — session-keyed stats reader
+pub(crate) mod canonical;
+pub(crate) mod canonical_runtime;
 mod clang_cl_shim;
 mod cmake_need;
 mod codegen_units;
@@ -684,6 +686,8 @@ mod dylint_rustup_home_child_tests;
 mod linker_project_config_tests;
 #[cfg(test)]
 mod porcelain_tests;
+#[cfg(test)]
+mod run_prepare_tests;
 #[cfg(test)]
 mod scrub_pool_tests;
 #[cfg(test)]

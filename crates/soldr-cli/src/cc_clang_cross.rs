@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 
 use crate::core::{SoldrError, SoldrPaths};
 
@@ -232,10 +232,10 @@ fn write_drivers(
     }
     let config_body = format!("{}\n", spec.config_lines.join("\n"));
     let digest = {
-        let mut hasher = Sha256::new();
+        let mut hasher = Sha256Hasher::new();
         hasher.update(clang.display().to_string());
         hasher.update(format!("{spec:?}"));
-        format!("{:x}", hasher.finalize())
+        hasher.finalize().to_hex()
     };
     let dir = paths
         .bin

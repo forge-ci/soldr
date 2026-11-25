@@ -159,6 +159,7 @@ keep = [
 run = ["uv", "run", "--no-project", "--python", "3.13", "python", "ci/local_gate.py", "--lane", "tests"]
 group = "isolated"
 tools = ["uv", "soldr"]
+env = ["SOLDR_LOCAL_TEST_FAIL_FAST"]
 exclude = [
   "docs/**", "*.md", "*.png", "contracts/**", "bench/**", "perf/**", "examples/**",
   "tests/**", ".github/**", "ci/**", "tools/**", "scripts/**", ".claude/**",

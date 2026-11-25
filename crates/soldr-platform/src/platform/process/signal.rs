@@ -17,4 +17,7 @@
 //! to a task: a terminator that races the task's first poll must still
 //! find the event.
 
-pub use crate::platform_imp::process::signal::wait_for_terminate_signal;
+pub use crate::platform_imp::process::signal::{
+    forward_child_termination, kill_owned_process_group, wait_for_terminate_signal,
+    ChildTerminationGuard,
+};
