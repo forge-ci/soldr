@@ -110,6 +110,8 @@ pub(crate) fn spawn_guarded(command: &mut Command) -> std::io::Result<Child> {
 pub(crate) fn extra_command(extra: &ExtraCommand) -> Command {
     let mut command = Command::new(&extra.program);
     command.args(&extra.args).current_dir(&extra.cwd);
+    // Repository lint extras may delegate their Cargo work through Soldr.
+    command.env(crate::reentrancy_guard::LINT_EXTRA_EDGE, "1");
     command
 }
 

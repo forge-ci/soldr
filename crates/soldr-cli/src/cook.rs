@@ -698,11 +698,11 @@ fn write_cook_marker(path: &Path, marker: &CookMarker) -> std::io::Result<()> {
 /// file missing — shouldn't happen post-Phase-1, but if it does we
 /// simply skip the optimization).
 fn compute_cook_marker(ctx: &CookContext, parsed: &CookArgs) -> Option<CookMarker> {
-    use sha2::{Digest, Sha256};
+    use kernal_api::hash::Sha256Hasher;
     let recipe_bytes = std::fs::read(&ctx.recipe_path).ok()?;
-    let mut h = Sha256::new();
+    let mut h = Sha256Hasher::new();
     h.update(&recipe_bytes);
-    let recipe_sha256 = hex_lower(&h.finalize());
+    let recipe_sha256 = h.finalize().to_hex();
     let selection_sha256 = cook_selection_sha256(parsed);
     let rustc_version = match rustc_version_string(&ctx.manifest_dir) {
         Ok(version) => version,
@@ -721,22 +721,13 @@ fn compute_cook_marker(ctx: &CookContext, parsed: &CookArgs) -> Option<CookMarke
 }
 
 fn cook_selection_sha256(args: &CookArgs) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
+    use kernal_api::hash::Sha256Hasher;
+    let mut h = Sha256Hasher::new();
     for arg in build_exact_cook_args(args) {
         h.update(arg.as_bytes());
         h.update([0]);
     }
-    hex_lower(&h.finalize())
-}
-
-/// Lower-case hex helper (`crate::cache_lib::cook_archive::sha_abbrev` truncates).
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{:02x}", b));
-    }
-    s
+    h.finalize().to_hex()
 }
 
 /// `rustc -V` for the toolchain `manifest_dir` resolves to. Failures carry

@@ -14,7 +14,7 @@
 
 use crate::core::{suppress_windows_console_window, SoldrError, SoldrPaths};
 use fs2::FileExt;
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::fs::OpenOptions;
@@ -501,7 +501,7 @@ pub(crate) fn target_config_value_in_files(
         let Ok(contents) = std::fs::read_to_string(path) else {
             continue;
         };
-        let Ok(value) = contents.parse::<toml::Value>() else {
+        let Ok(value) = toml::from_str::<toml::Value>(&contents) else {
             continue;
         };
         let configured = value.get("target").and_then(|targets| {
@@ -543,7 +543,7 @@ fn pep517_fallback_key(target: &str, injection: &LinkerInjection) -> Option<Stri
         return None;
     }
 
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     hash_field(&mut hasher, b"schema", b"pep517-linker-fallback-v1");
     hash_field(&mut hasher, b"target", target.as_bytes());
     hash_field(
@@ -600,7 +600,7 @@ fn pep517_fallback_key(target: &str, injection: &LinkerInjection) -> Option<Stri
             hash_field(&mut hasher, relative.as_bytes(), &bytes);
         }
     }
-    Some(hex::encode(hasher.finalize()))
+    Some(hasher.finalize().to_hex())
 }
 
 fn linker_candidate_identity(injection: &LinkerInjection) -> Vec<u8> {
@@ -661,7 +661,7 @@ pub(crate) fn extract_flag_value<'a>(text: &'a str, marker: &str) -> Option<&'a 
     (!value.is_empty()).then_some(value)
 }
 
-fn hash_field(hasher: &mut Sha256, name: &[u8], value: &[u8]) {
+fn hash_field(hasher: &mut Sha256Hasher, name: &[u8], value: &[u8]) {
     hasher.update((name.len() as u64).to_le_bytes());
     hasher.update(name);
     hasher.update((value.len() as u64).to_le_bytes());

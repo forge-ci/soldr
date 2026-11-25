@@ -71,29 +71,28 @@ pub struct Finding {
     pub file: String,
     /// 1-based line number where the offending command begins.
     pub line: u32,
-    /// The detected non-blessed tool.
+    /// The detected tool or invocation.
     pub tool: String,
-    /// Resolved Apple/Windows target, a `*`-representative, or `<unresolved>`.
+    /// Resolved target, or differing selection fields for canonical invocations.
     pub target: String,
-    /// The exact blessed replacement command.
+    /// The rule-specific replacement command and remedy.
     pub recommendation: String,
 }
 
 impl Finding {
     /// Human-readable one-line rendering.
     ///
-    /// `<severity>: <RULE-ID> <path>:<line> — <tool> for <target>; use
-    /// `soldr build --target <target>` instead`
+    /// `<severity>: <RULE-ID> <path>:<line> — <tool> for <target>; <recommendation>`
     pub fn render_human(&self) -> String {
         format!(
-            "{}: {} {}:{} — {} for {}; use `soldr build --target {}` instead",
+            "{}: {} {}:{} — {} for {}; {}",
             self.severity.label(),
             self.rule,
             self.file,
             self.line,
             self.tool,
             self.target,
-            self.target,
+            self.recommendation,
         )
     }
 }

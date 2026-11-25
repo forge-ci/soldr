@@ -100,7 +100,7 @@ fn retry_timed_out_cargo_without_cache(
     command.env(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR, "1");
     nested_cargo_guard::forward_mode_to_front_door_retry(&mut command);
     suppress_windows_console_window(&mut command);
-    configure_cargo_child_for_timeout(&mut command);
+    let _signals = prepare_cargo_child(&mut command)?;
     let mut child = debug_trace::spawn_traced(&mut command, "soldr no-cache cargo retry")
         .map_err(|err| SoldrError::Other(format!("spawn no-cache cargo retry failed: {err}")))?;
     // The nested soldr invocation inherits the explicit timeout that caused
@@ -776,6 +776,16 @@ fn wait_for_cargo_child_guarded(
     let start = Instant::now();
     let mut next_heartbeat = heartbeat;
     loop {
+        if crate::platform::process::signal::forward_child_termination(child.id())
+            .map_err(|err| SoldrError::Other(format!("forward termination to {context}: {err}")))?
+        {
+            let _ = child.wait_timeout(Duration::from_millis(100));
+            let detail = kill_cargo_process_tree(child);
+            let _ = child.wait_timeout(Duration::from_secs(KILLED_CARGO_REAP_TIMEOUT_SECS));
+            return Err(SoldrError::Other(format!(
+                "{context} interrupted by termination signal; tree cleanup: {detail:?}"
+            )));
+        }
         if let Some(violation) = guard.and_then(nested_cargo_guard::NestedCargoGuard::violation) {
             return Err(nested_cargo_guard::teardown_std_child(
                 child, context, &violation,
@@ -787,7 +797,7 @@ fn wait_for_cargo_child_guarded(
                 return Err(cargo_timeout_error(child, context, timeout));
             }
         }
-        let mut wait_for = next_heartbeat.saturating_sub(elapsed);
+        let mut wait_for = next_heartbeat.saturating_sub(elapsed).min(Duration::from_millis(100));
         if let Some(timeout) = timeout {
             wait_for = wait_for.min(timeout.saturating_sub(elapsed));
         }
@@ -882,7 +892,17 @@ pub(crate) fn kill_cargo_process_tree(
     }
 }
 
+fn prepare_cargo_child(
+    command: &mut std::process::Command,
+) -> Result<crate::platform::process::signal::ChildTerminationGuard, SoldrError> {
+    let signals = crate::platform::process::signal::ChildTerminationGuard::install()
+        .map_err(|err| SoldrError::Other(format!("install cargo termination handlers: {err}")))?;
+    configure_cargo_child_for_timeout(command);
+    Ok(signals)
+}
+
 pub(crate) fn configure_cargo_child_for_timeout(command: &mut std::process::Command) {
+    crate::platform::process::command::configure_parent_death(command);
     if std::env::var_os(INHERIT_PARENT_PROCESS_GROUP_ENV).is_none() {
         crate::platform::process::command::configure_process_group(command);
     } else {

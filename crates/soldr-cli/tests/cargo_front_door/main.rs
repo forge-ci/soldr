@@ -8,12 +8,14 @@
 mod common;
 
 mod cli_cargo_basic;
+mod cli_cargo_canonical;
 mod cli_cargo_clippy_fixture;
 mod cli_cargo_doc_routes;
 mod cli_cargo_dylint_link;
 mod cli_cargo_linker;
 mod cli_cargo_native_cc;
 mod cli_cargo_nested_cargo_guard;
+mod cli_cargo_parent_death;
 mod cli_cargo_porcelain;
 mod cli_cargo_run_trampoline;
 mod cli_cargo_signal_diagnostics;

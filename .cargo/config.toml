@@ -16,7 +16,13 @@
 # [build] rustflags that is present wins outright. The macOS cross lane
 # sets CARGO_TARGET_<triple>_RUSTFLAGS, so it appends `--cfg
 # tokio_unstable` itself (ci/docker-darwin-cross/build-soldr-for-darwin.sh)
-# to avoid silently dropping this. Windows/Linux/native builds have no
-# such override and inherit the flag from here.
+# to avoid silently dropping this. The Windows GNU target below also
+# includes the flag explicitly because it sets a target-specific rustflags list.
 [build]
 rustflags = ["--cfg", "tokio_unstable"]
+
+# MinGW auto-exports every global from DLLs with no explicit export list.
+# iroh-relay's Rust-only DLL exceeds the PE ordinal limit when that happens.
+# Explicit exports still work, including the Python module initializer.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["--cfg", "tokio_unstable", "-C", "link-arg=-Wl,--exclude-all-symbols"]

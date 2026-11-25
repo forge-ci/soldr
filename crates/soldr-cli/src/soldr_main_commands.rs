@@ -17,6 +17,11 @@ async fn run_wheel_command(
 
 /// `soldr cargo ...`: the cargo front door.
 async fn run_cargo_command(args: Vec<String>, flags: DispatchFlags) -> Result<(), SoldrError> {
+    if let Some((verb, cargo_args)) = args.split_first() {
+        if let Some(code) = crate::remote_build::auto::try_cargo(verb, cargo_args, flags.cache_enabled).await? {
+            guarded_exit(code);
+        }
+    }
     let args = crate::target_lifecycle::prepare_cargo_invocation(args).await?;
     // soldr#1079: same MSVC host env injection that
     // `Commands::Build` does, so `soldr cargo build` /

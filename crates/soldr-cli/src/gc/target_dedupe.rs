@@ -285,9 +285,9 @@ mod imp {
 
     fn hash_file(path: &Path) -> std::io::Result<String> {
         let mut file = std::fs::File::open(path)?;
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = kernal_api::hash::Blake3Hasher::new();
         std::io::copy(&mut file, &mut hasher)?;
-        Ok(hasher.finalize().to_hex().to_string())
+        Ok(hasher.finalize().to_hex())
     }
 
     fn blob_path(store: &Path, kind: &str, hex: &str) -> PathBuf {

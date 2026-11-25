@@ -16,16 +16,14 @@ soldr-platform = { path = "../soldr-platform" }
 bzip2 = { workspace = true }
 flate2 = { workspace = true }
 fs2 = { workspace = true }
-hex = { workspace = true }
 minisign-verify = { workspace = true }
 reqwest = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
+kernal-api = { workspace = true, features = ["hash-sha256"] }
 tar = { workspace = true }
 thiserror = { workspace = true }
-strum = { workspace = true }
 tokio = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }

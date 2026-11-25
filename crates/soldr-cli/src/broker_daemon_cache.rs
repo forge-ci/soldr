@@ -32,14 +32,10 @@ pub(crate) fn sweep_retired_route_caches(
     let Ok(entries) = std::fs::read_dir(services_root) else {
         return report;
     };
-    for entry in entries.flatten() {
-        let Some(service) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.strip_suffix(SERVICE_DEF_V2_EXTENSION))
-            .and_then(|name| name.strip_suffix('.'))
-            .map(str::to_owned)
-        else {
+    let entries: Vec<_> = entries.flatten().collect();
+    let current = current_routes(&entries, live);
+    for entry in entries {
+        let Some(service) = route_service(&entry) else {
             continue;
         };
         if !valid_route_name(&service) || live.contains(&service) {
@@ -68,6 +64,13 @@ pub(crate) fn sweep_retired_route_caches(
             .join("zccache/daemon-state")
             .join(format!("embedded-v1-{service}"));
         if !private_root.exists() {
+            continue;
+        }
+        // gh-runner#75: the root's current store is not retired. Keep its
+        // registration too, so a later pass can still find the store once a
+        // newer route supersedes it.
+        if current.contains(&service) {
+            report.pending.insert(service);
             continue;
         }
         if crate::cache_lib::path_safety::validate_owned_directory(&paths.root, &private_root)
@@ -117,6 +120,69 @@ pub(crate) fn sweep_retired_route_caches(
         }
     }
     report
+}
+
+fn route_service(entry: &std::fs::DirEntry) -> Option<String> {
+    entry
+        .file_name()
+        .to_str()
+        .and_then(|name| name.strip_suffix(SERVICE_DEF_V2_EXTENSION))
+        .and_then(|name| name.strip_suffix('.'))
+        .map(str::to_owned)
+}
+
+/// The route whose store each Soldr root is using: its most recently
+/// registered route, unless a route of that root is live (then the live one
+/// is current and nothing else is). A front door renews a registration on
+/// every launch, so its mtime is when the route was last asked for.
+///
+/// gh-runner#75: a persistent CI runner runs one route per root. When a job
+/// ends its daemon stops, the broker reaps the idle route, and the reaper's
+/// pass swept that route's store in Pressure mode two minutes later: every
+/// artifact the job had just published was gone, and every next job on the
+/// runner compiled cold (0 HIT / 383 MISS on forge-ci/bosn, ~92 GiB swept on
+/// one host). A route that only went idle is not retired; one a newer route
+/// of the same root replaced is. Routes tied for newest are all kept.
+fn current_routes(entries: &[std::fs::DirEntry], live: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut by_root: std::collections::BTreeMap<PathBuf, Vec<(SystemTime, String, bool)>> =
+        std::collections::BTreeMap::new();
+    for entry in entries {
+        let Some(service) = route_service(entry) else {
+            continue;
+        };
+        if !valid_route_name(&service) {
+            continue;
+        }
+        let Some(root) = registered_root(&entry.path(), &service) else {
+            continue;
+        };
+        let registered = entry
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let is_live = live.contains(&service);
+        by_root
+            .entry(root)
+            .or_default()
+            .push((registered, service, is_live));
+    }
+    let mut current = BTreeSet::new();
+    for routes in by_root.into_values() {
+        if routes.iter().any(|(_, _, is_live)| *is_live) {
+            continue;
+        }
+        let Some(newest) = routes.iter().map(|(registered, _, _)| *registered).max() else {
+            continue;
+        };
+        current.extend(
+            routes
+                .into_iter()
+                .filter(|(registered, _, _)| *registered == newest)
+                .map(|(_, service, _)| service),
+        );
+    }
+    current
 }
 
 fn valid_route_name(service: &str) -> bool {

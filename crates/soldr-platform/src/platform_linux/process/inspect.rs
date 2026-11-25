@@ -43,15 +43,24 @@ pub fn is_alive(pid: u32) -> bool {
     if unsafe { libc::kill(pid, 0) } != 0 {
         return false;
     }
-    !is_zombie(pid as u32)
+    match read_process_stat(pid as u32) {
+        Ok(stat) => !stat_is_zombie(&stat),
+        // The kernel can reap the process between the signal probe and this read.
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
 }
 
 /// True when `pid` names a process that has exited but is still awaiting
 /// collection by its parent.
 pub fn is_zombie(pid: u32) -> bool {
-    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-        return false;
-    };
+    read_process_stat(pid).is_ok_and(|stat| stat_is_zombie(&stat))
+}
+
+fn read_process_stat(pid: u32) -> std::io::Result<String> {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+}
+
+fn stat_is_zombie(stat: &str) -> bool {
     // The comm field is parenthesized and may itself contain spaces, so the
     // state character is the first byte after the LAST ") ".
     let Some((_, tail)) = stat.rsplit_once(") ") else {
@@ -115,8 +124,8 @@ pub fn executable_path_matches(pid: u32, expected_path: &Path) -> bool {
         return false;
     };
     let actual = std::fs::canonicalize(&actual).unwrap_or(actual);
-    let expected = std::fs::canonicalize(expected_path)
-        .unwrap_or_else(|_| expected_path.to_path_buf());
+    let expected =
+        std::fs::canonicalize(expected_path).unwrap_or_else(|_| expected_path.to_path_buf());
     actual == expected
 }
 
@@ -236,7 +245,10 @@ mod tests {
     #[test]
     fn linux_start_token_is_stable_and_present_for_this_process() {
         let first = process_start_token(std::process::id());
-        assert!(first.is_some(), "a live process must have a readable starttime");
+        assert!(
+            first.is_some(),
+            "a live process must have a readable starttime"
+        );
         let second = process_start_token(std::process::id());
         assert_eq!(first, second, "starttime does not change across reads");
         assert_ne!(first, Some(0), "a real process never boots at tick zero");

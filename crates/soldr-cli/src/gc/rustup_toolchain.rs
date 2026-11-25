@@ -176,7 +176,7 @@ pub(super) fn read_home_settings(settings_toml: &Path) -> HomeSettings {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return HomeSettings::default(),
         Err(_) => return HomeSettings::fail_closed(),
     };
-    let value: toml::Value = match text.parse() {
+    let value: toml::Value = match toml::from_str(&text) {
         Ok(value) => value,
         Err(_) => return HomeSettings::fail_closed(),
     };

@@ -18,7 +18,7 @@ members = [
 # running-process were `_vender/` submodules with their own [workspace]
 # declarations, and each needed excluding so cargo would not fold its crates
 # into soldr's workspace and mis-version them. They are exact crates.io
-# dependencies now (`zccache = { version = "=1.15.14" }` in
+# dependencies now (`zccache = { version = "=1.15.18" }` in
 # `[workspace.dependencies]`, the single pin every member inherits;
 # `running-process = { version = "=4.10.20" }`), so there is no nested
 # workspace left to exclude. Neither has a `[patch]`: cargo strips `[patch]`
@@ -35,7 +35,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.9.54"
+version = "0.9.57"
 edition = "2021"
 rust-version = "1.98"
 license = "AGPL-3.0-only"
@@ -75,7 +75,7 @@ libraries = [{ path = "dylints/*" }]
 [workspace.dependencies]
 # The one zccache pin (soldr#3604): every member uses `workspace = true`.
 # `default-features = false` can only be set here; a member cannot re-disable it.
-zccache = { version = "=1.15.14", default-features = false }
+zccache = { version = "=1.15.18", default-features = false }
 cap-fs-ext = "3.4.4"
 cap-std = "3.4.4"
 tokio = { version = "1", features = ["full"] }
@@ -87,11 +87,11 @@ tracing-appender = "0.2"
 # soldr-cli when the crate's `tokio-console` feature is enabled.
 console-subscriber = "0.5"
 thiserror = "2"
-strum = { version = "0.27.2", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 semver = "1"
-sha2 = "0.10"
+# Keep this exact pin aligned with the kernal-api release resolved by zccache.
+kernal-api = { version = "=0.1.40", default-features = false }
 hex = "0.4"
 fs2 = "0.4"
 # soldr#1356 prep — reqwest features made explicit for robustness.
@@ -100,7 +100,7 @@ fs2 = "0.4"
 # (`stream`). Previously these were pulled in by feature-unification
 # through other deps; declaring them explicitly makes soldr's build
 # self-sufficient against dep-trim churn.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "charset", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "charset", "stream", "http2"] }
 tempfile = "3"
 # soldr#1356 A4 — default-features=false + deflate only. Drops bzip2-sys
 # (C build) + aes + sha1 + lzma + deflate64 + zopfli + zip's own zstd copy.
@@ -123,8 +123,8 @@ tar = "0.4"
 # linking makes the binary host-independent, matching the released
 # PyPI artifacts.
 xz2 = { version = "0.1", features = ["static"] }
-toml = "0.8"
-toml_edit = "0.22"
+toml = "1.1"
+toml_edit = "0.25"
 rayon = "1"
 prost = "0.14"
 # soldr#1356 A2 — walkdir workspace dep removed; jwalk is the sole

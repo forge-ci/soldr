@@ -92,6 +92,11 @@ pub fn session_stream_from_received_fd(
 ) -> io::Result<interprocess::local_socket::tokio::Stream> {
     use std::os::fd::FromRawFd as _;
     let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd.raw() as i32) };
+    // The broker can hand off a blocking descriptor. Tokio requires
+    // nonblocking mode before registering that descriptor with its reactor.
+    let socket = std::os::unix::net::UnixStream::from(owned);
+    socket.set_nonblocking(true)?;
+    let owned = std::os::fd::OwnedFd::from(socket);
     let stream = interprocess::os::unix::uds_local_socket::tokio::Stream::try_from(owned)?;
     Ok(stream.into())
 }
@@ -156,4 +161,23 @@ pub fn send_test_handoff_descriptor(
         control.into(),
         interprocess::os::unix::uds_local_socket::Stream::from(client_side).into(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{session_stream_from_received_fd, ReceivedFd};
+    use std::os::fd::IntoRawFd as _;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn adopts_a_blocking_session_socket_into_tokio() {
+        let (socket, _peer) = UnixStream::pair().expect("create connected blocking sockets");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("create test reactor");
+        let _entered = runtime.enter();
+        let received = ReceivedFd::from_raw(socket.into_raw_fd() as u64);
+        let _stream = session_stream_from_received_fd(received).expect("adopt broker socket");
+    }
 }

@@ -75,6 +75,9 @@ async fn run_cargo_shorthand(
     inject_msvc_host_env: bool,
     flags: DispatchFlags,
 ) -> Result<(), SoldrError> {
+    if let Some(code) = crate::remote_build::auto::try_cargo(verb, tool_args, flags.cache_enabled).await? {
+        guarded_exit(code);
+    }
     let mut cargo_args = Vec::with_capacity(tool_args.len() + 1);
     cargo_args.push(verb.to_string());
     cargo_args.extend(tool_args.iter().cloned());

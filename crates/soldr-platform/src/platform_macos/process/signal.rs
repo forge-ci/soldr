@@ -23,6 +23,10 @@ pub fn wait_for_terminate_signal() -> impl std::future::Future<Output = bool> + 
     }
 }
 
+pub use super::child_termination::{
+    forward_child_termination, kill_owned_process_group, ChildTerminationGuard,
+};
+
 #[cfg(test)]
 mod tests {
     use super::wait_for_terminate_signal;

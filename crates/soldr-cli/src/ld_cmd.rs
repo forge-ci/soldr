@@ -236,7 +236,7 @@ fn write_linker_shim(
     linker: &PreparedLinker,
 ) -> Result<PathBuf, SoldrError> {
     let body = crate::cc_clang_cross::render_driver(&linker.program, &linker.args)?;
-    let digest = blake3::hash(body.as_bytes()).to_hex();
+    let digest = kernal_api::hash::blake3_bytes(body.as_bytes()).to_hex();
     let dir = paths.bin.join("cc-driver").join("ld");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!(

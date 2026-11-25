@@ -831,6 +831,8 @@ pub(crate) fn fake_rustc_script(log_path: &Path) -> String {
         soldr_platform::host::facts::os(),
         soldr_platform::host::facts::HostOs::Windows
     ) {
+        // Staged MSVC links expect the image's debug sidecar as well as the
+        // primary output. Keep the fake compiler's output layout consistent.
         format!(
             "@echo off\n\
              setlocal EnableDelayedExpansion\n\
@@ -852,8 +854,12 @@ pub(crate) fn fake_rustc_script(log_path: &Path) -> String {
              )\n\
              if \"%~1\"==\"-o\" (\n\
                call :materialize_one \"%~2\"\n\
+               for %%D in (\"%~2\") do (\n\
+                 if /I \"%%~xD\"==\".exe\" call :materialize_one \"%%~dpnD.pdb\"\n\
+                 if /I \"%%~xD\"==\".dll\" call :materialize_one \"%%~dpnD.pdb\"\n\
+               )\n\
                if not \"!all_args:dep-info=!\"==\"!all_args!\" (\n\
-                 for %%D in (\"%~2\") do call :materialize_one \"%%~dpD!crate_name!.d\"\n\
+                 for %%D in (\"%~2\") do call :materialize_one \"%%~dpnD.d\"\n\
                )\n\
                shift\n\
              )\n\
@@ -891,7 +897,7 @@ pub(crate) fn fake_rustc_script(log_path: &Path) -> String {
                mkdir -p \"$(dirname \"$output_path\")\"\n\
                : > \"$output_path\"\n\
                case \"$all_args\" in\n\
-                 *dep-info*) : > \"${{output_dir:-$(dirname \"$output_path\")}}/$crate_name.d\" ;;\n\
+                 *dep-info*) dep_base=$(basename \"$output_path\"); dep_base=${{dep_base%.*}}; : > \"$(dirname \"$output_path\")/$dep_base.d\" ;;\n\
                esac\n\
              fi\n",
             log_path.display()

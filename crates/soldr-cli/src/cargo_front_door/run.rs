@@ -3,7 +3,19 @@ pub(crate) async fn run_cargo_front_door(
     cache_enabled: bool,
     trust_inherited_soldr_env: bool,
 ) -> Result<i32, SoldrError> {
-    let result = run_cargo_front_door_gated(args, cache_enabled, trust_inherited_soldr_env).await;
+    let result = match canonical_runtime::prepare(args, cache_enabled) {
+        Err(error) => Err(error),
+        Ok(canonical) if canonical.refused => Ok(2),
+        Ok(canonical) => {
+            run_cargo_front_door_gated(
+                &canonical.args,
+                cache_enabled,
+                trust_inherited_soldr_env,
+                canonical.unify,
+            )
+            .await
+        }
+    };
     emit_porcelain_catch_all(args, &result);
     result
 }
@@ -37,6 +49,7 @@ async fn run_cargo_front_door_gated(
     args: &[String],
     cache_enabled: bool,
     trust_inherited_soldr_env: bool,
+    canonical_unify: bool,
 ) -> Result<i32, SoldrError> {
     // soldr#3896: a pure check whose exact inputs already passed is replayed
     // before any setup; otherwise a pass is recorded for the next run.
@@ -51,8 +64,13 @@ async fn run_cargo_front_door_gated(
         .and_then(|armed| armed.args_override())
         .unwrap_or(args)
         .to_vec();
-    let result =
-        run_cargo_front_door_ungated(&run_args, cache_enabled, trust_inherited_soldr_env).await;
+    let result = run_cargo_front_door_ungated(
+        &run_args,
+        cache_enabled,
+        trust_inherited_soldr_env,
+        canonical_unify,
+    )
+    .await;
     if let Some(armed) = armed {
         armed.finish(*result.as_ref().unwrap_or(&1));
     }
@@ -63,6 +81,7 @@ async fn run_cargo_front_door_ungated(
     args: &[String],
     cache_enabled: bool,
     trust_inherited_soldr_env: bool,
+    canonical_unify: bool,
 ) -> Result<i32, SoldrError> {
     // Time the front door (#1843); a warm no-op does not invoke a rustc
     // wrapper. Zero-cost unless SOLDR_PROFILE_STARTUP is set.
@@ -72,8 +91,20 @@ async fn run_cargo_front_door_ungated(
         FrontDoorArgs::Executed(code) => return Ok(code),
         FrontDoorArgs::Cargo(normalized) => normalized,
     };
+    if let Some(plan) = normalized.trampoline_plan.as_ref() {
+        if normalized.explicit_toolchain.is_none() && !porcelain::enabled() {
+            if let Some(code) = crate::remote_build::auto::try_run(plan, cache_enabled).await? {
+                return Ok(code);
+            }
+        }
+    }
     let mut prepared =
         prepare_child_cargo(&setup, &normalized, cache_enabled, &mut profile).await?;
+    if canonical_unify {
+        prepared
+            .command
+            .env("CARGO_RESOLVER_FEATURE_UNIFICATION", "workspace");
+    }
     let mut session = FrontDoorBuildSession::begin(&mut prepared, &mut profile)?;
     // Everything above is pure soldr overhead the user pays before Cargo
     // starts. Emit the breakdown here so the total excludes Cargo itself.

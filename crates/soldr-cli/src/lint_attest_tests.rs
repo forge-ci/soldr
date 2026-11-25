@@ -113,7 +113,7 @@ checks = [{ step = "clippy", targets = "cross", id = "a/{target}" }, { step = "t
     );
     assert_eq!(
         a.digest,
-        hex::encode(Sha256::digest(serde_json::to_vec(&a.checks).unwrap()))
+        Sha256Hasher::digest(serde_json::to_vec(&a.checks).unwrap()).to_hex()
     );
 }
 

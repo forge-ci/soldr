@@ -2,7 +2,7 @@
 //!
 //! Extracted from `fetch/mod.rs` during the >1k-LOC refactor.
 
-use sha2::Digest;
+use kernal_api::hash::Sha256Hasher;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -205,10 +205,10 @@ async fn download_and_extract_with_pin_inner(
         ArchiveSource::VerifiedFile { asset_name, path } => {
             let mut file = tempfile::NamedTempFile::new_in(soldr_core::core::ensure_temp_root())?;
             let mut input = std::fs::File::open(path)?;
-            let mut hasher = sha2::Sha256::new();
+            let mut hasher = Sha256Hasher::new();
             let bytes = copy_and_hash(&mut input, &mut file, &mut hasher)?;
             file.flush()?;
-            let digest = hex::encode(hasher.finalize());
+            let digest = hasher.finalize().to_hex();
             (
                 asset_name,
                 super::stream_download::DownloadedAsset {
@@ -391,7 +391,7 @@ pub(super) fn promote_staged_tool_dir(
 fn copy_and_hash<W: Write>(
     input: &mut std::fs::File,
     output: &mut W,
-    hasher: &mut sha2::Sha256,
+    hasher: &mut Sha256Hasher,
 ) -> Result<u64, SoldrError> {
     use std::io::Read;
     let mut total = 0u64;
@@ -647,7 +647,7 @@ mod tests {
         std::fs::write(&fixture, b"fixture tool payload").unwrap();
         // Pin the fixture so the test never reads the process-global
         // SOLDR_TRUST_MODE / SOLDR_CHECKSUMS_FILE that other tests mutate.
-        let fixture_sha = hex::encode(sha2::Sha256::digest(b"fixture tool payload"));
+        let fixture_sha = Sha256Hasher::digest(b"fixture tool payload").to_hex();
         let target = TargetTriple::host().expect("host triple");
         for round in 0..40 {
             let root = tempfile::tempdir().expect("tempdir");

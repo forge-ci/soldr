@@ -11,7 +11,7 @@ use crate::{
     REAL_TOOLCHAIN_BINARY_ENV_PREFIX, TEST_CARGO_BIN_ENV_VAR, TEST_RUSTC_BIN_ENV_VAR,
     TEST_RUSTUP_BIN_ENV_VAR,
 };
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -126,11 +126,11 @@ impl ToolchainBinCacheScope {
     }
 
     fn stable_key(&self) -> String {
-        let mut hasher = Sha256::new();
+        let mut hasher = Sha256Hasher::new();
         hasher.update(self.rustup_home.to_string_lossy().as_bytes());
         hasher.update([0]);
         hasher.update(self.host_triple.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hasher.finalize().to_hex()
     }
 }
 

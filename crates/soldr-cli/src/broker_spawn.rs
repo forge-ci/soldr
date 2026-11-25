@@ -174,7 +174,12 @@ pub(crate) fn front_door_command_shape(raw_args: &[String]) -> bool {
     // Don't spawn a broker to service a direct `soldr broker ...`
     // invocation -- that command IS the broker; spawning another one to
     // watch it start would just race its own singleton bind pointlessly.
-    if matches!(first_positional.as_str(), "broker" | "replay-nextest") {
+    // Lint can delegate the whole operation. Local lint starts the broker
+    // through its Cargo child when a local step actually needs it.
+    if matches!(
+        first_positional.as_str(),
+        "broker" | "replay-nextest" | "lint"
+    ) {
         return false;
     }
     true

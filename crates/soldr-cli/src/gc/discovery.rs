@@ -8,7 +8,7 @@
 //! filled. This module bridges the `gc target` walker (issue #574) into
 //! the registry-shaped scan the reclaimer already speaks.
 
-use super::{daemon_registry_rows, daemon_remove_registry_rows, target_walker};
+use super::{daemon_registry_rows, target_walker};
 use crate::core::{SoldrError, SoldrPaths};
 
 /// Depth the auto-GC discovery walk uses, matching `gc target`'s own
@@ -82,10 +82,12 @@ pub(super) fn daemon_gc_scan_with_rows(
     options: &crate::cache_lib::gc::GcOptions,
     extra_rows: Vec<crate::cache_lib::target_registry::TargetRow>,
 ) -> Result<crate::cache_lib::gc::GcReport, SoldrError> {
-    let rows = daemon_registry_rows(paths)?;
-    let (live, missing): (Vec<_>, Vec<_>) = rows.into_iter().partition(|row| row.path.exists());
-    let dropped_missing =
-        daemon_remove_registry_rows(paths, missing.into_iter().map(|row| row.path).collect())?;
+    // Planning runs outside the maintenance lease. Missing rows may be
+    // refreshed by a concurrent build, so this snapshot is read-only.
+    let live: Vec<_> = daemon_registry_rows(paths)?
+        .into_iter()
+        .filter(|row| row.path.exists())
+        .collect();
     let known: std::collections::HashSet<&std::path::Path> =
         live.iter().map(|row| row.path.as_path()).collect();
     let mut all: Vec<crate::cache_lib::target_registry::TargetRow> = extra_rows
@@ -102,8 +104,42 @@ pub(super) fn daemon_gc_scan_with_rows(
     // discovered target be deleted ahead of a long-cold registered one
     // just because of which list it came from.
     all.sort_by_key(|row| row.last_used);
-    crate::cache_lib::gc::scan_daemon_snapshot(all, dropped_missing, options)
+    crate::cache_lib::gc::scan_daemon_snapshot(all, 0, options)
         .map_err(|error| SoldrError::Other(format!("gc scan failed: {error}")))
+}
+
+pub(super) fn target_still_cold(
+    target: &std::path::Path,
+    options: &crate::cache_lib::gc::GcOptions,
+    rows: impl FnOnce() -> Result<
+        Vec<crate::cache_lib::target_registry::TargetRow>,
+        crate::core::SoldrError,
+    >,
+) -> bool {
+    use crate::cache_lib::target_registry::{
+        current_unix_seconds, evaluate_safety_guards, workspace_root_for_target, GuardOutcome,
+    };
+
+    let (Ok(rows), Ok(now)) = (rows(), current_unix_seconds()) else {
+        return false;
+    };
+    let last_used = rows
+        .iter()
+        .find(|row| row.path == target)
+        .map_or(0, |row| row.last_used);
+    let age = crate::cache_lib::gc::effective_age_seconds(target, last_used, now);
+    age >= 0
+        && age as u64 >= options.older_than_seconds
+        && matches!(
+            evaluate_safety_guards(
+                target,
+                &workspace_root_for_target(target),
+                &options.dev_roots,
+                options.older_than_seconds,
+                now,
+            ),
+            GuardOutcome::Eligible,
+        )
 }
 
 #[cfg(test)]

@@ -575,7 +575,7 @@ pub fn project_pins_rust_lld_for_msvc(cwd: &Path) -> bool {
 /// it intentionally only fires for the windows-msvc case — that is
 /// the only place rust-lld needs `LIB` injection.
 pub fn config_pins_rust_lld(toml_str: &str) -> bool {
-    let value: toml::Value = match toml_str.parse() {
+    let value: toml::Value = match toml::from_str(toml_str) {
         Ok(v) => v,
         Err(_) => return false,
     };

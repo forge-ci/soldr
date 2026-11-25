@@ -243,17 +243,78 @@
 //! outer loop still only re-runs the same number of times it always did,
 //! for the same terminal reasons it always did.
 
+pub(crate) mod forge_http;
+mod forge_pairing;
+pub use forge_pairing::ForgePairingClient;
+
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::core::SoldrError;
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 
 pub(crate) const ASSET_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const ASSET_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const CONTROL_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
+/// Bounded JSON control requests to the Forge peer authorization service.
+#[derive(Clone)]
+pub struct ForgeSignalClient(reqwest::Client);
+
+impl ForgeSignalClient {
+    /// First-party relay and GitHub device authorization origin.
+    pub const ORIGIN: &str = "https://signal.forge-ci.com";
+
+    /// Construct a client pinned to the Forge origin, with no redirects.
+    pub fn new() -> std::io::Result<Self> {
+        super::net_guard::ensure_network_allowed("Forge remote peer authorization")
+            .map_err(std::io::Error::other)?;
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(12))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map(Self)
+            .map_err(std::io::Error::other)
+    }
+
+    /// Exchange typed JSON for a single authorization operation.
+    pub async fn post<Request: serde::Serialize, Response: serde::de::DeserializeOwned>(
+        &self,
+        operation: &str,
+        request: &Request,
+    ) -> std::io::Result<Response> {
+        if !matches!(operation, "start" | "poll" | "check") {
+            return Err(std::io::Error::other(
+                "invalid Forge authorization operation",
+            ));
+        }
+        let mut response = self
+            .0
+            .post(format!("{}/v1/remote/{operation}", Self::ORIGIN))
+            .json(request)
+            .send()
+            .await
+            .map_err(std::io::Error::other)?;
+        if !response.status().is_success() {
+            return Err(std::io::Error::other(format!(
+                "Forge peer authorization {operation}: HTTP {}",
+                response.status()
+            )));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(std::io::Error::other)? {
+            if bytes.len() + chunk.len() > 4096 {
+                return Err(std::io::Error::other(
+                    "Forge authorization response too large",
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes).map_err(std::io::Error::other)
+    }
+}
+
 /// Catalogue and asset redirects are bounded independently of reqwest's
 /// changing default.  Reqwest strips sensitive headers on cross-origin hops.
 pub(crate) const MAX_REDIRECT_HOPS: usize = 5;
@@ -344,6 +405,36 @@ pub(crate) fn asset_http_client_with_protocol(
     builder
         .build()
         .map_err(|error| SoldrError::Network(error.to_string()))
+}
+
+/// Keep credentials on the configured worker or control-plane origin.
+fn forge_http_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+}
+
+async fn send_forge_request(
+    request: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, reqwest::Error> {
+    request.send().await
+}
+
+async fn read_forge_body(
+    mut response: reqwest::Response,
+    limit: usize,
+    size_error: &str,
+    map_error: impl Fn(reqwest::Error) -> std::io::Error,
+) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(&map_error)? {
+        if chunk.len() > limit - bytes.len() {
+            return Err(std::io::Error::other(size_error.to_owned()));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 /// Build a GET request through the fetch boundary.
@@ -630,7 +721,7 @@ async fn stream_response_to_temp_file_inner_direct(
     permit.mark_streaming();
 
     let mut file = tempfile::NamedTempFile::new_in(soldr_core::core::ensure_temp_root())?;
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     let mut bytes = 0_u64;
     let started = tokio::time::Instant::now();
 
@@ -665,7 +756,7 @@ async fn stream_response_to_temp_file_inner_direct(
 
     Ok(DownloadedAsset {
         file,
-        sha256: hex::encode(hasher.finalize()),
+        sha256: hasher.finalize().to_hex(),
         bytes,
     })
 }

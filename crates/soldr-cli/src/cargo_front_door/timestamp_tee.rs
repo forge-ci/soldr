@@ -117,7 +117,7 @@ enum LineHead {
 
 /// Visible text of `head` with ANSI CSI escapes removed, or `None` when
 /// the head ends inside an escape.
-fn visible_text(head: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn visible_text(head: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(head.len());
     let mut i = 0;
     while i < head.len() {
