@@ -178,7 +178,7 @@ pub(crate) fn front_door_command_shape(raw_args: &[String]) -> bool {
     // through its Cargo child when a local step actually needs it.
     if matches!(
         first_positional.as_str(),
-        "broker" | "replay-nextest" | "lint"
+        "broker" | "replay-nextest" | "lint" | "attestation"
     ) {
         return false;
     }

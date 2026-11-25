@@ -51,6 +51,20 @@ pub(super) enum Action {
 }
 
 impl Action {
+    pub(super) fn stats_name(self) -> &'static str {
+        match self {
+            Self::Build => "build",
+            Self::Test => "test",
+            Self::Dylint => "dylint",
+            Self::Lint => "lint",
+            Self::CargoBuild => "cargo-build",
+            Self::CargoCheck => "cargo-check",
+            Self::CargoClippy => "cargo-clippy",
+            Self::CargoTestCompile => "cargo-test-compile",
+            Self::CargoTestRuntime => "cargo-test-runtime",
+        }
+    }
+
     pub(super) fn worker_command(self, args: &mut Vec<String>) -> &'static str {
         let cargo_verb = match self {
             Self::Build => return "build",

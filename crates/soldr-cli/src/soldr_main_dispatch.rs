@@ -55,6 +55,9 @@ async fn dispatch_build_command(
         Commands::Remote(args) => {
             exit_with(crate::remote_build::run(args).await.map_err(Into::into))
         }
+        Commands::Attestation { command } => {
+            exit_with(crate::attestation_stats::run(command).await.map_err(Into::into))
+        }
         Commands::Build { args } => {
             run_blessed_build(args, cache_enabled, trust_inherited_soldr_env).await
         }
@@ -206,6 +209,7 @@ async fn dispatch_state_command(command: Commands, flags: DispatchFlags) -> Resu
         // Listed rather than `_` so a new command still fails to compile until
         // it is routed to a family.
         Commands::Build { .. }
+        | Commands::Attestation { .. }
         | Commands::Remote(_)
         | Commands::Pair
         | Commands::Blaze { .. }

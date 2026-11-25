@@ -325,6 +325,11 @@ pub(crate) use crate::builtin_verbs::{
 
 #[derive(clap::Subcommand)]
 pub(crate) enum Commands {
+    /// Serve remote build attestation statistics.
+    Attestation {
+        #[command(subcommand)]
+        command: crate::attestation_stats::AttestationCommand,
+    },
     /// Run whole-workspace builds on a remote runner.
     Remote(crate::remote_build::RemoteArgs),
     /// Pair Soldr with your Forge CI account.

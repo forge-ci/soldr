@@ -456,6 +456,7 @@ pub use soldr_core::{
 pub use soldr_daemon::{daemon, zccache_embedded};
 pub use soldr_fetch::fetch;
 
+mod attestation_stats;
 mod forge_sign_in;
 mod pair_cmd;
 mod remote_build;

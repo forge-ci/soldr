@@ -194,6 +194,9 @@ Run `soldr build` from your repository as usual. When Forge CI has a compatible
 worker, Soldr sends the build there and prints the path to the returned
 attestation. If a worker is unavailable, Soldr builds locally.
 
+See [Forge CI attestation statistics](docs/FORGE_ATTESTATION_STATS.md) for build
+timing fields and the standalone statistics service.
+
 ## GitHub Actions setup
 
 The current GitHub Actions entry point is the public `setup-soldr` action:

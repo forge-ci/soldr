@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Path as RoutePath, Query, State};
@@ -14,6 +15,7 @@ use cap_std::{ambient_authority, fs::Dir};
 use globset::{GlobBuilder, GlobSetBuilder};
 use prost::Message;
 
+use crate::attestation_stats::{outbox, WorkerTimer};
 use crate::platform::{fs::permissions, wait};
 
 use super::access::SessionAccess;
@@ -35,6 +37,7 @@ pub(super) async fn serve(
     fs::create_dir_all(root.join("blobs"))?;
     fs::create_dir_all(root.join("sessions"))?;
     retention::prepare(&root)?;
+    outbox::start(&root);
     retention::maintain(root.canonicalize()?);
     let router = Router::new()
         .route("/v1/{*operation}", post(handle))
@@ -446,44 +449,30 @@ fn run(
     sink: Option<std::sync::Arc<control::Sink>>,
     archive: &retention::OutputDirectory,
 ) -> io::Result<ResultFrame> {
-    let request = Start::decode(fs::read(session.join("start.pb"))?.as_slice())?;
-    let _runner_lock = lock_session(root, session, &request)?;
-    let cache_root = root.join("compiler");
-    let cache_dir = crate::core::SoldrPaths::with_root(cache_root.clone()).cache;
-    let manifest = manifest::decode(request.manifest_json.as_deref(), &request.commit)?;
-    let lease = manifest
-        .as_ref()
-        .filter(|_| slot_limit != Some(0))
-        .map(|manifest| slots::Lease::acquire(root, id, manifest, slot_limit))
-        .transpose()?;
-    let workspace = lease
-        .as_ref()
-        .map_or(session, |lease| lease.workspace.as_path());
+    let mut timer = WorkerTimer::start();
     let output = &archive.path().join("output");
-    let (source, build_output) =
-        prepare_sources(root, session, workspace, output, &request, lease.is_some())?;
-    let changes = lease
-        .as_ref()
-        .map(|lease| slots::OutputChanges::capture(&lease.workspace, &request))
-        .transpose()?;
-
+    let build = execution::prepare_run(root, session, output, id, slot_limit, &mut timer)?;
+    let request = &build.request;
+    let lease = build.lease;
     let soldr = std::env::current_exe()?;
     let transcript = Transcript::new(parent(output)?, sink)?;
+    timer.command_started();
     let (result, action, full_lint) = execution::execute_action(
         &soldr,
-        &cache_root,
-        &source,
-        &build_output,
-        &request,
+        &build.cache_root,
+        &build.source,
+        &build.build_output,
+        request,
         &transcript,
         &session.join("test-runtime"),
     )?;
+    timer.command_finished();
     let exit_code = result.status.code().unwrap_or(1);
     let mut stderr = result.stderr;
     let stderr_before_postprocessing = stderr.len();
     let run_cook = lease.is_some() && exit_code == 0 && full_lint;
     let mut cook_archive_sha256 = None;
-    if let (Some(lease), Some(changes)) = (&lease, changes) {
+    if let (Some(lease), Some(changes)) = (&lease, build.changes) {
         fs::create_dir(output)?;
         changes.publish(output, exit_code == 0)?;
         cook_archive_sha256 = cook_slot_output(root, lease, &soldr, output, run_cook, &mut stderr);
@@ -491,14 +480,14 @@ fn run(
     let cook_ready = run_cook.then_some(cook_archive_sha256.is_some());
     fs::write(
         output.join("manifest.json"),
-        serde_json::to_vec_pretty(&manifest)?,
+        serde_json::to_vec_pretty(&build.manifest)?,
     )?;
     let cache_saved = request.cache_zstd_level.map(|level| {
         save_cache(
             &soldr,
-            &cache_root,
-            &source,
-            &cache_dir,
+            &build.cache_root,
+            &build.source,
+            &crate::core::SoldrPaths::with_root(build.cache_root.clone()).cache,
             output,
             level,
             &mut stderr,
@@ -508,12 +497,16 @@ fn run(
         (0, Some(false), _) | (0, _, Some(false)) => 1,
         _ => exit_code,
     };
+    let mut timing = timer.finish();
+    let publication_started = Instant::now();
+    let runner_name = sysinfo::System::host_name();
     let attestation = serde_json::to_vec_pretty(&serde_json::json!({
         "schema_version": 1,
         "session": id,
+        "timing": timing,
         "commit": (!request.working_tree).then_some(&request.commit),
         "base_commit": (request.working_tree && !request.commit.is_empty()).then_some(&request.commit),
-        "manifest": manifest,
+        "manifest": build.manifest,
         "slot": lease.as_ref().map(|lease| lease.slot),
         "action": action,
         "args": request.args,
@@ -523,7 +516,7 @@ fn run(
         "cache_saved": cache_saved,
         "cook_ready": cook_ready,
         "cook_archive_sha256": cook_archive_sha256,
-        "runner": sysinfo::System::host_name(),
+        "runner": runner_name,
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
         "source": request.files.iter().map(|file| (&file.path, &file.digest)).collect::<std::collections::BTreeMap<_, _>>(),
@@ -542,6 +535,18 @@ fn run(
         lease.as_ref(),
         stderr_before_postprocessing,
     )?;
+    timing.publication_ms = Some(publication_started.elapsed().as_millis() as u64);
+    drop(lease);
+    drop(build.runner_lock);
+    outbox::record(
+        root,
+        runner_name,
+        id,
+        Action::try_from(request.action).map_or("unknown", Action::stats_name),
+        &request.args,
+        result.exit_code,
+        timing,
+    );
     Ok(result)
 }
 
@@ -835,6 +840,7 @@ fn bounded_postprocessing(
 
 fn runner_soldr(executable: &Path, cache_root: &Path) -> Command {
     let mut command = Command::new(executable);
+    outbox::remove_service_credentials(&mut command);
     command
         .env(soldr_core::self_relocate::SELF_SPAWN_EDGE_ENV_VAR, "1")
         .env("SOLDR_CACHE_DIR", cache_root)

@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
 use super::{
-    download_attestation, find_worker, start_worktree, uses_direct_run, BuildMode, Client,
+    download_attestation, find_worker, finish_client_timing, start_worktree, uses_direct_run,
+    BuildMode, Client,
 };
 use crate::remote_build::{artifacts, control, snapshot, test_runtime_env, wire};
 
@@ -27,6 +28,7 @@ pub(super) async fn try_relay(
     compile: &[String],
     cache_enabled: bool,
 ) -> io::Result<Option<i32>> {
+    let started = Instant::now();
     if [
         "RUSTDOC",
         "RUSTDOCFLAGS",
@@ -59,6 +61,8 @@ pub(super) async fn try_relay(
         result => result?,
     };
     download_attestation(&client, &root, &session.id).await?;
+    let attestation_ms = started.elapsed().as_millis() as u64;
+    finish_client_timing(&root, &session.id, started, attestation_ms, false);
     Ok(Some(code))
 }
 

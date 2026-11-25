@@ -1,9 +1,12 @@
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use serde::Deserialize;
 
-use super::{artifact_executable_path, artifacts, find_worker, receive_build, snapshot};
+use super::{
+    artifact_executable_path, artifacts, find_worker, finish_client_timing, receive_build, snapshot,
+};
 use super::{start_worktree, supported_args, test_runtime, uses_direct_run, BuildMode};
 
 const INVENTORY: &str = "test-executables.json";
@@ -15,6 +18,7 @@ struct TestExecutable {
 }
 
 pub(super) async fn try_test(args: &[String], cache_enabled: bool) -> io::Result<Option<i32>> {
+    let started = Instant::now();
     let separator = args
         .iter()
         .position(|arg| arg == "--")
@@ -83,7 +87,9 @@ pub(super) async fn try_test(args: &[String], cache_enabled: bool) -> io::Result
     };
     eprintln!("Forge CI build session {}", session.id);
     let code = receive_build(&client, &root, &session.id).await?;
+    let attestation_ms = started.elapsed().as_millis() as u64;
     if code != 0 {
+        finish_client_timing(&root, &session.id, started, attestation_ms, false);
         return Ok(Some(code));
     }
 
@@ -93,6 +99,7 @@ pub(super) async fn try_test(args: &[String], cache_enabled: bool) -> io::Result
     let inventory = serde_json::from_slice(&std::fs::read(metadata.join(INVENTORY))?)?;
     let tests = resolve_tests(&root, inventory)?;
     if tests.is_empty() {
+        finish_client_timing(&root, &session.id, started, attestation_ms, true);
         return Ok(Some(0));
     }
     let output = staging.path().join("artifacts");
@@ -101,6 +108,7 @@ pub(super) async fn try_test(args: &[String], cache_enabled: bool) -> io::Result
         .map(|(executable, _)| executable.clone())
         .collect();
     artifacts::download(&client, &session.id, &output, requested).await?;
+    finish_client_timing(&root, &session.id, started, attestation_ms, true);
     run_downloaded_tests(&output, tests, &test_args, no_fail_fast).await
 }
 
@@ -133,6 +141,7 @@ async fn run_on_worker(
     compile: &[String],
     cache_enabled: bool,
 ) -> io::Result<Option<i32>> {
+    let started = Instant::now();
     let mode = BuildMode::CargoTestWorker;
     let Some((client, root, work_dir)) = find_worker(compile, cache_enabled, mode).await? else {
         return Ok(None);
@@ -144,7 +153,10 @@ async fn run_on_worker(
         return Ok(None);
     };
     eprintln!("Forge CI build session {}", session.id);
-    receive_build(&client, &root, &session.id).await.map(Some)
+    let code = receive_build(&client, &root, &session.id).await?;
+    let attestation_ms = started.elapsed().as_millis() as u64;
+    finish_client_timing(&root, &session.id, started, attestation_ms, false);
+    Ok(Some(code))
 }
 
 fn resolve_tests(

@@ -1,8 +1,65 @@
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
+
+use prost::Message;
+
+use crate::attestation_stats::WorkerTimer;
 
 use super::{
-    compile_args, relative_path, runner_soldr, runtime, test_outputs, Action, Start, Transcript,
+    compile_args, lock_session, manifest, prepare_sources, relative_path, runner_soldr, runtime,
+    slots, test_outputs, Action, Start, Transcript,
 };
+
+pub(super) struct PreparedRun {
+    pub(super) request: Start,
+    pub(super) runner_lock: fs::File,
+    pub(super) cache_root: PathBuf,
+    pub(super) manifest: Option<manifest::Manifest>,
+    pub(super) lease: Option<slots::Lease>,
+    pub(super) source: PathBuf,
+    pub(super) build_output: PathBuf,
+    pub(super) changes: Option<slots::OutputChanges>,
+}
+
+pub(super) fn prepare_run(
+    root: &Path,
+    session: &Path,
+    output: &Path,
+    id: &str,
+    slot_limit: Option<u32>,
+    timer: &mut WorkerTimer,
+) -> io::Result<PreparedRun> {
+    let request = Start::decode(fs::read(session.join("start.pb"))?.as_slice())?;
+    let runner_lock = lock_session(root, session, &request)?;
+    timer.locked();
+    let manifest = manifest::decode(request.manifest_json.as_deref(), &request.commit)?;
+    let lease = manifest
+        .as_ref()
+        .filter(|_| slot_limit != Some(0))
+        .map(|manifest| slots::Lease::acquire(root, id, manifest, slot_limit))
+        .transpose()?;
+    let workspace = lease
+        .as_ref()
+        .map_or(session, |lease| lease.workspace.as_path());
+    let (source, build_output) =
+        prepare_sources(root, session, workspace, output, &request, lease.is_some())?;
+    let changes = lease
+        .as_ref()
+        .map(|lease| slots::OutputChanges::capture(&lease.workspace, &request))
+        .transpose()?;
+    Ok(PreparedRun {
+        request,
+        runner_lock,
+        cache_root: root.join("compiler"),
+        manifest,
+        lease,
+        source,
+        build_output,
+        changes,
+    })
+}
 
 pub(super) fn execute_action(
     soldr: &Path,

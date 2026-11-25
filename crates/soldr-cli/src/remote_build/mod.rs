@@ -82,33 +82,7 @@ enum RemoteCommand {
         artifact_streams: u8,
     },
     /// Run a command against a Git checkout on the runner.
-    Run {
-        #[arg(long)]
-        endpoint: Option<SocketAddr>,
-        #[arg(long, default_value = "target/attestation.json")]
-        attestation: PathBuf,
-        /// Build the current worktree, including uncommitted and nonignored files.
-        #[arg(long, conflicts_with = "manifest")]
-        working_tree: bool,
-        /// Optional JSON identifying a repository, user, and commit lineage.
-        #[arg(long)]
-        manifest: Option<PathBuf>,
-        /// Download matching artifacts to this new directory on the same connection.
-        #[arg(long, requires = "fetch")]
-        fetch_out: Option<PathBuf>,
-        /// Session-relative artifact glob to download after the run. Repeat as needed.
-        #[arg(long, requires = "fetch_out")]
-        fetch: Vec<String>,
-        /// Accepted for compatibility. Output always streams.
-        #[arg(long, hide = true)]
-        stream: bool,
-        #[arg(long, allow_negative_numbers = true, value_parser = crate::cache_lib::zstd_level::parse_zstd_level)]
-        cache_zstd_level: Option<i32>,
-        #[arg(value_enum)]
-        action: BuildAction,
-        #[arg(last = true)]
-        args: Vec<String>,
-    },
+    Run(RunArgs),
     /// Fetch matching files from a legacy on-disk session into a new directory.
     Fetch {
         #[arg(long, default_value = "127.0.0.1:7744")]
@@ -127,6 +101,102 @@ enum BuildAction {
     Test,
     Dylint,
     Lint,
+}
+
+#[derive(Args)]
+struct RunArgs {
+    #[arg(long)]
+    endpoint: Option<SocketAddr>,
+    #[arg(long, default_value = "target/attestation.json")]
+    attestation: PathBuf,
+    /// Build the current worktree, including uncommitted and nonignored files.
+    #[arg(long, conflicts_with = "manifest")]
+    working_tree: bool,
+    /// Optional JSON identifying a repository, user, and commit lineage.
+    #[arg(long)]
+    manifest: Option<PathBuf>,
+    /// Download matching artifacts to this new directory on the same connection.
+    #[arg(long, requires = "fetch")]
+    fetch_out: Option<PathBuf>,
+    /// Session-relative artifact glob to download after the run. Repeat as needed.
+    #[arg(long, requires = "fetch_out")]
+    fetch: Vec<String>,
+    /// Accepted for compatibility. Output always streams.
+    #[arg(long = "stream", hide = true)]
+    _stream: bool,
+    #[arg(long, allow_negative_numbers = true, value_parser = crate::cache_lib::zstd_level::parse_zstd_level)]
+    cache_zstd_level: Option<i32>,
+    #[arg(value_enum)]
+    action: BuildAction,
+    #[arg(last = true)]
+    args: Vec<String>,
+}
+
+async fn submit_run(token_file: Option<&std::path::Path>, args: RunArgs) -> io::Result<i32> {
+    let RunArgs {
+        endpoint,
+        attestation,
+        working_tree,
+        manifest,
+        fetch_out,
+        fetch,
+        _stream: _,
+        cache_zstd_level,
+        action,
+        args,
+    } = args;
+    let started = std::time::Instant::now();
+    let directory = std::env::current_dir()?;
+    let snapshot = if working_tree {
+        snapshot::capture_worktree(&directory)?
+    } else {
+        snapshot::capture(&directory)?
+    };
+    let manifest_json = verified_manifest(&directory, &snapshot.commit, manifest.as_deref())?;
+    let client = connect_for_run(token_file, endpoint).await?;
+    if snapshot.commit.is_empty() {
+        require_unborn_worktree_support(&client).await?;
+    }
+    let action = match action {
+        BuildAction::Build => Action::Build,
+        BuildAction::Test => Action::Test,
+        BuildAction::Dylint => Action::Dylint,
+        BuildAction::Lint => Action::Lint,
+    };
+    let session = client
+        .start_session(
+            Start {
+                commit: snapshot.commit,
+                files: snapshot.files,
+                action: action as i32,
+                args,
+                cache_zstd_level,
+                manifest_json,
+                working_tree,
+                work_dir: None,
+            },
+            snapshot.blobs,
+        )
+        .await?;
+    eprintln!("Remote build session {}", session.id);
+    let code = match client.finish_run(&session.id, &attestation).await {
+        // A diagnostic could write to the same blocked pipe.
+        Err(error) if control::terminal_blocked(&error) => return Ok(1),
+        result => result?,
+    };
+    let attestation_ms = started.elapsed().as_millis() as u64;
+    let downloaded = fetch_out.is_some();
+    if let Some(out) = fetch_out {
+        artifacts::download(&client, &session.id, &out, fetch).await?;
+    }
+    crate::attestation_stats::write_explicit_client_receipt(
+        &attestation,
+        &session.id,
+        started,
+        attestation_ms,
+        downloaded,
+    );
+    Ok(code)
 }
 
 pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
@@ -162,62 +232,7 @@ pub(crate) async fn run(args: RemoteArgs) -> io::Result<i32> {
             let auth = server_auth(forge_key_file.as_deref(), token_file.as_deref())?;
             serve(listen, root, auth, slots, artifact_streams, peer_key).await
         }
-        RemoteCommand::Run {
-            endpoint,
-            attestation,
-            working_tree,
-            manifest,
-            fetch_out,
-            fetch,
-            stream: _,
-            cache_zstd_level,
-            action,
-            args,
-        } => {
-            let directory = std::env::current_dir()?;
-            let snapshot = if working_tree {
-                snapshot::capture_worktree(&directory)?
-            } else {
-                snapshot::capture(&directory)?
-            };
-            let manifest_json =
-                verified_manifest(&directory, &snapshot.commit, manifest.as_deref())?;
-            let client = connect_for_run(token_file.as_deref(), endpoint).await?;
-            if snapshot.commit.is_empty() {
-                require_unborn_worktree_support(&client).await?;
-            }
-            let action = match action {
-                BuildAction::Build => Action::Build,
-                BuildAction::Test => Action::Test,
-                BuildAction::Dylint => Action::Dylint,
-                BuildAction::Lint => Action::Lint,
-            };
-            let session = client
-                .start_session(
-                    Start {
-                        commit: snapshot.commit,
-                        files: snapshot.files,
-                        action: action as i32,
-                        args,
-                        cache_zstd_level,
-                        manifest_json,
-                        working_tree,
-                        work_dir: None,
-                    },
-                    snapshot.blobs,
-                )
-                .await?;
-            eprintln!("Remote build session {}", session.id);
-            let code = match client.finish_run(&session.id, &attestation).await {
-                // A diagnostic could write to the same blocked pipe.
-                Err(error) if control::terminal_blocked(&error) => return Ok(1),
-                result => result?,
-            };
-            if let Some(out) = fetch_out {
-                artifacts::download(&client, &session.id, &out, fetch).await?;
-            }
-            Ok(code)
-        }
+        RemoteCommand::Run(args) => submit_run(token_file.as_deref(), args).await,
         RemoteCommand::Fetch {
             endpoint,
             out,
@@ -480,7 +495,7 @@ mod tests {
                 panic!("expected remote command");
             };
             assert_eq!(args.token_file.is_some(), !prefix.is_empty());
-            assert!(matches!(args.command, RemoteCommand::Run { .. }));
+            assert!(matches!(args.command, RemoteCommand::Run(_)));
         }
     }
 }
