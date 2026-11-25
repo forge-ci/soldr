@@ -1,16 +1,69 @@
 //! Maintenance activity follows the worker, including detached blocking work.
 
 use crate::cache_lib::build_active::MaintenanceLease;
+use crate::core::SoldrPaths;
 use crate::platform::sync::Mutex;
 use std::future::Future;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use super::{atomic_write, store_marker_dir, unix_millis, FULL_INTERVAL};
 
 #[derive(Clone, Default)]
 pub struct MaintenanceActivity {
     workers: Arc<AtomicUsize>,
     blocking: Arc<BlockingWorker>,
+}
+
+pub(super) async fn acquire_after_store_pass(
+    paths: &SoldrPaths,
+    store: impl Future<Output = ()>,
+) -> io::Result<Option<MaintenanceLease>> {
+    let Some(probe) = MaintenanceLease::try_acquire(paths)? else {
+        return Ok(None);
+    };
+    // The embedded store serializes its own writes and evictions. Recheck
+    // the lease after that pass, before touching the build's local files.
+    drop(probe);
+    store.await;
+    MaintenanceLease::try_acquire(paths)
+}
+
+/// Keep the full store scan on its own schedule if a build defers local cleanup.
+pub(super) fn claim_full_store_attempt(paths: &SoldrPaths, now: SystemTime) -> bool {
+    if recent_full_store_attempt(paths, now).is_some() {
+        return false;
+    }
+    record_full_store_attempt(paths, now, false);
+    true
+}
+
+fn recent_full_store_attempt(paths: &SoldrPaths, now: SystemTime) -> Option<bool> {
+    let marker = store_marker_dir(paths).join("last-full-store-attempt-v1");
+    let body = std::fs::read_to_string(marker).ok()?;
+    let (millis, completed) = body.trim().split_once(' ')?;
+    let last = UNIX_EPOCH + Duration::from_millis(millis.parse().ok()?);
+    if now.duration_since(last).ok()? >= FULL_INTERVAL {
+        return None;
+    }
+    completed.parse().ok()
+}
+
+pub(super) fn full_store_pass_completed(paths: &SoldrPaths, now: SystemTime) -> bool {
+    recent_full_store_attempt(paths, now) == Some(true)
+}
+
+pub(super) fn record_full_store_attempt(paths: &SoldrPaths, now: SystemTime, completed: bool) {
+    let dir = store_marker_dir(paths);
+    let marker = dir.join("last-full-store-attempt-v1");
+    let body = format!("{} {completed}\n", unix_millis(now));
+    if let Err(error) =
+        std::fs::create_dir_all(dir).and_then(|()| atomic_write(&marker, body.as_bytes()))
+    {
+        tracing::warn!(%error, "could not record full embedded store maintenance attempt");
+    }
 }
 
 impl MaintenanceActivity {
@@ -122,7 +175,53 @@ impl Drop for ActivityToken {
 mod tests {
     use super::*;
     use crate::cache_lib::build_active::BuildRootLease;
-    use crate::core::SoldrPaths;
+
+    #[tokio::test]
+    async fn store_pass_leaves_the_maintenance_lease_available() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = SoldrPaths::with_root(temp.path().to_path_buf());
+        let acquired = acquire_after_store_pass(&paths, async {
+            assert!(MaintenanceLease::try_acquire(&paths).unwrap().is_some());
+        })
+        .await
+        .unwrap();
+        assert!(acquired.is_some());
+        assert!(MaintenanceLease::try_acquire(&paths).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn local_sweep_defers_to_a_build_started_during_the_store_pass() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = SoldrPaths::with_root(temp.path().to_path_buf());
+        let mut build = None;
+        let acquired = acquire_after_store_pass(&paths, async {
+            build = Some(BuildRootLease::acquire(&paths).unwrap());
+        })
+        .await
+        .unwrap();
+        assert!(build.is_some());
+        assert!(acquired.is_none());
+    }
+
+    #[test]
+    fn the_full_store_backoff_is_independent_of_local_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = SoldrPaths::with_root(temp.path().to_path_buf());
+        let now = SystemTime::now();
+        assert!(claim_full_store_attempt(&paths, now));
+        assert!(!full_store_pass_completed(&paths, now));
+        assert!(!claim_full_store_attempt(
+            &paths,
+            now + Duration::from_secs(300)
+        ));
+        record_full_store_attempt(&paths, now, true);
+        assert!(full_store_pass_completed(
+            &paths,
+            now + Duration::from_secs(300)
+        ));
+        assert!(claim_full_store_attempt(&paths, now + FULL_INTERVAL));
+        assert!(!full_store_pass_completed(&paths, now + FULL_INTERVAL));
+    }
 
     #[tokio::test]
     async fn cancelled_awaiter_keeps_worker_busy_and_root_exclusive() {

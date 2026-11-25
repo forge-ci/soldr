@@ -166,10 +166,9 @@ pub async fn run_loop(context: MaintenanceContext) {
     run_loop_inner(&paths, shutdown, PRESSURE_INTERVAL, |kind, now| {
         let context = &context;
         async move {
-            let outcome = run_once_with_lease_state(context, kind, now).await;
+            let outcome = run_once_with_lease_state(context, kind, now, true).await;
             let status = outcome.status;
-            let succeeded = status.successful_at_ms.is_some();
-            if succeeded && kind == MaintenanceKind::Full {
+            if kind == MaintenanceKind::Full && status.last_full_at_ms == Some(unix_millis(now)) {
                 let _ = record_last_full(&context.paths, now);
             }
             let _ = persist_status(&context.paths, status);
@@ -250,7 +249,9 @@ pub async fn run_once(
     kind: MaintenanceKind,
     now: SystemTime,
 ) -> MaintenanceStatus {
-    run_once_with_lease_state(context, kind, now).await.status
+    run_once_with_lease_state(context, kind, now, false)
+        .await
+        .status
 }
 
 struct RunOnceOutcome {
@@ -278,6 +279,7 @@ async fn run_once_with_lease_state(
     context: &MaintenanceContext,
     kind: MaintenanceKind,
     now: SystemTime,
+    scheduled: bool,
 ) -> RunOnceOutcome {
     let _activity = context.activity.enter();
     let mut status = MaintenanceStatus::new(context, kind, now);
@@ -286,53 +288,53 @@ async fn run_once_with_lease_state(
         .as_ref()
         .map_or(0, |previous| previous.consecutive_full_deferrals);
     status.consecutive_full_deferrals = previous_deferrals;
-    // Measured before any sweep, so the report shows what the pass found.
     retired_status::measure_retired(context, &mut status);
-    let maintenance_lease =
-        match crate::cache_lib::build_active::MaintenanceLease::try_acquire(&context.paths) {
-            Ok(None) => {
-                // The build defers soldr's own destructive collectors, which
-                // need the exclusive root lease. The store pass does not
-                // (soldr#3251): on a host that is always building, deferring it
-                // too meant it never ran.
-                status.deferred_reason = Some("build_active".to_string());
-                let mut escape = false;
-                if kind == MaintenanceKind::Full {
-                    status.consecutive_full_deferrals = previous_deferrals.saturating_add(1);
-                    // soldr#3329: a continuously building host would defer the
-                    // full pass forever. At the threshold, run the build-safe
-                    // part unconditionally: the store pass and the retired-store
-                    // sweep, which proves death by the writer lock and removes
-                    // only nlink==1 files (#3365). The counter restarts so the
-                    // escape recurs once per threshold, not on every tick.
-                    if status.consecutive_full_deferrals >= FULL_STARVATION_DEFERRALS {
-                        escape = true;
-                        status.consecutive_full_deferrals = 0;
-                        status.deferred_reason = Some("build_active_starvation_escape".to_string());
-                    }
+    let acquire = activity::acquire_after_store_pass(&context.paths, async {
+        let full = kind == MaintenanceKind::Full
+            && (!scheduled || activity::claim_full_store_attempt(&context.paths, now));
+        measure_store(context, full, now, &mut status).await;
+        if scheduled && full && status.zccache_error.is_none() {
+            activity::record_full_store_attempt(&context.paths, now, true);
+        }
+    })
+    .await;
+    let maintenance_lease = match acquire {
+        Ok(None) => {
+            // Builds defer destructive collectors, but the store coordinates
+            // with builds independently (soldr#3251).
+            status.deferred_reason = Some("build_active".to_string());
+            let mut escape = false;
+            if kind == MaintenanceKind::Full {
+                status.consecutive_full_deferrals = previous_deferrals.saturating_add(1);
+                // Run the build-safe store and retired-store sweeps once per
+                // threshold on continuously building hosts (soldr#3329).
+                if status.consecutive_full_deferrals >= FULL_STARVATION_DEFERRALS {
+                    escape = true;
+                    status.consecutive_full_deferrals = 0;
+                    status.deferred_reason = Some("build_active_starvation_escape".to_string());
                 }
-                if escape || store_pass_due(previous.as_ref(), now) {
-                    run_store_pass(context, kind, now, &mut status).await;
-                }
-                return RunOnceOutcome {
-                    status,
-                    lease_acquired: false,
-                };
             }
-            Err(error) => {
-                status.deferred_reason = Some(format!("build_lease_probe_failed: {error}"));
-                return RunOnceOutcome {
-                    status,
-                    lease_acquired: false,
-                };
+            if escape || store_pass_due(previous.as_ref(), now) {
+                run_store_pass(context, kind, now, &mut status).await;
             }
-            Ok(Some(lease)) => lease,
-        };
+            return RunOnceOutcome {
+                status,
+                lease_acquired: false,
+            };
+        }
+        Err(error) => {
+            status.deferred_reason = Some(format!("build_lease_probe_failed: {error}"));
+            return RunOnceOutcome {
+                status,
+                lease_acquired: false,
+            };
+        }
+        Ok(Some(lease)) => lease,
+    };
     if kind == MaintenanceKind::Full {
         status.consecutive_full_deferrals = 0;
     }
 
-    measure_store(context, kind == MaintenanceKind::Full, now, &mut status).await;
     let zccache_pressure = status
         .zccache
         .as_ref()
@@ -364,7 +366,9 @@ async fn run_once_with_lease_state(
             status.legacy_zccache = local.legacy_zccache;
             if local_components_succeeded(&status) {
                 status.successful_at_ms = Some(unix_millis(now));
-                if kind == MaintenanceKind::Full {
+                if kind == MaintenanceKind::Full
+                    && (!scheduled || activity::full_store_pass_completed(&context.paths, now))
+                {
                     status.last_full_at_ms = Some(unix_millis(now));
                 }
             } else {
@@ -524,9 +528,9 @@ async fn run_store_pass(
     now: SystemTime,
     status: &mut MaintenanceStatus,
 ) {
-    // A pressure pass, never a full one: the full pass and its marker stay with
-    // the lease-held pass, so a deferred full pass remains due.
-    measure_store(context, false, now, status).await;
+    if status.zccache_measured_at_ms.is_none() && status.zccache_error.is_none() {
+        measure_store(context, false, now, status).await;
+    }
     let paths = context.paths.clone();
     let legacy = context
         .activity
