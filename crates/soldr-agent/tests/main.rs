@@ -12,9 +12,7 @@ use tokio_tungstenite::tungstenite::Message;
 fn fixture(name: &str) -> Value {
     serde_json::from_str(
         &std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/signal-proto")
-                .join(format!("{name}.json")),
+            Path::new("tests/fixtures/signal-proto").join(format!("{name}.json")),
         )
         .unwrap(),
     )
@@ -61,15 +59,13 @@ fn every_protocol_fixture_roundtrips() {
         assert_eq!(close.reason.as_str(), fixture(name)["reason"]);
     }
     roundtrip::<SignatureVector>("signing-vector");
-    let names = std::fs::read_dir(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/signal-proto"),
-    )
-    .unwrap()
-    .filter_map(|e| {
-        let p = e.unwrap().path();
-        (p.extension().is_some_and(|s| s == "json")).then_some(p)
-    })
-    .count();
+    let names = std::fs::read_dir(Path::new("tests/fixtures/signal-proto"))
+        .unwrap()
+        .filter_map(|e| {
+            let p = e.unwrap().path();
+            (p.extension().is_some_and(|s| s == "json")).then_some(p)
+        })
+        .count();
     assert_eq!(
         names, 11,
         "add every newly copied fixture to this conformance test"

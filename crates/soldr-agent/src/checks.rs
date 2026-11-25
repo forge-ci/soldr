@@ -5,10 +5,7 @@ use crate::{
     proto::{Check, Dist, Load},
     Result,
 };
-use soldr_platform::{
-    fs::volume,
-    process::{command, terminate},
-};
+use soldr_platform::{fs::volume, process::terminate};
 use std::{
     io::{Read, Seek, SeekFrom},
     process::{Child, Command, Stdio},
@@ -38,11 +35,7 @@ pub async fn probe(program: &str, args: &[String]) -> Result<Probe> {
         .stdin(Stdio::null())
         .stdout(stdout.try_clone()?)
         .stderr(stderr.try_clone()?);
-    command::configure_process_group(&mut cmd);
-    let child = {
-        let _spawn = soldr_platform::process::spawn_exclusion::spawn_shared();
-        cmd.spawn()?
-    };
+    let child = soldr_platform::wait::spawn_owned(&mut cmd)?;
     let mut group = ProcessGroup(child);
     let wait = async {
         loop {
