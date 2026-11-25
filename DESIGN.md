@@ -163,6 +163,16 @@ embedded host-admission classifier. Soldr must not put another general compiler
 gate around `ZccacheService::compile`, because that would move admission ahead
 of hit/miss knowledge and recreate two schedulers with different predicates.
 
+**One shipped executable (argv[0] multicall).** Every shipped executable file
+is the same `soldr` image, either the binary itself or a hardlink, symlink, or
+copied alias dispatched by `crates/soldr-cli/src/multicall.rs`. Aliases may be
+created at staging, install, or runtime. New functionality is a library plus a
+`soldr` subcommand, with an argv[0] identity when a distinct process name is
+needed, never a separate shipped binary target/package. The repository-wide
+`crates/soldr-cli/tests/guards/multicall_bin_layout.rs` guard enforces this layout;
+see `CLAUDE.md` "Key Design Rules" for named non-shipped exceptions, fixture
+exclusions, and the owner-approval requirement for new exceptions.
+
 Compiler shims are named `rustc`, `clippy-driver`, or `zccache-soldr`, but a
 long-lived daemon process must never inherit one of those executable
 identities. The Cargo front door passes a canonical `soldr-daemon` multicall
