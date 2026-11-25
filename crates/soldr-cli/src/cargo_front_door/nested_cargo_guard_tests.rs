@@ -463,3 +463,68 @@ fn the_child_walk_tracks_starts_exits_and_skips_compiler_and_soldr_subtrees() {
     assert!(!tree.nodes.contains_key(&300));
     assert_eq!(tree.assess(300, &no_cwd), Assessment::NotCandidate);
 }
+
+/// soldr#4198: a tick walks `/proc`, reads argv and working directories, and
+/// none of that may run under the state lock -- the lock is a critical
+/// section whose watchdog aborts the process when a hold passes 15 s, and on
+/// a loaded host the inspection alone took longer. Every probe here asserts
+/// the lock is free when it is called; `try_lock` on the same thread fails
+/// if the tick still holds it, so the check is deterministic, not timed.
+#[test]
+fn a_tick_runs_every_host_probe_with_the_state_lock_released() {
+    let audit = tempfile::tempdir().expect("audit dir");
+    let guard = NestedCargoGuard::new(GuardMode::Enforce, true, Some(audit.path().to_path_buf()));
+    guard.bind_root(ROOT);
+    let calls = std::cell::RefCell::new(Vec::<&'static str>::new());
+    let lock_free = |probe: &'static str| {
+        assert!(
+            guard.state.try_lock().is_some(),
+            "{probe} ran while the tick held the state lock"
+        );
+        calls.borrow_mut().push(probe);
+    };
+    let children: HashMap<u32, Vec<u32>> = HashMap::from([(ROOT, vec![200]), (200, vec![300])]);
+    let argvs: HashMap<u32, Vec<String>> = HashMap::from([
+        (200, vec![build_script()]),
+        // A relative --target-dir makes the assessment read the cwd.
+        (
+            300,
+            ["cargo", "build", "--target-dir", "rel"]
+                .map(String::from)
+                .to_vec(),
+        ),
+    ]);
+    let children_of = |pid: u32| {
+        lock_free("child enumeration");
+        children.get(&pid).cloned()
+    };
+    let read = |pid: u32| {
+        lock_free("argv read");
+        argvs.get(&pid).cloned()
+    };
+    let cwd_of = |_: u32| {
+        lock_free("cwd read");
+        None
+    };
+    let probes = Probes {
+        children_of: &children_of,
+        read_argv: &read,
+        cwd_of: &cwd_of,
+    };
+    guard.tick_with(&probes);
+    let calls = calls.into_inner();
+    for probe in ["child enumeration", "argv read", "cwd read"] {
+        assert!(calls.contains(&probe), "{probe} never ran: {calls:?}");
+    }
+    let violation = guard
+        .violation()
+        .expect("the walked hazard trips the guard");
+    assert_eq!(violation.hazard.nested_pid, 300);
+    assert_eq!(violation.hazard.reason, HazardReason::UnresolvableTargetDir);
+    assert_eq!(std::fs::read_dir(audit.path()).expect("dir").count(), 1);
+    // The walked tree was merged back into the shared state.
+    let state = guard.state();
+    let tree = state.tree.as_ref().expect("bound");
+    assert!(tree.nodes.contains_key(&200) && tree.nodes.contains_key(&300));
+    assert!(state.handled.contains(&300));
+}

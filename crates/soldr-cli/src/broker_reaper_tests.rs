@@ -612,3 +612,36 @@ fn a_daemon_that_cannot_take_the_shutdown_request_is_signalled() {
     assert!(!graceful);
     assert_eq!(signalled, Some(4242));
 }
+
+/// soldr#4198: the liveness probe reads `/proc` and must run with the route
+/// table lock released -- that lock is a watchdog-bounded critical section
+/// every route request needs. `try_lock` from inside the probe fails if the
+/// sweep still holds it, so this is deterministic, not timed.
+#[test]
+fn the_sweep_probes_requester_liveness_with_the_table_lock_released() {
+    let start = Instant::now();
+    let owners = Mutex::new(RouteOwnership::new());
+    owners
+        .lock()
+        .record_request("soldr-daemon-a", identified(1, 1), start);
+    owners
+        .lock()
+        .record_request("soldr-daemon-b", identified(2, 1), start);
+    let mut probed = Vec::new();
+    let verdicts = sweep_routes(&owners, start + DEFAULT_GRACE, DEFAULT_GRACE, |k| {
+        assert!(
+            owners.try_lock().is_some(),
+            "liveness probe ran under the route table lock"
+        );
+        probed.push(k);
+        k == key(2, 1)
+    });
+    assert_eq!(probed, vec![key(1, 1), key(2, 1)]);
+    assert_eq!(
+        verdicts,
+        vec![
+            ("soldr-daemon-a".into(), RouteVerdict::Reap),
+            ("soldr-daemon-b".into(), RouteVerdict::Live),
+        ]
+    );
+}

@@ -56,10 +56,17 @@
 
 use crate::platform::sync::Mutex;
 use std::collections::{HashMap, HashSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[path = "nested_cargo_guard_paths.rs"]
+mod paths;
+use paths::canonicalish;
+#[cfg(test)]
+use paths::lexical_normalize;
+use paths::resolve_target_dir;
 
 use super::nested_cargo::{
     bounded_head, classify_cargo_descendant, executable_stem, CargoDescendant, LockingCargo,
@@ -324,7 +331,7 @@ pub(crate) enum Assessment {
 }
 
 /// The observed descendant tree of the front door's Cargo child.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ProcessTree {
     root_pid: u32,
     nodes: HashMap<u32, Node>,
@@ -357,6 +364,26 @@ impl ProcessTree {
 
     pub(crate) fn exited(&mut self, pid: u32) {
         self.nodes.remove(&pid);
+    }
+
+    /// Take the results of a refresh done on a copy of this tree. A walking
+    /// guard (`membership`) owns the node set outright -- observer events are
+    /// ignored there -- so the copy replaces it. Otherwise events may have
+    /// added or removed nodes since the copy was taken, so only the re-read
+    /// argv and role are taken, for nodes that are still the same process.
+    fn adopt(&mut self, refreshed: ProcessTree, membership: bool) {
+        if membership {
+            self.nodes = refreshed.nodes;
+            return;
+        }
+        for (pid, fresh) in refreshed.nodes {
+            if let Some(node) = self.nodes.get_mut(&pid) {
+                if node.first_seen == fresh.first_seen && node.ppid == fresh.ppid {
+                    node.argv = fresh.argv;
+                    node.role = fresh.role;
+                }
+            }
+        }
     }
 
     /// Re-read argv where it can still change meaningfully: processes seen
@@ -576,68 +603,21 @@ impl ProcessTree {
     }
 }
 
-/// Resolve an explicit `--target-dir` the way Cargo does: relative to `-C`,
-/// which is itself relative to the process's working directory.
-fn resolve_target_dir(
-    path: &str,
-    change_dir: Option<&str>,
-    cwd: impl FnOnce() -> Option<PathBuf>,
-) -> Option<PathBuf> {
-    let path = Path::new(path);
-    if path.is_absolute() {
-        return Some(path.to_path_buf());
-    }
-    let base = match change_dir.map(Path::new) {
-        Some(dir) if dir.is_absolute() => dir.to_path_buf(),
-        Some(dir) => cwd()?.join(dir),
-        None => cwd()?,
-    };
-    Some(base.join(path))
-}
-
-/// Canonicalize the longest existing prefix of `path` (resolving symlinks and
-/// junctions) and append the rest, so a target directory Cargo has not
-/// created yet still compares against real paths.
-pub(crate) fn canonicalish(path: &Path) -> PathBuf {
-    let mut existing = path;
-    let mut rest = Vec::new();
-    loop {
-        if let Ok(mut resolved) = std::fs::canonicalize(existing) {
-            for name in rest.iter().rev() {
-                resolved.push(name);
-            }
-            return resolved;
-        }
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(name)) => {
-                rest.push(name.to_os_string());
-                existing = parent;
-            }
-            _ => return lexical_normalize(path),
-        }
-    }
-}
-
-fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
-}
-
 /// A hazard the guard acted on in [`GuardMode::Enforce`].
 #[derive(Debug, Clone)]
 pub(crate) struct Violation {
     pub(crate) hazard: Hazard,
     nested_start_token: Option<u64>,
     pub(crate) message: String,
+}
+
+/// The host probes one guard tick runs: child enumeration, argv reads and
+/// working-directory reads. Injected so tests can prove they run with the
+/// state lock released (soldr#4198).
+pub(crate) struct Probes<'a> {
+    pub(crate) children_of: &'a dyn Fn(u32) -> Option<Vec<u32>>,
+    pub(crate) read_argv: &'a dyn Fn(u32) -> Option<Vec<String>>,
+    pub(crate) cwd_of: &'a dyn Fn(u32) -> Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -737,33 +717,42 @@ impl NestedCargoGuard {
     /// Re-examine the tree. Called by the pump after each event batch and at
     /// least every [`GUARD_TICK`].
     pub(crate) fn tick(&self) {
+        self.tick_with(&Probes {
+            children_of: &crate::platform::process::inspect::child_pids,
+            read_argv: &read_argv,
+            cwd_of: &working_directory,
+        });
+    }
+
+    /// [`Self::tick`] with injectable host probes.
+    ///
+    /// The state lock is a critical section (soldr#3836): its watchdog aborts
+    /// the process when a hold passes 15 s. Walking `/proc`, reading argv and
+    /// working directories, canonicalizing paths and writing the audit record
+    /// are all blocking work, and under a loaded host with many compiler
+    /// children they took longer than that (soldr#4198). So the lock is only
+    /// taken to copy the tree out and to merge and claim results back; every
+    /// probe and every write runs on the copy, with the lock released.
+    fn tick_with(&self, probes: &Probes<'_>) {
         if self.tripped.load(Ordering::Acquire) {
             return;
         }
         let now = Instant::now();
-        let mut state = self.state();
-        let refresh_due = state
-            .last_refresh
-            .is_none_or(|last| now.duration_since(last) >= GUARD_TICK);
-        if refresh_due {
-            state.last_refresh = Some(now);
-            let walk = self.walk;
-            if let Some(tree) = state.tree.as_mut() {
-                if walk {
-                    tree.walk(&crate::platform::process::inspect::child_pids, &read_argv);
-                }
-                tree.refresh(now, &read_argv);
-            }
-        }
-        let Some(tree) = state.tree.as_ref() else {
+        let Some((mut tree, refresh_due, handled)) = self.snapshot(now) else {
             return;
         };
+        if refresh_due {
+            if self.walk {
+                tree.walk(probes.children_of, probes.read_argv);
+            }
+            tree.refresh(now, probes.read_argv);
+        }
         let root_pid = tree.root_pid;
         let hazards: Vec<(Hazard, Duration)> = tree
             .candidates()
             .into_iter()
-            .filter(|pid| !state.handled.contains(pid))
-            .filter_map(|pid| match tree.assess(pid, &working_directory) {
+            .filter(|pid| !handled.contains(pid))
+            .filter_map(|pid| match tree.assess(pid, probes.cwd_of) {
                 Assessment::Hazard(hazard) => {
                     let seen = tree.nodes[&pid].first_seen;
                     Some((hazard, now.duration_since(seen)))
@@ -771,34 +760,86 @@ impl NestedCargoGuard {
                 _ => None,
             })
             .collect();
-        for (hazard, after) in hazards {
-            state.handled.insert(hazard.nested_pid);
-            let audit = self.write_audit(root_pid, &hazard, after);
-            match self.mode {
-                GuardMode::Enforce => {
-                    let message = enforce_message(root_pid, &hazard, audit.as_deref());
-                    state.violation = Some(Violation {
-                        nested_start_token: crate::platform::process::inspect::process_start_token(
-                            hazard.nested_pid,
-                        ),
-                        hazard,
-                        message,
-                    });
-                    self.tripped.store(true, Ordering::Release);
-                    return;
+        let merged = refresh_due.then_some(tree);
+        for (hazard, after) in self.merge_and_claim(root_pid, merged, hazards) {
+            self.act(root_pid, hazard, after);
+        }
+    }
+
+    /// Under the lock: copy the tree, the handled set and whether a refresh
+    /// is due (recording it as done). `None` when no root is bound.
+    fn snapshot(&self, now: Instant) -> Option<(ProcessTree, bool, HashSet<u32>)> {
+        let mut state = self.state();
+        let refresh_due = state
+            .last_refresh
+            .is_none_or(|last| now.duration_since(last) >= GUARD_TICK);
+        if refresh_due {
+            state.last_refresh = Some(now);
+        }
+        let tree = state.tree.clone()?;
+        Some((tree, refresh_due, state.handled.clone()))
+    }
+
+    /// Under the lock: fold the refreshed copy back into the shared tree and
+    /// claim each hazard's pid, so a pid is handled once. In
+    /// [`GuardMode::Enforce`] only the first new hazard is claimed: it trips
+    /// the guard. Nothing is claimed if the root was rebound meanwhile.
+    fn merge_and_claim(
+        &self,
+        root_pid: u32,
+        refreshed: Option<ProcessTree>,
+        hazards: Vec<(Hazard, Duration)>,
+    ) -> Vec<(Hazard, Duration)> {
+        let mut state = self.state();
+        match state.tree.as_mut() {
+            Some(current) if current.root_pid == root_pid => {
+                if let Some(refreshed) = refreshed {
+                    current.adopt(refreshed, self.walk);
                 }
-                GuardMode::Report => eprintln!(
-                    "soldr warning: {} ({NESTED_CARGO_ENV_VAR}=report: not terminated)",
-                    describe(root_pid, &hazard)
-                ),
-                GuardMode::Allow => eprintln!(
-                    "soldr: nested Cargo pid {} (`{}`) permitted by {NESTED_CARGO_ENV_VAR}=allow \
-                     although {}",
-                    hazard.nested_pid,
-                    hazard.head,
-                    hazard.reason.explain()
-                ),
             }
+            _ => return Vec::new(),
+        }
+        let mut claimed = Vec::new();
+        for (hazard, after) in hazards {
+            if !state.handled.insert(hazard.nested_pid) {
+                continue;
+            }
+            claimed.push((hazard, after));
+            if self.mode == GuardMode::Enforce {
+                break;
+            }
+        }
+        claimed
+    }
+
+    /// Respond to one claimed hazard. Runs without the state lock: it writes
+    /// the audit record and reads the nested process's start token.
+    fn act(&self, root_pid: u32, hazard: Hazard, after: Duration) {
+        let audit = self.write_audit(root_pid, &hazard, after);
+        match self.mode {
+            GuardMode::Enforce => {
+                let message = enforce_message(root_pid, &hazard, audit.as_deref());
+                let violation = Violation {
+                    nested_start_token: crate::platform::process::inspect::process_start_token(
+                        hazard.nested_pid,
+                    ),
+                    hazard,
+                    message,
+                };
+                self.state().violation.get_or_insert(violation);
+                self.tripped.store(true, Ordering::Release);
+            }
+            GuardMode::Report => eprintln!(
+                "soldr warning: {} ({NESTED_CARGO_ENV_VAR}=report: not terminated)",
+                describe(root_pid, &hazard)
+            ),
+            GuardMode::Allow => eprintln!(
+                "soldr: nested Cargo pid {} (`{}`) permitted by {NESTED_CARGO_ENV_VAR}=allow \
+                     although {}",
+                hazard.nested_pid,
+                hazard.head,
+                hazard.reason.explain()
+            ),
         }
     }
 

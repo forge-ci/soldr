@@ -239,6 +239,15 @@ impl RouteOwnership {
         }
     }
 
+    /// Every identified requester across all routes, for a liveness probe
+    /// that must run with the table lock released ([`sweep_routes`]).
+    pub(crate) fn requester_keys(&self) -> BTreeSet<PidKey> {
+        self.routes
+            .values()
+            .flat_map(|owners| owners.requesters.iter().copied())
+            .collect()
+    }
+
     /// Drop requesters that have exited and classify each route.
     ///
     /// `is_alive` is injected so the decision logic is testable without
@@ -525,6 +534,29 @@ pub(crate) fn stop_idle_daemon(pid: u32, endpoint: &str, terminate: impl FnOnce(
     false
 }
 
+/// [`RouteOwnership::sweep`] with every liveness probe run outside the table
+/// lock (soldr#4198).
+///
+/// `is_alive` reads `/proc` (the start token) for each requester, and the
+/// table lock is a watchdog-bounded critical section that every route request
+/// takes: on a loaded host with many requesters, probing under it can pass
+/// the 15 s hold limit and abort the broker. So the keys are copied out, the
+/// probes run unlocked, and the sweep applies the verdicts with a pure
+/// lookup. A requester recorded after the copy was not probed and is kept
+/// alive until the next sweep.
+pub(crate) fn sweep_routes(
+    route_owners: &Mutex<RouteOwnership>,
+    now: Instant,
+    grace: Duration,
+    mut is_alive: impl FnMut(PidKey) -> bool,
+) -> Vec<(String, RouteVerdict)> {
+    let keys = route_owners.lock().requester_keys();
+    let dead: BTreeSet<PidKey> = keys.into_iter().filter(|key| !is_alive(*key)).collect();
+    route_owners
+        .lock()
+        .sweep(now, grace, |key| !dead.contains(&key))
+}
+
 /// Stop the daemons of routes whose requesters have all exited.
 ///
 /// Returns the service names reaped, for the log line and for tests.
@@ -538,10 +570,7 @@ pub(crate) fn reap_orphaned_routes(
 ) -> Vec<String> {
     use running_process::broker::backend_lifecycle::verify_pid::signal_terminate;
 
-    let verdicts = {
-        let mut owners = route_owners.lock();
-        owners.sweep(Instant::now(), grace, requester_is_alive)
-    };
+    let verdicts = sweep_routes(route_owners, Instant::now(), grace, requester_is_alive);
     let candidates: Vec<String> = verdicts
         .into_iter()
         .filter_map(|(name, verdict)| (verdict == RouteVerdict::Reap).then_some(name))
