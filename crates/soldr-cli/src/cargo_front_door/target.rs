@@ -8,10 +8,12 @@
 use crate::core::{SoldrError, SoldrPaths};
 use crate::linker;
 
-use super::subcommand::{cargo_args_specify_target, cargo_args_target_value};
+use super::subcommand::{
+    cargo_args_specify_target, cargo_args_target_value, first_cargo_subcommand,
+};
 
 /// Whether soldr should inject its Windows MSVC build target, given the two
-/// caller-observable inputs plus whether `CARGO_BUILD_TARGET` is already set.
+/// caller-observable inputs, including cargo-dylint’s nested library marker.
 /// Pure (no env / no `cfg!`) so the policy is deterministically unit-testable on
 /// any host.
 ///
@@ -27,8 +29,11 @@ fn should_inject_windows_target_inner(
     args: &[String],
     dylint_requested: bool,
     build_target_env_set: bool,
+    dylint_building_libraries: bool,
 ) -> bool {
-    if dylint_requested {
+    if dylint_requested
+        || (dylint_building_libraries && first_cargo_subcommand(args) == Some("build"))
+    {
         return false;
     }
     !(cargo_args_specify_target(args) || build_target_env_set)
@@ -40,6 +45,7 @@ pub(super) fn should_inject_windows_target(args: &[String], dylint_requested: bo
         args,
         dylint_requested,
         std::env::var_os("CARGO_BUILD_TARGET").is_some(),
+        std::env::var("DYLINT_BUILDING_LIBRARIES").as_deref() == Ok("1"),
     )
 }
 
@@ -328,15 +334,26 @@ mod tests {
         // soldr#2350: dylint libs are host cdylibs; injecting the MSVC target
         // nests the stamped DLL where cargo-dylint can't find it. Suppressed
         // regardless of an explicit --target or a set CARGO_BUILD_TARGET.
-        assert!(!inject(&args("dylint --all"), true, false));
-        assert!(!inject(&args("dylint"), true, true));
+        assert!(!inject(&args("dylint --all"), true, false, false));
+        assert!(!inject(&args("dylint"), true, true, false));
+    }
+
+    #[test]
+    fn nested_dylint_library_build_keeps_the_host_output_layout() {
+        assert!(!inject(
+            &args("build --release --target-dir library-target"),
+            false,
+            false,
+            true,
+        ));
+        assert!(inject(&args("test"), false, false, true));
     }
 
     #[test]
     fn ordinary_build_injects_when_target_unspecified() {
         // The MSVC-on-Windows default still applies to ordinary builds.
-        assert!(inject(&args("build --release"), false, false));
-        assert!(inject(&args("test"), false, false));
+        assert!(inject(&args("build --release"), false, false, false));
+        assert!(inject(&args("test"), false, false, false));
     }
 
     #[test]
@@ -347,8 +364,9 @@ mod tests {
             &args("build --target x86_64-pc-windows-gnu"),
             false,
             false,
+            false,
         ));
-        assert!(!inject(&args("build"), false, true));
+        assert!(!inject(&args("build"), false, true, false));
     }
 
     #[test]
