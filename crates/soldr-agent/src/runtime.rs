@@ -18,7 +18,7 @@ use tokio_tungstenite::{
     },
     WebSocketStream,
 };
-type Socket = WebSocketStream<reqwest::Upgraded>;
+type Socket = WebSocketStream<soldr_fetch::SignalWebSocketTransport>;
 const IO_LIMIT: Duration = Duration::from_secs(2);
 
 pub async fn run(config: Config, key: HostKey, mut shutdown: watch::Receiver<bool>) -> Result<()> {
@@ -231,13 +231,7 @@ async fn health_request(mut stream: TcpStream, config: &Config) -> Result<()> {
     }).await.map_err(|_| "health request timed out")?
 }
 
-/// Let reqwest own TLS and HTTP; tungstenite handles framing after the upgrade.
 async fn open_socket(url: &str) -> Result<Socket> {
-    use reqwest::header::{
-        CONNECTION, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_EXTENSIONS, SEC_WEBSOCKET_KEY,
-        SEC_WEBSOCKET_PROTOCOL, SEC_WEBSOCKET_VERSION, UPGRADE,
-    };
-
     let mut url = url::Url::parse(url).map_err(|_| "invalid signal URL")?;
     let scheme = match url.scheme() {
         "wss" => "https",
@@ -249,49 +243,7 @@ async fn open_socket(url: &str) -> Result<Socket> {
 
     let key = generate_key();
     let accept = derive_accept_key(key.as_bytes());
-    let response = reqwest::Client::builder()
-        .http1_only()
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .build()?
-        .get(url)
-        .header(CONNECTION, "Upgrade")
-        .header(UPGRADE, "websocket")
-        .header(SEC_WEBSOCKET_VERSION, "13")
-        .header(SEC_WEBSOCKET_KEY, key)
-        .send()
-        .await
-        .map_err(|_| "signal HTTP upgrade request failed")?;
-
-    if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
-        return Err(format!("signal WebSocket upgrade refused: {}", response.status()).into());
-    }
-    let headers = response.headers();
-    let has_connection_upgrade = headers.get_all(CONNECTION).iter().any(|value| {
-        value.to_str().is_ok_and(|value| {
-            value
-                .split(',')
-                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
-        })
-    });
-    if !has_connection_upgrade
-        || !headers
-            .get(UPGRADE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
-        || !headers
-            .get(SEC_WEBSOCKET_ACCEPT)
-            .is_some_and(|value| value == &accept)
-        || headers.contains_key(SEC_WEBSOCKET_EXTENSIONS)
-        || headers.contains_key(SEC_WEBSOCKET_PROTOCOL)
-    {
-        return Err("invalid signal WebSocket upgrade response".into());
-    }
-
-    let stream = response
-        .upgrade()
-        .await
-        .map_err(|_| "signal WebSocket upgrade failed")?;
+    let stream = soldr_fetch::open_signal_websocket(url, &key, &accept).await?;
     let limits = WebSocketConfig::default()
         .max_message_size(Some(MAX_MESSAGE))
         .max_frame_size(Some(MAX_MESSAGE));
@@ -302,6 +254,8 @@ async fn open_socket(url: &str) -> Result<Socket> {
 mod tests {
     use super::*;
 
+    // The test server callback has a fixed tungstenite error type.
+    #[allow(clippy::result_large_err)]
     #[tokio::test]
     async fn rejects_an_upgrade_with_the_wrong_accept_key() {
         use tokio_tungstenite::tungstenite::{
@@ -328,10 +282,9 @@ mod tests {
             .await
             .expect("client upgrade deadline")
             .expect_err("invalid accept key must be rejected");
-        assert_eq!(
-            error.to_string(),
-            "invalid signal WebSocket upgrade response"
-        );
+        assert!(error
+            .to_string()
+            .contains("invalid signal WebSocket upgrade response"));
         server.await.unwrap();
     }
 }

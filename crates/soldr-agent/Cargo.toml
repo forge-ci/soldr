@@ -14,9 +14,9 @@ getrandom = "=0.4.3"
 if-addrs = "=0.13.4"
 fs2.workspace = true
 prost.workspace = true
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+soldr-fetch = { path = "../soldr-fetch" }
 soldr-platform = { path = "../soldr-platform" }
 tempfile.workspace = true
 tokio.workspace = true

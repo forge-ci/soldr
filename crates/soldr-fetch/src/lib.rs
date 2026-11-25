@@ -22,3 +22,6 @@ pub use soldr_core::core;
 pub mod fetch;
 
 pub use reqwest::Response as RemoteBuildHttpResponse;
+
+mod signal_websocket;
+pub use signal_websocket::{open_signal_websocket, SignalWebSocketTransport};

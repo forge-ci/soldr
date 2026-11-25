@@ -179,6 +179,8 @@ fn backoff_schedule_uses_a_deterministic_clock_and_caps_at_30s() {
         assert!(backoff.next_delay(u32::MAX) <= Duration::from_secs(2));
     });
 }
+// The test server callback has a fixed tungstenite error type.
+#[allow(clippy::result_large_err)]
 #[test]
 fn loopback_challenge_hello_heartbeat_ping_pong_and_status() {
     if !Path::new("/proc/sys/kernel/random/boot_id").is_file() {
