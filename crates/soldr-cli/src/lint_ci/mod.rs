@@ -22,6 +22,8 @@
 //! `allow all` suppresses every rule on that line; `allow <rule-id>[,<id>...]`
 //! suppresses the named rules. Text after `--` is a free-form reason.
 
+mod canonical_invocation;
+mod canonical_tokens;
 pub mod cross_compile_surface;
 pub mod model;
 pub mod registry;
@@ -53,16 +55,23 @@ pub fn analyze(root: &Path) -> CiLintReport {
         .iter()
         .filter_map(|path| scan::scan_file(root, path))
         .collect();
-    analyze_files(&files)
+    analyze_with_rules(&files, registry::rules(Some(root)))
 }
 
 /// Rule execution + suppression, factored out for in-memory unit tests.
 pub fn analyze_files(files: &[ScannedFile]) -> CiLintReport {
+    analyze_with_rules(files, registry::rules(None))
+}
+
+fn analyze_with_rules(
+    files: &[ScannedFile],
+    rules: Vec<Box<dyn registry::CiRule>>,
+) -> CiLintReport {
     let by_path: HashMap<&str, &ScannedFile> =
         files.iter().map(|f| (f.rel_path.as_str(), f)).collect();
 
     let mut findings = Vec::new();
-    for rule in registry::rules() {
+    for rule in rules {
         for finding in rule.check(files) {
             if is_suppressed(&by_path, &finding) {
                 continue;

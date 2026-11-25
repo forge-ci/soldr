@@ -1,5 +1,6 @@
 //! Native host-validation DAG for `soldr ci-test` (soldr#2867).
 
+mod canonical_profile;
 mod dylint_library_marker;
 mod dylint_target_guard;
 mod execute;
@@ -91,3 +92,5 @@ fn render(plan: &model::CiTestPlan, format: OutputFormat) -> Result<(), SoldrErr
     }
     Ok(())
 }
+
+pub(crate) use test_targets::workspace_member_names;
