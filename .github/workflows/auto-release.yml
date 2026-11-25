@@ -1241,9 +1241,9 @@ jobs:
         with:
           enable-cache: false
       - name: Install and exercise the published Dylint surface
-        shell: bash
+        shell: pwsh
         # Keep the MSVC linker input paths below MAX_PATH.
-        run: uv run --no-project --python 3.13 ci/smoke_published_dylint.py --expected-version "${{ needs.prepare.outputs.version }}" --state-root .dylint
+        run: uv run --no-project --python 3.13 ci/smoke_published_dylint.py --expected-version "${{ needs.prepare.outputs.version }}" --state-root (Join-Path ([IO.Path]::GetPathRoot($env:RUNNER_TEMP)) 'd')
 
   publish-npm:
     name: Publish npm package

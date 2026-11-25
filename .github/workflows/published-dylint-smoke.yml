@@ -36,11 +36,12 @@ jobs:
         with:
           enable-cache: false
       - name: Install and exercise published Dylint
-        shell: bash
+        shell: pwsh
         env:
           EXPECTED_VERSION: ${{ inputs.expected_version }}
           PYTHONUNBUFFERED: '1'
         # Keep the MSVC linker input paths below MAX_PATH.
         run: >-
           uv run --no-project --python 3.13 ci/smoke_published_dylint.py
-          --expected-version "$EXPECTED_VERSION" --state-root .dylint
+          --expected-version=$env:EXPECTED_VERSION
+          --state-root (Join-Path ([IO.Path]::GetPathRoot($env:RUNNER_TEMP)) 'd')
