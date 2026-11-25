@@ -1,5 +1,5 @@
 use crate::core::{suppress_windows_console_window, SoldrError, SoldrPaths};
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 use std::{
     ffi::OsStr,
     fs::{self, File, OpenOptions},
@@ -680,7 +680,7 @@ fn hash_file_with_progress(
 ) -> Result<String, SoldrError> {
     let mut file = File::open(path)?;
     let total = file.metadata()?.len();
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     let mut buf = vec![0u8; 1024 * 1024];
     let mut completed = 0_u64;
     loop {
@@ -692,7 +692,7 @@ fn hash_file_with_progress(
         completed = completed.saturating_add(read as u64);
         progress(stage, completed, total);
     }
-    Ok(to_hex(&hasher.finalize()))
+    Ok(to_hex(hasher.finalize().as_bytes()))
 }
 
 /// Stage `source` at `target`, preferring a hardlink over a byte copy.

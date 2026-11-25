@@ -1,13 +1,16 @@
 //! Maintenance activity follows the worker, including detached blocking work.
 
 use crate::cache_lib::build_active::MaintenanceLease;
+use crate::platform::sync::Mutex;
 use std::future::Future;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::io;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
 
 #[derive(Clone, Default)]
 pub struct MaintenanceActivity {
     workers: Arc<AtomicUsize>,
+    blocking: Arc<BlockingWorker>,
 }
 
 impl MaintenanceActivity {
@@ -38,17 +41,72 @@ impl MaintenanceActivity {
         &self,
         lease: Option<MaintenanceLease>,
         work: impl FnOnce() -> T + Send + 'static,
-    ) -> Result<T, tokio::task::JoinError> {
-        // Acquire before scheduling so even a queued worker reports busy.
-        // Cancellation drops the JoinHandle, not the blocking closure: both
-        // guards must belong to that closure until its work really returns.
+    ) -> io::Result<T> {
+        let slot = self.blocking.try_reserve()?;
         let activity = self.enter();
-        tokio::task::spawn_blocking(move || {
-            let _activity = activity;
-            let _lease = lease;
-            work()
-        })
-        .await
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.blocking.submit(Box::new(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                .map_err(|_| io::Error::other("maintenance worker panicked"));
+            drop(lease);
+            drop(activity);
+            drop(slot);
+            let _ = send.send(result);
+        }))?;
+        receive
+            .await
+            .map_err(|_| io::Error::other("maintenance worker exited without a result"))?
+    }
+}
+
+type BlockingJob = Box<dyn FnOnce() + Send>;
+
+#[derive(Default)]
+struct BlockingWorker {
+    busy: AtomicBool,
+    sender: Mutex<Option<mpsc::SyncSender<BlockingJob>>>,
+}
+
+impl BlockingWorker {
+    fn try_reserve(self: &Arc<Self>) -> io::Result<BlockingSlot> {
+        self.busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "maintenance worker is busy"))?;
+        Ok(BlockingSlot(self.clone()))
+    }
+
+    fn submit(&self, work: BlockingJob) -> io::Result<()> {
+        let mut sender = self.sender.lock();
+        if sender.is_none() {
+            let (send, receive) = mpsc::sync_channel::<BlockingJob>(1);
+            std::thread::Builder::new()
+                .name("soldr-maintenance".into())
+                .spawn(move || {
+                    for work in receive {
+                        work();
+                    }
+                })?;
+            *sender = Some(send);
+        }
+        let result = sender
+            .as_ref()
+            .ok_or_else(|| io::Error::other("maintenance worker channel not initialized"))?
+            .try_send(work);
+        if let Err(error) = result {
+            *sender = None;
+            return Err(io::Error::other(format!(
+                "could not submit maintenance work: {error}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+struct BlockingSlot(Arc<BlockingWorker>);
+
+impl Drop for BlockingSlot {
+    fn drop(&mut self) {
+        self.0.busy.store(false, Ordering::Release);
     }
 }
 
@@ -106,6 +164,52 @@ mod tests {
         .await
         .unwrap();
         assert!(busy, "the store must outlive its cancelled waiter");
+    }
+
+    #[tokio::test]
+    async fn blocking_passes_reuse_one_thread_and_reject_overlap() {
+        let activity = MaintenanceActivity::default();
+        let current = std::thread::current().id();
+        let (started, running) = tokio::sync::oneshot::channel();
+        let (release, finish) = mpsc::channel();
+        let first = tokio::spawn({
+            let activity = activity.clone();
+            async move {
+                activity
+                    .worker(None, move || {
+                        let id = std::thread::current().id();
+                        started.send(id).unwrap();
+                        finish.recv().unwrap();
+                        id
+                    })
+                    .await
+            }
+        });
+        let worker_thread = running.await.unwrap();
+        assert_ne!(worker_thread, current);
+        let overlap = activity
+            .worker(None, || panic!("overlap must not run"))
+            .await;
+        assert_eq!(overlap.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        release.send(()).unwrap();
+        assert_eq!(first.await.unwrap().unwrap(), worker_thread);
+        let next = activity
+            .worker(None, || std::thread::current().id())
+            .await
+            .unwrap();
+        assert_eq!(next, worker_thread);
+    }
+
+    #[tokio::test]
+    async fn failed_mock_pass_releases_worker_for_next_pass() {
+        let activity = MaintenanceActivity::default();
+        let result = activity.worker(None, || panic!("mock pass failure")).await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "maintenance worker panicked"
+        );
+        assert!(!activity.is_active());
+        assert_eq!(activity.worker(None, || 42).await.unwrap(), 42);
     }
 
     async fn cancelled_worker(exclusive: bool) {

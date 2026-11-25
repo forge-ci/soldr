@@ -106,6 +106,24 @@ pub(crate) fn maybe_dispatch(raw_args: &[String]) -> Option<MulticallDispatch> {
     match classify_argv0(argv0)? {
         ShimIdentity::Toolchain(tool) => {
             strip_self_from_path(argv0);
+            let forwarded = &raw_args[1..];
+            if tool == "cargo"
+                && is_dylint_package_metadata_probe(forwarded)
+                && env::var_os("SOLDR_PORCELAIN").is_none()
+                && crate::dylint_toolchain::prepared_scope_is_inherited()
+            {
+                // Dylint asks each lint package for its metadata before building.
+                // The parent has prepared the nightly and this probe cannot compile.
+                // Forward the probe before the CLI runtime starts.
+                env::remove_var("MAKEFLAGS");
+                env::remove_var("CARGO_MAKEFLAGS");
+                let code = crate::toolchain::run_toolchain_passthrough(tool, forwarded)
+                    .unwrap_or_else(|error| {
+                        eprintln!("soldr: {error}");
+                        1
+                    });
+                return Some(MulticallDispatch::Exit(code));
+            }
             let mut args = Vec::with_capacity(raw_args.len());
             args.push(tool.to_string());
             args.extend(raw_args.iter().skip(1).cloned());
@@ -116,6 +134,12 @@ pub(crate) fn maybe_dispatch(raw_args: &[String]) -> Option<MulticallDispatch> {
         ShimIdentity::SoldrDaemon => Some(MulticallDispatch::Exit(crate::daemon_entry::run())),
         ShimIdentity::SoldrDylint => Some(MulticallDispatch::Exit(run_soldr_dylint(raw_args))),
     }
+}
+
+fn is_dylint_package_metadata_probe(args: &[String]) -> bool {
+    args.iter()
+        .map(String::as_str)
+        .eq(["metadata", "--format-version", "1", "--no-deps"])
 }
 
 pub(crate) fn toolchain_shim_should_defer_to_rustc_wrapper(raw_args: &[String]) -> bool {
@@ -225,17 +249,18 @@ fn strip_self_from_path(argv0: &str) {
 /// itself. For a trampoline they do not: `current_exe()` is the real soldr
 /// binary, off in the install tree, and scrubbing *that* directory would leave
 /// the shim dir on `PATH` while removing something that belonged there.
+/// Keep the invoked spelling for matching entries in `PATH`.
 fn current_shim_dir(argv0: &str) -> Option<PathBuf> {
     Path::new(argv0)
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .map(canonicalize_or_self)
+        .map(Path::to_path_buf)
         .or_else(|| {
             env::current_exe()
                 .ok()
                 .as_deref()
                 .and_then(Path::parent)
-                .map(canonicalize_or_self)
+                .map(Path::to_path_buf)
         })
 }
 
@@ -244,21 +269,32 @@ fn canonicalize_or_self(path: &Path) -> PathBuf {
 }
 
 fn filter_path(existing: &str, shim_dir: &Path, separator: char) -> String {
+    // PATH may contain the symlink spelling that invoked the shim.
+    let canonical = canonicalize_or_self(shim_dir);
     let shim_str = shim_dir.to_string_lossy();
+    let canonical_str = canonical.to_string_lossy();
+    let windows =
+        crate::platform::host::facts::os() == crate::platform::host::facts::HostOs::Windows;
+    let same_path = |first: &str, second: &str| {
+        if windows {
+            first.eq_ignore_ascii_case(second)
+        } else {
+            first == second
+        }
+    };
     let mut out = String::with_capacity(existing.len());
     let mut first = true;
     for entry in existing.split(separator) {
         if entry.is_empty() {
             continue;
         }
-        let matches = if crate::platform::host::facts::os()
-            == crate::platform::host::facts::HostOs::Windows
+        if same_path(entry, &shim_str)
+            || same_path(entry, &canonical_str)
+            || (shim_dir != canonical
+                && Path::new(entry)
+                    .canonicalize()
+                    .is_ok_and(|path| same_path(&path.to_string_lossy(), &canonical_str)))
         {
-            entry.eq_ignore_ascii_case(&shim_str)
-        } else {
-            entry == shim_str
-        };
-        if matches {
             continue;
         }
         if !first {
@@ -631,6 +667,41 @@ mod tests {
     }
 
     #[test]
+    fn filter_path_removes_aliases_of_a_symlinked_shim_directory() {
+        use crate::platform::host::facts::{os, HostOs};
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real-shims");
+        let alias = root.path().join("alias");
+        let alternate = root.path().join("alternate");
+        std::fs::create_dir(&real).unwrap();
+        for link in [&alias, &alternate] {
+            if let Err(error) =
+                crate::platform::fs::links::create(&real.to_string_lossy(), link, true)
+            {
+                if os() == HostOs::Windows {
+                    return;
+                }
+                panic!("failed to create fixture symlink: {error}");
+            }
+        }
+
+        let shim_dir = current_shim_dir(alias.join("rustup").to_str().unwrap()).unwrap();
+        let canonical = real.canonicalize().unwrap();
+        let separator = if os() == HostOs::Windows { ';' } else { ':' };
+        let path = format!(
+            "{}{separator}keep-one{separator}{}/{separator}{}{separator}keep-two",
+            alias.display(),
+            alternate.display(),
+            canonical.display(),
+        );
+        assert_eq!(
+            filter_path(&path, &shim_dir, separator),
+            format!("keep-one{separator}keep-two"),
+        );
+    }
+
+    #[test]
     fn argv_has_msvc_target_detects_single_and_split_forms() {
         assert!(argv_has_msvc_target(&os_args(&[
             "-O2",
@@ -717,4 +788,20 @@ mod tests {
             ))
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn dylint_probe_fast_path_matches_only_the_read_only_package_query() {
+    assert!(is_dylint_package_metadata_probe(&[
+        "metadata".into(),
+        "--format-version".into(),
+        "1".into(),
+        "--no-deps".into(),
+    ]));
+    assert!(!is_dylint_package_metadata_probe(&[
+        "metadata".into(),
+        "--format-version".into(),
+        "1".into(),
+    ]));
 }

@@ -118,7 +118,7 @@ pub(crate) fn find_nearest_manifest() -> Option<PathBuf> {
 }
 
 /// Resolve the `[bin]` name to build. Slice 1 only handles unambiguous
-/// cases: explicit `--bin <NAME>`, or a crate with exactly one binary.
+/// cases: explicit `--bin <NAME>`, a manifest default, or one binary.
 /// Returns `Ok(None)` when ambiguity forces fall-through.
 pub(crate) fn resolve_bin_name(parsed: &ParsedRunArgs) -> Result<Option<String>, SoldrError> {
     if let Some(name) = parsed.bin.as_ref() {
@@ -132,13 +132,20 @@ pub(crate) fn resolve_bin_name(parsed: &ParsedRunArgs) -> Result<Option<String>,
     let text = fs::read_to_string(&manifest_path).map_err(|err| {
         SoldrError::Other(format!("read manifest {}: {err}", manifest_path.display()))
     })?;
-    let value: toml::Value = text.parse().map_err(|err| {
+    let value: toml::Value = toml::from_str(&text).map_err(|err| {
         SoldrError::Other(format!("parse manifest {}: {err}", manifest_path.display()))
     })?;
 
+    let package = value.get("package");
+    if let Some(default) = package.and_then(|package| package.get("default-run")) {
+        let name = default
+            .as_str()
+            .filter(|name| Path::new(name).file_name() == Some(std::ffi::OsStr::new(name)));
+        return Ok(name.map(str::to_owned));
+    }
+
     let bins = value.get("bin").and_then(|v| v.as_array());
-    let package_name = value
-        .get("package")
+    let package_name = package
         .and_then(|p| p.get("name"))
         .and_then(|n| n.as_str())
         .map(str::to_string);

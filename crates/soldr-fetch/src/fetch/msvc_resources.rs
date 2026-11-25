@@ -4,7 +4,7 @@
 //! running LLVM installation: other slots may be using its Linux/Darwin files.
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 
 use super::manifest_lookup::{self, ManifestEntry, ManifestIndex};
 use crate::core::{SoldrError, SoldrPaths};
@@ -52,13 +52,14 @@ async fn ensure_from_index(
     index: &ManifestIndex,
 ) -> Result<PathBuf, SoldrError> {
     let unit = select_unit(index)?;
-    let identity = hex::encode(Sha256::digest(format!(
+    let identity = Sha256Hasher::digest(format!(
         "{FORMAT}\n{}\n{}\n{}\n{}",
         resource.display(),
         unit.asset,
         unit.sha256,
         unit.size_bytes
-    )));
+    ))
+    .to_hex();
     let parent = paths.root.join("sdk/windows-msvc/clang-resources");
     let _lock = super::syslib_common::acquire_install_lock(&parent, &identity)?;
     let parent = parent.canonicalize()?;

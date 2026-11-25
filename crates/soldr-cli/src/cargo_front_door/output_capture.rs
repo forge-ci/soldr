@@ -55,7 +55,7 @@ fn retry_zthreads_without_flag(
         }
     }
     suppress_windows_console_window(&mut command);
-    configure_cargo_child_for_timeout(&mut command);
+    let _signals = prepare_cargo_child(&mut command)?;
     let mut child = debug_trace::spawn_traced(&mut command, "soldr -Zthreads fallback")
         .map_err(|err| SoldrError::Other(format!("spawn -Zthreads fallback failed: {err}")))?;
     let status = wait_for_cargo_child(&mut child, "soldr -Zthreads fallback", None)?;
@@ -98,7 +98,7 @@ fn run_command_capturing_cargo_json(
 ) -> Result<(std::process::ExitStatus, String, Vec<String>), SoldrError> {
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
-    configure_cargo_child_for_timeout(command);
+    let _signals = prepare_cargo_child(command)?;
     let mut child = debug_trace::spawn_traced(command, "cargo JSON capture")
         .map_err(|err| SoldrError::Other(format!("spawn cargo for JSON capture failed: {err}")))?;
     // soldr#2546 slice 3: capture modes own their pipes, so descendant
@@ -291,7 +291,7 @@ fn run_command_inheriting_stdio(
             guard.cloned(),
         );
     }
-    configure_cargo_child_for_timeout(command);
+    let _signals = prepare_cargo_child(command)?;
     let mut child = debug_trace::spawn_traced(command, "cargo")
         .map_err(|err| SoldrError::Other(format!("spawn cargo failed: {err}")))?;
     // soldr#2924: the nested-Cargo guard observes the inherited-stdio tree
@@ -336,7 +336,7 @@ fn run_command_capturing_diagnostic_tail(
 ) -> Result<(std::process::ExitStatus, String), SoldrError> {
     command.stderr(std::process::Stdio::piped());
     // stdout stays inherited — we don't need its bytes.
-    configure_cargo_child_for_timeout(command);
+    let _signals = prepare_cargo_child(command)?;
     let mut child = debug_trace::spawn_traced(command, "cargo diagnostic capture").map_err(|err| {
         SoldrError::Other(format!("spawn cargo for diagnostic capture failed: {err}"))
     })?;
@@ -407,7 +407,7 @@ fn run_command_capturing_porcelain(
 ) -> Result<PorcelainCaptureResult, SoldrError> {
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
-    configure_cargo_child_for_timeout(command);
+    let _signals = prepare_cargo_child(command)?;
     let started_at_ms = current_unix_ms();
     // soldr#2024 misattribution: porcelain is the one capture mode that both
     // (a) does NOT inherit stdio -- it pipes the child into the porcelain log

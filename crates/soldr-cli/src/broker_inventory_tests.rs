@@ -204,3 +204,26 @@ fn the_process_home_prefers_userprofile_then_home() {
     let empty = ["HOME=".to_string()];
     assert_eq!(env_home_of(&empty), None);
 }
+
+#[test]
+fn foreground_broker_is_recognized_only_at_the_command_position() {
+    let role_for = |args: &[&str]| {
+        let cmd: Vec<String> = args.iter().map(|arg| (*arg).into()).collect();
+        Role::of_process(Path::new("soldr"), &cmd)
+    };
+    assert_eq!(
+        role_for(&[
+            "soldr",
+            "--jobs",
+            "2",
+            "broker",
+            "--allow-unpinned",
+            "serve"
+        ]),
+        Some(Role::Broker)
+    );
+    assert_eq!(
+        role_for(&["soldr", "cargo", "test", "--", "broker", "serve"]),
+        None
+    );
+}

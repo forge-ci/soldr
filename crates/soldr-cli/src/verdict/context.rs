@@ -59,6 +59,7 @@ impl Context {
                 "1",
                 "--offline",
             ])
+            .args(super::crates::metadata_selector(args))
             .current_dir(cwd);
         let output = crate::core::command_output_with_timeout_duration(
             &mut command,

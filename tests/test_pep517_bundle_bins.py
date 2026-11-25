@@ -433,8 +433,8 @@ class BinBuildCall:
     pyo3_python: str | None
 
 
-class BackendIntegrationTest(unittest.TestCase):
-    """The native maturin hooks build and stage configured bins."""
+class _BackendHarness(unittest.TestCase):
+    """A loaded backend over a scratch project; `_build` runs one hook."""
 
     def setUp(self) -> None:
         self.backend = load_script_module(
@@ -499,6 +499,10 @@ class BackendIntegrationTest(unittest.TestCase):
                 result = getattr(self.backend, hook)(str(self.out), config_settings)
         self.assertEqual(result, WHEEL_NAME)
         return calls
+
+
+class BackendIntegrationTest(_BackendHarness):
+    """The native maturin hooks build and stage configured bins."""
 
     def test_wheel_bundles_each_bin_with_maturins_profile_and_interpreter(self) -> None:
         calls = self._build("build_wheel", {"--target": "x86_64-unknown-linux-gnu"})
@@ -741,3 +745,231 @@ path = "src/main.rs"
 
 if __name__ == "__main__":
     unittest.main()
+
+
+MUSL_PYPROJECT = """\
+[tool.soldr.pep517]
+bundle-bins = [
+  { bin = "demo-cli", package = "demo", features = ["wheel", "tls/vendored"], linux-libc = "musl" },
+  { bin = "helper" },
+]
+"""
+
+
+def _elf64(*, interpreter: bytes | None = None, needed: bool = False) -> bytes:
+    """A minimal ELF64 image: PT_DYNAMIC (as static-pie keeps), optionally a
+    PT_INTERP and a DT_NEEDED entry."""
+    import struct
+
+    headers, payload = [], b""
+    base = 64 + 56 * (2 if interpreter else 1)
+    if interpreter is not None:
+        headers.append(
+            struct.pack("<IIQQQQQQ", 3, 4, base, 0, 0, len(interpreter) + 1, 0, 1)
+        )
+        payload += interpreter + b"\0"
+    dynamic = (struct.pack("<qQ", 1, 0) if needed else b"") + struct.pack("<qQ", 0, 0)
+    headers.append(
+        struct.pack("<IIQQQQQQ", 2, 6, base + len(payload), 0, 0, len(dynamic), 0, 8)
+    )
+    ident = b"\x7fELF" + bytes([2, 1, 1]) + bytes(9)
+    header = ident + struct.pack(
+        "<HHIQQQIHHHHHH", 3, 62, 1, 0, 64, 0, 0, 64, 56, len(headers), 64, 0, 0
+    )
+    return header + b"".join(headers) + payload + dynamic
+
+
+class MuslBundleBinTest(unittest.TestCase):
+    """A bundled CLI can carry Cargo features and be a static musl executable
+    while the PyO3 extension keeps the interpreter's glibc (bosn)."""
+
+    def setUp(self) -> None:
+        self.helper = _helper()
+
+    def _read(self, text: str) -> list[Any]:
+        with tempfile.TemporaryDirectory() as raw:
+            pyproject = Path(raw) / "pyproject.toml"
+            pyproject.write_text(text, encoding="utf-8")
+            return self.helper.read_bundle_bins(pyproject)
+
+    def test_features_and_linux_libc_parse_with_and_without_tomllib(self) -> None:
+        expected = [
+            self.helper.BundleBin(
+                bin="demo-cli",
+                package="demo",
+                features=("wheel", "tls/vendored"),
+                linux_libc="musl",
+            ),
+            self.helper.BundleBin(bin="helper"),
+        ]
+        self.assertEqual(self._read(MUSL_PYPROJECT), expected)
+        with mock.patch.dict(sys.modules, {"tomllib": None}):
+            self.assertEqual(self._read(MUSL_PYPROJECT), expected)
+
+    def test_invalid_features_and_libc_are_refused(self) -> None:
+        cases = {
+            'bundle-bins = [{ bin = "d", features = "wheel" }]': "array of Cargo feature",
+            'bundle-bins = [{ bin = "d", features = ["a b"] }]': "array of Cargo feature",
+            'bundle-bins = [{ bin = "d", linux-libc = "glibc" }]': "must be one of musl",
+        }
+        for body, message in cases.items():
+            with self.subTest(body=body):
+                with self.assertRaises(self.helper.BundleBinsError) as raised:
+                    self._read(f"[tool.soldr.pep517]\n{body}\n")
+                self.assertIn(message, str(raised.exception))
+
+    def test_command_passes_features_and_retargets_only_linux(self) -> None:
+        musl = self.helper.BundleBin(
+            bin="demo-cli", features=("wheel",), linux_libc="musl"
+        )
+        plain = self.helper.BundleBin(bin="helper")
+        retarget = self.helper.entry_target_args
+        self.assertEqual(
+            retarget(musl, ["--target", "aarch64-unknown-linux-gnu"]),
+            ["--target", "aarch64-unknown-linux-musl"],
+        )
+        for darwin in (
+            ["--target", "aarch64-apple-darwin"],
+            ["--target", "x86_64-pc-windows-msvc"],
+        ):
+            self.assertEqual(retarget(musl, darwin), darwin)
+        self.assertEqual(
+            retarget(plain, ["--target", "x86_64-unknown-linux-gnu"]),
+            ["--target", "x86_64-unknown-linux-gnu"],
+        )
+        self.assertEqual(retarget(plain, []), [])
+        with (
+            mock.patch.object(self.helper.sys, "platform", "linux"),
+            mock.patch.object(
+                self.helper.os,
+                "uname",
+                return_value=os.uname_result(("Linux", "h", "6", "#1", "x86_64")),
+            ),
+        ):
+            self.assertEqual(
+                retarget(musl, []), ["--target", "x86_64-unknown-linux-musl"]
+            )
+        with mock.patch.object(self.helper.sys, "platform", "darwin"):
+            self.assertEqual(retarget(musl, []), [])
+        command = self.helper.cargo_build_command(
+            musl,
+            manifest_path=None,
+            profile_args=["--release"],
+            target_args=["--target", "x86_64-unknown-linux-gnu"],
+        )
+        self.assertEqual(
+            command[5:],
+            [
+                "--features",
+                "wheel",
+                "--release",
+                "--target",
+                "x86_64-unknown-linux-musl",
+            ],
+        )
+
+    def test_a_musl_bin_must_be_static(self) -> None:
+        entry = self.helper.BundleBin(bin="demo-cli", linux_libc="musl")
+        command = ["soldr", "build", "--target", "x86_64-unknown-linux-musl"]
+        with tempfile.TemporaryDirectory() as raw:
+            executable = Path(raw) / "demo-cli"
+            message = json.dumps(
+                {
+                    "reason": "compiler-artifact",
+                    "target": {"name": "demo-cli", "kind": ["bin"]},
+                    "executable": str(executable),
+                }
+            )
+
+            def run(argv: Any, **_kwargs: Any) -> Any:
+                return subprocess.CompletedProcess(argv, 0, stdout=message)
+
+            executable.write_bytes(_elf64())
+            self.assertEqual(
+                self.helper.build_bundle_bin(entry, command, {}, run=run), executable
+            )
+            for image, reason in (
+                (
+                    _elf64(interpreter=b"/lib64/ld-linux-x86-64.so.2"),
+                    "dynamically linked",
+                ),
+                (_elf64(needed=True), "needs a shared library"),
+            ):
+                executable.write_bytes(image)
+                with self.assertRaises(self.helper.BundleBinsError) as raised:
+                    self.helper.build_bundle_bin(entry, command, {}, run=run)
+                self.assertIn(reason, str(raised.exception))
+
+
+class RenameTest(unittest.TestCase):
+    """`rename` stages a bin under another name (bosn's `bosn-native` -> `bosn`)."""
+
+    def setUp(self) -> None:
+        self.helper = _helper()
+
+    def test_rename_keeps_only_the_windows_suffix(self) -> None:
+        entry = self.helper.BundleBin(bin="tool-native", rename="tool")
+        self.assertEqual(entry.staged_name(Path("/t/tool-native")), "tool")
+        self.assertEqual(entry.staged_name(Path("/t/tool-native.exe")), "tool.exe")
+        plain = self.helper.BundleBin(bin="tool.v2")
+        self.assertEqual(plain.staged_name(Path("/t/tool.v2")), "tool.v2")
+        self.assertEqual(
+            self.helper.BundleBin(bin="a.b", rename="c").staged_name(Path("/t/a.b")),
+            "c",
+        )
+
+    def test_renamed_bin_is_staged_under_its_new_name(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            wheel = Path(raw) / WHEEL_NAME
+            _write_wheel(wheel)
+            built = Path(raw) / "tool-native"
+            built.write_bytes(b"cli")
+            entry = self.helper.BundleBin(bin="tool-native", rename="tool")
+            self.helper.bundle_into_wheel(wheel, [entry], lambda _entry: built)
+            with zipfile.ZipFile(wheel) as archive:
+                self.assertEqual(archive.read("demo-0.1.0.data/scripts/tool"), b"cli")
+                self.assertNotIn(
+                    "demo-0.1.0.data/scripts/tool-native", archive.namelist()
+                )
+
+    def test_rename_must_be_a_plain_name(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            pyproject = Path(raw) / "pyproject.toml"
+            pyproject.write_text(
+                '[tool.soldr.pep517]\nbundle-bins = [{ bin = "t", rename = "../x" }]\n',
+                encoding="utf-8",
+            )
+            with self.assertRaises(self.helper.BundleBinsError) as raised:
+                self.helper.read_bundle_bins(pyproject)
+        self.assertIn("plain executable name", str(raised.exception))
+
+
+class MuslBackendTest(_BackendHarness):
+    """The backend gives a host-interpreter PyO3 config only to host bins."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.root / "pyproject.toml").write_text(
+            PYPROJECT.replace(
+                '{ bin = "demo-cli", package = "demo" }',
+                '{ bin = "demo-cli", package = "demo", features = ["wheel"], linux-libc = "musl" }',
+            ),
+            encoding="utf-8",
+        )
+
+    def test_host_wheel_builds_the_musl_bin_without_the_host_interpreter(self) -> None:
+        with (
+            mock.patch.object(self.helper.sys, "platform", "linux"),
+            mock.patch.object(
+                self.helper.os,
+                "uname",
+                return_value=os.uname_result(("Linux", "h", "6", "#1", "x86_64")),
+            ),
+        ):
+            calls = self._build("build_wheel")
+        musl, helper = calls[0], calls[1]
+        self.assertEqual(musl.command[-2:], ["--target", "x86_64-unknown-linux-musl"])
+        self.assertIn("--features", musl.command)
+        self.assertIsNone(musl.pyo3_python, "a musl bin is a cross build for PyO3")
+        self.assertEqual(helper.pyo3_python, sys.executable)
+        self.assertNotIn("--target", helper.command)

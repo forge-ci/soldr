@@ -166,7 +166,7 @@ mod tests {
     use super::*;
     use crate::core::SoldrPaths;
     use crate::fetch::trust;
-    use sha2::Digest;
+    use kernal_api::hash::Sha256Hasher;
     use std::io::Write as _;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -245,7 +245,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let body = build_fixture_archive(b"fixture reld");
-        let sha256 = hex::encode(sha2::Sha256::digest(&body));
+        let sha256 = Sha256Hasher::digest(&body).to_hex();
         let asset = ReleaseAsset {
             triple: "test-fixture",
             extension: "tar.gz",
@@ -303,7 +303,7 @@ mod tests {
         std::env::set_var(trust::TRUST_MODE_ENV_VAR, "strict");
 
         let body = b"#!/bin/sh\necho fake-reld\n".to_vec();
-        let sha256 = hex::encode(sha2::Sha256::digest(build_fixture_archive(&body)));
+        let sha256 = Sha256Hasher::digest(build_fixture_archive(&body)).to_hex();
         let asset = ReleaseAsset {
             triple: "test-fixture",
             extension: "tar.gz",

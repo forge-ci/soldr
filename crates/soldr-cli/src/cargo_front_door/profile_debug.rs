@@ -336,7 +336,7 @@ fn merge_configured_targets(selected: &mut Option<ConfiguredTargets>, setting: C
 }
 
 fn toml_text_build_msvc_target(text: &str) -> Option<ConfiguredTargets> {
-    let value: toml::Value = text.parse().ok()?;
+    let value: toml::Value = toml::from_str(text).ok()?;
     // Cargo's include graph can contribute build.target from another file.
     // Resolve conservatively here: retaining line tables for an include that
     // ultimately selects only non-MSVC is cheap; stripping them from an MSVC
@@ -545,7 +545,7 @@ fn toml_file_specifies_profile_debug(path: &std::path::Path, profiles: &[&str]) 
 }
 
 fn toml_text_specifies_profile_debug(text: &str, profiles: &[&str]) -> Option<bool> {
-    let value: toml::Value = text.parse().ok()?;
+    let value: toml::Value = toml::from_str(text).ok()?;
     // An included config may explicitly choose this profile's debug policy.
     // Missing that choice would let Soldr's env injection override Cargo's
     // merged configuration, so includes conservatively suppress the default.
@@ -630,7 +630,7 @@ fn cargo_manifest_declares_workspace(path: &std::path::Path) -> bool {
     let Ok(text) = std::fs::read_to_string(path) else {
         return false;
     };
-    let Ok(value) = text.parse::<toml::Value>() else {
+    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
         return false;
     };
     value.get("workspace").is_some()

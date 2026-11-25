@@ -195,9 +195,10 @@ impl LintPlan {
         &self,
         all_features: bool,
         cross_targets: &[String],
+        profile: Option<&crate::cargo_metadata_canonical::CanonicalProfile>,
     ) -> Result<Vec<(LintStep, String, Vec<String>)>, SoldrError> {
         let mut compiler_scope = self.scope.clone();
-        if all_features {
+        if all_features && profile.is_none() {
             add_all_features(&mut compiler_scope)?;
         }
 
@@ -205,13 +206,7 @@ impl LintPlan {
         fmt.extend(fmt_compatible_scope(&self.scope));
         fmt.extend(["--".into(), "--check".into()]);
 
-        let mut clippy = vec![
-            "clippy".into(),
-            "--workspace".into(),
-            "--all-targets".into(),
-        ];
-        clippy.extend(compiler_scope.iter().cloned());
-        clippy.extend(["--".into(), "-D".into(), "warnings".into()]);
+        let clippy = lint_clippy_args(profile, &compiler_scope, None)?;
 
         let mut steps = Vec::new();
         if self.fmt_fix {
@@ -229,15 +224,7 @@ impl LintPlan {
         // target, each landing under cargo's own `target/<triple>/`
         // subdirectory so the host tree's fingerprints stay untouched.
         for target in cross_targets {
-            let mut cross_clippy = vec![
-                "clippy".into(),
-                "--workspace".into(),
-                "--all-targets".into(),
-                "--target".into(),
-                target.clone(),
-            ];
-            cross_clippy.extend(compiler_scope.iter().cloned());
-            cross_clippy.extend(["--".into(), "-D".into(), "warnings".into()]);
+            let cross_clippy = lint_clippy_args(profile, &compiler_scope, Some(target))?;
             steps.push((
                 LintStep::Clippy,
                 format!("clippy --target {target}"),
@@ -256,11 +243,28 @@ impl LintPlan {
             dylint.push("--all-targets".into());
         }
         dylint.extend(compiler_scope);
+        if let Some(profile) = profile {
+            dylint = vec!["dylint".into(), "--all".into(), "--".into()];
+            dylint.extend(
+                cargo_front_door::canonical::scoped_args(
+                    profile,
+                    cargo_front_door::canonical::CompilingVerb::Check,
+                    &crate::core::TargetTriple::host()?.triple(),
+                    &self.scope,
+                )
+                .into_iter()
+                .skip(1),
+            );
+        }
         if self.cross_dylint {
             steps.push((LintStep::Dylint, "dylint".to_string(), dylint.clone()));
             for target in cross_targets {
                 let mut cross_dylint = dylint.clone();
-                cross_dylint.extend(["--target".into(), target.clone()]);
+                if let Some(index) = cross_dylint.iter().position(|arg| arg == "--target") {
+                    cross_dylint[index + 1] = target.clone();
+                } else {
+                    cross_dylint.extend(["--target".into(), target.clone()]);
+                }
                 steps.push((
                     LintStep::Dylint,
                     format!("dylint --target {target}"),
@@ -282,7 +286,7 @@ impl LintPlan {
         cross_targets: &[String],
     ) -> Result<Vec<Vec<String>>, SoldrError> {
         Ok(self
-            .rust_step_args(all_features, cross_targets)?
+            .rust_step_args(all_features, cross_targets, None)?
             .into_iter()
             .map(|(_, _, args)| args)
             .collect())
@@ -307,7 +311,12 @@ impl LintPlan {
         cross_targets: &[String],
     ) -> Result<Vec<PlannedStep>, SoldrError> {
         let (config, root) = crate::cargo_metadata_soldr::lint_config_from(start)?;
-        let built_ins = self.rust_step_args(all_features, cross_targets)?;
+        let profile = crate::cargo_metadata_canonical::profile_from(start)?;
+        let built_ins = self.rust_step_args(
+            all_features,
+            cross_targets,
+            profile.as_ref().map(|(profile, _)| profile),
+        )?;
         let mut plan = Vec::new();
         for kind in &config.steps {
             plan.extend(built_ins.iter().filter(|(step, _, _)| step == kind).map(
@@ -369,6 +378,37 @@ impl LintPlan {
 /// The Dylint stage widens an unscoped call to `--all-targets`; a scope that
 /// already selects targets (`--lib --bins` for a pre-expansion boundary lint,
 /// soldr#3930) must be passed through as given, never widened. Both the bare
+fn lint_clippy_args(
+    profile: Option<&crate::cargo_metadata_canonical::CanonicalProfile>,
+    scope: &[String],
+    target: Option<&str>,
+) -> Result<Vec<String>, SoldrError> {
+    if let Some(profile) = profile {
+        let mut profile = profile.clone();
+        if target.is_some() {
+            profile.target = crate::cargo_metadata_canonical::CanonicalTarget::ExplicitHost;
+        }
+        let host = crate::core::TargetTriple::host()?.triple();
+        return Ok(cargo_front_door::canonical::scoped_args(
+            &profile,
+            cargo_front_door::canonical::CompilingVerb::Clippy,
+            target.unwrap_or(&host),
+            scope,
+        ));
+    }
+    let mut args = vec![
+        "clippy".into(),
+        "--workspace".into(),
+        "--all-targets".into(),
+    ];
+    if let Some(target) = target {
+        args.extend(["--target".into(), target.into()]);
+    }
+    args.extend(scope.iter().cloned());
+    args.extend(["--".into(), "-D".into(), "warnings".into()]);
+    Ok(args)
+}
+
 /// and the `--flag=value` spellings count.
 fn has_target_selector(scope: &[String]) -> bool {
     const SELECTORS: [&str; 10] = [
@@ -516,10 +556,15 @@ pub(crate) async fn run_lint(
         LintMode::Rust => {
             // soldr#3378: resolved (and validated) before any compile starts.
             let cross_targets = plan.resolve_cross_targets()?;
-            let steps = plan.rust_plan(false, &cross_targets)?;
+            let mut steps = plan.rust_plan(false, &cross_targets)?;
             if cargo_front_door::porcelain_lint::requested() {
                 // soldr#3958: one folded summary for the whole plan.
                 return lint_steps::run_porcelain(steps, cache_enabled, trust_inherited_soldr_env);
+            }
+            if let Some(code) =
+                try_remote_lint(args, &mut steps, cache_enabled, trust_inherited_soldr_env).await?
+            {
+                return Ok(code);
             }
             lint_steps::run_planned_steps(steps, cache_enabled, trust_inherited_soldr_env).await
         }
@@ -555,6 +600,39 @@ pub(crate) async fn run_lint(
             .await
         }
     }
+}
+
+async fn try_remote_lint(
+    args: &[String],
+    steps: &mut Vec<PlannedStep>,
+    cache_enabled: bool,
+    trust_inherited_soldr_env: bool,
+) -> Result<Option<i32>, SoldrError> {
+    if steps
+        .iter()
+        .any(|step| matches!(step, PlannedStep::Extra(_)))
+    {
+        return Ok(None);
+    }
+    let Some(worker) = crate::remote_build::auto::LintWorker::connect(args, cache_enabled).await?
+    else {
+        return Ok(None);
+    };
+    if steps
+        .first()
+        .is_some_and(|step| step.label() == lint_steps::FMT_FIX_LABEL)
+    {
+        let code = lint_steps::run_planned_steps(
+            vec![steps.remove(0)],
+            cache_enabled,
+            trust_inherited_soldr_env,
+        )
+        .await?;
+        if code != 0 {
+            return Ok(Some(code));
+        }
+    }
+    Ok(worker.run(args).await?)
 }
 
 /// Run the `ci` policy suite (soldr#2038). Pure filesystem scan over the

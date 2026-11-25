@@ -79,17 +79,16 @@ impl Role {
     /// or when it is `soldr broker serve` in the foreground (a supported
     /// diagnostic surface, and what soldr's own broker tests spawn).
     fn of_record(record: &ProcessRecord) -> Option<Self> {
-        Self::of_executable(&record.exe).or_else(|| {
-            let is_soldr = record
-                .exe
+        Self::of_process(&record.exe, &record.cmd)
+    }
+
+    pub(crate) fn of_process(exe: &Path, cmd: &[String]) -> Option<Self> {
+        Self::of_executable(exe).or_else(|| {
+            let is_soldr = exe
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with("soldr"));
-            let serves = record
-                .cmd
-                .windows(2)
-                .any(|pair| pair[0] == "broker" && pair[1] == "serve");
-            (is_soldr && serves).then_some(Self::Broker)
+            (is_soldr && is_foreground_broker(cmd)).then_some(Self::Broker)
         })
     }
 
@@ -105,6 +104,24 @@ impl Role {
             _ => None,
         }
     }
+}
+
+// Inspect the command prefix without building the full Clap command tree in a
+// watchdog thread. These are the value-taking options on the top-level Cli.
+fn is_foreground_broker(cmd: &[String]) -> bool {
+    let mut args = cmd.iter().skip(1);
+    let mut words = std::iter::from_fn(|| loop {
+        let arg = args.next()?.as_str();
+        match arg {
+            "--" => return None,
+            "--jobs" | "--zccache" | "--zccache-mode" => {
+                args.next()?;
+            }
+            flag if flag.starts_with('-') => {}
+            word => return Some(word),
+        }
+    });
+    words.next() == Some("broker") && words.next() == Some("serve")
 }
 
 /// A soldr process serving some `HOME` other than the invoking one.

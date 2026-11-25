@@ -34,9 +34,16 @@ fn take_output() -> Option<String> {
     CAPTURED.lock().take()
 }
 
-/// Drop cargo's progress lines; they describe the original run's work, not
-/// its verdict, and would be misleading in a replay.
+/// Keep diagnostics, excluding telemetry about the original run's work.
 pub(crate) fn strip_cargo_status(output: &str) -> String {
+    output
+        .lines()
+        .filter(|line| !is_build_telemetry(line))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+fn is_build_telemetry(line: &str) -> bool {
     const STATUS: &[&str] = &[
         "Compiling",
         "Checking",
@@ -51,14 +58,38 @@ pub(crate) fn strip_cargo_status(output: &str) -> String {
         "Documenting",
         "Building",
     ];
-    output
-        .lines()
-        .filter(|line| {
-            let first = line.split_whitespace().next().unwrap_or("");
-            !STATUS.contains(&first)
-        })
-        .map(|line| format!("{line}\n"))
-        .collect()
+    let Some(visible) = crate::cargo_front_door::timestamp_tee::visible_text(line.as_bytes())
+    else {
+        return false;
+    };
+    let visible = String::from_utf8_lossy(&visible);
+    // Nested cargo-dylint front doors can contribute more than one elapsed
+    // prefix. Inspect the undecorated text but preserve diagnostics verbatim.
+    let text = without_elapsed_prefixes(&visible);
+    STATUS.contains(&text.split_whitespace().next().unwrap_or(""))
+        || text.starts_with("# t0=")
+        || text.starts_with("soldr[cache] ")
+        || text.starts_with("soldr: cache ")
+        || text.starts_with("soldr: no stats for this session")
+        || text.starts_with("soldr: cargo diagnostic capture still running after ")
+}
+
+fn without_elapsed_prefixes(mut text: &str) -> &str {
+    loop {
+        text = text.trim_start();
+        let end = text.find(char::is_whitespace).unwrap_or(text.len());
+        let Some((seconds, fraction)) = text[..end].split_once('.') else {
+            return text;
+        };
+        if seconds.is_empty()
+            || !seconds.bytes().all(|byte| byte.is_ascii_digit())
+            || fraction.len() != 2
+            || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return text;
+        }
+        text = &text[end..];
+    }
 }
 
 pub(crate) enum Gate {
@@ -225,7 +256,8 @@ fn has_user_rows() -> bool {
 
 fn replay(record: &Record) {
     if let Some(output) = &record.output {
-        eprint!("{output}");
+        // Also sanitize existing records written before telemetry was filtered.
+        eprint!("{}", strip_cargo_status(output));
     }
     let note = if record.output_captured {
         ""

@@ -12,6 +12,7 @@ use crate::core::SoldrPaths;
 use crate::daemon::client;
 use crate::daemon::lifecycle::{pid_exe_stem_matches, pid_is_alive};
 use crate::daemon::protocol::PROTOCOL_VERSION;
+use kernal_api::hash::Sha256Hasher;
 use running_process::broker::backend_handle::{BackendHandle, BackendHandleError, DaemonProcess};
 use running_process::broker::backend_lifecycle::identity::IdentityError;
 use running_process::broker::backend_lifecycle::probe::{EndpointProbeError, ProbeError};
@@ -19,7 +20,6 @@ use running_process::broker::backend_lifecycle::verify_pid::VerifyPidError;
 use running_process::broker::backend_sdk::{BackendEndpointMux, LegacyClassification};
 use running_process::broker::host_identity;
 use running_process::broker::protocol::Endpoint;
-use sha2::{Digest, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -99,7 +99,7 @@ pub fn broker_route_identity(
         &super::image_hash::machine_scoped_cache_dir(&paths.cache.join("image-hash")),
         daemon_binary,
     )?;
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     hasher.update(identity.as_bytes());
     hasher.update([0]);
     hasher.update(SOLDR_DAEMON_SERVICE_VERSION.as_bytes());
@@ -107,7 +107,10 @@ pub fn broker_route_identity(
     hasher.update(image_hash.as_bytes());
     let digest = hasher.finalize();
     Ok(BrokerRouteIdentity {
-        service_name: format!("{SOLDR_DAEMON_SERVICE_NAME}-{}", hex::encode(&digest[..16])),
+        service_name: format!(
+            "{SOLDR_DAEMON_SERVICE_NAME}-{}",
+            hex::encode(&digest.as_bytes()[..16])
+        ),
         image_hash,
     })
 }

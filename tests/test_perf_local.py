@@ -168,6 +168,32 @@ def test_bosn_workspace_test_cleans_up_source_route_after_validation_failure(
     assert calls == [step.argv for step in plan.steps]
 
 
+def test_workspace_fail_fast_does_not_retry_only_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handoff = load_script_module(
+        Path(__file__).parents[1] / "ci" / "workspace_test.py",
+        "workspace_test_fail_fast",
+    )
+    plan = handoff.workspace_test_plan(
+        target=Path("/target"), bootstrap=Path("/b"), fail_fast=True
+    )
+    assert "nextest run --fail-fast " in plan.validation.argv[2]
+    calls: list[list[str]] = []
+
+    def fail(step: StepLike, *, repo: Path, **_: object) -> None:
+        calls.append(step.argv)
+        raise subprocess.CalledProcessError(101, step.argv)
+
+    monkeypatch.setattr(handoff, "run_step", fail)
+    monkeypatch.setattr(
+        handoff, "timed_out_only", lambda _: pytest.fail("unexpected retry")
+    )
+    with pytest.raises(subprocess.CalledProcessError):
+        handoff.run_validation(plan, repo=Path("/repo"), fail_fast=True)
+    assert calls == [plan.validation.argv]
+
+
 def test_bosn_workspace_test_cleans_up_source_route_after_start_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

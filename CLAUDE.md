@@ -32,6 +32,26 @@ Mode is detected automatically from argv[1]: path-to-rustc → cache mode, built
 
 **soldr wraps rustc, NOT cargo.** This is the most important design decision: cargo owns build orchestration, soldr owns per-unit caching. See DESIGN.md "Why no `soldr build`" for rationale. As of #685 (phase 2 of #682) `soldr test` / `soldr clippy` / etc. are accepted as **dispatch shorthand** for `soldr cargo test` / `soldr cargo clippy` — they route through the cargo front door and do not become soldr-native verbs (the `Commands::Cargo` arm is still where the work happens).
 
+## Remote builds run on one worker
+
+Assign each whole build or attestation to one worker through
+[`soldr remote run`](docs/REMOTE_BUILD.md). Keep the workspace, pinned toolchain,
+generated files, Cargo target tree, and compiler cache on that worker. Use the
+E640's CPU and RAM for Cargo's parallel work. On Btrfs, use reflinks to give
+sessions writable copies of warm state. Return logs, attestations, and requested
+artifacts to the client. Use additional machines for independent builds.
+
+We retired the `soldr dist` experiment, which tried to distribute individual
+compiler invocations across machines in the style of distcc or Incredibuild.
+Direct joblets did execute remotely, but the experiment did not establish a
+reliable relay-only build or a performance win. In Rust and native builds, a
+compiler invocation can read build-script outputs, files opened by proc macros,
+headers, libraries, linker scripts, and sysroot files. Maintaining a complete
+input set and synchronized toolchain across workers is necessary for correct
+cache hits, and staging those inputs and transferring outputs can erase the
+parallelism gains. Keep per-compiler distribution out of the build and
+attestation workflow.
+
 ## Two build paths — blessed vs legacy (soldr#1010)
 
 `soldr build --target <triple>` is the **blessed-default surface**; `soldr cargo build --target <triple>` is the **explicit legacy passthrough**. Both invoke cargo under the hood — the difference is the toolchain stack each surface mounts and which behaviors evolve at each level:
@@ -44,6 +64,19 @@ Mode is detected automatically from argv[1]: path-to-rustc → cache mode, built
 The split is **a surface contract, not an implementation contract**. `soldr build` may delegate to cargo internally; what matters is that callers asking for `soldr build` get the soldr-blessed toolchain story (with whatever extras land there over time), while callers asking for `soldr cargo build` get the legacy cargo-xwin/zigbuild path verbatim. Internal sharing of the dispatch is allowed and expected.
 
 Friendly target aliases (`win-x64`, `mac-arm64`, etc.) are accepted by both verbs and resolve identically.
+
+## Subprocess lifetimes
+
+Run one-shot maintenance and host probes through `platform::wait::output_for`
+for captured output or the existing `core::command_output_with_timeout*`
+helpers when progress reporting is needed. Give each operation an explicit
+deadline. These paths use an isolated process group on Unix for timeout cleanup
+and bind the direct child to its spawning thread on Linux. Keep one-shot tools
+in that group, and exec the final tool when a launcher only selects it.
+
+Use the daemon launch API for services that intentionally outlive the caller.
+Reserve systemd integration for those services when the existing daemon
+launcher needs it. Maintenance commands must remain invocation-owned.
 
 ## Build Commands
 
@@ -337,7 +370,10 @@ branch is merged.
   repository's shared git root read-only at `/repo`; a worktree *below* that
   root is reachable with `docker exec -w`, a sister worktree under
   `../soldr-extern` is not -- use `bosn run --task <t>` from the worktree
-  instead (bosn mounts the workspace it is run from).
+  instead (bosn mounts the workspace it is run from). bosn tasks are for
+  tests and builds only: lint never runs under bosn (forge-ci/ci.yml
+  GATE-016). Run Rust lint with `soldr lint` and Python lint with `./lint`,
+  both on the host.
 - **Never share one worktree between agents**, and never edit a checkout or
   worktree another agent owns.
 
@@ -592,7 +628,7 @@ The repo builds itself through soldr so every contributor populates and hits the
 
 ## Serialization (issues #580 + #603)
 
-- **Binary transports and persisted-state metadata MUST use Protocol Buffers** (via `prost`), not `bincode` / `rmp-serde` / other schema-less formats. Each schema is paired with the module carrying its hand-written prost types, and the pairs are exactly `PAIRS` in `.github/scripts/check_proto_drift.py`: the daemon wire schema `crates/soldr-core/src/core/wire.proto` with `crates/soldr-core/src/core/wire_proto.rs` (conversions in `crates/soldr-daemon/src/daemon/wire.rs`), and the `soldr save` / `soldr load` archive manifest `crates/soldr-cache/src/cache_lib/manifest.proto` with `crates/soldr-cache/src/cache_lib/save.rs`. (The former rust-plan schema was removed with the target cache in soldr#2996.) The schema file is the source of truth; `.github/scripts/check_proto_drift.py` enforces that by comparing every (message, field, tag) triple in each `.proto` against the `#[prost(…)]` attributes on its Rust type, and runs in the `Lint` job.
+- **Binary transports and persisted-state metadata MUST use Protocol Buffers** (via `prost`), not `bincode` / `rmp-serde` / other schema-less formats. Each schema is paired with the module carrying its hand-written prost types, and the pairs are exactly `PAIRS` in `.github/scripts/check_proto_drift.py`: the daemon wire schema `crates/soldr-core/src/core/wire.proto` with `crates/soldr-core/src/core/wire_proto.rs` (conversions in `crates/soldr-daemon/src/daemon/wire.rs`), and the `soldr save` / `soldr load` archive manifest `crates/soldr-cache/src/cache_lib/manifest.proto` with `crates/soldr-cache/src/cache_lib/save.rs`. (The former rust-plan schema was removed with the target cache in soldr#2996.) The remote-build HTTP protocol pairs `crates/soldr-cli/src/remote_build/wire.proto` with `crates/soldr-cli/src/remote_build/wire.rs`. The schema file is the source of truth; `.github/scripts/check_proto_drift.py` enforces that by comparing every (message, field, tag) triple in each `.proto` against the `#[prost(…)]` attributes on its Rust type, and runs in the `Lint` job.
 
   soldr runs no `prost-build`, so the Rust types are hand-written rather than generated. Until soldr#2753 nothing read the `.proto` files at all — the round-trip tests encode a Rust type and decode it back into the *same* Rust type, which catches prost attribute self-consistency but cannot detect divergence from a schema it never parses. Three drifts had accumulated, including `wire.proto` referencing a message it never defined (i.e. `protoc` would have rejected it). If a schema and its Rust type disagree, fix whichever is wrong; the checker's `CROSS_REPO_MESSAGES` allowlist is only for types implemented in a vendored repo, and each entry must name the file where the type actually lives.
 - **Daemon IPC** (`crates/soldr-daemon/src/daemon/{protocol,ipc,wire}.rs`) carries prost-encoded `WireRequest` / `WireResponse` in the frame body. The header is unchanged from prior versions; `PROTOCOL_VERSION` is bumped on every body-format change so peers at different versions error cleanly rather than silently mis-decoding.

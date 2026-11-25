@@ -194,6 +194,13 @@ fn a_cache_follows_its_route_retention_not_route_liveness() {
         (expired, policy.idle_ttl + Duration::from_secs(60)),
     ] {
         register(&services, service, &root, now);
+        // A front door renews the registration with every launch, so it ages
+        // with the route: the kept route is the root's newest.
+        set_file_mtime(
+            services.join(format!("{service}.servicedef.v2")),
+            FileTime::from_system_time(now - idle),
+        )
+        .unwrap();
         let route = routes.join(service);
         fs::create_dir_all(&route).unwrap();
         set_file_mtime(&route, FileTime::from_system_time(now - idle)).unwrap();
@@ -223,4 +230,117 @@ fn a_cache_follows_its_route_retention_not_route_liveness() {
     assert_eq!(report.cache_stores_removed, 1, "{report:?}");
     assert!(!stores[1].exists());
     assert!(!routes.join(expired).exists());
+}
+
+/// gh-runner#75 regression: a persistent CI runner runs one soldr route per
+/// root. When the job ends its daemon stops, the broker reaps the idle route,
+/// and the reaper's eager pass used to sweep that route's store in Pressure
+/// mode: every artifact the job had just published (1.5 GB on dell-fsx3mn2)
+/// was gone two minutes later, so every job on the runner compiled cold. The
+/// newest registered route of a root is that root's current store and is
+/// kept, together with its registration, until a newer route supersedes it.
+#[test]
+fn the_current_route_of_a_root_keeps_its_store_after_its_daemon_exits() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("soldr-root");
+    let services = temp.path().join("services");
+    fs::create_dir_all(&services).unwrap();
+    let now = SystemTime::now();
+    let service = "soldr-daemon-ffffffffffffffffffffffffffffffff";
+    register(&services, service, &root, now);
+    let store = SoldrPaths::with_root(root)
+        .cache
+        .join("zccache/daemon-state")
+        .join(format!("embedded-v1-{service}"))
+        .join(zccache::core::config::versioned_subdir());
+    fs::create_dir_all(&store).unwrap();
+    fs::write(store.join("artifact"), b"payload").unwrap();
+
+    let report = sweep_retired_route_caches(&services, &BTreeSet::new(), now);
+
+    assert_eq!(report.stores_removed, 0, "{report:?}");
+    assert!(store.join("artifact").exists());
+    assert!(
+        report.pending.contains(service),
+        "the current route's registration must survive so a later sweep can find its store"
+    );
+}
+
+/// The daemon-disk sweep may reclaim an idle route's staged image after its
+/// TTL, but the root's current store is not the route's to take: the next
+/// job on the root relaunches the same route and needs it warm. A runner idle
+/// overnight (6.6 h between two jobs on dell-fsx3mn2-forge-ci-1) is past the
+/// 6 h TTL.
+#[test]
+fn a_ttl_reclaimed_route_keeps_its_store_while_it_is_its_roots_newest() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("soldr-root");
+    let services = temp.path().join("services");
+    let routes = temp.path().join("routes");
+    fs::create_dir_all(&services).unwrap();
+    fs::create_dir_all(&routes).unwrap();
+    let now = SystemTime::now();
+    let policy = crate::broker_daemon_disk::DaemonDiskPolicy::default();
+    let service = "soldr-daemon-abababababababababababababababab";
+    register(&services, service, &root, now);
+    let route = routes.join(service);
+    fs::create_dir_all(&route).unwrap();
+    let idle = policy.idle_ttl + Duration::from_secs(60);
+    set_file_mtime(&route, FileTime::from_system_time(now - idle)).unwrap();
+    let store = SoldrPaths::with_root(root)
+        .cache
+        .join("zccache/daemon-state")
+        .join(format!("embedded-v1-{service}"))
+        .join(zccache::core::config::versioned_subdir());
+    fs::create_dir_all(&store).unwrap();
+    fs::write(store.join("artifact"), b"payload").unwrap();
+
+    let report = crate::broker_daemon_disk::sweep_daemon_disk(
+        &routes,
+        &services,
+        &BTreeSet::new(),
+        now,
+        policy,
+    );
+
+    assert!(store.join("artifact").exists(), "{report:?}");
+    assert_eq!(report.cache_stores_removed, 0, "{report:?}");
+    assert!(services.join(format!("{service}.servicedef.v2")).exists());
+}
+
+/// Once a newer route registers on the same root, the older route's store is
+/// superseded and goes on the next pass, as before.
+#[test]
+fn a_superseded_route_loses_its_store_to_the_newer_route_on_its_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("soldr-root");
+    let services = temp.path().join("services");
+    fs::create_dir_all(&services).unwrap();
+    let now = SystemTime::now();
+    let old = "soldr-daemon-01010101010101010101010101010101";
+    let new = "soldr-daemon-02020202020202020202020202020202";
+    register(&services, old, &root, now);
+    register(&services, new, &root, now);
+    set_file_mtime(
+        services.join(format!("{old}.servicedef.v2")),
+        FileTime::from_system_time(now - Duration::from_secs(3 * 3600)),
+    )
+    .unwrap();
+    let store_for = |service: &str| {
+        SoldrPaths::with_root(root.clone())
+            .cache
+            .join("zccache/daemon-state")
+            .join(format!("embedded-v1-{service}"))
+            .join(zccache::core::config::versioned_subdir())
+    };
+    for service in [old, new] {
+        fs::create_dir_all(store_for(service)).unwrap();
+        fs::write(store_for(service).join("artifact"), b"payload").unwrap();
+    }
+
+    let report = sweep_retired_route_caches(&services, &BTreeSet::new(), now);
+
+    assert_eq!(report.stores_removed, 1, "{report:?}");
+    assert!(!store_for(old).exists());
+    assert!(store_for(new).join("artifact").exists());
 }

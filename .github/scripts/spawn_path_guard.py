@@ -17,6 +17,10 @@ Counting is per file rather than per line so refactors inside an allowlisted
 module do not churn the manifest; adding a spawn to a *new* file, or growing a
 file's count, is exactly the event that needs review.
 
+The same guard reserves detached sweep launches and systemd scopes for
+their owning launchers, along with the persistent daemon launch API. These
+source checks catch direct references and imports of the named APIs.
+
 Test-only code is out of scope: `*_tests.rs` siblings, `tests/` directories,
 and dylint `ui/` fixtures are skipped.
 """
@@ -35,6 +39,35 @@ CRATES = REPO_ROOT / "crates"
 # `std::process::Command::spawn` and tokio's process spawn take no
 # arguments, while `thread::spawn(closure)` / `tokio::spawn(future)` do.
 SPAWN = re.compile(r"\.spawn\(\)")
+DETACHED_SPAWN = re.compile(r"\bspawn_detached\b")
+DAEMON_SPAWN = re.compile(r"\bspawn_daemon(?:_\w+)?\b")
+DAEMON_COMMAND = re.compile(r"\bdaemon_command\b")
+SYSTEMD_RUN = re.compile(r'"(?:[^"\n]*/)?systemd-run"')
+DETACHED_SWEEP = "crates/soldr-cli/src/gc/auto.rs"
+SYSTEMD_DAEMON_SCOPE = "crates/soldr-platform/src/platform_linux/process/spawn.rs"
+DAEMON_LAUNCHERS = frozenset(
+    f"crates/soldr-cli/src/{name}.rs"
+    for name in ("broker_launcher", "broker_spawn", "pair_cmd")
+)
+PLATFORM_SPAWN_MODULES = frozenset(
+    f"crates/soldr-platform/src/{platform}/process/spawn.rs"
+    for platform in ("platform", "platform_linux", "platform_macos", "platform_win")
+)
+BROKER_LAUNCHER = "crates/soldr-cli/src/broker_launcher.rs"
+LIFETIME_RULES = (
+    (
+        DETACHED_SPAWN,
+        PLATFORM_SPAWN_MODULES | {DETACHED_SWEEP},
+        "the coalesced auto-GC sweeper",
+    ),
+    (DAEMON_SPAWN, DAEMON_LAUNCHERS, "the broker and desktop launchers"),
+    (
+        DAEMON_COMMAND,
+        PLATFORM_SPAWN_MODULES | {BROKER_LAUNCHER},
+        "the broker launcher",
+    ),
+    (SYSTEMD_RUN, {SYSTEMD_DAEMON_SCOPE}, "the shared daemon scope"),
+)
 
 
 @dataclass(frozen=True)
@@ -218,9 +251,29 @@ def violations(counts: list[SpawnCount]) -> list[str]:
     return problems
 
 
+def lifetime_violations() -> list[str]:
+    problems = []
+    for path in sorted(CRATES.glob("*/src/**/*.rs")):
+        if not is_production_source(path):
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for pattern, allowed, owner in LIFETIME_RULES:
+            if rel in allowed:
+                continue
+            for match in pattern.finditer(text):
+                line_number = text.count("\n", 0, match.start()) + 1
+                launch = match.group().strip('"')
+                problems.append(
+                    f"{rel}:{line_number}: {launch} is reserved for "
+                    f"{owner}; use an owned command helper"
+                )
+    return problems
+
+
 def main() -> int:
     counts = spawn_counts()
-    problems = violations(counts)
+    problems = violations(counts) + lifetime_violations()
     if problems:
         print("spawn-path guard failed:", file=sys.stderr)
         for problem in problems:

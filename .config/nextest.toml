@@ -25,13 +25,18 @@ experimental = ["wrapper-scripts"]
 # to SIGKILL. Windows nextest timeouts kill the job object immediately and
 # cannot run a graceful diagnostic hook.
 #
-# `period` x `terminate-after` is the budget: 60s x 2 = 120s, which is exactly
-# the old `DEFAULT_TEST_TIMEOUT`. Tests that declared a *shorter* budget are
-# not given overrides -- those were fail-fast niceties rather than safety
-# limits, and 162 per-test entries would be noise. Only the 12 tests that
-# declared MORE than the default get one, below.
+# Targets without the native wrapper use a 120s wall-clock budget (60s x 2).
+# The first matching Unix override keeps the slow notice and lets the wrapper
+# terminate tests based on output silence. Longer budgets below apply where
+# there is no native wrapper.
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 2, grace-period = "30s" }
+
+# On Unix the native wrapper ends tests after sustained output silence.
+# Keep Nextest's slow warnings without imposing a competing wall deadline.
+[[profile.default.overrides]]
+platform = { target = "cfg(unix)" }
+slow-timeout = { period = "60s" }
 
 # =====================================================================
 # soldr#2934 -- READ THIS BEFORE EDITING ANY `filter = ` LINE BELOW.
@@ -351,17 +356,17 @@ max-threads = 1
 # strictly serial today, but it is not a 2x.
 
 [[profile.default.overrides]]
-filter = '(binary(cargo_front_door) & test(/^(cli_cargo_basic|cli_cargo_linker|cli_cargo_run_trampoline|cli_cargo_wrappers|cli_dylint_wrapper)::/)) + (binary(cargo_front_door) & test(/^cli_cargo_doc_routes::(cargo_doc_keeps_rustc_wrapped_but_rustdoc_direct|bare_doc_keeps_rustc_wrapped_but_rustdoc_direct|cargo_doc_route_deadline_kills_wrapper_hold_tree|bare_doc_route_deadline_kills_rustdoc_hold_tree|cargo_doc_tests_keep_rustc_wrapped_but_rustdoc_direct|rustdoc_path_shim_reenters_direct_passthrough_without_zccache)$/)) + test(=cli_wrapper::cargo_front_door_forces_msvc_target_even_with_polluted_path) + test(=cli_exec::exec_cargo_build_routes_through_child_shims)'
+filter = '(binary(cargo_front_door) & test(/^(cli_cargo_basic|cli_cargo_linker|cli_cargo_run_trampoline|cli_cargo_wrappers|cli_cargo_canonical|cli_dylint_wrapper)::/)) + (binary(cargo_front_door) & test(/^cli_cargo_doc_routes::(cargo_doc_keeps_rustc_wrapped_but_rustdoc_direct|bare_doc_keeps_rustc_wrapped_but_rustdoc_direct|cargo_doc_route_deadline_kills_wrapper_hold_tree|bare_doc_route_deadline_kills_rustdoc_hold_tree|cargo_doc_tests_keep_rustc_wrapped_but_rustdoc_direct|rustdoc_path_shim_reenters_direct_passthrough_without_zccache)$/)) + test(=cli_wrapper::cargo_front_door_forces_msvc_target_even_with_polluted_path) + test(=cli_exec::exec_cargo_build_routes_through_child_shims)'
 platform = { target = 'cfg(target_os = "windows")' }
 threads-required = "num-cpus"
 
 [[profile.default.overrides]]
-filter = '(binary(cargo_front_door) & test(/^(cli_cargo_basic|cli_cargo_linker|cli_cargo_run_trampoline|cli_cargo_wrappers|cli_dylint_wrapper)::/)) + (binary(cargo_front_door) & test(/^cli_cargo_doc_routes::(cargo_doc_keeps_rustc_wrapped_but_rustdoc_direct|bare_doc_keeps_rustc_wrapped_but_rustdoc_direct|cargo_doc_route_deadline_kills_wrapper_hold_tree|bare_doc_route_deadline_kills_rustdoc_hold_tree|cargo_doc_tests_keep_rustc_wrapped_but_rustdoc_direct|rustdoc_path_shim_reenters_direct_passthrough_without_zccache)$/)) + test(=cli_wrapper::cargo_front_door_forces_msvc_target_even_with_polluted_path) + test(=cli_exec::exec_cargo_build_routes_through_child_shims)'
+filter = '(binary(cargo_front_door) & test(/^(cli_cargo_basic|cli_cargo_linker|cli_cargo_run_trampoline|cli_cargo_wrappers|cli_cargo_canonical|cli_dylint_wrapper)::/)) + (binary(cargo_front_door) & test(/^cli_cargo_doc_routes::(cargo_doc_keeps_rustc_wrapped_but_rustdoc_direct|bare_doc_keeps_rustc_wrapped_but_rustdoc_direct|cargo_doc_route_deadline_kills_wrapper_hold_tree|bare_doc_route_deadline_kills_rustdoc_hold_tree|cargo_doc_tests_keep_rustc_wrapped_but_rustdoc_direct|rustdoc_path_shim_reenters_direct_passthrough_without_zccache)$/)) + test(=cli_wrapper::cargo_front_door_forces_msvc_target_even_with_polluted_path) + test(=cli_exec::exec_cargo_build_routes_through_child_shims)'
 platform = { target = 'cfg(target_os = "linux")' }
 test-group = 'soldr-cold-start-linux'
 
 [[profile.default.overrides]]
-filter = '(binary(cargo_front_door) & test(/^(cli_cargo_basic|cli_cargo_linker|cli_cargo_run_trampoline|cli_cargo_wrappers|cli_dylint_wrapper)::/)) + (binary(cargo_front_door) & test(/^cli_cargo_doc_routes::(cargo_doc_keeps_rustc_wrapped_but_rustdoc_direct|bare_doc_keeps_rustc_wrapped_but_rustdoc_direct|cargo_doc_route_deadline_kills_wrapper_hold_tree|bare_doc_route_deadline_kills_rustdoc_hold_tree|cargo_doc_tests_keep_rustc_wrapped_but_rustdoc_direct|rustdoc_path_shim_reenters_direct_passthrough_without_zccache)$/)) + test(=cli_wrapper::cargo_front_door_forces_msvc_target_even_with_polluted_path) + test(=cli_exec::exec_cargo_build_routes_through_child_shims)'
+filter = '(binary(cargo_front_door) & test(/^(cli_cargo_basic|cli_cargo_linker|cli_cargo_run_trampoline|cli_cargo_wrappers|cli_cargo_canonical|cli_dylint_wrapper)::/)) + (binary(cargo_front_door) & test(/^cli_cargo_doc_routes::(cargo_doc_keeps_rustc_wrapped_but_rustdoc_direct|bare_doc_keeps_rustc_wrapped_but_rustdoc_direct|cargo_doc_route_deadline_kills_wrapper_hold_tree|bare_doc_route_deadline_kills_rustdoc_hold_tree|cargo_doc_tests_keep_rustc_wrapped_but_rustdoc_direct|rustdoc_path_shim_reenters_direct_passthrough_without_zccache)$/)) + test(=cli_wrapper::cargo_front_door_forces_msvc_target_even_with_polluted_path) + test(=cli_exec::exec_cargo_build_routes_through_child_shims)'
 test-group = 'soldr-cargo-cold-builds'
 
 # soldr#3625: front-door modules with the cold-start shape that were in no
@@ -515,11 +520,13 @@ slow-timeout = { period = "60s", terminate-after = 4, grace-period = "30s" }
 filter = 'binary(broker) & test(/^cli_kill_matrix::/)'
 slow-timeout = { period = "60s", terminate-after = 4, grace-period = "30s" }
 
-# Inherits `[profile.default]`, so the timeouts above apply here too. That is
-# required, not incidental: with `timed_test!` gone, this profile would
-# otherwise let a hung test run until the job's 45-minute ceiling.
+# Inherits the default wrapper and the non-Unix wall-clock deadlines.
 [profile.target-run]
 fail-fast = false
+
+[[profile.target-run.overrides]]
+platform = { target = "cfg(unix)" }
+slow-timeout = { period = "60s" }
 
 # Target-run intentionally inherits the default profile's zero-retry policy.
 # A failed attempt is evidence, not a reason to spend another target-run slot
