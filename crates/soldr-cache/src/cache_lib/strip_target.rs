@@ -159,20 +159,33 @@ impl StripTargetOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StripCategory {
-    #[strum(serialize = "large_stderr")]
     LargeStderr,
-    #[strum(serialize = "build_script_binary")]
     BuildScriptBinary,
-    #[strum(serialize = "examples_doc_tests")]
     ExamplesDocTests,
-    #[strum(serialize = "debug_sidecar")]
     DebugSidecar,
-    #[strum(serialize = "incremental_dir")]
     IncrementalDir,
-    #[strum(serialize = "stub_binary")]
     StubBinary,
+}
+
+impl From<StripCategory> for &'static str {
+    fn from(category: StripCategory) -> Self {
+        match category {
+            StripCategory::LargeStderr => "large_stderr",
+            StripCategory::BuildScriptBinary => "build_script_binary",
+            StripCategory::ExamplesDocTests => "examples_doc_tests",
+            StripCategory::DebugSidecar => "debug_sidecar",
+            StripCategory::IncrementalDir => "incremental_dir",
+            StripCategory::StubBinary => "stub_binary",
+        }
+    }
+}
+
+impl From<&StripCategory> for &'static str {
+    fn from(category: &StripCategory) -> Self {
+        (*category).into()
+    }
 }
 
 impl StripCategory {

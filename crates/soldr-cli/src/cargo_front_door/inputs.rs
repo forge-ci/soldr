@@ -10,8 +10,8 @@
 //!   ([`file_hash_or_missing`], [`stable_hash_json`], [`path_string`]).
 
 use crate::core::SoldrError;
+use kernal_api::hash::Sha256Hasher;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use super::profile_debug::CargoProfileDebugDefault;
 use super::subcommand::cargo_args_target_value;
@@ -207,12 +207,7 @@ pub(crate) fn stable_hash_json<T: Serialize>(value: &T) -> String {
 }
 
 pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        hex.push_str(&format!("{byte:02x}"));
-    }
-    hex
+    Sha256Hasher::digest(bytes).to_hex()
 }
 
 pub(crate) fn path_string(path: &std::path::Path) -> String {

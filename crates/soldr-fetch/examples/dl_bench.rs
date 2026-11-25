@@ -42,7 +42,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, BoxError>;
@@ -175,7 +175,7 @@ fn aria2c_available() -> bool {
 
 fn sha256_file(path: &Path) -> Result<String> {
     let mut f = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     let mut buf = [0u8; 1 << 20];
     loop {
         let n = f.read(&mut buf)?;
@@ -184,7 +184,7 @@ fn sha256_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hex::encode(hasher.finalize()))
+    Ok(hasher.finalize().to_hex())
 }
 
 fn auth_token() -> Option<String> {

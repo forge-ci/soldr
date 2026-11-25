@@ -42,6 +42,9 @@ fn run_signal_case(signal: TestSignal, debug: bool, ignore: bool) {
     command
         .args(["--no-cache", "cargo", "build"])
         .current_dir(&workspace)
+        // ci-test keeps its stages in one group. This fixture exercises Cargo
+        // in a separate group owned by the nested Soldr process.
+        .env_remove("SOLDR_INTERNAL_INHERIT_PROCESS_GROUP")
         .env("SOLDR_TEST_CARGO_BIN", &cargo)
         .env("SOLDR_TEST_RUSTC_BIN", &rustc)
         .env("SOLDR_CACHE_DIR", root.join("cache"))
@@ -85,13 +88,20 @@ fn run_signal_case(signal: TestSignal, debug: bool, ignore: bool) {
         "interruption must fail"
     );
     let deadline = Instant::now() + Duration::from_secs(3);
-    while cleanup.0[1..].iter().any(|pid| inspect::is_alive(*pid)) && Instant::now() < deadline {
+    loop {
+        let survivor = cleanup.0[1..]
+            .iter()
+            .copied()
+            .find(|pid| inspect::is_alive(*pid));
+        let Some(pid) = survivor else {
+            break;
+        };
+        assert!(
+            Instant::now() < deadline,
+            "PID {pid} survived {signal:?} (cargo PID {cargo_pid})"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(
-        cleanup.0[1..].iter().all(|pid| !inspect::is_alive(*pid)),
-        "cargo {cargo_pid} survived {signal:?}"
-    );
     assert!(output.pipes_closed, "cargo retained its inherited pipes");
     cleanup.0.clear();
     if signal != TestSignal::Kill {

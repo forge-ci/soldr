@@ -14,7 +14,7 @@ name = "soldr-nextest-wrapper"
 path = "src/main.rs"
 
 [dependencies]
-sha2 = { workspace = true }
+kernal-api = { workspace = true, features = ["hash-sha256"] }
 soldr-core = { path = "../soldr-core" }
 soldr-platform = { path = "../soldr-platform" }
 wait-timeout = { workspace = true }

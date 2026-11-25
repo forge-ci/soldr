@@ -5,14 +5,75 @@ account dedicated to trusted builds. Cargo build scripts and tests run with
 that account's permissions. The HTTP listeners bind to loopback. Use a Soldr
 peer connection or an SSH tunnel between machines.
 
-Generate a build token on the client with a restrictive file mode and
-transfer it to the runner over a trusted channel. Each command uses the token
-path on its own machine.
+## Forge CI pairing
+
+Run `soldr pair` and approve the prefilled pairing in your browser with GitHub.
+`soldr sign in` uses the same pairing flow. Once Forge CI has a worker configured,
+`soldr remote run build` uses the saved account to request a worker grant.
+The worker receives that grant over HTTPS and never sees the device credential.
+
+After pairing, builds, Cargo check, Clippy, and `soldr test --no-run` can
+select a worker from a Git workspace root. Cargo shorthands and their explicit
+`soldr cargo` forms share the same routing. Soldr sends tracked worktree files
+and nonignored new files. A compatible worker can build a Git worktree before
+its first commit.
+
+Automatic routing requires a matching worker host and the default target
+directory. It supports common package, feature, profile, and binary selection
+flags, plus explicit Rust triples and target aliases for compile-only actions.
+With a native target and the default runner, supported `soldr run` invocations
+compile remotely and execute locally. Supported `soldr test` invocations
+compile and run on the worker so Cargo's generated files and compile-time
+paths remain accessible. Tests use the worker environment. Custom target JSON
+files and custom runners use the local path.
+
+Set `SOLDR_FORGE_LOCAL_TEST_RUNTIME=1` to try local execution of tests with
+portable artifacts. Tests that use worker-specific paths require worker
+execution. The local relay captures test output and sends it back to the
+worker for Cargo or Rustdoc to report.
+
+After a remote build, check, Clippy run, or test compile finishes, Soldr
+downloads the worker's attestation to
+`target/forge-ci-attestations/<session>.json` and prints the path. The record
+identifies the worker, input files, and compile exit status. A regular build
+also installs its verified build products in the local Cargo profile
+directories. `soldr test --no-run` puts its products in
+`target/forge-ci-tests/<session>` and prints that path.
+
+Plain `soldr lint` delegates the Rust suite from a supported Git workspace root
+after pairing and writes the worker's result to `target/attestation.json`.
+When lint would normally fix formatting, Soldr runs that step locally before
+sending the worktree. The worker then checks formatting.
+If no compatible worker is available, lint runs locally. Repository extra
+commands and the explicit `lint rust --attest` evidence workflow run locally.
+
+Run the worker in its dedicated build environment with
+`soldr remote serve --forge-key-file /path/to/key --root /path/to/state`.
+Put an HTTPS endpoint in front of the loopback listener. Signed sessions
+authorize build and artifact requests with the original grant, so the proxy can
+open or reuse upstream connections. The worker key must match the service's
+configured worker key. A grant can start builds for 15 minutes and access sessions for
+four hours after that. Configure the worker origin only once its HTTPS
+endpoint is reachable.
+
+## SSH tunnel
+
+Generate a shared token on the client with a restrictive file mode and
+copy the file to the runner via SSH. Use the corresponding token path on
+each machine.
 
 ```sh
 (umask 077 && openssl rand -hex 32 > "$HOME/.soldr-remote-token")
 scp "$HOME/.soldr-remote-token" build-runner:.soldr-remote-token
 ```
+
+## Register Soldr with Forge CI
+
+Run `soldr pair` on your computer and leave it running. Soldr opens
+[forge-ci.com/soldr/pair](https://forge-ci.com/soldr/pair) with the code filled
+in. If the browser does not open, copy the full URL printed in your terminal.
+Select **Continue with GitHub** within 30 minutes. The page and terminal
+confirm registration.
 
 ## Persistent peer connection
 
@@ -75,8 +136,8 @@ Use the session ID printed by `remote run`. The same command accepts
 `test`, `dylint`, or `lint` in place of `build` and forwards arguments to that
 Soldr command from the repository root. To export the runner's Soldr cache,
 pass `--cache-zstd-level 3` before the action and include `cache.tar.zst`
-among the fetch globs. The runner serializes builds and cache exports
-against its dedicated compiler cache. The fetch destination must be a new
+among the fetch globs. Cache exports wait for other sessions to finish before reading the worker's
+compiler cache. The fetch destination must be a new
 directory with an existing parent. Give the fetch exclusive use of that
 destination path until it completes. Artifact paths retain their relative layout.
 An explicit Cargo `--target-dir` is relative to the session's fetchable
@@ -89,17 +150,22 @@ Each stream sends binary Zstandard at level 9. The client verifies the
 uncompressed size and SHA-256 of every file before publishing the
 download directory.
 
-Downloads start after the runner reports the build result. New session
-artifacts are available only on the HTTP connection that started the
-build. The runner stages them under `artifact-tmp/` and starts a four-hour
-countdown when it publishes the artifacts. Disconnecting releases the
+Downloads start after the runner reports the build result. For SSH tunnel
+sessions, artifacts stay on the HTTP connection that started the build.
+Signed Forge CI sessions can fetch artifacts across connections with their
+original grant. The runner stages archives under `artifact-tmp/` and starts a
+four-hour countdown at publication. Disconnecting an SSH tunnel releases its
 archive as soon as in-flight work lets go of it. The runner also checks
 for expired directories left by a crash at startup and once a minute.
 Use `--fetch-out` and `--fetch` on the original run to save the files locally.
 
-The client requires a commit and a clean Git status, including untracked
-files. Ignored build outputs stay local. The client reads sources from the
-committed Git tree. The runner
+By default the client requires a commit and a clean Git status, including
+untracked files, and reads sources from the committed Git tree. Pass
+`--working-tree` to include the current bytes of tracked files and nonignored
+new files, including local edits and deletions. Worktree builds require a
+base commit and a worker that acknowledges this mode. They report a base
+commit rather than claiming the files match that commit. They do not accept a
+commit manifest. Ignored, untracked build outputs stay local. The runner
 asks for SHA-256 blobs missing from its disk store, then materializes each
 session in a fresh directory. The HTTP bodies use Zstandard-compressed
 Protocol Buffers. A single request or response can carry up to 256 MiB of
@@ -173,7 +239,8 @@ the session's fetch directory. An identical successful run can also reuse
 files that still match its recorded output inventory. Failed commands still
 publish their logs and metadata. A client disconnect leaves the build running
 until its child exits or times out, so a slot cannot be reused while a
-detached build is writing to it. Build execution remains serialized.
+detached build is writing to it. Private workspaces can run concurrently.
+Sessions using warm slots or exporting the cache still take the exclusive lock.
 
 For a manifested session, `lint` defaults to `soldr lint rust --check`.
 After a successful full Rust lint, the runner attempts a separate

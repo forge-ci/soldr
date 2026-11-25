@@ -19,11 +19,11 @@
 //! Any memo problem (missing, unreadable, malformed, unwritable) degrades to
 //! computing the digest; the memo only ever skips work.
 
+use kernal_api::hash::Sha256Hasher;
 use running_process::broker::backend_handle::DaemonProcess;
 use running_process::broker::backend_lifecycle::identity::DaemonIdentityHashPolicy;
 use running_process::broker::backend_lifecycle::identity::IdentityError;
 use running_process::broker::protocol::Endpoint;
-use sha2::{Digest, Sha256};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
@@ -94,7 +94,7 @@ fn write_entry(memo_dir: &Path, entry: &Path, digest: &[u8; 32]) -> io::Result<(
 
 fn sha256_file(path: &Path) -> io::Result<[u8; 32]> {
     let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
         let read = file.read(&mut buf)?;
@@ -103,7 +103,7 @@ fn sha256_file(path: &Path) -> io::Result<[u8; 32]> {
         }
         hasher.update(&buf[..read]);
     }
-    Ok(hasher.finalize().into())
+    Ok(*hasher.finalize().as_bytes())
 }
 
 fn hex(bytes: &[u8; 32]) -> String {

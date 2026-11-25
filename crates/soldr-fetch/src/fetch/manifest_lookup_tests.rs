@@ -4,7 +4,7 @@ use crate::fetch::manifest_lookup::catalogue_model::*;
 use crate::fetch::manifest_lookup::catalogue_transport::*;
 use crate::fetch::manifest_lookup::resolved_download_label;
 use crate::fetch::manifest_lookup::toolchain_origin::DEFAULT_TOOLCHAIN_ORIGIN;
-use sha2::Digest;
+use kernal_api::hash::Sha256Hasher;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1228,11 +1228,11 @@ fn multipart_copy_hashes_without_whole_file_buffering() {
     std::fs::write(&source, vec![0x5a; 128 * 1024 + 7]).unwrap();
     let mut input = std::fs::File::open(source).unwrap();
     let mut output = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
-    let mut hash = sha2::Sha256::new();
+    let mut hash = Sha256Hasher::new();
     let bytes = copy_and_hash(&mut input, &mut output, &mut hash).unwrap();
     assert_eq!(bytes, 128 * 1024 + 7);
     assert_eq!(
-        hex::encode(hash.finalize()),
+        hash.finalize().to_hex(),
         super::super::trust::sha256_of(&std::fs::read(output.path()).unwrap())
     );
 }

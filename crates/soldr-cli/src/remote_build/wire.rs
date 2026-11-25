@@ -18,6 +18,10 @@ pub(super) struct Start {
     pub cache_zstd_level: Option<i32>,
     #[prost(bytes = "vec", optional, tag = "6")]
     pub manifest_json: Option<Vec<u8>>,
+    #[prost(bool, tag = "7")]
+    pub working_tree: bool,
+    #[prost(string, optional, tag = "8")]
+    pub work_dir: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -39,6 +43,32 @@ pub(super) enum Action {
     Test = 1,
     Dylint = 2,
     Lint = 3,
+    CargoBuild = 4,
+    CargoCheck = 5,
+    CargoClippy = 6,
+    CargoTestCompile = 7,
+    CargoTestRuntime = 8,
+}
+
+impl Action {
+    pub(super) fn worker_command(self, args: &mut Vec<String>) -> &'static str {
+        let cargo_verb = match self {
+            Self::Build => return "build",
+            Self::Test => return "test",
+            Self::Dylint => return "dylint",
+            Self::Lint => return "lint",
+            Self::CargoBuild => "build",
+            Self::CargoCheck => "check",
+            Self::CargoClippy => "clippy",
+            Self::CargoTestRuntime => "test",
+            Self::CargoTestCompile => {
+                args.insert(0, "--no-run".into());
+                "test"
+            }
+        };
+        args.insert(0, cargo_verb.into());
+        "cargo"
+    }
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -49,6 +79,59 @@ pub(super) struct Session {
     pub missing: Vec<String>,
     #[prost(bool, tag = "3")]
     pub manifest_accepted: bool,
+    #[prost(bool, tag = "4")]
+    pub working_tree_accepted: bool,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct TestRuntimeResult {
+    #[prost(int32, tag = "1")]
+    pub code: i32,
+    #[prost(bytes = "vec", tag = "2")]
+    pub stdout: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub stderr: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct Capabilities {
+    #[prost(string, tag = "1")]
+    pub host: String,
+    #[prost(bool, tag = "2")]
+    pub working_tree_builds: bool,
+    #[prost(bool, tag = "3")]
+    pub cargo_check: bool,
+    #[prost(enumeration = "Action", repeated, tag = "4")]
+    pub compile_actions: Vec<i32>,
+    #[prost(bool, tag = "5")]
+    pub worktree_subdirectories: bool,
+    #[prost(bool, tag = "6")]
+    pub test_executables: bool,
+    #[prost(bool, tag = "7")]
+    pub worktree_without_commit: bool,
+}
+
+impl Capabilities {
+    pub(super) fn worker() -> io::Result<Self> {
+        Ok(Self {
+            host: crate::core::TargetTriple::host()
+                .map_err(io::Error::other)?
+                .triple(),
+            working_tree_builds: true,
+            cargo_check: true,
+            worktree_subdirectories: true,
+            test_executables: true,
+            worktree_without_commit: true,
+            compile_actions: [
+                Action::CargoClippy,
+                Action::CargoTestCompile,
+                Action::CargoTestRuntime,
+            ]
+            .into_iter()
+            .map(|action| action as i32)
+            .collect(),
+        })
+    }
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -61,6 +144,16 @@ pub(super) struct Blob {
 pub(super) struct WorkspaceBatch {
     #[prost(message, repeated, tag = "1")]
     pub blobs: Vec<WorkspaceBlob>,
+    #[prost(message, optional, tag = "2")]
+    pub runtime_reply: Option<TestRuntimeReply>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(super) struct TestRuntimeReply {
+    #[prost(string, tag = "1")]
+    pub invocation: String,
+    #[prost(message, optional, tag = "2")]
+    pub result: Option<TestRuntimeResult>,
 }
 
 #[derive(Clone, PartialEq, Message)]

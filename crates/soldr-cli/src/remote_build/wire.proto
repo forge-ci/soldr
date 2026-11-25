@@ -9,6 +9,8 @@ message Start {
   repeated string args = 4;
   optional sint32 cache_zstd_level = 5;
   optional bytes manifest_json = 6;
+  bool working_tree = 7;
+  optional string work_dir = 8;
 }
 
 message Source {
@@ -23,12 +25,34 @@ enum Action {
   TEST = 1;
   DYLINT = 2;
   LINT = 3;
+  CARGO_BUILD = 4;
+  CARGO_CHECK = 5;
+  CARGO_CLIPPY = 6;
+  CARGO_TEST_COMPILE = 7;
+  CARGO_TEST_RUNTIME = 8;
 }
 
 message Session {
   string id = 1;
   repeated string missing = 2;
   bool manifest_accepted = 3;
+  bool working_tree_accepted = 4;
+}
+
+message TestRuntimeResult {
+  int32 code = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+}
+
+message Capabilities {
+  string host = 1;
+  bool working_tree_builds = 2;
+  bool cargo_check = 3;
+  repeated Action compile_actions = 4;
+  bool worktree_subdirectories = 5;
+  bool test_executables = 6;
+  bool worktree_without_commit = 7;
 }
 
 message Blob {
@@ -37,6 +61,12 @@ message Blob {
 
 message WorkspaceBatch {
   repeated WorkspaceBlob blobs = 1;
+  TestRuntimeReply runtime_reply = 2;
+}
+
+message TestRuntimeReply {
+  string invocation = 1;
+  TestRuntimeResult result = 2;
 }
 
 message WorkspaceBlob {

@@ -65,6 +65,19 @@ The split is **a surface contract, not an implementation contract**. `soldr buil
 
 Friendly target aliases (`win-x64`, `mac-arm64`, etc.) are accepted by both verbs and resolve identically.
 
+## Subprocess lifetimes
+
+Run one-shot maintenance and host probes through `platform::wait::output_for`
+for captured output or the existing `core::command_output_with_timeout*`
+helpers when progress reporting is needed. Give each operation an explicit
+deadline. These paths use an isolated process group on Unix for timeout cleanup
+and bind the direct child to its spawning thread on Linux. Keep one-shot tools
+in that group, and exec the final tool when a launcher only selects it.
+
+Use the daemon launch API for services that intentionally outlive the caller.
+Reserve systemd integration for those services when the existing daemon
+launcher needs it. Maintenance commands must remain invocation-owned.
+
 ## Build Commands
 
 ```bash

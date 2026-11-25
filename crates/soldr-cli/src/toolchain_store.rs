@@ -166,9 +166,9 @@ fn object_path(store: &Path, hash: &str, executable: bool) -> PathBuf {
 }
 
 fn hash_file(file: &Path) -> io::Result<String> {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update_reader(std::fs::File::open(file)?)?;
-    Ok(hasher.finalize().to_hex().to_string())
+    let mut hasher = kernal_api::hash::Blake3Hasher::new();
+    io::copy(&mut std::fs::File::open(file)?, &mut hasher)?;
+    Ok(hasher.finalize().to_hex())
 }
 
 /// The executable bit is part of the object key: hardlinks share

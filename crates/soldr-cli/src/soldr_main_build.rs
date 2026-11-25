@@ -3,6 +3,15 @@ async fn run_blessed_build(
     cache_enabled: bool,
     trust_inherited_soldr_env: bool,
 ) -> Result<(), SoldrError> {
+    if let Some(code) = crate::remote_build::auto::try_build(
+        &args,
+        cache_enabled,
+        crate::remote_build::auto::BuildMode::Blessed,
+    )
+    .await? {
+        guarded_exit(code);
+    }
+
     // soldr#1012: prepare a recognized `--target X` / `--target=X`
     // through the blessed catalogue before entering the cargo front
     // door. This materializes the required SDK/sysroot and compiler

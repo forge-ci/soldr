@@ -10,32 +10,42 @@
 use crate::core::{SoldrError, TargetTriple};
 
 /// binstall `pkg-fmt` values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString, strum::IntoStaticStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PkgFmt {
-    #[strum(serialize = "tar")]
     Tar,
-    #[strum(serialize = "tbz2")]
     Tbz2,
-    #[strum(serialize = "tgz")]
     Tgz,
-    #[strum(serialize = "txz")]
     Txz,
-    #[strum(serialize = "tzstd")]
     Tzstd,
-    #[strum(serialize = "zip")]
     Zip,
-    #[strum(serialize = "bin")]
     Bin,
+}
+
+impl From<PkgFmt> for &'static str {
+    fn from(format: PkgFmt) -> Self {
+        match format {
+            PkgFmt::Tar => "tar",
+            PkgFmt::Tbz2 => "tbz2",
+            PkgFmt::Tgz => "tgz",
+            PkgFmt::Txz => "txz",
+            PkgFmt::Tzstd => "tzstd",
+            PkgFmt::Zip => "zip",
+            PkgFmt::Bin => "bin",
+        }
+    }
 }
 
 impl PkgFmt {
     pub(crate) fn parse(raw: &str) -> Result<Self, SoldrError> {
-        raw.trim().parse().map_err(|_| {
-            SoldrError::Other(format!(
-                "binstall: unknown pkg-fmt `{}` (known: tar, tbz2, tgz, txz, tzstd, zip, bin)",
-                raw.trim()
-            ))
-        })
+        let raw = raw.trim();
+        Self::GUESS_ORDER
+            .into_iter()
+            .find(|format| format.archive_format() == raw)
+            .ok_or_else(|| {
+                SoldrError::Other(format!(
+                    "binstall: unknown pkg-fmt `{raw}` (known: tar, tbz2, tgz, txz, tzstd, zip, bin)"
+                ))
+            })
     }
 
     /// `{ archive-format }`: binstall's first extension without the dot.
@@ -214,8 +224,7 @@ impl BinstallMeta {
     /// Parse a crate's `Cargo.toml`. A crate with no binstall table yields
     /// all-`None` metadata, i.e. the default guesses.
     pub(crate) fn from_cargo_toml(text: &str, target: &TargetTriple) -> Result<Self, SoldrError> {
-        let doc: toml::Value = text
-            .parse()
+        let doc: toml::Value = toml::from_str(text)
             .map_err(|e| SoldrError::Other(format!("binstall: invalid Cargo.toml: {e}")))?;
         let package = doc.get("package");
         let repo = package

@@ -26,6 +26,33 @@ fn strips_no_trampoline_flag() {
 }
 
 #[test]
+fn resolves_manifest_default_run_with_multiple_binaries() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let manifest = directory.path().join("Cargo.toml");
+    std::fs::write(
+        &manifest,
+        r#"[package]
+name = "project"
+version = "0.1.0"
+default-run = "app"
+
+[[bin]]
+name = "tool"
+
+[[bin]]
+name = "app"
+"#,
+    )
+    .expect("write manifest");
+    let mut parsed = parse_run_args(&argv(&["run"])).expect("parsed");
+    parsed.manifest_path = Some(manifest);
+    assert_eq!(resolve_bin_name(&parsed).unwrap().as_deref(), Some("app"));
+
+    parsed.bin = Some("tool".into());
+    assert_eq!(resolve_bin_name(&parsed).unwrap().as_deref(), Some("tool"));
+}
+
+#[test]
 fn parses_basic_run() {
     let parsed = parse_run_args(&argv(&["run", "--bin", "demo"])).expect("parsed");
     assert_eq!(parsed.bin.as_deref(), Some("demo"));

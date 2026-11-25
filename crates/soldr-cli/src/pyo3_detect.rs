@@ -491,7 +491,7 @@ fn project_maturin_target(start: &Path) -> Option<String> {
     loop {
         let pyproject = current.join("pyproject.toml");
         if let Ok(text) = std::fs::read_to_string(&pyproject) {
-            if let Ok(document) = text.parse::<toml::Value>() {
+            if let Ok(document) = toml::from_str::<toml::Value>(&text) {
                 if let Some(target) = document
                     .get("tool")
                     .and_then(|value| value.get("maturin"))

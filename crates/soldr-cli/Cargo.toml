@@ -34,13 +34,13 @@ cap-fs-ext = { workspace = true }
 cap-std = { workspace = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "query", "tokio"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-blake3 = "1"
 clap = { workspace = true }
 filetime = { workspace = true }
 fs2 = { workspace = true }
 getrandom = "0.4"
 globset = "0.4"
 hex = { workspace = true }
+ring = "0.17"
 iroh = { version = "1.5.0", default-features = false, features = ["tls-ring"] }
 interprocess = { version = "2", features = ["tokio"] }
 jwalk = { workspace = true }
@@ -51,11 +51,7 @@ rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 semver = { workspace = true }
-sha2 = { workspace = true }
-# Same exact pin as crates/soldr-platform: pre-1.0 kernal-api resolves to one
-# release across the fleet (guard: version_lockstep.rs). Feature-gated so the
-# facade stays cheap; `text-similarity` provides `kernal_api::text`.
-kernal-api = { version = "=0.1.40", default-features = false, features = ["text-similarity"] }
+kernal-api = { workspace = true, features = ["hash-sha256", "text-similarity"] }
 sysinfo = "0.30"
 tar = { workspace = true }
 tempfile = { workspace = true }

@@ -1,9 +1,11 @@
-use std::collections::BTreeMap;
-use std::io::{self, BufRead, BufReader, Write};
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-use sha2::{Digest, Sha256};
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::{ambient_authority, fs};
+use kernal_api::hash::Sha256Hasher;
 
 use crate::platform::wait;
 
@@ -61,7 +63,7 @@ pub(super) fn verify_parent(
 }
 
 pub(super) fn digest(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
+    Sha256Hasher::digest(bytes).to_hex()
 }
 
 pub(super) fn relative_path(path: &str) -> io::Result<&Path> {
@@ -127,6 +129,110 @@ pub(super) fn capture(directory: &Path) -> io::Result<Snapshot> {
         ));
     }
     Ok(snapshot)
+}
+
+pub(super) fn worktree_root(directory: &Path) -> io::Result<PathBuf> {
+    let root = git(directory, &["rev-parse", "--show-toplevel"])?;
+    Ok(PathBuf::from(utf8(&root)?.trim_end_matches(['\r', '\n'])))
+}
+
+pub(super) fn worktree_commit(root: &Path) -> io::Result<String> {
+    match git(root, &["rev-parse", "--verify", "HEAD^{commit}"]) {
+        Ok(commit) => Ok(utf8(&commit)?.trim().to_owned()),
+        Err(error) => {
+            let head = git(root, &["symbolic-ref", "--quiet", "HEAD"])?;
+            let head = utf8(&head)?.trim();
+            let result = wait::output_for(
+                git_command(root).args(["show-ref", "--verify", "--quiet", head]),
+                wait::PROBE,
+            )?;
+            if result.status.code() == Some(1) {
+                Ok(String::new())
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Snapshot the actual files Cargo sees without modifying the Git index.
+pub(super) fn capture_worktree(directory: &Path) -> io::Result<Snapshot> {
+    let root = worktree_root(directory)?;
+    let commit = worktree_commit(&root)?;
+    let listing = git(
+        &root,
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+    )?;
+    let directory = fs::Dir::open_ambient_dir(&root, ambient_authority())?;
+    let mut files = Vec::new();
+    let mut blobs = BTreeMap::new();
+    let mut remaining = 1024 * 1024 * 1024;
+    let paths: BTreeSet<_> = listing
+        .split(|byte| *byte == 0)
+        .filter(|p| !p.is_empty())
+        .collect();
+    for name in paths {
+        let name = utf8(name)?;
+        let path = relative_path(name)?;
+        let metadata = match directory.symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let symlink = metadata.is_symlink();
+        let data = if symlink {
+            let target = directory.read_link_contents(path)?;
+            let target = target
+                .to_str()
+                .ok_or_else(|| io::Error::other("symlink target must be UTF-8"))?;
+            relative_path(target)?;
+            target.as_bytes().to_vec()
+        } else if metadata.is_file() {
+            read_worktree_file(&directory, path, remaining.min(super::wire::MAX_FRAME))?
+        } else {
+            return Err(io::Error::other(format!(
+                "unsupported worktree file {name:?}"
+            )));
+        };
+        remaining = remaining
+            .checked_sub(data.len())
+            .ok_or_else(|| io::Error::other("remote worktree exceeds its total size limit"))?;
+        let hash = digest(&data);
+        blobs.entry(hash.clone()).or_insert(data);
+        files.push(Source {
+            path: name.to_owned(),
+            digest: hash,
+            executable: !symlink
+                && crate::platform::fs::permissions::mode(&root.join(path))
+                    .is_some_and(|mode| mode & 0o111 != 0),
+            symlink,
+        });
+    }
+    Ok(Snapshot {
+        commit,
+        files,
+        blobs,
+    })
+}
+
+fn read_worktree_file(directory: &fs::Dir, path: &Path, limit: usize) -> io::Result<Vec<u8>> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = directory.open_with(path, &options)?;
+    let mut data = Vec::new();
+    file.take(limit as u64 + 1).read_to_end(&mut data)?;
+    if data.len() > limit {
+        return Err(io::Error::other(
+            "remote worktree file exceeds its size limit",
+        ));
+    }
+    Ok(data)
 }
 
 fn read_tree(
@@ -206,4 +312,79 @@ fn read_blob(object: &str, mut input: impl Write, mut output: impl BufRead) -> i
         return Err(io::Error::other("missing Git blob terminator"));
     }
     Ok(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_worktree_snapshot_without_base_commit_preserves_git_ignores() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path();
+        git(root, &["init"]).unwrap();
+        std::fs::write(root.join(".gitignore"), "/private\n").unwrap();
+        std::fs::write(root.join("private"), "excluded").unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[workspace]").unwrap();
+
+        let snapshot = capture_worktree(root).unwrap();
+        assert!(snapshot.commit.is_empty());
+        let paths: Vec<_> = snapshot
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
+        assert_eq!(paths, [".gitignore", "Cargo.toml"]);
+        assert!(capture(root).is_err());
+        assert!(git(root, &["ls-files", "--cached"]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remote_worktree_snapshot_captures_edits_and_excludes_ignored_files() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path();
+        git(root, &["init"]).unwrap();
+        std::fs::write(root.join(".gitignore"), "/ignored\n").unwrap();
+        std::fs::write(root.join("edited"), "old edit").unwrap();
+        std::fs::write(root.join("deleted"), "old deletion").unwrap();
+        git(root, &["add", "."]).unwrap();
+        git(
+            root,
+            &[
+                "-c",
+                "user.name=Soldr Test",
+                "-c",
+                "user.email=soldr-test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        )
+        .unwrap();
+        std::fs::write(root.join("edited"), "new edit").unwrap();
+        std::fs::rename(root.join("deleted"), root.join("ignored")).unwrap();
+        std::fs::write(root.join("added"), "new file").unwrap();
+        std::fs::write(root.join("ignored"), "private").unwrap();
+        let index_before = git(root, &["ls-files", "--stage"]).unwrap();
+
+        let snapshot = capture_worktree(root).unwrap();
+        let sources: BTreeMap<_, _> = snapshot
+            .files
+            .iter()
+            .map(|source| {
+                (
+                    source.path.as_str(),
+                    snapshot.blobs[&source.digest].as_slice(),
+                )
+            })
+            .collect();
+        assert_eq!(sources["edited"], b"new edit");
+        assert_eq!(sources["added"], b"new file");
+        assert!(!sources.contains_key("deleted"));
+        assert!(!sources.contains_key("ignored"));
+        assert_eq!(git(root, &["ls-files", "--stage"]).unwrap(), index_before);
+        assert!(capture(root).is_err());
+    }
 }

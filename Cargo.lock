@@ -2111,12 +2111,13 @@ dependencies = [
  "object",
  "reflink-copy",
  "running-process",
+ "sha2 0.10.9",
  "strsim",
  "sysinfo 0.39.6",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "toml 1.1.8+spec-1.1.0",
+ "toml",
  "widestring",
  "winapi",
  "windows-sys 0.61.2",
@@ -3139,7 +3140,7 @@ version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f"
 dependencies = [
- "toml_edit 0.25.20+spec-1.1.0",
+ "toml_edit",
 ]
 
 [[package]]
@@ -3626,7 +3627,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
- "toml 1.1.8+spec-1.1.0",
+ "toml",
  "winapi",
  "windows-sys 0.61.2",
 ]
@@ -3939,15 +3940,6 @@ dependencies = [
 
 [[package]]
 name = "serde_spanned"
-version = "0.6.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "serde_spanned"
 version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c187e0a369471c550af028cba56d4f4fa2a489ad28151ae95a4d340a2a8b782"
@@ -4103,24 +4095,23 @@ dependencies = [
 
 [[package]]
 name = "soldr-cache"
-version = "0.9.56"
+version = "0.9.57"
 dependencies = [
  "filetime",
  "fs2",
  "jwalk",
+ "kernal-api",
  "prost",
  "rayon",
  "rusqlite",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "soldr-core",
  "soldr-platform",
- "strum 0.27.2",
  "tar",
  "tempfile",
  "thiserror 2.0.20",
- "toml 0.8.23",
+ "toml",
  "tracing",
  "zccache",
  "zstd",
@@ -4128,10 +4119,9 @@ dependencies = [
 
 [[package]]
 name = "soldr-cli"
-version = "0.9.56"
+version = "0.9.57"
 dependencies = [
  "axum",
- "blake3",
  "cap-fs-ext",
  "cap-std",
  "clap",
@@ -4149,12 +4139,12 @@ dependencies = [
  "prost",
  "rayon",
  "reqwest 0.12.28",
+ "ring",
  "running-process",
  "rusqlite",
  "semver",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "soldr-cache",
  "soldr-core",
  "soldr-daemon",
@@ -4165,8 +4155,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "toml 0.8.23",
- "toml_edit 0.22.27",
+ "toml",
+ "toml_edit",
  "tracing",
  "wait-timeout",
  "widestring",
@@ -4178,17 +4168,17 @@ dependencies = [
 
 [[package]]
 name = "soldr-core"
-version = "0.9.56"
+version = "0.9.57"
 dependencies = [
+ "kernal-api",
  "libc",
  "prost",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "soldr-platform",
  "tempfile",
  "thiserror 2.0.20",
- "toml 0.8.23",
+ "toml",
  "url",
  "wait-timeout",
  "windows-sys 0.61.2",
@@ -4196,20 +4186,20 @@ dependencies = [
 
 [[package]]
 name = "soldr-daemon"
-version = "0.9.56"
+version = "0.9.57"
 dependencies = [
  "console-subscriber",
  "filetime",
  "fs2",
  "hex",
  "interprocess",
+ "kernal-api",
  "libc",
  "prost",
  "running-process",
  "rusqlite",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "soldr-cache",
  "soldr-core",
  "soldr-platform",
@@ -4225,26 +4215,24 @@ dependencies = [
 
 [[package]]
 name = "soldr-fetch"
-version = "0.9.56"
+version = "0.9.57"
 dependencies = [
  "bzip2",
  "flate2",
  "fs2",
- "hex",
+ "kernal-api",
  "minisign-verify",
  "reqwest 0.12.28",
  "semver",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "soldr-core",
  "soldr-platform",
- "strum 0.27.2",
  "tar",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "toml 0.8.23",
+ "toml",
  "url",
  "xz2",
  "zip",
@@ -4253,9 +4241,9 @@ dependencies = [
 
 [[package]]
 name = "soldr-nextest-wrapper"
-version = "0.9.56"
+version = "0.9.57"
 dependencies = [
- "sha2 0.10.9",
+ "kernal-api",
  "soldr-core",
  "soldr-platform",
  "tempfile",
@@ -4264,9 +4252,8 @@ dependencies = [
 
 [[package]]
 name = "soldr-platform"
-version = "0.9.56"
+version = "0.9.57"
 dependencies = [
- "blake3",
  "fs2",
  "interprocess",
  "kernal-api",
@@ -4705,38 +4692,17 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "0.8.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
-dependencies = [
- "serde",
- "serde_spanned 0.6.9",
- "toml_datetime 0.6.11",
- "toml_edit 0.22.27",
-]
-
-[[package]]
-name = "toml"
 version = "1.1.8+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20489e00e4d8741d6be680764cc12e270655e375a20d1011e844a9c3379e678d"
 dependencies = [
  "indexmap",
  "serde_core",
- "serde_spanned 1.1.3",
- "toml_datetime 1.1.3+spec-1.1.0",
+ "serde_spanned",
+ "toml_datetime",
  "toml_parser",
  "toml_writer",
- "winnow 1.0.5",
-]
-
-[[package]]
-name = "toml_datetime"
-version = "0.6.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
-dependencies = [
- "serde",
+ "winnow",
 ]
 
 [[package]]
@@ -4750,28 +4716,15 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
-version = "0.22.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
-dependencies = [
- "indexmap",
- "serde",
- "serde_spanned 0.6.9",
- "toml_datetime 0.6.11",
- "toml_write",
- "winnow 0.7.15",
-]
-
-[[package]]
-name = "toml_edit"
 version = "0.25.20+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e76360e201d6dbd6583e17795ba71a88f47365a9139c8450a7979c32303b8e73"
 dependencies = [
  "indexmap",
- "toml_datetime 1.1.3+spec-1.1.0",
+ "toml_datetime",
  "toml_parser",
- "winnow 1.0.5",
+ "toml_writer",
+ "winnow",
 ]
 
 [[package]]
@@ -4780,14 +4733,8 @@ version = "1.1.6+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6769c452d71ba30696c6b37770c439a9cc9110f47f7d5cdbeda79840ef5ea31"
 dependencies = [
- "winnow 1.0.5",
+ "winnow",
 ]
-
-[[package]]
-name = "toml_write"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "toml_writer"
@@ -5613,15 +5560,6 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
-
-[[package]]
-name = "winnow"
-version = "0.7.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
-dependencies = [
- "memchr",
-]
 
 [[package]]
 name = "winnow"

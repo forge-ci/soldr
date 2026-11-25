@@ -243,13 +243,17 @@
 //! outer loop still only re-runs the same number of times it always did,
 //! for the same terminal reasons it always did.
 
+pub(crate) mod forge_http;
+mod forge_pairing;
+pub use forge_pairing::ForgePairingClient;
+
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::core::SoldrError;
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 
 pub(crate) const ASSET_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const ASSET_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
@@ -308,128 +312,6 @@ impl ForgeSignalClient {
             bytes.extend_from_slice(&chunk);
         }
         serde_json::from_slice(&bytes).map_err(std::io::Error::other)
-    }
-}
-
-/// Client for an authenticated HTTP service on a local tunnel endpoint.
-pub struct LoopbackPostClient {
-    http: reqwest::Client,
-    endpoint: std::net::SocketAddr,
-}
-
-impl LoopbackPostClient {
-    /// Use a literal loopback address and keep credentials on that endpoint.
-    pub fn new(endpoint: std::net::SocketAddr) -> std::io::Result<Self> {
-        Self::with_http2(endpoint, false)
-    }
-
-    /// Select cleartext HTTP/2 for a loopback endpoint reached through a tunnel or peer gateway.
-    pub fn with_http2(endpoint: std::net::SocketAddr, http2: bool) -> std::io::Result<Self> {
-        if !endpoint.ip().is_loopback() {
-            return Err(std::io::Error::other(
-                "Remote build endpoint must be a loopback tunnel or peer gateway.",
-            ));
-        }
-        let builder = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10));
-        let builder = if http2 {
-            builder.http2_prior_knowledge()
-        } else {
-            builder
-        };
-        let http = builder.build().map_err(std::io::Error::other)?;
-        Ok(Self { http, endpoint })
-    }
-
-    /// Post a frame and return its response with a bounded body size.
-    pub async fn post(
-        &self,
-        path: &str,
-        token: &str,
-        content_type: &str,
-        body: Vec<u8>,
-        max_response: usize,
-    ) -> std::io::Result<Vec<u8>> {
-        let response = self.post_stream(path, token, content_type, body).await?;
-        Self::read_response(response, max_response).await
-    }
-
-    /// Fetch a resource with a bounded response body.
-    pub async fn get(
-        &self,
-        path: &str,
-        token: &str,
-        query: &[(&str, &str)],
-        max_response: usize,
-    ) -> std::io::Result<Vec<u8>> {
-        let response = self.get_stream(path, token, query).await?;
-        Self::read_response(response, max_response).await
-    }
-
-    /// Issue an authenticated GET and return its streaming response body.
-    pub async fn get_stream(
-        &self,
-        path: &str,
-        token: &str,
-        query: &[(&str, &str)],
-    ) -> std::io::Result<reqwest::Response> {
-        if !path.starts_with('/') {
-            return Err(std::io::Error::other("HTTP service path must begin with /"));
-        }
-        self.http
-            .get(format!("http://{}{path}", self.endpoint))
-            .query(query)
-            .header("accept-encoding", "zstd")
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(std::io::Error::other)
-    }
-
-    async fn read_response(
-        mut response: reqwest::Response,
-        max_response: usize,
-    ) -> std::io::Result<Vec<u8>> {
-        let mut data = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(std::io::Error::other)? {
-            if chunk.len() > max_response - data.len() {
-                return Err(std::io::Error::other(
-                    "HTTP service response exceeds its size limit",
-                ));
-            }
-            data.extend_from_slice(&chunk);
-        }
-        if !response.status().is_success() {
-            return Err(std::io::Error::other(format!(
-                "remote build {}: {}",
-                response.status(),
-                String::from_utf8_lossy(&data)
-            )));
-        }
-        Ok(data)
-    }
-
-    /// Post a request and leave response streaming to the caller.
-    pub async fn post_stream(
-        &self,
-        path: &str,
-        token: &str,
-        content_type: &str,
-        body: Vec<u8>,
-    ) -> std::io::Result<reqwest::Response> {
-        if !path.starts_with('/') {
-            return Err(std::io::Error::other("HTTP service path must begin with /"));
-        }
-        self.http
-            .post(format!("http://{}{path}", self.endpoint))
-            .header("content-type", content_type)
-            .bearer_auth(token)
-            .body(body)
-            .send()
-            .await
-            .map_err(std::io::Error::other)
     }
 }
 
@@ -523,6 +405,36 @@ pub(crate) fn asset_http_client_with_protocol(
     builder
         .build()
         .map_err(|error| SoldrError::Network(error.to_string()))
+}
+
+/// Keep credentials on the configured worker or control-plane origin.
+fn forge_http_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+}
+
+async fn send_forge_request(
+    request: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, reqwest::Error> {
+    request.send().await
+}
+
+async fn read_forge_body(
+    mut response: reqwest::Response,
+    limit: usize,
+    size_error: &str,
+    map_error: impl Fn(reqwest::Error) -> std::io::Error,
+) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(&map_error)? {
+        if chunk.len() > limit - bytes.len() {
+            return Err(std::io::Error::other(size_error.to_owned()));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 /// Build a GET request through the fetch boundary.
@@ -809,7 +721,7 @@ async fn stream_response_to_temp_file_inner_direct(
     permit.mark_streaming();
 
     let mut file = tempfile::NamedTempFile::new_in(soldr_core::core::ensure_temp_root())?;
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     let mut bytes = 0_u64;
     let started = tokio::time::Instant::now();
 
@@ -844,7 +756,7 @@ async fn stream_response_to_temp_file_inner_direct(
 
     Ok(DownloadedAsset {
         file,
-        sha256: hex::encode(hasher.finalize()),
+        sha256: hasher.finalize().to_hex(),
         bytes,
     })
 }

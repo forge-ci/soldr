@@ -183,6 +183,17 @@ runner anywhere in the pipeline. Apple Silicon artifacts are cross-built the
 same way but are not executed anywhere in CI until a follow-up issue
 re-enables that before release.
 
+## Connect to Forge CI
+
+Run `soldr pair` and sign in with GitHub in the browser. Soldr opens the Forge CI
+pairing page with the code already filled in. If the browser does not open, use
+the URL printed by the command. After you approve pairing, Soldr saves the
+connection for future commands. Run `soldr sign status` to check it.
+
+Run `soldr build` from your repository as usual. When Forge CI has a compatible
+worker, Soldr sends the build there and prints the path to the returned
+attestation. If a worker is unavailable, Soldr builds locally.
+
 ## GitHub Actions setup
 
 The current GitHub Actions entry point is the public `setup-soldr` action:

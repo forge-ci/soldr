@@ -9,6 +9,7 @@ use axum::body::{Body, Bytes};
 use axum::response::{IntoResponse, Response};
 use futures_util::stream;
 use serde::Serialize;
+use soldr_fetch::RemoteBuildHttpResponse;
 use tokio::sync::{mpsc, oneshot};
 
 use super::{wire, Client};
@@ -128,14 +129,11 @@ impl Sink {
         }
     }
 
-    pub(super) fn finish(&self, t: f64, code: i32, session: &str) -> io::Result<()> {
-        if self.interrupted.load(Ordering::Relaxed) {
-            return Err(io::Error::other(
-                "remote control stream could not deliver all output",
-            ));
-        }
-        self.send(&serde_json::json!({"t": t, "return": code}))?;
-        self.send(&serde_json::json!({"artifacts": super::artifacts::manifest_path(session)}))
+    pub(super) fn finish(&self, t: f64, code: i32, session: &str) {
+        // The durable result has already been published. A disconnected client
+        // can fetch it later, so live delivery must not invalidate the result.
+        self.output(&serde_json::json!({"t": t, "return": code}));
+        self.output(&serde_json::json!({"artifacts": super::artifacts::manifest_path(session)}));
     }
 }
 
@@ -178,12 +176,12 @@ fn heartbeat_body(rx: mpsc::Receiver<io::Result<Bytes>>) -> Body {
     ))
 }
 
-pub(super) async fn receive(client: &Client<'_>, session: &str) -> io::Result<i32> {
-    let mut response = tokio::time::timeout(
+pub(super) async fn receive(client: &Client, session: &str) -> io::Result<i32> {
+    let response = tokio::time::timeout(
         HEADER_TIMEOUT,
         client.http.post_stream(
             &format!("/v1/run-stream/{session}"),
-            client.token,
+            &client.token,
             "application/x-protobuf+zstd",
             wire::encode(&wire::Blob::default())?,
         ),
@@ -208,14 +206,48 @@ pub(super) async fn receive(client: &Client<'_>, session: &str) -> io::Result<i3
         )));
     }
 
-    let mut pending = Vec::new();
-    let mut exit = None;
-    let mut artifacts = false;
     let terminal = Terminal::start();
+    let mut progress = Progress::default();
     let manifest_path = super::artifacts::manifest_path(session);
+    let result = consume_stream(response, &terminal, &manifest_path, &mut progress, false).await;
+    if let Err(error) = result {
+        if error.kind() != io::ErrorKind::UnexpectedEof {
+            return Err(error);
+        }
+        terminal
+            .write(
+                true,
+                "Forge CI output stream disconnected. Waiting for the existing build result.\n",
+            )
+            .await?;
+        let transcript = finished_transcript(client, session).await?;
+        consume_stream(transcript, &terminal, &manifest_path, &mut progress, true).await?;
+    }
+    progress
+        .exit
+        .ok_or_else(|| io::Error::other("remote control stream omitted the return code"))
+}
+
+#[derive(Default)]
+struct Progress {
+    exit: Option<i32>,
+    artifacts: bool,
+    records: usize,
+}
+
+async fn consume_stream(
+    mut response: RemoteBuildHttpResponse,
+    terminal: &Terminal,
+    manifest_path: &str,
+    progress: &mut Progress,
+    replay: bool,
+) -> io::Result<()> {
+    let mut pending = Vec::new();
+    let mut skip = if replay { progress.records } else { 0 };
     while let Some(chunk) = body_read(response.chunk())
-        .await?
-        .map_err(io::Error::other)?
+        .await
+        .map_err(interrupted_stream)?
+        .map_err(interrupted_stream)?
     {
         for part in chunk.split_inclusive(|&byte| byte == b'\n') {
             if part.len() > MAX_LINE + 1 - pending.len() {
@@ -225,24 +257,81 @@ pub(super) async fn receive(client: &Client<'_>, session: &str) -> io::Result<i3
             }
             pending.extend_from_slice(part);
             if part.last() == Some(&b'\n') {
-                receive_line(
-                    &pending,
-                    &mut exit,
-                    &mut artifacts,
-                    &manifest_path,
-                    &terminal,
-                )
-                .await?;
+                if pending != b"\n" {
+                    if skip > 0 {
+                        skip -= 1;
+                    } else {
+                        receive_line(
+                            &pending,
+                            &mut progress.exit,
+                            &mut progress.artifacts,
+                            manifest_path,
+                            terminal,
+                        )
+                        .await?;
+                        if !progress.artifacts {
+                            progress.records += 1;
+                        }
+                    }
+                }
                 pending.clear();
             }
         }
     }
-    if !pending.is_empty() || !artifacts {
-        return Err(io::Error::other(
-            "remote control stream ended before the postamble",
+    if !pending.is_empty() || skip != 0 || !replay && !progress.artifacts {
+        return Err(interrupted_stream(
+            "remote control stream ended before the result",
         ));
     }
-    exit.ok_or_else(|| io::Error::other("remote control stream omitted the return code"))
+    Ok(())
+}
+
+fn interrupted_stream(error: impl std::fmt::Display) -> io::Error {
+    io::Error::new(io::ErrorKind::UnexpectedEof, error.to_string())
+}
+
+async fn finished_transcript(
+    client: &Client,
+    session: &str,
+) -> io::Result<RemoteBuildHttpResponse> {
+    let path = format!("/v1/sessions/{session}/artifact");
+    let window = Duration::from_secs(super::auth::SESSION_WINDOW_SECONDS);
+    tokio::time::timeout(window, async {
+        loop {
+            let request = client.http.get_with_encoding(
+                &path,
+                &client.token,
+                &[("path", "stdout-stderr.jsonl")],
+                "identity",
+            );
+            if let Ok(Ok(mut response)) = tokio::time::timeout(HEADER_TIMEOUT, request).await {
+                let status = response.status();
+                if status.is_success() {
+                    return Ok(response);
+                }
+                if !matches!(status.as_u16(), 404 | 502 | 503 | 504) {
+                    let detail = body_read(response.chunk())
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .flatten();
+                    let detail = detail.as_deref().unwrap_or_default();
+                    let detail = String::from_utf8_lossy(&detail[..detail.len().min(4096)]);
+                    return Err(io::Error::other(format!(
+                        "remote transcript request returned HTTP {status}: {detail}"
+                    )));
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "remote build result recovery timed out",
+        )
+    })?
 }
 
 async fn receive_line(
@@ -289,6 +378,39 @@ async fn receive_line(
 mod tests {
     use super::*;
     use futures_util::StreamExt;
+
+    #[tokio::test]
+    async fn disconnected_build_recovers_the_existing_transcript() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let launches = calls.clone();
+        let router = axum::Router::new()
+            .route(
+                "/v1/run-stream/test-session",
+                axum::routing::post(move || {
+                    let launches = launches.clone();
+                    async move {
+                        launches.fetch_add(1, Ordering::Relaxed);
+                        (
+                            [("content-type", "application/x-ndjson")],
+                            "{\"type\":\"o\",\"v\":\"\"}\n{\"type\":",
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/v1/sessions/test-session/artifact",
+                axum::routing::get(|| async { "{\"type\":\"o\",\"v\":\"\"}\n{\"return\":7}\n" }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::new(endpoint, "test".into()).unwrap();
+        assert_eq!(receive(&client, "test-session").await.unwrap(), 7);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        server.abort();
+    }
 
     #[tokio::test(start_paused = true)]
     async fn quiet_stream_emits_heartbeats_and_closes_with_the_sender() {

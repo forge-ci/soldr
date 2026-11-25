@@ -1,6 +1,7 @@
 //! Unit tests for `session_transport`, split out to keep that file under the
 //! 1,000-line production-source ceiling.
 
+use super::setup::{compile_session_start, negotiate_with_proxy_retry};
 use super::*;
 
 #[test]
@@ -231,7 +232,11 @@ fn compile_service_that_never_publishes_is_bounded() {
 
 /// A broker that has accepted the connection but answers `delay` after the
 /// Hello: the reply frame a busy-but-alive broker eventually sends.
-async fn late_negotiated_reply(mut server: tokio::io::DuplexStream, delay: Duration) {
+async fn late_negotiated_reply(
+    mut server: tokio::io::DuplexStream,
+    delay: Duration,
+    handoff: bool,
+) {
     use prost::Message as _;
     use running_process::broker::protocol::{
         hello_reply, Negotiated, PayloadEncoding, CONTROL_PAYLOAD_PROTOCOL,
@@ -241,6 +246,12 @@ async fn late_negotiated_reply(mut server: tokio::io::DuplexStream, delay: Durat
         result: Some(hello_reply::Result::Negotiated(Negotiated {
             backend_pipe: "late-pipe".to_string(),
             daemon_version: "9.9.9".to_string(),
+            server_capabilities: if handoff {
+                running_process::broker::capabilities::CAP_HANDLE_PASSING
+            } else {
+                0
+            },
+            handle_passed_token: if handoff { vec![1; 16] } else { Vec::new() },
             ..Default::default()
         })),
     };
@@ -272,7 +283,11 @@ fn a_busy_broker_answering_after_3_4_seconds_completes_under_the_defaults() {
         .expect("runtime");
     runtime.block_on(async {
         let (mut client, server) = tokio::io::duplex(4096);
-        tokio::spawn(late_negotiated_reply(server, Duration::from_millis(3400)));
+        tokio::spawn(late_negotiated_reply(
+            server,
+            Duration::from_millis(3400),
+            false,
+        ));
         let route = read_negotiated_with_deadlines(
             &mut client,
             1,
@@ -309,6 +324,65 @@ fn a_broker_that_never_answers_still_fails_at_the_first_response_deadline() {
         assert!(waited >= deadlines.first_response, "{waited:?}");
         assert!(waited < deadlines.route_ceiling, "{waited:?}");
     });
+}
+
+async fn negotiate_test_reply(handoff: Option<bool>) -> Result<ReadyRoute, SessionError> {
+    let (mut client, server) = tokio::io::duplex(4096);
+    let _silent_broker = match handoff {
+        Some(handoff) => {
+            tokio::spawn(late_negotiated_reply(server, Duration::ZERO, handoff));
+            None
+        }
+        None => Some(server),
+    };
+    read_negotiated_with_deadlines(
+        &mut client,
+        1,
+        crate::broker_deadlines::BrokerDeadlines::defaults(),
+    )
+    .await
+    .map_err(SessionError::pre_output)
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_handoff_timeout_retries_with_handle_passing_disabled() {
+    let mut attempts = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let route = negotiate_with_proxy_retry("test", deadline, |request_handoff| {
+        attempts.push(request_handoff);
+        negotiate_test_reply(Some(request_handoff))
+    })
+    .await
+    .expect("the second negotiation succeeds without a handoff");
+    assert_eq!(route.backend_pipe, "late-pipe");
+    assert_eq!(attempts, [true, false]);
+
+    attempts.clear();
+    let result = negotiate_with_proxy_retry("test", deadline, |request_handoff| {
+        attempts.push(request_handoff);
+        negotiate_test_reply(None)
+    })
+    .await;
+    assert_eq!(result.unwrap_err().source.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(attempts, [true]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_second_handoff_timeout_is_returned_without_another_attempt() {
+    let mut attempts = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let error = negotiate_with_proxy_retry("test", deadline, |request_handoff| {
+        attempts.push(request_handoff);
+        // A broker that offers handoff again still gets only two attempts.
+        negotiate_test_reply(Some(true))
+    })
+    .await
+    .expect_err("the second attempt also timed out");
+    assert!(error
+        .source
+        .get_ref()
+        .is_some_and(|cause| cause.is::<HandoffTimeout>()));
+    assert_eq!(attempts, [true, false]);
 }
 
 #[test]

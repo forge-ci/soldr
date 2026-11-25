@@ -21,14 +21,13 @@ publish = false
 
 [dependencies]
 thiserror = { workspace = true }
-blake3 = "1"
 interprocess = { version = "2", features = ["tokio"] }
 # Exact pin: kernal-api is pre-1.0, so per its COMPATIBILITY.md every
 # consumer must resolve the same release. This must equal the kernal-api
 # version the locked `zccache` package depends on (soldr#3297); the guard
 # `kernal_api_version_matches_across_the_fleet` in
 # crates/soldr-cli/tests/guards/version_lockstep.rs enforces that.
-kernal-api = { version = "=0.1.40", default-features = false, features = ["fs"] }
+kernal-api = { workspace = true, features = ["fs"] }
 running-process = { version = "=4.10.21", default-features = false, features = ["client"] }
 fs2 = { workspace = true }
 wait-timeout = { workspace = true }

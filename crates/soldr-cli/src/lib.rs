@@ -255,6 +255,7 @@ pub mod cache;
 pub(crate) mod cache_health;
 pub mod cargo_diagnostics;
 pub mod cargo_front_door;
+mod cargo_metadata_canonical;
 pub mod cargo_metadata_soldr;
 pub(crate) mod cargo_toolchain_shim;
 mod cc_clang_cross;
@@ -454,8 +455,11 @@ pub use soldr_core::{
 pub use soldr_daemon::{daemon, zccache_embedded};
 pub use soldr_fetch::fetch;
 
-/// CLI entry logic — formerly the `main.rs` crate root (#1490 Phase 1).
+mod forge_sign_in;
+mod pair_cmd;
 mod remote_build;
+
+/// CLI entry logic — formerly the `main.rs` crate root (#1490 Phase 1).
 mod soldr_main;
 
 /// The full soldr CLI entry point, called by the `src/main.rs` shim.

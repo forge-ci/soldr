@@ -65,8 +65,8 @@
 
 use crate::core::{SoldrError, SoldrPaths};
 use crate::dylint_toolchain::DylintToolchainPlan;
+use kernal_api::hash::Sha256Hasher;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -227,7 +227,7 @@ fn marker_path(inputs: &LibraryMarkerInputs) -> PathBuf {
 }
 
 fn compute_marker(inputs: &LibraryMarkerInputs) -> Result<DylintLibraryMarker, SoldrError> {
-    let mut digest = Sha256::new();
+    let mut digest = Sha256Hasher::new();
     digest.update(b"soldr-ci-test-dylint-library-marker-v1\0");
     hash_field(&mut digest, inputs.toolchain.channel.as_bytes());
     hash_field(&mut digest, inputs.toolchain.compiler_release.as_bytes());
@@ -246,7 +246,7 @@ fn compute_marker(inputs: &LibraryMarkerInputs) -> Result<DylintLibraryMarker, S
         environment_input_hash(std::env::vars())?.as_bytes(),
     );
     hash_field(&mut digest, WRAPPER_IDENTITY.as_bytes());
-    let cache_key = hex::encode(digest.finalize());
+    let cache_key = digest.finalize().to_hex();
     Ok(DylintLibraryMarker {
         schema_version: SCHEMA_VERSION,
         cache_key,
@@ -255,7 +255,7 @@ fn compute_marker(inputs: &LibraryMarkerInputs) -> Result<DylintLibraryMarker, S
     })
 }
 
-fn hash_field(digest: &mut Sha256, bytes: &[u8]) {
+fn hash_field(digest: &mut Sha256Hasher, bytes: &[u8]) {
     digest.update((bytes.len() as u64).to_le_bytes());
     digest.update(bytes);
 }
@@ -283,13 +283,13 @@ fn driver_identity(toolchain: &DylintToolchainPlan) -> Option<String> {
 /// that reproduces the same bytes and changes only when the bytes do.
 fn hash_driver_file(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
-    let mut digest = Sha256::new();
+    let mut digest = Sha256Hasher::new();
     digest.update(&bytes);
     Some(format!(
         "{}|{}|{}",
         path.display(),
         bytes.len(),
-        hex::encode(digest.finalize())
+        digest.finalize().to_hex()
     ))
 }
 
@@ -346,7 +346,7 @@ fn environment_input_hash(
     vars: impl Iterator<Item = (String, String)>,
 ) -> Result<String, SoldrError> {
     let environment = relevant_environment(vars);
-    let mut digest = Sha256::new();
+    let mut digest = Sha256Hasher::new();
     hash_field(
         &mut digest,
         &serde_json::to_vec(&environment).map_err(|error| {
@@ -355,7 +355,7 @@ fn environment_input_hash(
             ))
         })?,
     );
-    Ok(hex::encode(digest.finalize()))
+    Ok(digest.finalize().to_hex())
 }
 
 fn semantic_input_hash(root: &Path) -> Result<String, SoldrError> {
@@ -365,12 +365,12 @@ fn semantic_input_hash(root: &Path) -> Result<String, SoldrError> {
             entries.insert(normalize_path(relative), bytes.to_vec());
         }
     })?;
-    let mut digest = Sha256::new();
+    let mut digest = Sha256Hasher::new();
     for (path, bytes) in entries {
         hash_field(&mut digest, path.as_bytes());
         hash_field(&mut digest, &bytes);
     }
-    Ok(hex::encode(digest.finalize()))
+    Ok(digest.finalize().to_hex())
 }
 
 /// Walks `dylints/<lint>/**` for every declared lint, deterministically

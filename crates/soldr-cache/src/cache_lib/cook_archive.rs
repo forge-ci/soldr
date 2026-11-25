@@ -23,7 +23,7 @@
 //! returns the resolved sha256.
 
 use crate::cache_lib::target_registry::RegistryError;
-use sha2::{Digest, Sha256};
+use kernal_api::hash::Sha256Hasher;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -160,7 +160,7 @@ pub fn pack_cook_archive_at_level(
     encoder.finish().map_err(io_err)?;
 
     // Hash the on-disk file. Going through a fresh `Read` cycle is
-    // simpler than chaining a `Sha256` writer through the zstd encoder
+    // simpler than chaining a `Sha256Hasher` writer through the zstd encoder
     // and matches the integrity model PR 3 uses on hydrate (re-hash
     // the file at the named path and compare to the filename stem).
     let (sha256, size_bytes) = hash_file(&temp_path)?;
@@ -253,7 +253,7 @@ fn pax_mtime(entry: &mut tar::Entry<'_, impl Read>) -> Option<zccache::core::mti
 
 fn hash_file(path: &Path) -> Result<([u8; 32], u64), RegistryError> {
     let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     let mut buf = [0u8; 64 * 1024];
     let mut total: u64 = 0;
     loop {
@@ -266,7 +266,7 @@ fn hash_file(path: &Path) -> Result<([u8; 32], u64), RegistryError> {
     }
     let digest = hasher.finalize();
     let mut out = [0u8; 32];
-    out.copy_from_slice(&digest);
+    out.copy_from_slice(digest.as_bytes());
     Ok((out, total))
 }
 
@@ -311,7 +311,7 @@ pub fn compute_recipe_hash_proxy(manifest_dir: &Path) -> Option<[u8; 32]> {
     let lock_bytes = std::fs::read(&lockfile).ok()?;
     let manifest_pairs = collect_manifest_hashes(manifest_dir).ok()?;
 
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha256Hasher::new();
     hasher.update(b"soldr-cook-recipe-hash-v1\n");
     hasher.update(b"Cargo.lock\n");
     hasher.update((lock_bytes.len() as u64).to_le_bytes());
@@ -332,7 +332,7 @@ pub fn compute_recipe_hash_proxy(manifest_dir: &Path) -> Option<[u8; 32]> {
     }
     let digest = hasher.finalize();
     let mut out = [0u8; 32];
-    out.copy_from_slice(&digest);
+    out.copy_from_slice(digest.as_bytes());
     Some(out)
 }
 
@@ -389,7 +389,7 @@ fn discover_referenced_state_roots(
         let Ok(raw) = std::fs::read_to_string(&manifest_path) else {
             continue;
         };
-        let Ok(value) = raw.parse::<toml::Value>() else {
+        let Ok(value) = toml::from_str::<toml::Value>(&raw) else {
             continue;
         };
         let base = manifest_path.parent().unwrap_or(root);
@@ -489,9 +489,9 @@ fn walk_for_manifests(
                 .to_string_lossy()
                 .replace('\\', "/");
             let bytes = std::fs::read(&path)?;
-            let mut h = Sha256::new();
+            let mut h = Sha256Hasher::new();
             h.update(&bytes);
-            out.push((rel, hex_lower_short(&h.finalize().into())));
+            out.push((rel, hex_lower_short(h.finalize().as_bytes())));
         }
     }
     Ok(())

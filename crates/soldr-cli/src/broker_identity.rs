@@ -394,7 +394,7 @@ pub fn broker_windows_error(message: String) -> BrokerIdentityError {
 
 #[doc(hidden)]
 pub fn identity_key(identity: &[u8]) -> String {
-    let digest = blake3::hash(identity);
+    let digest = kernal_api::hash::blake3_bytes(identity);
     digest.to_hex()[..16].to_string()
 }
 
@@ -451,8 +451,8 @@ pub fn daemon_session_endpoint_from_executable(
             let broker_parent = Path::new(&broker.bind_endpoint)
                 .parent()
                 .unwrap_or_else(|| Path::new("/tmp"));
-            let digest = blake3::hash(executable.to_string_lossy().as_bytes());
-            let leaf = format!("d-{}.session.sock", &digest.to_hex()[..16]);
+            let key = identity_key(executable.to_string_lossy().as_bytes());
+            let leaf = format!("d-{key}.session.sock");
             let candidates = [
                 broker_parent.join(&leaf),
                 crate::platform::ipc::endpoint::machine_runtime_dir()
