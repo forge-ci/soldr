@@ -27,6 +27,13 @@ use crate::dylint_toolchain_readiness::{
 use crate::toolchain_readiness::TOOLCHAIN_CHANNEL_MANIFEST;
 use crate::{apply_implicit_toolchain_homes, resolve_toolchain_binary_for_channel, rustup_binary};
 
+#[path = "dylint_toolchain_marker.rs"]
+mod marker;
+
+use marker::write_prepared_marker;
+#[cfg(test)]
+use marker::write_prepared_marker_at;
+
 pub(crate) const TOOLCHAIN_ENV_VAR: &str = "SOLDR_DYLINT_TOOLCHAIN";
 pub(crate) const COMPILER_RELEASE_ENV_VAR: &str = "SOLDR_DYLINT_RUSTC_RELEASE";
 pub(crate) const COMPILER_COMMIT_ENV_VAR: &str = "SOLDR_DYLINT_RUSTC_COMMIT_HASH";
@@ -50,7 +57,7 @@ pub(crate) const PREPARE_TTL_ENV_VAR: &str = "SOLDR_DYLINT_PREPARE_TTL_SECS";
 pub(crate) const REVERIFY_ENV_VAR: &str = "SOLDR_DYLINT_REVERIFY";
 
 const MAP_ASSET: &str = "rust-nightly-versions.v1.json";
-const REQUIRED_COMPONENTS: &[&str] = &["rustc-dev", "rust-src", "llvm-tools-preview"];
+pub(crate) const REQUIRED_COMPONENTS: &[&str] = &["rustc-dev", "rust-src", "llvm-tools-preview"];
 
 /// Default freshness window for the warm-run prepared-plan marker: 24
 /// hours. Long enough that a normal dev inner loop (many `soldr cargo
@@ -422,13 +429,20 @@ pub(crate) fn prepare_resolved(
     mut plan: DylintToolchainPlan,
 ) -> Result<DylintToolchainPlan, SoldrError> {
     let prepared_identity = plan.cache_identity();
-    if non_empty_env(PREPARED_IDENTITY_ENV_VAR).as_deref() != Some(prepared_identity.as_str()) {
+    let inherited =
+        non_empty_env(PREPARED_IDENTITY_ENV_VAR).as_deref() == Some(prepared_identity.as_str());
+    if !inherited {
         ensure_installed(&plan)?;
         verify_installed_identity(&plan)?;
     }
-    plan.channel = qualify_toolchain_name(&plan.channel)?;
+    // An inherited identity covers the toolchain but does not guarantee that
+    // the marker exists in this invocation's cache root.
+    let preserve_marker = inherited && is_fully_qualified_nightly(&plan.channel);
+    if !preserve_marker {
+        plan.channel = qualify_toolchain_name(&plan.channel)?;
+    }
     if let Some(version) = major_minor(&plan.compiler_release) {
-        if let Err(error) = write_prepared_marker(&version, &plan) {
+        if let Err(error) = write_prepared_marker(&version, &plan, preserve_marker) {
             eprintln!("soldr: failed to write dylint prepared marker: {error}");
         }
     }
@@ -587,27 +601,6 @@ fn parse_marker_identity(line: &str) -> Option<DylintToolchainPlan> {
 /// any directory whose name starts with `<channel>-` if the host triple
 /// cannot be determined, so an unusual host doesn't spuriously miss a
 /// perfectly good warm cache.
-/// Production entry point for persisting the warm-path marker after a
-/// successful cold-path prepare. Best-effort by contract — callers must
-/// not fail the run on a write error, only log it.
-fn write_prepared_marker(version: &str, plan: &DylintToolchainPlan) -> Result<(), SoldrError> {
-    let base_dir = SoldrPaths::new()?.root;
-    write_prepared_marker_at(&base_dir, version, plan)
-}
-
-fn write_prepared_marker_at(
-    base_dir: &Path,
-    version: &str,
-    plan: &DylintToolchainPlan,
-) -> Result<(), SoldrError> {
-    let path = prepared_marker_path(base_dir, version);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, format!("{}\n", plan.cache_identity()))?;
-    Ok(())
-}
-
 fn plan_from_configured_environment() -> Result<Option<DylintToolchainPlan>, SoldrError> {
     let values = (
         non_empty_env(CONFIGURED_TOOLCHAIN_ENV_VAR),

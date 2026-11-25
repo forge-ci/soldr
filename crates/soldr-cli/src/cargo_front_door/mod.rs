@@ -687,6 +687,8 @@ mod linker_project_config_tests;
 #[cfg(test)]
 mod porcelain_tests;
 #[cfg(test)]
+mod run_prepare_tests;
+#[cfg(test)]
 mod scrub_pool_tests;
 #[cfg(test)]
 mod signal_tests;
