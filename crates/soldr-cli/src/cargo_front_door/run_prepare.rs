@@ -634,7 +634,9 @@ async fn apply_child_path_and_target(
     // injects PYO3_NO_PYTHON for a proven cross ABI3 extension, never for
     // embedding/non-ABI3 builds, and never downloads Python assets merely
     // because PyO3 appears in metadata.
-    if pyo3_build {
+    // Caller-provided PyO3 settings already determine the child environment.
+    // Wheel and environment reporting still resolve the dependency graph for their plans.
+    if pyo3_build && !crate::pyo3_detect::caller_configures_pyo3() {
         let workspace_root =
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         // soldr#3794: an up-to-date lockfile without `pyo3` makes the

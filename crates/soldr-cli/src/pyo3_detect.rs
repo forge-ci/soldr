@@ -399,6 +399,15 @@ fn build_kind_override() -> Option<BuildShape> {
     }
 }
 
+/// Whether the caller supplies a setting that takes precedence over Cargo-front-door planning.
+pub(crate) fn caller_configures_pyo3() -> bool {
+    std::env::vars_os().any(|(name, value)| {
+        name.to_str()
+            .is_some_and(|name| CALLER_CONFIG_VARS.contains(&name))
+            && value.to_str().is_some()
+    })
+}
+
 fn caller_pyo3_env() -> BTreeMap<String, String> {
     std::env::vars()
         .filter(|(key, _)| key.starts_with("PYO3_"))
