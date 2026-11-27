@@ -17,6 +17,7 @@ mod cli_cargo_native_cc;
 mod cli_cargo_nested_cargo_guard;
 mod cli_cargo_parent_death;
 mod cli_cargo_porcelain;
+mod cli_cargo_pyo3;
 mod cli_cargo_run_trampoline;
 mod cli_cargo_signal_diagnostics;
 mod cli_cargo_strip_failure;
