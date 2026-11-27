@@ -96,9 +96,10 @@ pub fn session_hot_path(rustc_argv: &[String]) -> SessionHotPathOutcome {
         Err(err) => return SessionHotPathOutcome::HardFail(err),
     };
     let cwd = cwd.display().to_string();
-    let env: Vec<SessionEnvVar> = std::env::vars()
+    let mut env: Vec<SessionEnvVar> = std::env::vars()
         .map(|(key, value)| SessionEnvVar { key, value })
         .collect();
+    crate::dylint_library_cache::apply_compile_root(&mut env);
 
     let started = std::time::Instant::now();
     let mut attempt =

@@ -328,7 +328,21 @@ pub(crate) fn share_library_build(
                 target_dir.join(triple)
             };
             let store = inputs.store_dir(&store_root, channel, triple);
+            let local_tree =
+                std::fs::symlink_metadata(target.join("dylint/libraries")).is_ok_and(|metadata| {
+                    metadata.is_dir() && !crate::platform::fs::links::is_link_or_reparse(&metadata)
+                });
+            if !local_tree {
+                if let Err(error) =
+                    seed::seed_store(&store_root, &store, channel, triple, &inputs.libraries)
+                {
+                    eprintln!("soldr: could not seed Dylint library store ({error}); sharing without a seed");
+                }
+            }
             link_libraries_dir(&target, &store)?;
+            if let Err(error) = seed::record_libraries(&store, &inputs.libraries) {
+                eprintln!("soldr: could not record Dylint library inventory ({error})");
+            }
             gc::register_link(&target, &store)?;
         }
         drop(_lock);
@@ -395,6 +409,8 @@ fn invocation_targets(
 mod gc;
 #[path = "dylint_library_store_metadata.rs"]
 mod metadata;
+#[path = "dylint_library_store_seed.rs"]
+mod seed;
 pub(crate) use gc::run;
 
 #[cfg(test)]

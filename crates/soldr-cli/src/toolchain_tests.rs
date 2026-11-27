@@ -739,3 +739,43 @@ fn scope_rustup_args_to_pin_defers_to_rustup_toolchain_env() {
         ])
     );
 }
+
+#[test]
+fn cargo_prepare_memo_reuses_a_short_channel_symlink() {
+    let root = tempfile::tempdir().unwrap();
+    let key = test_memo_key(root.path());
+    let host = crate::pyo3_detect::host_triple();
+    let toolchain = key
+        .rustup_home
+        .join("toolchains")
+        .join(format!("1.94.1-{host}"));
+    std::fs::create_dir_all(toolchain.join("bin")).unwrap();
+    std::fs::create_dir_all(toolchain.join("lib/rustlib")).unwrap();
+    std::fs::write(&key.rustup_binary, b"rustup").unwrap();
+    std::fs::write(toolchain.join("bin/rustc"), b"rustc").unwrap();
+    std::fs::write(
+        toolchain.join(crate::toolchain_readiness::TOOLCHAIN_CHANNEL_MANIFEST),
+        b"manifest-version = '2'\n",
+    )
+    .unwrap();
+    std::fs::write(toolchain.join("lib/rustlib/components"), b"rustc-test\n").unwrap();
+    write_fake_std(&toolchain, host, true);
+    write_fake_std(&toolchain, "wasm32-unknown-unknown", false);
+    let alias = key.rustup_home.join("toolchains/1.94.1");
+    if crate::platform::fs::links::create(&toolchain.to_string_lossy(), &alias, true).is_err() {
+        return; // Link creation can require privilege on some hosts.
+    }
+    let discovered = discover_toolchain_dirs(&key, None);
+    assert_eq!(discovered, vec![toolchain.canonicalize().unwrap()]);
+    let paths = SoldrPaths::with_root(root.path().join("soldr"));
+    write_cargo_prepare_memo(&paths, key.clone(), &discovered[0]);
+    assert_eq!(
+        memoized_toolchain_dir(&paths, &key),
+        Some(toolchain.canonicalize().unwrap())
+    );
+    std::fs::create_dir_all(key.rustup_home.join("toolchains/1.94.1-other")).unwrap();
+    assert!(
+        memoized_toolchain_dir(&paths, &key).is_none(),
+        "distinct installations must remain ambiguous"
+    );
+}

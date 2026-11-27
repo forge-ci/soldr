@@ -677,6 +677,9 @@ mod cargo_abort_log_tests;
 #[cfg(test)]
 mod dylint_driver_tests;
 #[cfg(test)]
+#[path = "dylint_library_cache_route_tests.rs"]
+mod dylint_library_cache_route_tests;
+#[cfg(test)]
 mod dylint_link_ensure_tests;
 #[cfg(test)]
 mod dylint_link_validation_tests;

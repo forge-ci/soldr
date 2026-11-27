@@ -671,7 +671,7 @@ fn discover_toolchain_dirs(
     if let Some(name) = installed_name {
         let exact = toolchains.join(name);
         if exact.is_dir() {
-            return vec![exact];
+            return vec![normalize_existing_path(&exact)];
         }
     }
     let Ok(entries) = std::fs::read_dir(toolchains) else {
@@ -688,9 +688,10 @@ fn discover_toolchain_dirs(
                     .strip_prefix(&key.channel)
                     .is_some_and(|suffix| suffix.starts_with('-'))
         })
-        .map(|entry| entry.path())
+        .map(|entry| normalize_existing_path(&entry.path()))
         .collect::<Vec<_>>();
     matches.sort();
+    matches.dedup();
     matches
 }
 
