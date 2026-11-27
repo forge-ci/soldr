@@ -458,24 +458,13 @@ fn current_process_start_token() -> u64 {
 }
 
 fn process_start_token(pid: u32) -> Option<u64> {
-    use sysinfo::{Pid, ProcessRefreshKind, System};
-
-    // Lease acquisition is a fail-fast startup path and stampedes can put
-    // dozens of contenders here at once. Refresh only the named process;
-    // `System::new_all()` scans every process and device on the machine and
-    // can consume enough time under load for a healthy five-second lease to
-    // expire while contenders are merely trying to validate it.
-    let pid = Pid::from_u32(pid);
-    let mut system = System::new();
-    system
-        .refresh_process_specifics(pid, ProcessRefreshKind::new())
-        .then(|| system.process(pid).map(|process| process.start_time()))
-        .flatten()
+    // Keep the on-disk lease token compatible with older Soldr processes.
+    crate::platform::process::metadata::start_time_unix(pid)
 }
 
 fn process_matches(pid: u32, expected_start_token: u64) -> bool {
     if expected_start_token == 0 {
-        return running_process::broker::backend_lifecycle::verify_pid::process_is_alive(pid);
+        return kernal_api::platform::process::is_alive(pid);
     }
     process_start_token(pid) == Some(expected_start_token)
 }

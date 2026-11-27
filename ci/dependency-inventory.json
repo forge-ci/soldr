@@ -60,7 +60,6 @@
       "semver",
       "serde",
       "serde_json",
-      "sysinfo",
       "tar",
       "tempfile",
       "thiserror",
