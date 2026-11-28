@@ -305,8 +305,6 @@ where
     D: Fn(&SoldrPaths) -> Option<PathBuf>,
     F: FnOnce() -> Result<BootstrapReport, SoldrError>,
 {
-    use fs2::FileExt as _;
-
     let _ = std::fs::create_dir_all(&paths.bin);
     let lock_path = paths.bin.join(".rustup-bootstrap.lock");
     let lock = match std::fs::OpenOptions::new()
@@ -325,9 +323,9 @@ where
     let started = std::time::Instant::now();
     let deadline = started + BOOTSTRAP_LOCK_BUDGET;
     let mut waited = false;
-    loop {
-        match lock.try_lock_exclusive() {
-            Ok(()) => break,
+    let guard = loop {
+        match kernal_api::platform::fs::try_lock_exclusive(&lock) {
+            Ok(guard) => break guard,
             Err(_) => {
                 if !waited {
                     waited = true;
@@ -348,7 +346,7 @@ where
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
         }
-    }
+    };
 
     // The winner may already have finished while we queued. Re-check before
     // spending a second download on a rustup that is now present.
@@ -359,7 +357,7 @@ where
                 started.elapsed().as_millis()
             );
         }
-        let _ = fs2::FileExt::unlock(&lock);
+        drop(guard);
         return Ok(BootstrapReport {
             rustup_path: path,
             already_installed: true,
@@ -368,7 +366,7 @@ where
     }
 
     let result = install();
-    let _ = fs2::FileExt::unlock(&lock);
+    drop(guard);
     result
 }
 

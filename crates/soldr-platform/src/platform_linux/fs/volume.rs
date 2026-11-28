@@ -13,5 +13,5 @@ pub fn identity(path: &Path) -> Option<String> {
 
 /// Free space on the volume containing `path`.
 pub fn free_bytes(path: &Path) -> io::Result<u64> {
-    fs2::available_space(path)
+    kernal_api::platform::resources::available_space(path)
 }

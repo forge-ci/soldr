@@ -364,24 +364,25 @@ fn lock_for(
 }
 
 fn is_lock_contention(error: &io::Error) -> bool {
-    error.kind() == io::ErrorKind::WouldBlock
-        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+    error.kind() == io::ErrorKind::WouldBlock || kernal_api::platform::fs::is_lock_conflict(error)
 }
 
 /// Take an exclusive advisory lock on `file`, waiting at most `bound`.
+/// The lock remains held until the file is closed or explicitly unlocked.
 pub fn lock_exclusive_for(file: &File, bound: Duration) -> io::Result<()> {
-    lock_for(file, bound, fs2::FileExt::try_lock_exclusive)
+    lock_for(file, bound, kernal_api::fs_try_lock_exclusive)
 }
 
 /// Take a shared advisory lock on `file`, waiting at most `bound`.
+/// The lock remains held until the file is closed or explicitly unlocked.
 pub fn lock_shared_for(file: &File, bound: Duration) -> io::Result<()> {
-    lock_for(file, bound, fs2::FileExt::try_lock_shared)
+    lock_for(file, bound, kernal_api::fs_try_lock_shared)
 }
 
 /// Like [`lock_exclusive_for`], announcing on stderr when another process
 /// holds the lock so a long wait is never silent.
 pub fn lock_exclusive_announced(file: &File, bound: Duration, what: &str) -> io::Result<()> {
-    if fs2::FileExt::try_lock_exclusive(file).is_ok() {
+    if kernal_api::fs_try_lock_exclusive(file).is_ok() {
         return Ok(());
     }
     eprintln!("soldr: waiting up to {bound:?} for {what} -- another process holds it");

@@ -37,7 +37,6 @@ axum = { version = "0.8", default-features = false, features = ["http1", "http2"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 clap = { workspace = true }
 filetime = { workspace = true }
-fs2 = { workspace = true }
 getrandom = "0.4"
 globset = "0.4"
 hex = { workspace = true }

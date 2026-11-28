@@ -301,9 +301,9 @@ fn is_detach_temp(name: &OsStr) -> bool {
 /// Discover locks first, then acquire them in a stable order and retain the
 /// file guards through the full detach. Refusing is safer than racing an
 /// active compiler while replacing its outputs.
-fn acquire_build_locks(root: &OpenDirectory) -> Result<Vec<File>, SoldrError> {
-    use fs2::FileExt;
-
+fn acquire_build_locks(
+    root: &OpenDirectory,
+) -> Result<Vec<kernal_api::platform::fs::OwnedFileLock>, SoldrError> {
     let mut pending = vec![OpenDirectory {
         dir: root
             .dir
@@ -353,8 +353,8 @@ fn acquire_build_locks(root: &OpenDirectory) -> Result<Vec<File>, SoldrError> {
             Err(_error) if entry_is_now_symlink(&root.dir, &path) => continue,
             Err(error) => return Err(detach_error(&display_path, "open build lock", error)),
         };
-        match file.try_lock_exclusive() {
-            Ok(()) => guards.push(file),
+        match kernal_api::platform::fs::try_lock_exclusive_owned(file) {
+            Ok(guard) => guards.push(guard),
             Err(error)
                 if matches!(
                     error.kind(),

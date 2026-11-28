@@ -172,14 +172,12 @@ fn workspace_source_lock_is_shared_across_target_and_nightly_shapes() {
         .unwrap();
 
     assert!(
-        contender.try_lock_exclusive().is_err(),
+        kernal_api::platform::fs::try_lock_exclusive(&contender).is_err(),
         "different nightly/target shapes must contend on one workspace source lock"
     );
-    FileExt::unlock(&first).unwrap();
-    contender
-        .try_lock_exclusive()
+    kernal_api::fs_unlock(&first).unwrap();
+    let _guard = kernal_api::platform::fs::try_lock_exclusive(&contender)
         .expect("workspace lock must become available after release");
-    FileExt::unlock(&contender).unwrap();
 }
 
 #[test]

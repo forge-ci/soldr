@@ -82,7 +82,7 @@ pub(super) struct InstallLock(File);
 
 impl Drop for InstallLock {
     fn drop(&mut self) {
-        let _ = fs2::FileExt::unlock(&self.0);
+        let _ = kernal_api::fs_unlock(&self.0);
     }
 }
 
@@ -101,11 +101,10 @@ fn acquire_blocking(
         .truncate(false)
         .write(true)
         .open(&path)?;
-    let contended = fs2::lock_contended_error().raw_os_error();
     loop {
-        match fs2::FileExt::try_lock_exclusive(&file) {
+        match kernal_api::fs_try_lock_exclusive(&file) {
             Ok(()) => return Ok(Some(InstallLock(file))),
-            Err(error) if error.raw_os_error() == contended => {
+            Err(error) if kernal_api::platform::fs::is_lock_conflict(&error) => {
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     return Ok(None);
                 }

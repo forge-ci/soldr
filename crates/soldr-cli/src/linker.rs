@@ -13,7 +13,6 @@
 //! stable identity for its exact content.
 
 use crate::core::{suppress_windows_console_window, SoldrError, SoldrPaths};
-use fs2::FileExt;
 use kernal_api::hash::Sha256Hasher;
 use std::borrow::Cow;
 use std::ffi::OsStr;
@@ -695,7 +694,7 @@ pub fn record_pep517_fallback(paths: &SoldrPaths, key: Option<&str>) -> Result<(
         file.seek(SeekFrom::End(0))?;
         writeln!(file, "{key}")?;
     }
-    file.unlock()?;
+    kernal_api::fs_unlock(&file)?;
     Ok(())
 }
 

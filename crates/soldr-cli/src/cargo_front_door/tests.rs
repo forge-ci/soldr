@@ -2537,13 +2537,14 @@ reason=daemon unavailable\n";
         .write(true)
         .open(&cargo_lock_path)
         .expect("open Cargo lock fixture");
-    fs2::FileExt::try_lock_exclusive(&cargo_lock).expect("hold Cargo lock fixture");
+    let guard =
+        kernal_api::platform::fs::try_lock_exclusive(&cargo_lock).expect("hold Cargo lock fixture");
     assert!(matches!(
         scrub_cached_fallback_diagnostics_once(&target).expect("defer active target"),
         FallbackOutputScrub::DeferredForActiveBuild(path) if path == cargo_lock_path
     ));
     assert!(!target.join(FALLBACK_OUTPUT_SCRUB_MARKER).exists());
-    fs2::FileExt::unlock(&cargo_lock).expect("release Cargo lock fixture");
+    drop(guard);
 
     assert_eq!(
         scrub_cached_fallback_diagnostics_once(&target).expect("scrub idle target"),

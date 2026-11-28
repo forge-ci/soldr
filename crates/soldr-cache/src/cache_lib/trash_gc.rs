@@ -38,7 +38,7 @@ pub const MAX_REPORTED_REASONS: usize = 5;
 pub(super) fn try_trash_reclaim_lock(
     root: &std::path::Path,
     shared: bool,
-) -> std::io::Result<Option<std::fs::File>> {
+) -> std::io::Result<Option<kernal_api::platform::fs::OwnedFileLock>> {
     use std::io::{Error, ErrorKind};
 
     super::path_safety::validate_owned_directory(root, root)?;
@@ -60,12 +60,12 @@ pub(super) fn try_trash_reclaim_lock(
         Err(error) => return Err(error),
     };
     let result = if shared {
-        fs2::FileExt::try_lock_shared(&file)
+        kernal_api::platform::fs::try_lock_shared_owned(file)
     } else {
-        fs2::FileExt::try_lock_exclusive(&file)
+        kernal_api::platform::fs::try_lock_exclusive_owned(file)
     };
     match result {
-        Ok(()) => Ok(Some(file)),
+        Ok(guard) => Ok(Some(guard)),
         Err(error) if super::cargo_lock::lock_is_held(&error) => Ok(None),
         Err(error) => Err(error),
     }

@@ -387,8 +387,6 @@ pub fn measure_retired_stores(
 
 /// An occupied or unreadable writer lock cannot be counted as retired.
 fn writer_lock_is_held(store: &std::path::Path) -> bool {
-    use fs2::FileExt as _;
-
     let file = match std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -398,7 +396,7 @@ fn writer_lock_is_held(store: &std::path::Path) -> bool {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
         Err(_) => return true,
     };
-    file.try_lock_exclusive().is_err()
+    kernal_api::platform::fs::try_lock_exclusive(&file).is_err()
 }
 
 /// True the first time a file's identity is seen, so a hardlinked file is
@@ -429,15 +427,13 @@ enum RetiredStoreRemoval {
 /// days. The writer lock is the proof. It is held for the whole removal, so a
 /// service of that version cannot claim the store halfway through.
 fn remove_retired_store(path: &std::path::Path) -> RetiredStoreRemoval {
-    use fs2::FileExt;
-
     let lock = match std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(path.join(ZCCACHE_WRITER_LOCK_FILE))
     {
-        Ok(file) => match file.try_lock_exclusive() {
-            Ok(()) => Some(file),
+        Ok(file) => match kernal_api::platform::fs::try_lock_exclusive_owned(file) {
+            Ok(guard) => Some(guard),
             Err(error) if crate::cache_lib::cargo_lock::lock_is_held(&error) => {
                 return RetiredStoreRemoval::Live
             }
@@ -549,8 +545,6 @@ mod legacy_gc_tests {
     /// running service, however old its files look.
     #[test]
     fn legacy_sweep_refuses_a_store_whose_writer_lock_is_held() {
-        use fs2::FileExt;
-
         let temp = tempfile::tempdir().unwrap();
         let owned = SoldrPaths::with_root(temp.path().join(".soldr"));
         let retired = owned
@@ -560,7 +554,7 @@ mod legacy_gc_tests {
         std::fs::create_dir_all(&retired).unwrap();
         std::fs::write(retired.join("artifact"), b"payload").unwrap();
         let lock = std::fs::File::create(retired.join(ZCCACHE_WRITER_LOCK_FILE)).unwrap();
-        lock.try_lock_exclusive().unwrap();
+        let lock = kernal_api::platform::fs::try_lock_exclusive_owned(lock).unwrap();
 
         let held = sweep_legacy_cache_roots(&owned, SystemTime::now(), std::time::Duration::ZERO);
 

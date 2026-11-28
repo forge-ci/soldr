@@ -5,10 +5,10 @@
     "soldr-agent": [
       "base64",
       "ed25519-dalek",
-      "fs2",
       "futures-util",
       "getrandom",
       "if-addrs",
+      "kernal-api",
       "prost",
       "serde",
       "serde_json",
@@ -20,7 +20,6 @@
     ],
     "soldr-cache": [
       "filetime",
-      "fs2",
       "jwalk",
       "kernal-api",
       "prost",
@@ -42,7 +41,6 @@
       "cap-std",
       "clap",
       "filetime",
-      "fs2",
       "futures-util",
       "getrandom",
       "globset",
@@ -88,7 +86,6 @@
     ],
     "soldr-daemon": [
       "console-subscriber",
-      "fs2",
       "hex",
       "interprocess",
       "kernal-api",
@@ -110,7 +107,6 @@
     "soldr-fetch": [
       "bzip2",
       "flate2",
-      "fs2",
       "kernal-api",
       "minisign-verify",
       "reqwest",
@@ -132,7 +128,6 @@
       "wait-timeout"
     ],
     "soldr-platform": [
-      "fs2",
       "interprocess",
       "kernal-api",
       "libc",

@@ -15,7 +15,6 @@ soldr-platform = { path = "../soldr-platform" }
 
 bzip2 = { workspace = true }
 flate2 = { workspace = true }
-fs2 = { workspace = true }
 minisign-verify = { workspace = true }
 reqwest = { workspace = true }
 semver = { workspace = true }

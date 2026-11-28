@@ -590,7 +590,6 @@ struct CacheLock(std::fs::File);
 
 impl CacheLock {
     pub(crate) async fn acquire(object: &Path) -> Result<Self, SoldrError> {
-        use fs2::FileExt;
         let lock_path = object.with_extension("lock");
         let file = OpenOptions::new()
             .create(true)
@@ -599,7 +598,7 @@ impl CacheLock {
             .write(true)
             .open(lock_path)?;
         loop {
-            match file.try_lock_exclusive() {
+            match kernal_api::fs_try_lock_exclusive(&file) {
                 Ok(()) => return Ok(Self(file)),
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     tokio::time::sleep(Duration::from_millis(15)).await;
@@ -612,7 +611,7 @@ impl CacheLock {
 
 impl Drop for CacheLock {
     fn drop(&mut self) {
-        let _ = fs2::FileExt::unlock(&self.0);
+        let _ = kernal_api::fs_unlock(&self.0);
     }
 }
 

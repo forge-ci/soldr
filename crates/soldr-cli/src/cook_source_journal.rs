@@ -26,7 +26,6 @@ use crate::cook_source_snapshot::{
     JOURNAL_DIR_NAME,
 };
 use crate::core::SoldrError;
-use fs2::FileExt;
 use kernal_api::hash::Sha256Hasher;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -90,7 +89,7 @@ impl CookSourceGuard {
         // the next invocation retries the recovery.
         restore_project_source(&self.root, &self.snapshot)?;
         remove_journal(&self.journal)?;
-        let _ = FileExt::unlock(&lock);
+        let _ = kernal_api::fs_unlock(&lock);
         Ok(())
     }
 
@@ -149,14 +148,14 @@ fn recover_dir(dir: &Path) -> Result<usize, SoldrError> {
         }
         let lock_path = journal.with_extension("lock");
         let lock = open_lock(&lock_path)?;
-        if lock.try_lock_exclusive().is_err() {
+        let Ok(guard) = kernal_api::platform::fs::try_lock_exclusive(&lock) else {
             continue; // a live cook owns it
-        }
+        };
         if journal.exists() {
             recover_journal(&journal)?;
             recovered += 1;
         }
-        let _ = FileExt::unlock(&lock);
+        drop(guard);
     }
     Ok(recovered)
 }

@@ -386,8 +386,6 @@ fn read_holder_summary_with_timeout(path: &Path, busy_timeout: Duration) -> Opti
 /// attributed timeout returns immediately — no diagnostic or validation
 /// reads after expiry.
 fn recover_corrupt_database(path: &Path, deadline: Instant) -> std::io::Result<()> {
-    use fs2::FileExt as _;
-
     let recovery_timeout = || {
         std::io::Error::new(
             std::io::ErrorKind::TimedOut,
@@ -405,19 +403,19 @@ fn recover_corrupt_database(path: &Path, deadline: Instant) -> std::io::Result<(
         .read(true)
         .write(true)
         .open(lock_path)?;
-    loop {
+    let _guard = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(recovery_timeout());
         }
-        match lock.try_lock_exclusive() {
-            Ok(()) => break,
+        match kernal_api::platform::fs::try_lock_exclusive(&lock) {
+            Ok(guard) => break guard,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(full_jitter().min(remaining));
             }
             Err(error) => return Err(error),
         }
-    }
+    };
     if Instant::now() >= deadline {
         return Err(recovery_timeout());
     }
@@ -598,7 +596,6 @@ mod tests {
 
     #[test]
     fn held_recovery_lock_respects_the_acquisition_deadline() {
-        use fs2::FileExt as _;
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("lease.sqlite3");
         std::fs::write(&path, b"this is not sqlite").unwrap();
@@ -612,7 +609,7 @@ mod tests {
             .write(true)
             .open(lock_path)
             .unwrap();
-        held.lock_exclusive().unwrap();
+        let _guard = kernal_api::platform::fs::lock_exclusive(&held).unwrap();
 
         let started = Instant::now();
         let error = BrokerLease::acquire_with_ceiling(&path, Duration::from_millis(200))

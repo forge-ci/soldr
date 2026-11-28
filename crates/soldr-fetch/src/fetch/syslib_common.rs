@@ -273,7 +273,7 @@ mod tests {
         // deliberately non-atomic read-modify-write on a shared file
         // inside the critical section. Without mutual exclusion the
         // lost-update race makes the final count < 8; with the lock
-        // it is exactly 8. (fs2 advisory locks are per-handle, so
+        // it is exactly 8. (Native advisory locks are per-handle, so
         // same-process threads contend just like separate processes.)
         let tmp = tempfile::tempdir().expect("tmpdir");
         let lock_dir = tmp.path().to_path_buf();

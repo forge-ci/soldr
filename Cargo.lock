@@ -1154,16 +1154,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs2"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
-dependencies = [
- "libc",
- "winapi",
-]
-
-[[package]]
 name = "futures"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4121,10 +4111,10 @@ version = "0.9.57"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
- "fs2",
  "futures-util",
  "getrandom 0.4.3",
  "if-addrs",
+ "kernal-api",
  "prost",
  "serde",
  "serde_json",
@@ -4142,7 +4132,6 @@ name = "soldr-cache"
 version = "0.9.57"
 dependencies = [
  "filetime",
- "fs2",
  "jwalk",
  "kernal-api",
  "prost",
@@ -4170,7 +4159,6 @@ dependencies = [
  "cap-std",
  "clap",
  "filetime",
- "fs2",
  "futures-util",
  "getrandom 0.4.3",
  "globset",
@@ -4234,7 +4222,6 @@ version = "0.9.57"
 dependencies = [
  "console-subscriber",
  "filetime",
- "fs2",
  "hex",
  "interprocess",
  "kernal-api",
@@ -4263,7 +4250,6 @@ version = "0.9.57"
 dependencies = [
  "bzip2",
  "flate2",
- "fs2",
  "kernal-api",
  "minisign-verify",
  "reqwest 0.12.28",
@@ -4298,7 +4284,6 @@ dependencies = [
 name = "soldr-platform"
 version = "0.9.57"
 dependencies = [
- "fs2",
  "interprocess",
  "kernal-api",
  "libc",

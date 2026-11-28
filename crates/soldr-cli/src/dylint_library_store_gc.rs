@@ -1,6 +1,5 @@
 //! Bounded pruning with backlinks to every target directory Soldr has linked.
 use crate::core::{SoldrError, SoldrPaths};
-use fs2::FileExt;
 use kernal_api::hash::Sha256Hasher;
 use std::path::{Path, PathBuf};
 

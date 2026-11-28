@@ -1,7 +1,7 @@
 //! Real Cargo lock probing for target cleanup.
 
-use fs2::FileExt;
-use std::fs::{self, File, OpenOptions};
+use kernal_api::platform::fs::{try_lock_exclusive_owned, OwnedFileLock};
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -13,24 +13,16 @@ pub enum CargoLockProbe {
 /// File handles whose exclusive locks remain held until the protected
 /// operation completes.
 pub struct CargoLockGuard {
-    files: Vec<File>,
+    _files: Vec<OwnedFileLock>,
 }
 
 /// Whether an error means another process already holds the file lock.
 ///
 /// Windows can reject the second open itself with ERROR_SHARING_VIOLATION
-/// (32) or ERROR_LOCK_VIOLATION (33), rather than letting fs2 return
-/// WouldBlock from try_lock_exclusive as Unix does.
+/// (32) or ERROR_LOCK_VIOLATION (33). Unix reports WouldBlock when
+/// the lock is held.
 pub fn lock_is_held(error: &io::Error) -> bool {
     crate::platform::fs::contention::is_lock_contention(error)
-}
-
-impl Drop for CargoLockGuard {
-    fn drop(&mut self) {
-        for file in &self.files {
-            let _ = file.unlock();
-        }
-    }
 }
 
 /// Recursively discover Cargo's .cargo-lock sentinels and try to acquire all
@@ -59,30 +51,24 @@ pub fn probe(target_dir: &Path) -> io::Result<CargoLockProbe> {
         }
     }
     lock_paths.sort();
-    let mut files: Vec<File> = Vec::with_capacity(lock_paths.len());
+    let mut files: Vec<OwnedFileLock> = Vec::with_capacity(lock_paths.len());
     for path in lock_paths {
         let file = match OpenOptions::new().read(true).write(true).open(&path) {
             Ok(file) => file,
             Err(error) if lock_is_held(&error) => {
-                for held in &files {
-                    let _ = held.unlock();
-                }
                 return Ok(CargoLockProbe::Active(path));
             }
             Err(error) => return Err(error),
         };
-        match file.try_lock_exclusive() {
-            Ok(()) => files.push(file),
+        match try_lock_exclusive_owned(file) {
+            Ok(guard) => files.push(guard),
             Err(error) if lock_is_held(&error) => {
-                for held in &files {
-                    let _ = held.unlock();
-                }
                 return Ok(CargoLockProbe::Active(path));
             }
             Err(error) => return Err(error),
         }
     }
-    Ok(CargoLockProbe::Idle(CargoLockGuard { files }))
+    Ok(CargoLockProbe::Idle(CargoLockGuard { _files: files }))
 }
 
 #[cfg(test)]
@@ -93,7 +79,7 @@ mod tests {
     fn persistent_unlocked_lock_is_idle() {
         let temp = tempfile::tempdir().unwrap();
         let lock = temp.path().join(".cargo-lock");
-        File::create(&lock).unwrap();
+        fs::File::create(&lock).unwrap();
         assert!(matches!(
             probe(temp.path()).unwrap(),
             CargoLockProbe::Idle(_)
@@ -104,12 +90,11 @@ mod tests {
     fn held_lock_is_active() {
         let temp = tempfile::tempdir().unwrap();
         let lock = temp.path().join(".cargo-lock");
-        let holder = File::create(&lock).unwrap();
-        holder.try_lock_exclusive().unwrap();
+        let holder = fs::File::create(&lock).unwrap();
+        let _guard = kernal_api::platform::fs::try_lock_exclusive(&holder).unwrap();
         assert!(matches!(
             probe(temp.path()).unwrap(),
             CargoLockProbe::Active(_)
         ));
-        holder.unlock().unwrap();
     }
 }
