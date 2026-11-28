@@ -3999,7 +3999,7 @@ dependencies = [
 
 [[package]]
 name = "soldr-agent"
-version = "0.9.58"
+version = "0.9.59"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -4021,7 +4021,7 @@ dependencies = [
 
 [[package]]
 name = "soldr-cache"
-version = "0.9.58"
+version = "0.9.59"
 dependencies = [
  "filetime",
  "jwalk",
@@ -4044,7 +4044,7 @@ dependencies = [
 
 [[package]]
 name = "soldr-cli"
-version = "0.9.58"
+version = "0.9.59"
 dependencies = [
  "axum",
  "cap-fs-ext",
@@ -4089,7 +4089,7 @@ dependencies = [
 
 [[package]]
 name = "soldr-core"
-version = "0.9.58"
+version = "0.9.59"
 dependencies = [
  "kernal-api",
  "libc",
@@ -4106,7 +4106,7 @@ dependencies = [
 
 [[package]]
 name = "soldr-daemon"
-version = "0.9.58"
+version = "0.9.59"
 dependencies = [
  "console-subscriber",
  "filetime",
@@ -4133,7 +4133,7 @@ dependencies = [
 
 [[package]]
 name = "soldr-fetch"
-version = "0.9.58"
+version = "0.9.59"
 dependencies = [
  "bzip2",
  "flate2",
@@ -4157,7 +4157,7 @@ dependencies = [
 
 [[package]]
 name = "soldr-nextest-wrapper"
-version = "0.9.58"
+version = "0.9.59"
 dependencies = [
  "kernal-api",
  "soldr-core",
@@ -4167,7 +4167,7 @@ dependencies = [
 
 [[package]]
 name = "soldr-platform"
-version = "0.9.58"
+version = "0.9.59"
 dependencies = [
  "interprocess",
  "kernal-api",
