@@ -19,7 +19,7 @@ members = [
 # running-process were `_vender/` submodules with their own [workspace]
 # declarations, and each needed excluding so cargo would not fold its crates
 # into soldr's workspace and mis-version them. They are exact crates.io
-# dependencies now (`zccache = { version = "=1.15.18" }` in
+# dependencies now (`zccache = { version = "=1.15.23" }` in
 # `[workspace.dependencies]`, the single pin every member inherits;
 # `running-process = { version = "=4.10.20" }`), so there is no nested
 # workspace left to exclude. Neither has a `[patch]`: cargo strips `[patch]`
@@ -76,7 +76,7 @@ libraries = [{ path = "dylints/*" }]
 [workspace.dependencies]
 # The one zccache pin (soldr#3604): every member uses `workspace = true`.
 # `default-features = false` can only be set here; a member cannot re-disable it.
-zccache = { version = "=1.15.18", default-features = false }
+zccache = { version = "=1.15.23", default-features = false }
 cap-fs-ext = "3.4.4"
 cap-std = "3.4.4"
 tokio = { version = "1", features = ["full"] }
@@ -92,7 +92,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 semver = "1"
 # Keep this exact pin aligned with the kernal-api release resolved by zccache.
-kernal-api = { version = "=0.1.40", default-features = false, features = ["fs"] }
+kernal-api = { version = "=0.1.42", default-features = false, features = ["fs"] }
 tempfile = "3"
 # soldr#1356 A4 — default-features=false + deflate only. Drops bzip2-sys
 # (C build) + aes + sha1 + lzma + deflate64 + zopfli + zip's own zstd copy.
@@ -146,7 +146,7 @@ rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 
 [patch.crates-io]
 # kernal-api main e39ecf3 (0.1.42 + forge-ci/kernal-api#626 async HTTP/2),
-# relabelled 0.1.40 so zccache 1.15.18's exact pin resolves to it.
+# relabelled 0.1.42 so zccache 1.15.23's exact pin resolves to it.
 # Drop this when zccache and soldr move to a kernal-api release containing #626.
 kernal-api = { path = "_vender/kernal-api" }
 # soldr#2406: use the vendored notify with bumped windows-sys (0.52→0.61)

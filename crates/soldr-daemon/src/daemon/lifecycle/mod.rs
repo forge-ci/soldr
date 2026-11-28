@@ -642,7 +642,9 @@ pub fn preflight_displace_stale_daemon_for_service(
     // busy-but-healthy daemon is strictly worse than leaving it alone.
     let claim_proves_current = claimed_process_live(paths)
         .filter(|_| current_version_claim_matches_service(paths, service));
-    let recorded_process_is_alive = claimed_daemon_occupies_route(paths).is_some();
+    // A dead PID's claim is a stopped daemon's leftover, not a stale one (#4279).
+    let recorded_process_is_alive =
+        read_recorded_daemon_identity(paths).is_some_and(|(pid, _)| pid_is_alive(pid));
     let endpoint_artifact_exists =
         crate::daemon::backend_handle_adoption::broker_route_claim_path(paths).exists();
     if preflight_should_displace(
@@ -689,7 +691,7 @@ fn preflight_should_displace(
     if claim_proves_current {
         return false;
     }
-    stale_daemon_occupies || recorded_process_is_alive || endpoint_artifact_exists
+    stale_daemon_occupies || (recorded_process_is_alive && endpoint_artifact_exists)
 }
 
 fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {

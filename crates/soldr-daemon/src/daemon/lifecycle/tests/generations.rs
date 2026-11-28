@@ -380,4 +380,51 @@ mod generation_tests {
         let _ = child.kill();
         let _ = child.wait();
     }
+
+    /// Dell CI slots: the previous job's daemon was stopped at job end, but
+    /// its route claim file survives in the persistent slot cache. A fresh
+    /// job's preflight must treat that leftover claim as nothing to displace,
+    /// not as a stale-version daemon (no `displace-stale-requested`).
+    #[test]
+    fn preflight_ignores_a_claim_whose_daemon_already_exited() {
+        let temp = TempDir::new().expect("tempdir");
+        let paths = SoldrPaths::with_root(temp.path().join("root"));
+        let bin_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        let (mut child, exe) = spawn_fake_daemon(&bin_dir, daemon_stem());
+        let pid = child.id();
+        let _env = ServiceEnv::set("soldr-daemon-dead-claim");
+        publish_broker_route_claim(&paths, &claim_for(pid, &exe)).expect("publish claim");
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!pid_is_alive(pid), "the recorded daemon must be gone");
+        assert!(broker_route_claim_path(&paths).exists());
+
+        crate::daemon::lifecycle::preflight_displace_stale_daemon_for_service(
+            &paths,
+            Some(std::ffi::OsStr::new("soldr-daemon-dead-claim")),
+        );
+
+        let log = std::fs::read_to_string(crate::cache_lib::daemon_lifecycle_log_path(&paths))
+            .unwrap_or_default();
+        assert!(
+            !log.contains("displace-stale-requested"),
+            "a dead claim was treated as a stale-version daemon: {log}"
+        );
+        assert!(
+            !log.contains("previous-daemon-vanished-without-ack"),
+            "{log}"
+        );
+    }
+
+    /// Policy half: a leftover endpoint artifact alone never justifies
+    /// displacement; it does while its recorded process is still alive.
+    #[test]
+    fn endpoint_artifact_requires_a_live_recorded_process() {
+        assert!(!preflight_should_displace(false, false, false, true));
+        assert!(preflight_should_displace(false, false, true, true));
+        assert!(preflight_should_displace(false, true, false, false));
+        assert!(!preflight_should_displace(true, true, true, true));
+    }
 }

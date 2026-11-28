@@ -2077,7 +2077,7 @@ dependencies = [
 
 [[package]]
 name = "kernal-api"
-version = "0.1.40"
+version = "0.1.42"
 dependencies = [
  "blake3",
  "bytes",
@@ -5556,9 +5556,9 @@ dependencies = [
 
 [[package]]
 name = "zccache"
-version = "1.15.18"
+version = "1.15.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2cc65128ee3ccbb24cf3d9db1f2ee2f63cce3bc350805a989a242bb3f6fb55e"
+checksum = "f41822a9e644d37119b894c64adcf6478149aa1154d6419215a7500011d52ec7"
 dependencies = [
  "arc-swap",
  "bincode",

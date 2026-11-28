@@ -391,7 +391,7 @@ fn externalized_dependencies_are_exact_and_consistent() {
         .expect("root [workspace.dependencies] must pin zccache");
     assert_eq!(
         extract_dependency_version(&workspace_line).as_deref(),
-        Some("=1.15.18"),
+        Some("=1.15.23"),
         "the workspace must pin the exact released zccache version"
     );
     assert!(
@@ -412,7 +412,7 @@ fn externalized_dependencies_are_exact_and_consistent() {
     }
 
     for (dependency, version, manifests) in [
-        ("zccache", "1.15.18", &[][..]),
+        ("zccache", "1.15.23", &[][..]),
         (
             "running-process",
             "4.10.21",

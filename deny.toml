@@ -37,12 +37,12 @@ skip = [
     # to the newer side so another version remains a ratchet failure.
     { name = "block-buffer", version = "=0.12.1" },
     { name = "crypto-common", version = "=0.2.2" },
-    # The published zccache 1.15.18 crate depends on sysinfo 0.39, while soldr's
+    # The published zccache 1.15.23 crate depends on sysinfo 0.39, while soldr's
     # own crates still use sysinfo 0.30 (the vendored zccache amalgamation was
     # built against 0.30). Pin the exception to the newer side so a third
     # version still fails the ratchet.
     { name = "sysinfo", version = "=0.39.6" },
-    # zccache 1.15.18 and notify 8 bring the toml 1.x stack, while soldr's own
+    # zccache 1.15.23 and notify 8 bring the toml 1.x stack, while soldr's own
     # crates still use toml 0.8 / toml_edit 0.22. Pinned to the newer side so a
     # third version still fails the ratchet; moving soldr to toml 1.x drops them.
     { name = "toml", version = "=1.1.8" },
