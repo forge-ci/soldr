@@ -86,6 +86,10 @@ pub(crate) async fn await_compile_reply<F: Future>(work: F) -> std::io::Result<F
                 disconnected_since = None;
                 status
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                disconnected_since = None;
+                continue;
+            }
             Err(error) => {
                 let since = disconnected_since.get_or_insert(probe_started);
                 if since.elapsed() < crate::session_transport::compile_liveness_deadline() {
@@ -125,7 +129,15 @@ pub(crate) async fn await_compile_reply<F: Future>(work: F) -> std::io::Result<F
 pub(crate) fn daemon_progress() -> std::io::Result<crate::daemon::protocol::StatusInfo> {
     let paths = crate::core::SoldrPaths::new().map_err(std::io::Error::other)?;
     crate::daemon::client::status(&crate::daemon::client::default_sock_path(&paths))
-        .map_err(|e| std::io::Error::other(format!("{e:?}")))
+        .map_err(|e| match e {
+            // No endpoint at the probed path: this process cannot observe the
+            // daemon the compile is routed to (broker/session routes use another
+            // root). That is "no information", never "daemon dead".
+            crate::daemon::client::ClientError::NotRunning => {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "daemon endpoint not observable")
+            }
+            other => std::io::Error::other(format!("{other:?}")),
+        })
 }
 
 #[derive(Default)]
