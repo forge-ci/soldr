@@ -11,6 +11,9 @@ use crate::core::{SoldrError, SoldrPaths};
 
 const FORMAT: &str = "msvc-resources-v1";
 const BUILTINS: &str = "lib/windows/clang_rt.builtins-x86_64.lib";
+/// The verified catalogue unit a published tree was composed from, so a
+/// restored tree can be re-verified without the catalogue (soldr#4174).
+const UNIT_RECORD: &str = "catalogue-unit";
 
 fn select_unit(index: &ManifestIndex) -> Result<ManifestEntry, SoldrError> {
     let asset = format!(
@@ -51,20 +54,23 @@ async fn ensure_from_index(
     resource: &Path,
     index: &ManifestIndex,
 ) -> Result<PathBuf, SoldrError> {
-    let unit = select_unit(index)?;
-    let identity = Sha256Hasher::digest(format!(
-        "{FORMAT}\n{}\n{}\n{}\n{}",
-        resource.display(),
-        unit.asset,
-        unit.sha256,
-        unit.size_bytes
-    ))
-    .to_hex();
     let parent = paths.root.join("sdk/windows-msvc/clang-resources");
+    let relative = "package/lib/clang/21";
+    // soldr#4174: with no catalogue at all (offline, air-gapped, restored
+    // prepared state), reuse a tree an earlier online run verified. A
+    // reachable catalogue keeps the strict #4167 identity check.
+    let unit = match select_unit(index) {
+        Ok(unit) => unit,
+        Err(error) if index.entries.is_empty() => {
+            return recorded_tree(&parent, resource, relative).ok_or(error);
+        }
+        Err(error) => return Err(error),
+    };
+    let record = unit_record(&unit.asset, &unit.sha256, unit.size_bytes);
+    let identity = tree_identity(resource, &record);
     let _lock = super::syslib_common::acquire_install_lock(&parent, &identity)?;
     let parent = parent.canonicalize()?;
     let root = parent.join(&identity);
-    let relative = "package/lib/clang/21";
     if root.exists() {
         validate(&root, relative, &identity)?;
         return Ok(root.join(relative));
@@ -82,6 +88,7 @@ async fn ensure_from_index(
     super::tar_extract::unpack_tar(&mut tar::Archive::new(decoder), &input)?;
     let overlay = input.join(relative).join("lib/windows");
     copy_resources(&overlay, &staging.path().join(relative).join("lib/windows"))?;
+    std::fs::write(staging.path().join(UNIT_RECORD), &record)?;
     std::fs::write(staging.path().join(".complete"), &identity)?;
     validate(staging.path(), relative, &identity)?;
     crate::platform::fs::permissions::restore_mode(staging.path(), Some(0o755))?;
@@ -92,6 +99,42 @@ async fn ensure_from_index(
         downloaded.sha256()
     );
     Ok(root.join(relative))
+}
+
+/// Line-oriented so the identity below hashes exactly the pre-#4174 input.
+fn unit_record(asset: &str, sha256: &str, size_bytes: u64) -> String {
+    format!("{asset}\n{sha256}\n{size_bytes}")
+}
+
+fn tree_identity(resource: &Path, record: &str) -> String {
+    Sha256Hasher::digest(format!("{FORMAT}\n{}\n{record}", resource.display())).to_hex()
+}
+
+/// A published tree for this LLVM resource dir whose recorded unit is the
+/// expected asset and hashes to the tree's own name. The tree's content was
+/// verified against that unit's sha256 when it was published.
+fn recorded_tree(parent: &Path, resource: &Path, relative: &str) -> Option<PathBuf> {
+    let asset = format!(
+        "compiler-rt/{}/windows-x64/bundle.tar.zst",
+        super::MANAGED_LLVM_VERSION
+    );
+    for entry in std::fs::read_dir(parent).ok()?.flatten() {
+        let root = entry.path();
+        let Ok(record) = std::fs::read_to_string(root.join(UNIT_RECORD)) else {
+            continue;
+        };
+        let identity = tree_identity(resource, &record);
+        if record.lines().next() == Some(asset.as_str())
+            && entry.file_name().to_str() == Some(identity.as_str())
+            && validate(&root, relative, &identity).is_ok()
+        {
+            eprintln!(
+                "soldr: trust: reused {asset} verified at publish (catalogue unreachable; soldr#4174)"
+            );
+            return Some(root.join(relative));
+        }
+    }
+    None
 }
 
 fn validate(root: &Path, relative: &str, identity: &str) -> Result<(), SoldrError> {
