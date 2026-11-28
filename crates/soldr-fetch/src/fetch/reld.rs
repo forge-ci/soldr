@@ -35,8 +35,39 @@ pub(crate) struct ReleaseAsset {
     pub(crate) files: &'static [&'static str],
 }
 
-/// The static build ships only the executable.
-const STATIC_FILES: &[&str] = &["reld"];
+/// The static musl build: no in-process COFF engine, so reld links COFF
+/// through its subprocess bridge. `reld-link` is its link.exe entry point.
+const STATIC_FILES: &[&str] = &["reld", "reld-link"];
+
+/// The glibc builds also ship reld's in-process COFF engine
+/// (`libllvm_ld.so`, loaded from beside `reld`) and its licences (soldr#4281).
+const GLIBC_FILES: &[&str] = &[
+    "reld",
+    "reld-link",
+    "libllvm_ld.so",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+    "LICENSE-LLVM.txt",
+    "LICENSE-llvm-ld.txt",
+    "LICENSE-LIBXML2.txt",
+    "LICENSE-MIMALLOC.txt",
+    "NOTICE",
+    "PROVENANCE-llvm-ld.md",
+];
+
+/// The glibc reld 0.2.3 needs: `reld` uses GLIBC_2.39 symbols.
+const GLIBC_FLOOR: (u32, u32) = (2, 39);
+
+fn glibc_at_least(version: Option<&str>, floor: (u32, u32)) -> bool {
+    let Some(version) = version else {
+        return false;
+    };
+    let mut parts = version.trim().split('.').map(str::parse::<u32>);
+    match (parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => (major, minor) >= floor,
+        _ => false,
+    }
+}
 
 /// Resolve a verified host executable for an explicit `reld` selection.
 pub async fn ensure_reld(paths: &SoldrPaths) -> Result<PathBuf, SoldrError> {
@@ -66,8 +97,20 @@ pub(crate) async fn ensure_reld_from(
 ) -> Result<PathBuf, SoldrError> {
     let host = TargetTriple::host()?;
     let binary = managed_binary_path(paths, asset);
-    if binary.is_file() {
+    // Reuse only a complete install: one from an older soldr kept only
+    // `reld`, without `reld-link` or the COFF engine (soldr#4281).
+    if asset
+        .files
+        .iter()
+        .all(|name| binary.with_file_name(installed_name(name)).is_file())
+    {
         return Ok(binary);
+    }
+    if asset.files == STATIC_FILES && asset.triple.ends_with("-linux-musl") {
+        eprintln!(
+            "soldr: note: host glibc is older than {}.{} (or unknown); installing the static reld, so COFF links use reld's subprocess bridge (soldr#4281)",
+            GLIBC_FLOOR.0, GLIBC_FLOOR.1
+        );
     }
 
     let asset_name = format!(
@@ -119,6 +162,11 @@ fn reld_bin_from_env() -> Result<Option<PathBuf>, SoldrError> {
     Ok(Some(path))
 }
 
+/// The archive extractor appends the host executable suffix to every name.
+fn installed_name(name: &str) -> String {
+    format!("{name}{}", std::env::consts::EXE_SUFFIX)
+}
+
 fn managed_binary_path(paths: &SoldrPaths, asset: &ReleaseAsset) -> PathBuf {
     paths
         .bin
@@ -129,9 +177,16 @@ fn managed_binary_path(paths: &SoldrPaths, asset: &ReleaseAsset) -> PathBuf {
 fn release_asset_for(
     os: HostOs,
     arch: HostArch,
-    _glibc: Option<&str>,
+    glibc: Option<&str>,
 ) -> Result<ReleaseAsset, SoldrError> {
     let asset = match (os, arch) {
+        (HostOs::Linux, HostArch::X86_64) if glibc_at_least(glibc, GLIBC_FLOOR) => ReleaseAsset {
+            triple: "x86_64-unknown-linux-gnu",
+            extension: "tar.gz",
+            cache_name: "reld-glibc",
+            files: GLIBC_FILES,
+            sha256: "33927b4b243c418ce81094ccb0741ddd4d06cf77fc2b56d29d9cc8a6b8ff297d",
+        },
         // Prefer the static musl release on Linux x86_64 so the bootstrap does
         // not depend on a runner's glibc version.
         (HostOs::Linux, HostArch::X86_64) => ReleaseAsset {
@@ -144,8 +199,8 @@ fn release_asset_for(
         (HostOs::Linux, HostArch::Aarch64) => ReleaseAsset {
             triple: "aarch64-unknown-linux-gnu",
             extension: "tar.gz",
-            cache_name: "reld",
-            files: STATIC_FILES,
+            cache_name: "reld-glibc",
+            files: GLIBC_FILES,
             sha256: "45e89ee11e838f66f37cf6cd5fe35178d296219cd3a0d92172e1740cb75df3f1",
         },
         (HostOs::MacOs, HostArch::X86_64) => ReleaseAsset {
@@ -274,7 +329,7 @@ mod tests {
             triple: "test-fixture",
             extension: "tar.gz",
             cache_name: "reld",
-            files: STATIC_FILES,
+            files: &["reld"],
             sha256: Box::leak(sha256.into_boxed_str()),
         };
         let temp = tempfile::tempdir().expect("tempdir");
@@ -334,7 +389,7 @@ mod tests {
             triple: "test-fixture",
             extension: "tar.gz",
             cache_name: "reld",
-            files: STATIC_FILES,
+            files: &["reld"],
             sha256: Box::leak(sha256.into_boxed_str()),
         };
 
@@ -386,7 +441,7 @@ mod tests {
             triple: "test-fixture",
             extension: "tar.gz",
             cache_name: "reld",
-            files: STATIC_FILES,
+            files: &["reld"],
             sha256: "0000000000000000000000000000000000000000000000000000000000000",
         };
 
