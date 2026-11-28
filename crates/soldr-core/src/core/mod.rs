@@ -17,7 +17,6 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
-use wait_timeout::ChildExt;
 
 /// soldr#941/#2336 — single-source-of-truth for the canonical 9-target list.
 /// Mirror of `[workspace.metadata.soldr].targets` in the root
@@ -177,8 +176,8 @@ pub fn home_dir() -> Result<PathBuf, SoldrError> {
 /// Run `command` to completion, failing only when it goes **silent** for the
 /// budget — not when it merely takes a long time.
 ///
-/// soldr#2974: this used to be `child.wait_timeout(command_output_timeout())`,
-/// a hard wall-clock deadline, despite the name and the operator-facing
+/// Before soldr#2974, this used the configured output timeout as a hard
+/// wall-clock deadline, despite the name and the operator-facing
 /// `SOLDR_COMMAND_OUTPUT_TIMEOUT_SECS` both promising an *output* timeout. Any
 /// child that legitimately ran longer than 60s was killed mid-work. That is
 /// how `soldr dylint` destroyed its own nightly install: the toolchain fetch
@@ -265,8 +264,7 @@ fn command_output_with_timeout_inner(
         .take()
         .map(|pipe| read_pipe_async(pipe, Arc::clone(&last_output), started));
     let status = loop {
-        match child
-            .wait_timeout(COMMAND_OUTPUT_POLL_INTERVAL)
+        match crate::platform::wait::try_wait_for(&mut child, COMMAND_OUTPUT_POLL_INTERVAL)
             .map_err(|err| SoldrError::Other(format!("wait on {context} failed: {err}")))?
         {
             Some(status) => break status,
@@ -285,8 +283,10 @@ fn command_output_with_timeout_inner(
                     continue;
                 }
                 let kill_result = crate::platform::process::terminate::terminate_tree(&mut child);
-                let reap_result = child
-                    .wait_timeout(Duration::from_secs(KILLED_COMMAND_OUTPUT_REAP_TIMEOUT_SECS));
+                let reap_result = crate::platform::wait::try_wait_for(
+                    &mut child,
+                    Duration::from_secs(KILLED_COMMAND_OUTPUT_REAP_TIMEOUT_SECS),
+                );
                 let timeout_secs = timeout.as_secs();
                 let elapsed_secs = elapsed.as_secs();
                 let mut message = match timeout_kind {

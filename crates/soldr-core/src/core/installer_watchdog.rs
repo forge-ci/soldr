@@ -11,8 +11,6 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use wait_timeout::ChildExt;
-
 use super::SoldrError;
 
 /// Environment variable for the silent-work heartbeat cadence (soldr#2359).
@@ -541,11 +539,10 @@ fn wait_for_child_with_watchdog<P: ProgressProbe>(
         }
         // Wake on child exit instead of rounding short toolchain probes up
         // to the watchdog's progress sampling interval.
-        match child.wait_timeout(config.poll_interval) {
+        match crate::platform::wait::try_wait_for(child, config.poll_interval) {
             Ok(Some(status)) => return Ok(status),
             Ok(None) => {}
-            // Notification setup can fail while the child is still healthy.
-            // Keep supervising it with the original polling path.
+            // Keep supervising after a wait error.
             Err(_) => thread::sleep(config.poll_interval),
         }
     }
@@ -561,7 +558,10 @@ fn kill_for_watchdog(
     config: &InstallerWatchdogConfig,
 ) -> SoldrError {
     let kill_result = kill_installer_process_tree(child);
-    let reap_result = child.wait_timeout(Duration::from_secs(KILLED_INSTALLER_REAP_TIMEOUT_SECS));
+    let reap_result = crate::platform::wait::try_wait_for(
+        child,
+        Duration::from_secs(KILLED_INSTALLER_REAP_TIMEOUT_SECS),
+    );
     let mut message = format!(
         "{context}: installer watchdog category={category} phase={phase} total_elapsed={}s since_progress={}s; stall_timeout={}s ({INSTALLER_STALL_TIMEOUT_ENV_VAR}); safety_ceiling={}s ({})",
         elapsed.as_secs(),

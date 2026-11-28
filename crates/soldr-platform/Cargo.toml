@@ -29,7 +29,6 @@ interprocess = { version = "2", features = ["tokio"] }
 # crates/soldr-cli/tests/guards/version_lockstep.rs enforces that.
 kernal-api = { workspace = true }
 running-process = { version = "=4.10.21", default-features = false, features = ["client"] }
-wait-timeout = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tar = { workspace = true }

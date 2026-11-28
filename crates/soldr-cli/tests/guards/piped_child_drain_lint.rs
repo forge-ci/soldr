@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! let mut child = cmd.stdout(Stdio::piped()).spawn()?;
-//! child.wait_timeout(budget)?;             // nobody is reading yet
+//! try_wait_for(&mut child, budget)?;             // nobody is reading yet
 //! let output = child.wait_with_output()?;  // too late
 //! ```
 //!
@@ -35,7 +35,6 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::common;
-use wait_timeout::ChildExt;
 
 /// Test sources the lint skips, relative to `crates/`, with the reason.
 const EXEMPT: &[(&str, &str)] = &[
@@ -51,7 +50,13 @@ const EXEMPT: &[(&str, &str)] = &[
 
 /// Calls that wait on a child. Any of them before `wait_with_output` means the
 /// child ran with nobody reading its pipes.
-const WAITS: &[&str] = &[".try_wait()", ".wait_timeout(", ".wait()"];
+const WAITS: &[&str] = &[
+    ".try_wait()",
+    ".wait_timeout(",
+    ".wait()",
+    "try_wait_for(",
+    "wait::wait_for(",
+];
 
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -201,12 +206,12 @@ fn the_rule_flags_undrained_pipes_and_accepts_every_draining_shape() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.wait_timeout(budget).unwrap();
+    try_wait_for(&mut child, budget).unwrap();
     child.wait_with_output().unwrap()
 }
 "#,
             2,
-            "wait_timeout before wait_with_output",
+            "try_wait_for before wait_with_output",
         ),
         (
             r#"fn never_read() -> Child {
@@ -294,8 +299,7 @@ fn waiting_before_reading_deadlocks_a_large_writer() {
     command.stdout(Stdio::piped()).stderr(Stdio::null());
     let mut child = common::spawn_staged(&mut command).expect("spawn large writer");
     let started = Instant::now();
-    let settled = child
-        .wait_timeout(Duration::from_secs(3))
+    let settled = soldr_platform::wait::try_wait_for(&mut child, Duration::from_secs(3))
         .expect("wait on large writer");
     // Closing the read end ends the writer with EPIPE/SIGPIPE; nothing is left.
     drop(child.stdout.take());

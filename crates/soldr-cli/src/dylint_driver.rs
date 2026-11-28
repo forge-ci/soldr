@@ -71,7 +71,6 @@ use std::{
     process::Stdio,
     time::Duration,
 };
-use wait_timeout::ChildExt;
 
 use crate::core::{suppress_windows_console_window, SoldrError, SoldrPaths, TargetTriple};
 use crate::dylint_toolchain::{is_fully_qualified_nightly, DylintToolchainPlan};
@@ -238,7 +237,7 @@ fn run_version_probe(
         // which is what makes them `ProbeTimedOut` rather than "no driver":
         // the binary is present and was executing, so nothing soldr could
         // fetch or build would change the outcome.
-        match child.wait_timeout(attempt_deadline) {
+        match crate::platform::wait::try_wait_for(&mut child, attempt_deadline) {
             Err(error) => {
                 let _ = child.kill();
                 let _ = crate::platform::wait::wait_for(&mut child, crate::platform::wait::PROBE);

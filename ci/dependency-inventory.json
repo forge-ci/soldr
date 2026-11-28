@@ -65,7 +65,6 @@
       "toml",
       "toml_edit",
       "tracing",
-      "wait-timeout",
       "widestring",
       "windows-sys",
       "zccache",
@@ -81,7 +80,6 @@
       "thiserror",
       "toml",
       "url",
-      "wait-timeout",
       "windows-sys"
     ],
     "soldr-daemon": [
@@ -124,8 +122,7 @@
       "zstd"
     ],
     "soldr-nextest-wrapper": [
-      "kernal-api",
-      "wait-timeout"
+      "kernal-api"
     ],
     "soldr-platform": [
       "interprocess",
@@ -137,7 +134,6 @@
       "tar",
       "thiserror",
       "tokio",
-      "wait-timeout",
       "widestring",
       "windows-sys"
     ]

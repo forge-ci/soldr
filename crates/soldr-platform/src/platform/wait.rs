@@ -21,8 +21,6 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use wait_timeout::ChildExt;
-
 /// Budget for a child that does a whole build or install with inherited
 /// output (`cargo build`, `rustup toolchain install`, a source build): long
 /// enough for any real run, short enough that a wedged one still ends.
@@ -138,14 +136,34 @@ pub fn join_for<T>(
 // Child processes
 // ---------------------------------------------------------------------------
 
+/// Wait at most `bound` for an already-spawned child. Close its stdin and
+/// return `None` on timeout so the caller can continue supervising the child
+/// or apply its own process-tree cleanup.
+pub fn try_wait_for(child: &mut Child, bound: Duration) -> io::Result<Option<ExitStatus>> {
+    drop(child.stdin.take());
+    let started = Instant::now();
+    let mut backoff = Duration::from_millis(1);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let remaining = bound.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        std::thread::sleep(backoff.min(remaining));
+        backoff = (backoff * 2).min(Duration::from_millis(20));
+    }
+}
+
 /// Wait for a child to exit, at most `bound`. On timeout the child is
 /// killed and reaped (bounded) and `TimedOut` is returned.
 pub fn wait_for(child: &mut Child, bound: Duration) -> io::Result<ExitStatus> {
-    if let Some(status) = child.wait_timeout(bound)? {
+    if let Some(status) = try_wait_for(child, bound)? {
         return Ok(status);
     }
     let _ = child.kill();
-    let _ = child.wait_timeout(Duration::from_secs(5));
+    let _ = try_wait_for(child, Duration::from_secs(5));
     Err(WaitError::TimedOut(bound).into())
 }
 
@@ -315,9 +333,7 @@ fn finish_owned_output<T>(
     let result = (|| {
         let stdout = collect(stdout)?;
         let stderr = collect(stderr)?;
-        let status = child
-            .wait_timeout(remaining())?
-            .ok_or(WaitError::TimedOut(bound))?;
+        let status = try_wait_for(child, remaining())?.ok_or(WaitError::TimedOut(bound))?;
         Ok((status, stdout, stderr))
     })();
     if result.is_err() {
@@ -328,7 +344,7 @@ fn finish_owned_output<T>(
 
 fn terminate_owned(child: &mut Child) {
     let _ = super::process::terminate::terminate_tree(child);
-    let _ = child.wait_timeout(Duration::from_secs(5));
+    let _ = try_wait_for(child, Duration::from_secs(5));
 }
 
 /// Run `command` with its stdio as configured (typically inherited) and wait
