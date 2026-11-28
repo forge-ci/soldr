@@ -125,7 +125,7 @@ pub(crate) async fn await_compile_reply<F: Future>(work: F) -> std::io::Result<F
 pub(crate) fn daemon_progress() -> std::io::Result<crate::daemon::protocol::StatusInfo> {
     let paths = crate::core::SoldrPaths::new().map_err(std::io::Error::other)?;
     crate::daemon::client::status(&crate::daemon::client::default_sock_path(&paths))
-        .map_err(std::io::Error::other)
+        .map_err(|e| std::io::Error::other(format!("{e:?}")))
 }
 
 #[derive(Default)]

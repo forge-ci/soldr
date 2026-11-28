@@ -82,7 +82,7 @@ pub(crate) fn write_stall_dump(paths: &SoldrPaths, phase: &str) -> std::io::Resu
         .map(|p| format!("{}:{}:{:?}:{}", p.pid, p.name, p.cmd, p.status))
         .collect();
     fingerprint.sort_unstable();
-    let fingerprint = blake3::hash(fingerprint.join("\n").as_bytes())
+    let fingerprint = kernal_api::hash::blake3_bytes(fingerprint.join("\n").as_bytes())
         .to_hex()
         .to_string();
     if let Some(previous) = reusable_dump(&logs, &generation, &fingerprint)? {
