@@ -416,10 +416,12 @@ fn apply_cl_driver_mode(tools: &mut NativeToolchain, triple: &str) -> Result<(),
         ));
     }
     let suffix = crate::platform::executable::name::script_suffix();
-    let cl = tools.cc.with_file_name(format!("{triple}-clang-cl{suffix}"));
-    tools.cc = cl.clone();
+    let cl = tools
+        .cc
+        .with_file_name(format!("{triple}-clang-cl{suffix}"));
+    tools.linker = cl.with_file_name(format!("lld-link{suffix}"));
     tools.cxx = cl.clone();
-    tools.linker = cl;
+    tools.cc = cl;
     Ok(())
 }
 
