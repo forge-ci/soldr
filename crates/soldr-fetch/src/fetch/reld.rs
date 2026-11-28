@@ -29,7 +29,14 @@ pub(crate) struct ReleaseAsset {
     pub(crate) triple: &'static str,
     pub(crate) extension: &'static str,
     pub(crate) sha256: &'static str,
+    /// Install directory stem under `bin/` (`<cache_name>-<version>`).
+    pub(crate) cache_name: &'static str,
+    /// Files extracted flat beside `reld`; the first is the executable.
+    pub(crate) files: &'static [&'static str],
 }
+
+/// The static build ships only the executable.
+const STATIC_FILES: &[&str] = &["reld"];
 
 /// Resolve a verified host executable for an explicit `reld` selection.
 pub async fn ensure_reld(paths: &SoldrPaths) -> Result<PathBuf, SoldrError> {
@@ -40,6 +47,7 @@ pub async fn ensure_reld(paths: &SoldrPaths) -> Result<PathBuf, SoldrError> {
     let asset = release_asset_for(
         crate::platform::host::facts::os(),
         crate::platform::host::facts::arch(),
+        crate::platform::host::facts::glibc_version().as_deref(),
     )?;
     let base_url = std::env::var(RELD_BASE_URL_ENV_VAR)
         .ok()
@@ -57,7 +65,7 @@ pub(crate) async fn ensure_reld_from(
     asset: &ReleaseAsset,
 ) -> Result<PathBuf, SoldrError> {
     let host = TargetTriple::host()?;
-    let binary = managed_binary_path(paths);
+    let binary = managed_binary_path(paths, asset);
     if binary.is_file() {
         return Ok(binary);
     }
@@ -72,11 +80,11 @@ pub(crate) async fn ensure_reld_from(
     let resolved = super::retry::with_backoff("reld", || {
         super::archive::download_and_extract_with_pin(
             paths,
-            "reld",
+            asset.cache_name,
             MANAGED_RELD_VERSION,
             &url,
             &host,
-            &["reld"],
+            asset.files,
             Some((&asset_name, asset.sha256)),
         )
     })
@@ -111,45 +119,61 @@ fn reld_bin_from_env() -> Result<Option<PathBuf>, SoldrError> {
     Ok(Some(path))
 }
 
-fn managed_binary_path(paths: &SoldrPaths) -> PathBuf {
+fn managed_binary_path(paths: &SoldrPaths, asset: &ReleaseAsset) -> PathBuf {
     paths
         .bin
-        .join(format!("reld-{MANAGED_RELD_VERSION}"))
+        .join(format!("{}-{MANAGED_RELD_VERSION}", asset.cache_name))
         .join(format!("reld{}", std::env::consts::EXE_SUFFIX))
 }
 
-fn release_asset_for(os: HostOs, arch: HostArch) -> Result<ReleaseAsset, SoldrError> {
+fn release_asset_for(
+    os: HostOs,
+    arch: HostArch,
+    _glibc: Option<&str>,
+) -> Result<ReleaseAsset, SoldrError> {
     let asset = match (os, arch) {
         // Prefer the static musl release on Linux x86_64 so the bootstrap does
         // not depend on a runner's glibc version.
         (HostOs::Linux, HostArch::X86_64) => ReleaseAsset {
             triple: "x86_64-unknown-linux-musl",
             extension: "tar.gz",
+            cache_name: "reld",
+            files: STATIC_FILES,
             sha256: "f65044bdb26a10b273948277c1cd960511f69a0eba9ba9c0c0dfa4e61aed5eb1",
         },
         (HostOs::Linux, HostArch::Aarch64) => ReleaseAsset {
             triple: "aarch64-unknown-linux-gnu",
             extension: "tar.gz",
+            cache_name: "reld",
+            files: STATIC_FILES,
             sha256: "45e89ee11e838f66f37cf6cd5fe35178d296219cd3a0d92172e1740cb75df3f1",
         },
         (HostOs::MacOs, HostArch::X86_64) => ReleaseAsset {
             triple: "x86_64-apple-darwin",
             extension: "tar.gz",
+            cache_name: "reld",
+            files: STATIC_FILES,
             sha256: "073565e1fff66671ab27bbc83f4fe31b9dd6bcdc2163ce1e06b6eb5f7b185e8f",
         },
         (HostOs::MacOs, HostArch::Aarch64) => ReleaseAsset {
             triple: "aarch64-apple-darwin",
             extension: "tar.gz",
+            cache_name: "reld",
+            files: STATIC_FILES,
             sha256: "d688c529eda43a18bed4477d0aa5fb7bd1982caf84b2689e850e5f88317e20d8",
         },
         (HostOs::Windows, HostArch::X86_64) => ReleaseAsset {
             triple: "x86_64-pc-windows-msvc",
             extension: "zip",
+            cache_name: "reld",
+            files: STATIC_FILES,
             sha256: "be053e50da77dfecd559d764bd4f3659da3e84a278b425849ee95c5de50f699f",
         },
         (HostOs::Windows, HostArch::Aarch64) => ReleaseAsset {
             triple: "aarch64-pc-windows-msvc",
             extension: "zip",
+            cache_name: "reld",
+            files: STATIC_FILES,
             sha256: "eba79aa6c769fd825f3f842838c88bcbb0bbf5b715c19a16b05c4bd377261a4d",
         },
         (os, arch) => {
@@ -249,6 +273,8 @@ mod tests {
         let asset = ReleaseAsset {
             triple: "test-fixture",
             extension: "tar.gz",
+            cache_name: "reld",
+            files: STATIC_FILES,
             sha256: Box::leak(sha256.into_boxed_str()),
         };
         let temp = tempfile::tempdir().expect("tempdir");
@@ -307,6 +333,8 @@ mod tests {
         let asset = ReleaseAsset {
             triple: "test-fixture",
             extension: "tar.gz",
+            cache_name: "reld",
+            files: STATIC_FILES,
             sha256: Box::leak(sha256.into_boxed_str()),
         };
 
@@ -357,6 +385,8 @@ mod tests {
         let asset = ReleaseAsset {
             triple: "test-fixture",
             extension: "tar.gz",
+            cache_name: "reld",
+            files: STATIC_FILES,
             sha256: "0000000000000000000000000000000000000000000000000000000000000",
         };
 
@@ -372,21 +402,153 @@ mod tests {
 
     #[test]
     fn release_assets_cover_supported_hosts_and_prefer_static_linux_x64() {
-        let linux = release_asset_for(HostOs::Linux, HostArch::X86_64).expect("linux x64");
+        let linux = release_asset_for(HostOs::Linux, HostArch::X86_64, None).expect("linux x64");
         assert_eq!(linux.triple, "x86_64-unknown-linux-musl");
         assert_eq!(linux.extension, "tar.gz");
         assert_eq!(linux.sha256.len(), 64);
 
-        let windows = release_asset_for(HostOs::Windows, HostArch::Aarch64).expect("windows arm");
+        let windows =
+            release_asset_for(HostOs::Windows, HostArch::Aarch64, None).expect("windows arm");
         assert_eq!(windows.triple, "aarch64-pc-windows-msvc");
         assert_eq!(windows.extension, "zip");
 
-        let mac = release_asset_for(HostOs::MacOs, HostArch::Aarch64).expect("mac arm");
+        let mac = release_asset_for(HostOs::MacOs, HostArch::Aarch64, None).expect("mac arm");
         assert_eq!(mac.triple, "aarch64-apple-darwin");
     }
 
     #[test]
     fn unknown_host_is_rejected() {
-        assert!(release_asset_for(HostOs::Linux, HostArch::Unknown("riscv64")).is_err());
+        assert!(release_asset_for(HostOs::Linux, HostArch::Unknown("riscv64"), None).is_err());
+    }
+
+    /// soldr#4281: only the glibc archives ship `libllvm_ld.so`, reld's
+    /// in-process COFF engine. Hosts with glibc >= 2.39 get that archive
+    /// and its library; older hosts keep the static build.
+    #[test]
+    fn linux_x64_with_new_glibc_gets_the_in_process_coff_engine() {
+        for glibc in ["2.39", "2.40", "3.0"] {
+            let asset = release_asset_for(HostOs::Linux, HostArch::X86_64, Some(glibc)).unwrap();
+            assert_eq!(asset.triple, "x86_64-unknown-linux-gnu", "glibc {glibc}");
+            assert_eq!(
+                asset.sha256,
+                "33927b4b243c418ce81094ccb0741ddd4d06cf77fc2b56d29d9cc8a6b8ff297d"
+            );
+            assert_eq!(asset.files[0], "reld");
+            assert!(asset.files.contains(&"libllvm_ld.so"));
+            assert!(asset.files.contains(&"LICENSE-LLVM.txt"));
+            assert!(asset.files.contains(&"reld-link"));
+            assert_ne!(asset.cache_name, "reld", "must not reuse a static install");
+        }
+    }
+
+    #[test]
+    fn linux_x64_with_old_or_unknown_glibc_keeps_the_static_build() {
+        for glibc in [None, Some("2.35"), Some("2.38"), Some("garbage")] {
+            let asset = release_asset_for(HostOs::Linux, HostArch::X86_64, glibc).unwrap();
+            assert_eq!(asset.triple, "x86_64-unknown-linux-musl", "glibc {glibc:?}");
+            assert_eq!(asset.files, STATIC_FILES);
+            assert!(
+                asset.files.contains(&"reld-link"),
+                "MSVC links need reld-link"
+            );
+            assert_eq!(asset.cache_name, "reld");
+        }
+    }
+
+    #[test]
+    fn linux_arm64_glibc_archive_keeps_its_coff_engine() {
+        let asset = release_asset_for(HostOs::Linux, HostArch::Aarch64, Some("2.39")).unwrap();
+        assert_eq!(asset.triple, "aarch64-unknown-linux-gnu");
+        assert!(asset.files.contains(&"libllvm_ld.so"));
+        assert_ne!(asset.cache_name, "reld");
+    }
+
+    /// The whole file list is extracted flat beside `reld`.
+    #[test]
+    fn ensure_reld_from_installs_the_coff_engine_beside_reld() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, body) in [
+            ("reld-v0.2.3-x/reld", b"reld".as_slice()),
+            ("reld-v0.2.3-x/libllvm_ld.so", b"engine".as_slice()),
+            ("reld-v0.2.3-x/LICENSE-LLVM.txt", b"llvm".as_slice()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append_data(&mut header, name, body).unwrap();
+        }
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(&builder.into_inner().unwrap()).unwrap();
+        let body = gz.finish().unwrap();
+        let asset = ReleaseAsset {
+            triple: "test-fixture",
+            extension: "tar.gz",
+            sha256: Box::leak(Sha256Hasher::digest(&body).to_hex().into_boxed_str()),
+            cache_name: "reld-glibc",
+            files: &["reld", "libllvm_ld.so", "LICENSE-LLVM.txt"],
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let paths = SoldrPaths::with_root(temp.path().to_path_buf());
+        let rt = runtime();
+        let (base_url, _hits) = rt.block_on(serve_once(body));
+        let reld = rt
+            .block_on(ensure_reld_from(&paths, &base_url, &asset))
+            .unwrap();
+        assert_eq!(
+            reld.file_name().unwrap(),
+            format!("reld{}", std::env::consts::EXE_SUFFIX).as_str()
+        );
+        assert_eq!(
+            std::fs::read(reld.with_file_name("libllvm_ld.so")).unwrap(),
+            b"engine"
+        );
+        assert!(reld.with_file_name("LICENSE-LLVM.txt").is_file());
+    }
+
+    /// An install from an older soldr that kept only `reld` is completed,
+    /// not reused, so `reld-link` and the COFF engine appear.
+    #[test]
+    fn an_install_missing_listed_files_is_refreshed() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut builder = tar::Builder::new(Vec::new());
+        for name in ["d/reld", "d/reld-link"] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(4);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, name, b"new!".as_slice())
+                .unwrap();
+        }
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(&builder.into_inner().unwrap()).unwrap();
+        let body = gz.finish().unwrap();
+        let asset = ReleaseAsset {
+            triple: "test-fixture",
+            extension: "tar.gz",
+            sha256: Box::leak(Sha256Hasher::digest(&body).to_hex().into_boxed_str()),
+            cache_name: "reld",
+            files: &["reld", "reld-link"],
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let paths = SoldrPaths::with_root(temp.path().to_path_buf());
+        let old = managed_binary_path(&paths, &asset);
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"old").unwrap();
+        let rt = runtime();
+        let (base_url, hits) = rt.block_on(serve_once(body));
+        let reld = rt
+            .block_on(ensure_reld_from(&paths, &base_url, &asset))
+            .unwrap();
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(reld
+            .with_file_name(format!("reld-link{}", std::env::consts::EXE_SUFFIX))
+            .is_file());
     }
 }
