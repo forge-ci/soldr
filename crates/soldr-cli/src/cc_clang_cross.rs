@@ -297,6 +297,12 @@ fn write_drivers(
     }
     std::fs::write(staged.join(".complete"), &digest)?;
     crate::platform::fs::permissions::restore_mode(staged, Some(0o755))?;
+    // soldr#4185: a directory without `.complete` (killed writer, partial
+    // cache restore) is never in use: readers return early only on
+    // `.complete`, and we hold the install lock. Replace it.
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
     std::fs::rename(staged, &dir)?;
     let cxx = written.pop().expect("two drivers written");
     let cc = written.pop().expect("two drivers written");
