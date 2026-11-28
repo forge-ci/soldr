@@ -455,7 +455,7 @@ async fn prepare_msvc(
     } else {
         (llvm_tool(paths, "lld-link").await?, Vec::new())
     };
-    args.extend(msvc_link_args(target, &lib_dirs));
+    args.extend(msvc_link_args(target, &lib_dirs, None));
     Ok(PreparedLinker {
         program,
         args,
@@ -463,7 +463,7 @@ async fn prepare_msvc(
     })
 }
 
-fn msvc_link_args(target: &str, lib_dirs: &[PathBuf]) -> Vec<String> {
+fn msvc_link_args(target: &str, lib_dirs: &[PathBuf], _builtins: Option<&Path>) -> Vec<String> {
     let machine = if target.starts_with("aarch64") {
         "ARM64"
     } else {
@@ -476,6 +476,11 @@ fn msvc_link_args(target: &str, lib_dirs: &[PathBuf]) -> Vec<String> {
             .map(|dir| format!("/LIBPATH:{}", dir.display())),
     );
     args
+}
+
+/// reld's link.exe entry point, installed beside `reld`.
+fn reld_link_beside(reld: &Path) -> PathBuf {
+    reld.to_path_buf()
 }
 
 async fn llvm_tool(paths: &SoldrPaths, name: &str) -> Result<PathBuf, SoldrError> {

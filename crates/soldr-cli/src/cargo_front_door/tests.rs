@@ -2651,3 +2651,47 @@ fn dylint_smoke_failure_never_calls_source_build() {
 // Named `log_summary_tests`, not `log_summary`: a child module of the same
 // name would shadow the real `super::log_summary` these tests exercise.
 mod log_summary_tests;
+
+/// soldr#4281: the blessed MSVC prep exports soldr's own `lld-link` default
+/// as the target linker; an explicit `SOLDR_LINKER=reld` must replace it
+/// instead of being silently dropped. A linker the user set stays.
+#[test]
+fn explicit_reld_replaces_the_blessed_msvc_lld_link_default() {
+    let _lock = ENV_LOCK.lock();
+    let _soldr_linker = EnvVarGuard::set("SOLDR_LINKER", "reld");
+    let root = tempfile::tempdir().unwrap();
+    let fake = root.path().join("reld-bin").join("reld");
+    std::fs::create_dir_all(fake.parent().unwrap()).unwrap();
+    std::fs::write(&fake, "#!/bin/sh\n").unwrap();
+    let _reld = EnvVarGuard::set("SOLDR_RELD_BIN", fake.to_str().unwrap());
+    let paths = SoldrPaths::with_root(root.path().join("soldr"));
+    let key = "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER";
+
+    let mut command = std::process::Command::new("cargo");
+    command.env(key, "lld-link");
+    target::apply_linker_override_blocking(
+        &mut command,
+        &argvec("build --target x86_64-pc-windows-msvc"),
+        None,
+        &paths,
+    )
+    .unwrap();
+    let linker = command_env_override(&command, key).flatten().unwrap();
+    assert_ne!(linker, "lld-link", "SOLDR_LINKER=reld was ignored");
+    assert!(linker.to_string_lossy().contains("reld"), "{linker:?}");
+
+    let mut command = std::process::Command::new("cargo");
+    command.env(key, "/opt/custom/link");
+    target::apply_linker_override_blocking(
+        &mut command,
+        &argvec("build --target x86_64-pc-windows-msvc"),
+        None,
+        &paths,
+    )
+    .unwrap();
+    assert_eq!(
+        command_env_override(&command, key),
+        Some(Some("/opt/custom/link".into())),
+        "a user-set target linker still wins over SOLDR_LINKER"
+    );
+}

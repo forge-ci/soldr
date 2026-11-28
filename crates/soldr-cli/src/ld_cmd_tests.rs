@@ -107,9 +107,10 @@ fn msvc_link_args_set_machine_and_libpaths() {
     let args = msvc_link_args(
         "aarch64-pc-windows-msvc",
         &[PathBuf::from("/x/crt/lib/arm64")],
+        None,
     );
     assert_eq!(args, ["/MACHINE:ARM64", "/LIBPATH:/x/crt/lib/arm64"]);
-    let x64 = msvc_link_args("x86_64-pc-windows-msvc", &[]);
+    let x64 = msvc_link_args("x86_64-pc-windows-msvc", &[], None);
     assert_eq!(x64, ["/MACHINE:X64"]);
 }
 
@@ -122,5 +123,52 @@ fn elf_search_args_only_name_existing_sysroot_dirs() {
     assert_eq!(
         &args[1..],
         [format!("-L{}", tmp.path().join("usr/lib").display())]
+    );
+}
+
+/// soldr#4281: `soldr link --fuse reld` links MSVC through `reld-link`.
+#[test]
+fn reld_links_msvc_and_is_listed_as_supported() {
+    assert!(check_fuse(
+        "link",
+        Family::WindowsMsvc,
+        Fuse::Reld,
+        "x86_64-pc-windows-msvc"
+    )
+    .is_ok());
+    let err = check_fuse(
+        "link",
+        Family::WindowsMsvc,
+        Fuse::Mold,
+        "x86_64-pc-windows-msvc",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("lld, reld, rust-lld"), "{err}");
+    let suffix = std::env::consts::EXE_SUFFIX;
+    let reld = PathBuf::from(format!("/bin/reld-glibc-0.2.3/reld{suffix}"));
+    assert_eq!(
+        reld_link_beside(&reld),
+        PathBuf::from(format!("/bin/reld-glibc-0.2.3/reld-link{suffix}"))
+    );
+}
+
+/// Every MSVC x64 link soldr prepares (lld-link or reld) carries the
+/// compiler-rt builtins the lld-link shim carries, after the /LIBPATHs.
+#[test]
+fn msvc_x64_link_args_carry_the_compiler_rt_builtins() {
+    let builtins = Path::new("/res/lib/windows/clang_rt.builtins-x86_64.lib");
+    let args = msvc_link_args(
+        "x86_64-pc-windows-msvc",
+        &[PathBuf::from("/x/crt/lib/x64")],
+        Some(builtins),
+    );
+    assert_eq!(
+        args,
+        [
+            "/MACHINE:X64",
+            "/LIBPATH:/x/crt/lib/x64",
+            "/res/lib/windows/clang_rt.builtins-x86_64.lib"
+        ]
     );
 }
