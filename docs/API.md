@@ -485,7 +485,9 @@ arguments:
 - `--print-cc`
 - `--print-cxx`
 - `--print-ar`
-- `--print-linker`
+- `--print-linker` (with `--driver-mode=cl` on MSVC targets: the `lld-link`
+  shim beside the `clang-cl` driver, for `CMAKE_LINKER`; it carries the xwin
+  library paths and the compiler-rt builtins)
 - `--print-sysroot` (the Apple SDK root, the xwin root for MSVC, the glibc/musl
   sysroot for Linux; an error for targets without one)
 - `--print-rc` (the managed `llvm-rc` resource compiler; `win-*` MSVC only,

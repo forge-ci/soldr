@@ -103,18 +103,7 @@ pub(crate) async fn run(args: CcArgs, language: Language) -> Result<i32, SoldrEr
     };
     let resolved_triple = rust_triple.as_str();
     if args.driver_mode.as_deref() == Some("cl") {
-        if !resolved_triple.ends_with("-pc-windows-msvc") {
-            return Err(SoldrError::Other(
-                "--driver-mode=cl requires a Windows MSVC target".into(),
-            ));
-        }
-        let suffix = crate::platform::executable::name::script_suffix();
-        let cl = tools
-            .cc
-            .with_file_name(format!("{resolved_triple}-clang-cl{suffix}"));
-        tools.cc = cl.clone();
-        tools.cxx = cl.clone();
-        tools.linker = cl;
+        apply_cl_driver_mode(&mut tools, resolved_triple)?;
     }
 
     if args.print_rc {
@@ -418,9 +407,52 @@ fn normalize_driver_target(input: &str) -> String {
     trimmed.to_string()
 }
 
+/// `--driver-mode=cl`: the clang-cl driver compiles; the printed linker is
+/// the sibling content-addressed shim the compiler's own directory holds.
+fn apply_cl_driver_mode(tools: &mut NativeToolchain, triple: &str) -> Result<(), SoldrError> {
+    if !triple.ends_with("-pc-windows-msvc") {
+        return Err(SoldrError::Other(
+            "--driver-mode=cl requires a Windows MSVC target".into(),
+        ));
+    }
+    let suffix = crate::platform::executable::name::script_suffix();
+    let cl = tools
+        .cc
+        .with_file_name(format!("{triple}-clang-cl{suffix}"));
+    tools.linker = cl.with_file_name(format!("lld-link{suffix}"));
+    tools.cxx = cl.clone();
+    tools.cc = cl;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // CMake's MSVC frontend runs CMAKE_LINKER directly with link.exe syntax,
+    // so cl mode must print the lld-link shim that carries the xwin libpaths
+    // and compiler-rt builtins (__udivti3), not the clang-cl compiler.
+    #[test]
+    fn cl_driver_mode_prints_the_lld_link_shim_as_linker() {
+        let dir = PathBuf::from("/cache/cc-driver/v2/x86_64-pc-windows-msvc/0123");
+        let suffix = crate::platform::executable::name::script_suffix();
+        let mut tools = NativeToolchain {
+            cc: dir.join(format!("x86_64-pc-windows-msvc-clang{suffix}")),
+            cxx: dir.join(format!("x86_64-pc-windows-msvc-clang++{suffix}")),
+            ar: PathBuf::from("/llvm/llvm-lib"),
+            linker: dir.join(format!("x86_64-pc-windows-msvc-clang{suffix}")),
+            bin_dir: PathBuf::from("/llvm"),
+            sysroot: None,
+            compiler_args: Vec::new(),
+            rc: None,
+            runtime_dlls: Vec::new(),
+        };
+        apply_cl_driver_mode(&mut tools, "x86_64-pc-windows-msvc").unwrap();
+        let cl = dir.join(format!("x86_64-pc-windows-msvc-clang-cl{suffix}"));
+        assert_eq!((&tools.cc, &tools.cxx), (&cl, &cl));
+        assert_eq!(tools.linker, dir.join(format!("lld-link{suffix}")));
+        assert!(apply_cl_driver_mode(&mut tools, "x86_64-pc-windows-gnu").is_err());
+    }
 
     #[test]
     fn print_tool_selection_is_unambiguous() {
