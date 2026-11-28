@@ -607,4 +607,31 @@ mod tests {
             .with_file_name(format!("reld-link{}", std::env::consts::EXE_SUFFIX))
             .is_file());
     }
+
+    /// soldr#4298: reld's macOS and Windows archives ship the in-process
+    /// COFF engine too; soldr must install it beside reld, and every listed
+    /// name must resolve to a file the archive really contains.
+    #[test]
+    fn macos_and_windows_assets_install_the_coff_engine() {
+        for (os, arch, engine, ext) in [
+            (HostOs::MacOs, HostArch::X86_64, "libllvm_ld.dylib", ""),
+            (HostOs::MacOs, HostArch::Aarch64, "libllvm_ld.dylib", ""),
+            (HostOs::Windows, HostArch::X86_64, "llvm_ld.dll", ".exe"),
+            (HostOs::Windows, HostArch::Aarch64, "llvm_ld.dll", ".exe"),
+        ] {
+            let asset = release_asset_for(os, arch, None).unwrap();
+            assert_eq!(&asset.files[..2], ["reld", "reld-link"], "{os:?} {arch:?}");
+            assert!(asset.files.contains(&engine), "{os:?} {arch:?}");
+            assert!(asset.files.contains(&"LICENSE-LLVM.txt"), "{os:?} {arch:?}");
+            for name in asset.files {
+                let installed = super::super::archive::with_binary_ext(name, ext);
+                let is_exe = *name == "reld" || *name == "reld-link";
+                assert!(
+                    is_exe || installed == *name,
+                    "{os:?}: data file {name} would be looked up as {installed}"
+                );
+            }
+        }
+    }
+
 }
