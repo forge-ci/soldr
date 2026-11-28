@@ -307,12 +307,11 @@ async fn download_one(
     )
     .await??;
     let encoding = response
-        .headers()
-        .get("content-encoding")
-        .and_then(|value| value.to_str().ok());
+        .header("content-encoding")
+        .and_then(|value| std::str::from_utf8(value).ok());
     let compressed = encoding == Some("zstd");
     let identity = accept_identity && matches!(encoding, None | Some("identity"));
-    if !response.status().is_success() || !(compressed || identity) {
+    if !((200..300).contains(&response.status()) && (compressed || identity)) {
         return Err(io::Error::other(format!(
             "remote artifact {}: expected a zstd response, got HTTP {}",
             entry.path,
@@ -325,11 +324,8 @@ async fn download_one(
         save(path, &entry, rx, compressed)
     });
     let transfer = async {
-        while let Some(chunk) = tokio::time::timeout(IO_IDLE, response.chunk())
-            .await?
-            .map_err(io::Error::other)?
-        {
-            if tx.send(Ok(chunk)).await.is_err() {
+        while let Some(chunk) = tokio::time::timeout(IO_IDLE, response.next_chunk()).await?? {
+            if tx.send(Ok(Bytes::from_owner(chunk))).await.is_err() {
                 break;
             }
         }

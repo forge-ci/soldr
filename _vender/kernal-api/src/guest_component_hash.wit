@@ -1,0 +1,53 @@
+package kernal:hash-experiment@0.1.0;
+
+interface hashes {
+    enum error { rejected, failed }
+    // Scalar-only frames avoid canonical lifting of an attacker-sized list.
+    // `last` is the explicit terminator: the host stages every frame,
+    // then commits only once it sees that marker. Words are little-endian.
+    record input-chunk {
+        word-0: u64,
+        word-1: u64,
+        word-2: u64,
+        word-3: u64,
+        word-4: u64,
+        word-5: u64,
+        word-6: u64,
+        word-7: u64,
+        word-8: u64,
+        word-9: u64,
+        word-10: u64,
+        word-11: u64,
+        word-12: u64,
+        word-13: u64,
+        word-14: u64,
+        word-15: u64,
+        word-16: u64,
+        word-17: u64,
+        word-18: u64,
+        word-19: u64,
+        word-20: u64,
+        word-21: u64,
+        word-22: u64,
+        word-23: u64,
+        word-24: u64,
+        word-25: u64,
+        word-26: u64,
+        word-27: u64,
+        word-28: u64,
+        word-29: u64,
+        word-30: u64,
+        word-31: u64,
+        used: u16,
+        last: bool,
+    }
+    resource hasher {
+        update: async func(chunks: stream<input-chunk>) -> result<_, error>;
+    }
+    create: func() -> result<hasher, error>;
+    finish: func(hash: own<hasher>) -> result<list<u8>, error>;
+}
+
+world hash-client {
+    import hashes;
+}

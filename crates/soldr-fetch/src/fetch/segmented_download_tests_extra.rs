@@ -1,9 +1,11 @@
+use super::test_client;
 use super::{
     clear_segmented_env, runtime, serve_range_tracking_concurrency, set_segmented_env, ENV_LOCK,
 };
 use crate::fetch::segmented_download::{
     SocketPool, SEGMENTED_DOWNLOAD_ENV_VAR, SEGMENTED_DOWNLOAD_N_ENV_VAR,
 };
+use crate::fetch::stream_download::get_request;
 use crate::fetch::stream_download::{
     send_control_request_with_pool, stream_response_to_temp_file_with_pool, ASSET_SAFETY_TIMEOUT,
 };
@@ -46,19 +48,27 @@ async fn serve_redirect_chain(redirects: u32) -> String {
 fn manual_redirect_limit_accepts_five_then_final_response() {
     runtime().block_on(async {
         let url = serve_redirect_chain(super::MAX_REDIRECT_HOPS).await;
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
+        let client = test_client();
+        let response =
+            super::send_with_hop_timeout(&client, &url, get_request, Duration::from_secs(2))
+                .await
+                .expect("five redirects followed by a final response must succeed");
+        assert!((200..300).contains(&response.status()));
+    });
+}
+
+#[test]
+fn automatic_redirects_follow_five_hops() {
+    runtime().block_on(async {
+        for (hops, expected_success) in [(5, true), (6, false)] {
+            let url = serve_redirect_chain(hops).await;
+            let client = kernal_api::http::Client::new(kernal_api::http::Limits {
+                max_redirects: 5,
+                ..kernal_api::http::Limits::default()
+            })
             .unwrap();
-        let response = super::send_with_hop_timeout(
-            &client,
-            &url,
-            |client, url| client.get(url),
-            Duration::from_secs(2),
-        )
-        .await
-        .expect("five redirects followed by a final response must succeed");
-        assert!(response.status().is_success());
+            assert_eq!(client.get(&url).await.is_ok(), expected_success);
+        }
     });
 }
 
@@ -81,14 +91,11 @@ fn manual_redirect_limit_rejects_sixth_and_redacts_unsafe_target() {
             }
         });
         let url = format!("http://{address}/asset?token=initial");
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap();
+        let client = test_client();
         let error = super::send_with_hop_timeout(
             &client,
             &url,
-            |client, url| client.get(url),
+            get_request,
             Duration::from_secs(2),
         )
         .await
@@ -129,11 +136,7 @@ fn mixed_workload_never_exceeds_bulk_plus_quick_total_capacity() {
 
         let big_body: Vec<u8> = (0..3072u32).map(|i| (i % 241) as u8).collect();
         let (big_url, big_hw) = serve_range_tracking_concurrency(big_body.clone()).await;
-        let big_resp = reqwest::Client::new()
-            .get(&big_url)
-            .send()
-            .await
-            .expect("GET big");
+        let big_resp = test_client().get(&big_url).await.expect("GET big");
         let big_fut = stream_response_to_temp_file_with_pool(
             big_resp,
             &big_url,
@@ -178,9 +181,9 @@ fn mixed_workload_never_exceeds_bulk_plus_quick_total_capacity() {
                 let quick = Arc::clone(&quick);
                 let url = small_url.clone();
                 tokio::spawn(async move {
-                    let client = reqwest::Client::new();
+                    let client = test_client();
                     send_control_request_with_pool(
-                        client.get(&url),
+                        get_request(&client, &url),
                         &url,
                         Duration::from_secs(5),
                         quick,

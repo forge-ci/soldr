@@ -69,7 +69,7 @@ zstd = { workspace = true }
 # CLI-adjacent surface soldr consumes is the daemon-free `formatter` API for
 # `soldr rustfmt`; Soldr owns the child-process policy through its runner
 # callback, so enabling `cli` would pull in a second command dispatcher,
-# a second daemon lifecycle, clap, tracing-subscriber, reqwest, and the
+# a second daemon lifecycle, clap, tracing-subscriber, and the
 # download-client archive stack for no reachable code path.
 zccache = { workspace = true, features = ["formatter", "mimalloc-allocator"] }
 
@@ -92,7 +92,6 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
-reqwest = { workspace = true }
 soldr-platform = { path = "../soldr-platform" }
 filetime = { workspace = true }
 serde_json = { workspace = true }

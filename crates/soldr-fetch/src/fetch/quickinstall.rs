@@ -71,10 +71,10 @@ pub async fn try_resolve(
     let client = asset_http_client("quickinstall probe")?;
     let probe = send_control_request(head_request(&client, &url), &url).await?;
     let status = probe.status();
-    if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
+    if status == 404 || status == 410 {
         return Ok(None);
     }
-    if !status.is_success() {
+    if !(200..300).contains(&status) {
         return Err(SoldrError::Network(format!(
             "quickinstall: HTTP {status} probing {crate_name} v{version} for {}",
             target.triple()

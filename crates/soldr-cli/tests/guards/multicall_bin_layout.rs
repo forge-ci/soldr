@@ -62,8 +62,11 @@ fn collect_manifests(root: &Path, dir: &Path, manifests: &mut Vec<PathBuf>) {
         let path = entry.path();
         let kind = entry.file_type().expect("read entry type");
         if kind.is_dir() {
-            if !SKIP_DIRS.iter().any(|name| entry.file_name() == *name)
-                && !is_fixture(path.strip_prefix(root).expect("repository path"))
+            let relative = path.strip_prefix(root).expect("repository path");
+            // A repo-local build can populate Cargo's registry under .cargo.
+            if relative != Path::new(".cargo/registry")
+                && !SKIP_DIRS.iter().any(|name| entry.file_name() == *name)
+                && !is_fixture(relative)
             {
                 collect_manifests(root, &path, manifests);
             }
@@ -219,6 +222,7 @@ fn multicall_scanner_ignores_fixtures_and_build_or_vendored_trees() {
         "examples/docker-cross-win/crate",
         "bench/dylint_fixture/app",
         "target/generated",
+        ".cargo/registry/src/download",
         ".git/input",
         "_vender/input",
         "vendor/input",

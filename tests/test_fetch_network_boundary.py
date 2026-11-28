@@ -9,14 +9,27 @@ FETCH_BOUNDARY = (
 )
 
 
-def test_reqwest_is_owned_only_by_soldr_fetch() -> None:
-    """No facade or sibling crate may grow its own HTTP client dependency."""
-    manifests = list((ROOT / "crates").glob("*/Cargo.toml"))
+def test_http_client_is_owned_only_by_soldr_fetch() -> None:
+    """Keep reqwest out of Soldr manifests and the HTTP client in soldr-fetch."""
+    manifests = [ROOT / "Cargo.toml", *(ROOT / "crates").glob("*/Cargo.toml")]
     owners = set()
     for manifest in manifests:
         parsed = tomllib.loads(manifest.read_text(encoding="utf-8"))
-        if "reqwest" in parsed.get("dependencies", {}):
-            owners.add(manifest.parent.name)
+        scopes = (
+            parsed,
+            parsed.get("workspace", {}),
+            *parsed.get("target", {}).values(),
+        )
+        for scope in scopes:
+            for kind in ("dependencies", "dev-dependencies", "build-dependencies"):
+                deps = scope.get(kind, {})
+                assert "reqwest" not in deps, manifest
+                kernal = deps.get("kernal-api")
+                if isinstance(kernal, dict) and {
+                    "http-client",
+                    "http-client-rustls",
+                }.intersection(kernal.get("features", ())):
+                    owners.add(manifest.parent.name)
     assert owners == {"soldr-fetch"}
 
 

@@ -1,0 +1,34 @@
+[package]
+name = "kernal-api-build-resources-consumer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+# Warnings are errors here, as in the kernal-api workspace.
+[lints.rust]
+warnings = "deny"
+
+[workspace]
+
+# The shape `build-resources` documents, checked by
+# ci/check_compilation_boundary_dependencies.py:
+#
+# - A runtime capability enabled in the `[dependencies]` entry stays out of
+#   the build script: the edition-2021 resolver resolves build-dependency
+#   features separately, so the build script's kernal-api has
+#   `build-resources` and not `window-icon`, and the runtime one the reverse.
+# - A `kernal-api/<feature>` entry in this package's own feature table is
+#   different: Cargo applies it to every dependency named `kernal-api`,
+#   build-dependency included. `forwarded` pins that Cargo behaviour so the
+#   documentation cannot silently go stale. Renaming the build-dependency
+#   would avoid it, but Cargo rejects one package depending on another under
+#   two names ("depends on crate ... multiple times with different names").
+[features]
+forwarded = ["kernal-api/text-similarity"]
+
+[dependencies]
+kernal-api = { path = "../..", default-features = false, features = ["window-icon"] }
+
+[build-dependencies]
+kernal-api = { path = "../..", default-features = false, features = ["build-resources"] }

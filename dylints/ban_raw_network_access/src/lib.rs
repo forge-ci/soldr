@@ -13,7 +13,7 @@ use rustc_span::{symbol::Symbol, FileName, RemapPathScopeComponents};
 dylint_linting::declare_late_lint! {
     /// ### What it does
     ///
-    /// Rejects direct reqwest transport operations in production soldr-fetch
+    /// Rejects direct HTTP transport operations in production soldr-fetch
     /// code. The `fetch::stream_download` / `fetch::segmented_download`
     /// boundary is the one blessed place that owns timeout policy, streaming,
     /// retry-compatible diagnostics, and hashing (see `is_boundary_file`).
@@ -41,6 +41,19 @@ const BANNED_REQWEST_METHODS: &[&str] = &[
     "json",
 ];
 
+const BANNED_KERNAL_HTTP_METHODS: &[&str] = &[
+    "new",
+    "with_protocol",
+    "open_websocket",
+    "get",
+    "execute",
+    "post_json",
+    "read",
+    "next_chunk",
+    "into_json",
+    "into_bytes",
+];
+
 impl<'tcx> LateLintPass<'tcx> for BanRawNetworkAccess {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
         if !span_is_in_scope(cx, expr.span) {
@@ -58,21 +71,34 @@ impl<'tcx> LateLintPass<'tcx> for BanRawNetworkAccess {
             return;
         };
         let path = cx.get_def_path(def_id);
-        let is_reqwest = path.iter().any(|part| *part == Symbol::intern("reqwest"));
         let Some(method) = path.last().map(Symbol::as_str) else {
             return;
         };
-        if is_reqwest && BANNED_REQWEST_METHODS.contains(&method) {
-            cx.opt_span_lint(
+        let transport = match path.as_slice() {
+            [root, ..]
+                if *root == Symbol::intern("reqwest")
+                    && BANNED_REQWEST_METHODS.contains(&method) =>
+            {
+                "reqwest"
+            }
+            [root, module, ..]
+                if *root == Symbol::intern("kernal_api")
+                    && *module == Symbol::intern("http")
+                    && BANNED_KERNAL_HTTP_METHODS.contains(&method) =>
+            {
+                "kernal_api::http"
+            }
+            _ => return,
+        };
+        cx.opt_span_lint(
                 BAN_RAW_NETWORK_ACCESS,
                 Some(expr.span),
                 DiagDecorator(move |diag| {
                     diag.primary_message(format!(
-                        "reqwest `{method}` bypasses fetch::stream_download; use its control or asset request helpers"
+                        "{transport} `{method}` bypasses fetch::stream_download; use its control or asset request helpers"
                     ));
                 }),
-            );
-        }
+        );
     }
 }
 
@@ -88,7 +114,7 @@ fn span_is_in_scope(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
 
 /// The blessed fetch network boundary: the files that own timeout policy,
 /// streaming, retry-compatible diagnostics, and hashing, and are therefore
-/// allowed to call raw reqwest. Originally a single file; the segmented
+/// allowed to call the HTTP client directly. Originally a single file; the segmented
 /// downloader (soldr#2320) was extracted into its own module and test
 /// helpers to stay under the per-file line ceiling (soldr#1966), so the
 /// boundary now spans those files too. Matching on the path suffix keeps
@@ -96,6 +122,7 @@ fn span_is_in_scope(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
 fn is_boundary_file(filename: &str) -> bool {
     const BOUNDARY_SUFFIXES: &[&str] = &[
         "fetch/stream_download.rs",
+        "fetch/stream_download/forge_http.rs",
         "fetch/segmented_download.rs",
         "fetch/segmented_download_tests.rs",
         "fetch/segmented_download_tests_extra.rs",

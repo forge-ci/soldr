@@ -653,8 +653,7 @@ pub(crate) async fn download_catalogue_asset_once(
 ) -> Result<super::stream_download::DownloadedAsset, SoldrError> {
     let client = super::stream_download::asset_http_client("catalogue asset download")?;
     let response = super::stream_download::send_asset_request(
-        super::stream_download::get_request(&client, url)
-            .header(reqwest::header::ACCEPT_ENCODING, "identity"),
+        super::stream_download::get_request(&client, url).header("accept-encoding", "identity"),
         url,
         MANIFEST_FETCH_TIMEOUT,
     )
@@ -715,17 +714,16 @@ pub(crate) async fn download_catalogue_part_response(
     file: &mut std::fs::File,
 ) -> Result<(u64, bool), SoldrError> {
     let client = super::stream_download::asset_http_client_no_redirect("catalogue part download")?;
-    let mut request = super::stream_download::get_request(&client, url)
-        .header(reqwest::header::ACCEPT_ENCODING, "identity");
+    let mut request =
+        super::stream_download::get_request(&client, url).header("accept-encoding", "identity");
     if let Some((start, end)) = range {
-        request = request.header(reqwest::header::RANGE, format!("bytes={start}-{end}"));
+        request = request.header("range", format!("bytes={start}-{end}"));
     }
     let response =
         super::stream_download::send_asset_request(request, url, MANIFEST_FETCH_TIMEOUT).await?;
     let range_advertised = response
-        .headers()
-        .get(reqwest::header::ACCEPT_RANGES)
-        .and_then(|value| value.to_str().ok())
+        .header("accept-ranges")
+        .and_then(|value| std::str::from_utf8(value).ok())
         .is_some_and(|value| value.eq_ignore_ascii_case("bytes"));
     let bytes =
         super::stream_download::stream_catalogue_part_into_file(response, url, file).await?;
@@ -753,8 +751,8 @@ pub(crate) async fn download_catalogue_part_tail(
             .map_err(TailFailure::Retry)?;
     let response = super::stream_download::send_asset_request(
         super::stream_download::get_request(&client, url)
-            .header(reqwest::header::ACCEPT_ENCODING, "identity")
-            .header(reqwest::header::RANGE, format!("bytes={start}-{end}")),
+            .header("accept-encoding", "identity")
+            .header("range", format!("bytes={start}-{end}")),
         url,
         MANIFEST_FETCH_TIMEOUT,
     )
@@ -791,20 +789,17 @@ pub(crate) async fn download_catalogue_part_tail(
 }
 
 fn valid_part_tail_response(
-    response: &reqwest::Response,
+    response: &kernal_api::http::Response,
     start: u64,
     end: u64,
     total: u64,
 ) -> bool {
-    if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
-        || response.content_length() != Some(end - start + 1)
-    {
+    if response.status() != 206 || response.content_length() != Some(end - start + 1) {
         return false;
     }
     let Some(value) = response
-        .headers()
-        .get(reqwest::header::CONTENT_RANGE)
-        .and_then(|v| v.to_str().ok())
+        .header("content-range")
+        .and_then(|v| std::str::from_utf8(v).ok())
     else {
         return false;
     };
@@ -826,7 +821,7 @@ fn downloaded_from_partial(
 }
 
 pub(crate) async fn stream_catalogue_asset_body(
-    response: reqwest::Response,
+    response: kernal_api::http::Response,
     url: &str,
     body_timeout: std::time::Duration,
 ) -> Result<super::stream_download::DownloadedAsset, SoldrError> {

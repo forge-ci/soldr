@@ -44,7 +44,7 @@ const DEFAULT_QUICK_THRESHOLD_BYTES: u64 = 4 * 1024 * 1024;
 #[cfg(test)]
 const DEFAULT_QUICK_THRESHOLD_BYTES: u64 = 256;
 /// Redirect-hop ceiling for the segmented client's manual redirect
-/// following (see module docs "Three clocks"). Matches reqwest's own
+/// following (see module docs "Three clocks"). Matches the HTTP client's
 /// default auto-redirect limit.
 const MAX_REDIRECT_HOPS: u32 = 5;
 /// If a whole-operation deadline (`SOLDR_DOWNLOAD_TIMEOUT_SECS`) expires
@@ -176,11 +176,13 @@ pub(crate) fn parse_quick_threshold() -> u64 {
 /// and a `Content-Length` strictly above `threshold` (at/below threshold
 /// routes to the Quick pool instead and is never segmented -- module docs
 /// "Two connection pools").
-pub(crate) fn segmentable_total_len(response: &reqwest::Response, threshold: u64) -> Option<u64> {
+pub(crate) fn segmentable_total_len(
+    response: &kernal_api::http::Response,
+    threshold: u64,
+) -> Option<u64> {
     let accept_ranges = response
-        .headers()
-        .get(reqwest::header::ACCEPT_RANGES)
-        .and_then(|v| v.to_str().ok())
+        .header("accept-ranges")
+        .and_then(|v| std::str::from_utf8(v).ok())
         .map(|v| v.eq_ignore_ascii_case("bytes"))
         .unwrap_or(false);
     if !accept_ranges {
@@ -462,28 +464,12 @@ impl SegmentedFailure {
     }
 }
 
-/// The segmented client disables reqwest's own auto-redirect
-/// (`redirect::Policy::none()`) so [`send_with_hop_timeout`] can give
-/// each hop its own connect/TTFB clock -- see module docs "Three clocks".
-/// Small, deliberate duplication of [`asset_http_client_with_protocol`]
-/// rather than a shared parameterized builder, so that function's
-/// existing (auto-redirecting) behavior for every other caller stays
-/// untouched.
+/// Leave redirects to the segment loop so every hop gets a fresh TTFB deadline.
 fn segmented_http_client(
     protocol: AssetProtocol,
     connect_timeout: Duration,
-) -> Result<reqwest::Client, SoldrError> {
-    super::net_guard::ensure_network_allowed("segmented asset download")?;
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(connect_timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent(format!("soldr/{}", crate::core::version()));
-    if matches!(protocol, AssetProtocol::Http1Only) {
-        builder = builder.http1_only();
-    }
-    builder
-        .build()
-        .map_err(|error| SoldrError::Network(error.to_string()))
+) -> Result<kernal_api::http::Client, SoldrError> {
+    super::stream_download::asset_client("segmented asset download", protocol, 0, connect_timeout)
 }
 
 fn resolve_redirect_url(current: &str, location: &str) -> Result<String, String> {
@@ -512,11 +498,11 @@ fn same_origin(left: &str, right: &str) -> bool {
 /// its own connect/TTFB clock (clock 1). `build_request` is called fresh
 /// for every hop since a `RequestBuilder` is consumed by `.send()`.
 async fn send_with_hop_timeout(
-    client: &reqwest::Client,
+    client: &kernal_api::http::Client,
     initial_url: &str,
-    build_request: impl Fn(&reqwest::Client, &str) -> reqwest::RequestBuilder,
+    build_request: impl Fn(&kernal_api::http::Client, &str) -> super::stream_download::PendingRequest,
     connect_timeout: Duration,
-) -> Result<reqwest::Response, String> {
+) -> Result<kernal_api::http::Response, String> {
     let mut url = initial_url.to_string();
     for redirects_followed in 0..=MAX_REDIRECT_HOPS {
         let req = build_request(client, &url);
@@ -525,14 +511,13 @@ async fn send_with_hop_timeout(
             Ok(Err(_)) => return Err("connect/send failed".to_string()),
             Err(_) => return Err(format!("connect/TTFB exceeded {connect_timeout:?}")),
         };
-        if resp.status().is_redirection() {
+        if (300..400).contains(&resp.status()) {
             if redirects_followed == MAX_REDIRECT_HOPS {
                 return Err(format!("exceeded {MAX_REDIRECT_HOPS} redirect hops"));
             }
             let location = resp
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .and_then(|v| v.to_str().ok())
+                .header("location")
+                .and_then(|v| std::str::from_utf8(v).ok())
                 .map(str::to_string);
             match location {
                 Some(loc) => {
@@ -556,7 +541,7 @@ async fn send_with_hop_timeout(
 /// already-received headers/version (see module docs) -- its body is
 /// never read here.
 pub(crate) async fn try_segmented_download(
-    response: &reqwest::Response,
+    response: &kernal_api::http::Response,
     url: &str,
     total: u64,
     config: SegmentedDownloadConfig,
@@ -564,7 +549,7 @@ pub(crate) async fn try_segmented_download(
 ) -> Result<DownloadedAsset, SegmentedFailure> {
     let safe_url = super::stream_download::safe_asset_url(url);
     // Protocol inheritance -- see module docs "Protocol inheritance".
-    let protocol = if response.version() >= reqwest::Version::HTTP_2 {
+    let protocol = if response.version() == kernal_api::http::Version::Http2 {
         AssetProtocol::Negotiated
     } else {
         AssetProtocol::Http1Only
@@ -643,7 +628,7 @@ pub(crate) async fn try_segmented_download(
 /// (via `JoinSet::abort_all`) and returns its failure reason -- "the
 /// segmented attempt aborts and falls through to single-stream".
 async fn run_all_segments(
-    client: reqwest::Client,
+    client: kernal_api::http::Client,
     url: String,
     plan: Vec<(u64, u64)>,
     file: Arc<std::fs::File>,
@@ -698,7 +683,7 @@ enum SegmentAttemptOutcome {
 /// never re-requesting bytes already on disk. Preemptions loop back
 /// immediately without incrementing the retry counter.
 async fn fetch_segment_with_retries(
-    client: &reqwest::Client,
+    client: &kernal_api::http::Client,
     url: &str,
     start: u64,
     end_inclusive: u64,
@@ -780,7 +765,7 @@ async fn fetch_segment_with_retries(
 /// count to construction call sites instead of removing it.
 #[allow(clippy::too_many_arguments)]
 async fn fetch_segment_once(
-    client: &reqwest::Client,
+    client: &kernal_api::http::Client,
     url: &str,
     start: u64,
     end_inclusive: u64,
@@ -794,13 +779,12 @@ async fn fetch_segment_once(
     let range_value = format!("bytes={start}-{end_inclusive}");
     let token = auth_token();
     let initial_url = url.to_string();
-    let build_request = |client: &reqwest::Client, request_url: &str| {
-        let mut req = client
-            .get(request_url)
-            .header(reqwest::header::RANGE, range_value.clone());
+    let build_request = |client: &kernal_api::http::Client, request_url: &str| {
+        let mut req = super::stream_download::get_request(client, request_url)
+            .header("range", range_value.clone());
         if same_origin(&initial_url, request_url) {
             if let Some(t) = &token {
-                req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {t}"));
+                req = req.header("authorization", format!("Bearer {t}"));
             }
         }
         req
@@ -820,7 +804,7 @@ async fn fetch_segment_once(
     // the segment retries, and if the origin genuinely can't serve ranges
     // the whole segmented attempt exhausts and falls back to a correct
     // single stream (which handles 200 fine).
-    if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+    if resp.status() != 206 {
         return SegmentAttemptOutcome::Failed(
             0,
             format!("expected 206, got HTTP {}", resp.status()),
@@ -851,7 +835,7 @@ async fn fetch_segment_once(
     let mut offset = start;
     let mut written = 0u64;
     loop {
-        let chunk = match tokio::time::timeout(stall_timeout, resp.chunk()).await {
+        let chunk = match tokio::time::timeout(stall_timeout, resp.next_chunk()).await {
             Ok(Ok(Some(c))) => c,
             Ok(Ok(None)) => break,
             Ok(Err(e)) => {
@@ -865,6 +849,7 @@ async fn fetch_segment_once(
             }
         };
         let remaining = cap - written;
+        let chunk = chunk.as_ref();
         let take = (chunk.len() as u64).min(remaining) as usize;
         if take > 0 {
             if let Err(e) = write_at_all(file, &chunk[..take], offset) {
@@ -884,15 +869,14 @@ async fn fetch_segment_once(
 }
 
 fn validate_content_range(
-    response: &reqwest::Response,
+    response: &kernal_api::http::Response,
     expected_start: u64,
     expected_end: u64,
     expected_len: u64,
 ) -> Result<(), String> {
     let raw = response
-        .headers()
-        .get(reqwest::header::CONTENT_RANGE)
-        .and_then(|value| value.to_str().ok())
+        .header("content-range")
+        .and_then(|value| std::str::from_utf8(value).ok())
         .ok_or_else(|| "206 response missing or malformed Content-Range".to_string())?;
     let raw = raw
         .strip_prefix("bytes ")

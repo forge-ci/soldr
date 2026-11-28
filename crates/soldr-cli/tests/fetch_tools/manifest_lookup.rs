@@ -192,15 +192,8 @@ fn manifest_sha256_mismatch_is_hard_error() {
         // Use the same trust verifier the manifest-first path uses.
         // We compute the actual sha256 of what the server returns,
         // then ask the verifier to compare against the pin.
-        let client = reqwest::Client::new();
-        let body = client
-            .get(&url)
-            .send()
-            .await
-            .unwrap()
-            .bytes()
-            .await
-            .unwrap();
+        let client = kernal_api::http::Client::new(kernal_api::http::Limits::default()).unwrap();
+        let body = client.get(&url).await.unwrap().into_bytes().await.unwrap();
         let actual = soldr_cli::fetch::trust::sha256_of(&body);
         // Verify the manual sha256 we computed matches the server
         // payload. This is just a sanity check on the test harness.

@@ -32,6 +32,14 @@ async fn serve_chunks(chunks: Vec<(Vec<u8>, Duration)>, content_length: usize) -
     format!("http://{address}/asset")
 }
 
+pub(super) fn test_client() -> kernal_api::http::Client {
+    kernal_api::http::Client::new(kernal_api::http::Limits {
+        max_body_bytes: u64::MAX,
+        ..kernal_api::http::Limits::default()
+    })
+    .expect("create test HTTP client")
+}
+
 pub(super) fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -82,7 +90,7 @@ fn healthy_chunks_reset_the_idle_watchdog() {
         )
         .await;
         let started = Instant::now();
-        let response = reqwest::Client::new().get(&url).send().await.expect("GET");
+        let response = test_client().get(&url).await.expect("GET");
         let asset = stream_response_to_temp_file(response, &url, idle)
             .await
             .expect("progressing transfer succeeds");
@@ -107,7 +115,7 @@ fn idle_pause_reports_bytes_and_is_transient() {
         // 1200 ms pause (3x idle) to trigger the timeout deterministically.
         let idle = Duration::from_millis(400);
         let url = serve_chunks(vec![(b"partial".to_vec(), Duration::from_millis(1200))], 12).await;
-        let response = reqwest::Client::new().get(&url).send().await.expect("GET");
+        let response = test_client().get(&url).await.expect("GET");
         let error = stream_response_to_temp_file(response, &url, idle)
             .await
             .expect_err("paused body must fail");
@@ -121,7 +129,7 @@ fn idle_pause_reports_bytes_and_is_transient() {
 fn truncated_body_is_transient() {
     runtime().block_on(async {
         let url = serve_chunks(vec![(b"short".to_vec(), Duration::ZERO)], 12).await;
-        let response = reqwest::Client::new().get(&url).send().await.expect("GET");
+        let response = test_client().get(&url).await.expect("GET");
         let error = stream_response_to_temp_file(response, &url, Duration::from_secs(1))
             .await
             .expect_err("truncated body must fail");
@@ -144,7 +152,7 @@ fn global_safety_ceiling_stops_a_slow_but_progressing_transfer() {
             6,
         )
         .await;
-        let response = reqwest::Client::new().get(&url).send().await.expect("GET");
+        let response = test_client().get(&url).await.expect("GET");
         let error = stream_response_to_temp_file_with_safety_timeout(
             response,
             &url,
@@ -177,7 +185,7 @@ fn header_timeout_is_separate_from_body_idle_timeout() {
         });
         let url = format!("http://{address}/slow-headers");
         let error = send_asset_request(
-            reqwest::Client::new().get(&url),
+            super::super::stream_download::get_request(&test_client(), &url),
             &url,
             Duration::from_millis(20),
         )
@@ -566,7 +574,7 @@ fn stalling_segment_trips_watchdog_recovers_and_resumes_from_offset() {
         let body: Vec<u8> = (0..2048u32).map(|i| (i % 251) as u8).collect();
         let (url, seen_ranges) = serve_stalling_then_recovering(body.clone()).await;
 
-        let response = reqwest::Client::new().get(&url).send().await.expect("GET");
+        let response = test_client().get(&url).await.expect("GET");
         let asset = stream_response_to_temp_file(response, &url, Duration::from_secs(5))
             .await
             .expect("stalled segment must recover via retry, not fail the download");
@@ -650,7 +658,7 @@ fn segment_retry_exhaustion_falls_back_to_single_stream() {
         let body: Vec<u8> = (0..1024u32).map(|i| (i % 191) as u8).collect();
         let url = serve_range_always_failing(body.clone()).await;
 
-        let response = reqwest::Client::new().get(&url).send().await.expect("GET");
+        let response = test_client().get(&url).await.expect("GET");
         let asset = stream_response_to_temp_file(response, &url, Duration::from_secs(5))
             .await
             .expect("every Range request failing must still resolve via single-stream fallback");
@@ -709,7 +717,7 @@ fn range_ignoring_server_returning_200_never_corrupts_the_file() {
         let body: Vec<u8> = (0..2048u32).map(|i| (i % 193) as u8).collect();
         let url = serve_range_ignored_returns_200_full_body(body.clone()).await;
 
-        let response = reqwest::Client::new().get(&url).send().await.expect("GET");
+        let response = test_client().get(&url).await.expect("GET");
         let asset = stream_response_to_temp_file(response, &url, Duration::from_secs(5))
             .await
             .expect("a 200-to-a-ranged-GET server must resolve via single-stream fallback");
@@ -779,7 +787,7 @@ fn global_timeout_expiry_with_no_budget_surfaces_a_clear_error() {
                 });
                 let url = format!("http://{address}/asset");
 
-                let response = reqwest::Client::new().get(&url).send().await.expect("GET");
+                let response = test_client().get(&url).await.expect("GET");
                 let error = stream_response_to_temp_file(response, &url, Duration::from_secs(30))
                     .await
                     .expect_err("global timeout with no remaining budget must be a hard error");
@@ -804,7 +812,7 @@ fn segmentation_never_attempted_when_response_lacks_accept_ranges() {
         // no Accept-Ranges header -- segmentation must be skipped
         // entirely and the existing single-stream path must run.
         let url = serve_chunks(vec![(b"abcd".to_vec(), Duration::ZERO)], 4).await;
-        let response = reqwest::Client::new().get(&url).send().await.expect("GET");
+        let response = test_client().get(&url).await.expect("GET");
         let asset = stream_response_to_temp_file(response, &url, Duration::from_secs(5))
             .await
             .expect("must succeed via the untouched single-stream path");
@@ -848,7 +856,7 @@ fn response_at_or_below_threshold_is_never_segmentable() {
         let threshold = DEFAULT_QUICK_THRESHOLD_BYTES;
         let body = vec![1u8; threshold as usize];
         let url = serve_fixed_response(response_headers(true, Some(threshold)), body).await;
-        let response = reqwest::Client::new().get(&url).send().await.expect("GET");
+        let response = test_client().get(&url).await.expect("GET");
         assert!(
             segmentable_total_len(&response, threshold).is_none(),
             "Content-Length exactly at the threshold must NOT be segmented"
@@ -863,7 +871,7 @@ fn response_above_threshold_is_segmentable() {
         let total = threshold + 1;
         let body = vec![1u8; total as usize];
         let url = serve_fixed_response(response_headers(true, Some(total)), body).await;
-        let response = reqwest::Client::new().get(&url).send().await.expect("GET");
+        let response = test_client().get(&url).await.expect("GET");
         assert_eq!(
             segmentable_total_len(&response, threshold),
             Some(total),
@@ -882,7 +890,7 @@ fn unknown_size_response_is_never_segmentable() {
             vec![1u8; 64],
         )
         .await;
-        let response = reqwest::Client::new().get(&url).send().await.expect("GET");
+        let response = test_client().get(&url).await.expect("GET");
         assert!(
             segmentable_total_len(&response, DEFAULT_QUICK_THRESHOLD_BYTES).is_none(),
             "unknown size must never be treated as segmentable"
@@ -964,7 +972,7 @@ fn pool_bounds_concurrent_segment_connections() {
         let (url, high_water) = serve_range_tracking_concurrency(body.clone()).await;
         let pool = SocketPool::new(2);
 
-        let response = reqwest::Client::new().get(&url).send().await.expect("GET");
+        let response = test_client().get(&url).await.expect("GET");
         let asset = stream_response_to_temp_file_with_pool(
             response,
             &url,
@@ -1000,16 +1008,8 @@ fn two_concurrent_downloads_share_one_pool() {
         let (url_b, hw_b) = serve_range_tracking_concurrency(body_b.clone()).await;
         let pool = SocketPool::new(2);
 
-        let resp_a = reqwest::Client::new()
-            .get(&url_a)
-            .send()
-            .await
-            .expect("GET a");
-        let resp_b = reqwest::Client::new()
-            .get(&url_b)
-            .send()
-            .await
-            .expect("GET b");
+        let resp_a = test_client().get(&url_a).await.expect("GET a");
+        let resp_b = test_client().get(&url_b).await.expect("GET b");
 
         let fut_a = stream_response_to_temp_file_with_pool(
             resp_a,
@@ -1066,7 +1066,7 @@ fn stalled_segment_retry_does_not_leak_pool_permits() {
     runtime().block_on(async {
                 let url = serve_range_hangs_forever().await;
                 let pool = SocketPool::new(1);
-                let client = reqwest::Client::new();
+                let client = test_client();
 
                 assert_eq!(pool.available(), 1);
                 let result = fetch_segment_with_retries(
@@ -1103,7 +1103,7 @@ fn hung_connect_trips_connect_timeout_and_releases_permit() {
     runtime().block_on(async {
         let url = serve_range_hangs_forever().await;
         let pool = SocketPool::new(1);
-        let client = reqwest::Client::new();
+        let client = test_client();
 
         assert_eq!(pool.available(), 1);
         let outcome = fetch_segment_once(
@@ -1157,7 +1157,7 @@ fn slow_header_fast_body_succeeds() {
             });
             let url = format!("http://{address}/asset");
             let pool = SocketPool::new(1);
-            let client = reqwest::Client::new();
+            let client = test_client();
 
             let outcome = fetch_segment_once(
                 &client,
@@ -1214,16 +1214,8 @@ fn redirect_hop_resets_connect_clock() {
             });
             let url = format!("http://{address1}/asset");
             let pool = SocketPool::new(1);
-            // A default reqwest::Client auto-follows redirects, which would
-            // swallow both hops into a single `.send()` call and defeat the
-            // point of this test (send_with_hop_timeout's manual redirect
-            // handling only matters when the client itself does NOT
-            // auto-follow -- exactly the client segmented_http_client
-            // builds in production).
-            let client = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .expect("build no-redirect client");
+            // Follow each hop in the segment loop, as in production.
+            let client = test_client();
 
             let outcome = fetch_segment_once(
                 &client,
@@ -1279,10 +1271,7 @@ fn cross_origin_redirect_does_not_forward_bearer_token() {
                 let _ = socket.write_all(response.as_bytes()).await;
             });
             let url = format!("http://{address_a}/asset");
-            let client = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .expect("build client");
+            let client = test_client();
             let outcome = fetch_segment_once(
                 &client,
                 &url,
@@ -1328,7 +1317,7 @@ fn preempted_segment_requeues_without_spending_retry_budget() {
         let (url_b, _hw_b) = serve_range_tracking_concurrency(body_b.clone()).await;
 
         let pool = SocketPool::new(1);
-        let client = reqwest::Client::new();
+        let client = test_client();
         let url_a = format!("http://{address_a}/asset");
 
         let pool_a = Arc::clone(&pool);
@@ -1393,7 +1382,7 @@ fn uniformly_slow_contention_still_completes_not_spins() {
             segment_retries: 5,
             global_timeout: None,
         };
-        let client = reqwest::Client::new();
+        let client = test_client();
         let file = Arc::new(tempfile::tempfile().expect("tempfile"));
 
         let plan = compute_segments(body.len() as u64, 3);
@@ -1440,14 +1429,14 @@ fn quick_pool_serves_control_requests_while_bulk_pool_is_saturated() {
 
         let started = Instant::now();
         let resp = send_control_request_with_pool(
-            reqwest::Client::new().get(&url),
+            super::super::stream_download::get_request(&test_client(), &url),
             &url,
             Duration::from_secs(5),
             quick,
         )
         .await
         .expect("control request must complete despite bulk saturation");
-        assert!(resp.status().is_success());
+        assert!((200..300).contains(&resp.status()));
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "must complete promptly, not queue behind a fully-saturated bulk pool: {:?}",

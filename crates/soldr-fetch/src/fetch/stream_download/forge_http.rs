@@ -1,8 +1,9 @@
+use kernal_api::http::{Client, Limits, Method, Protocol, Request, Response};
 use std::time::Duration;
 
 /// Client for an authenticated remote build service over HTTPS or an SSH tunnel.
 pub struct RemoteBuildHttpClient {
-    http: reqwest::Client,
+    http: Client,
     origin: String,
 }
 
@@ -22,13 +23,7 @@ impl RemoteBuildHttpClient {
                 "Remote build endpoint must be a loopback SSH tunnel.",
             ));
         }
-        let builder = super::forge_http_builder();
-        let builder = if http2 {
-            builder.http2_prior_knowledge()
-        } else {
-            builder
-        };
-        let http = builder.build().map_err(std::io::Error::other)?;
+        let http = remote_client(http2)?;
         Ok(Self {
             http,
             origin: format!("http://{endpoint}"),
@@ -46,7 +41,7 @@ impl RemoteBuildHttpClient {
     }
 
     fn https_origin(origin: &str, require_http2: bool) -> std::io::Result<Self> {
-        let origin = reqwest::Url::parse(origin).map_err(std::io::Error::other)?;
+        let origin = url::Url::parse(origin).map_err(std::io::Error::other)?;
         if origin.scheme() != "https"
             || origin.host_str().is_none()
             || origin.port_or_known_default() != Some(443)
@@ -60,13 +55,7 @@ impl RemoteBuildHttpClient {
                 "Remote build worker must be an HTTPS origin.",
             ));
         }
-        let builder = super::forge_http_builder().https_only(true);
-        let builder = if require_http2 {
-            builder.http2_prior_knowledge()
-        } else {
-            builder
-        };
-        let http = builder.build().map_err(std::io::Error::other)?;
+        let http = remote_client(require_http2)?;
         Ok(Self {
             http,
             origin: origin.origin().ascii_serialization(),
@@ -107,7 +96,7 @@ impl RemoteBuildHttpClient {
         path: &str,
         token: &str,
         query: &[(&str, &str)],
-    ) -> std::io::Result<reqwest::Response> {
+    ) -> std::io::Result<Response> {
         self.get_with_encoding(path, token, query, "zstd").await
     }
 
@@ -118,23 +107,28 @@ impl RemoteBuildHttpClient {
         token: &str,
         query: &[(&str, &str)],
         accept_encoding: &str,
-    ) -> std::io::Result<reqwest::Response> {
+    ) -> std::io::Result<Response> {
         if !path.starts_with('/') {
             return Err(std::io::Error::other("HTTP service path must begin with /"));
         }
-        let request = super::get_request(&self.http, &format!("{}{path}", self.origin))
-            .query(query)
-            .header("accept-encoding", accept_encoding)
-            .bearer_auth(token);
-        super::send_forge_request(request)
+        let mut url =
+            url::Url::parse(&format!("{}{path}", self.origin)).map_err(std::io::Error::other)?;
+        if !query.is_empty() {
+            url.query_pairs_mut().extend_pairs(query.iter().copied());
+        }
+        let authorization = format!("Bearer {token}");
+        self.http
+            .execute(Request {
+                headers: &[
+                    ("accept-encoding", accept_encoding),
+                    ("authorization", &authorization),
+                ],
+                ..Request::get(url.as_str())
+            })
             .await
-            .map_err(std::io::Error::other)
     }
 
-    async fn read_response(
-        response: reqwest::Response,
-        max_response: usize,
-    ) -> std::io::Result<Vec<u8>> {
+    async fn read_response(response: Response, max_response: usize) -> std::io::Result<Vec<u8>> {
         let status = response.status();
         let data = super::read_forge_body(
             response,
@@ -143,7 +137,7 @@ impl RemoteBuildHttpClient {
             std::io::Error::other,
         )
         .await?;
-        if !status.is_success() {
+        if !(200..300).contains(&status) {
             return Err(std::io::Error::other(format!(
                 "remote build {}: {}",
                 status,
@@ -160,33 +154,59 @@ impl RemoteBuildHttpClient {
         token: &str,
         content_type: &str,
         body: Vec<u8>,
-    ) -> std::io::Result<reqwest::Response> {
+    ) -> std::io::Result<Response> {
         if !path.starts_with('/') {
             return Err(std::io::Error::other("HTTP service path must begin with /"));
         }
-        let request = super::post_request(&self.http, &format!("{}{path}", self.origin))
-            .header("content-type", content_type)
-            .bearer_auth(token)
-            .body(body);
-        super::send_forge_request(request)
+        let url = format!("{}{path}", self.origin);
+        let authorization = format!("Bearer {token}");
+        self.http
+            .execute(Request {
+                method: Method::Post,
+                url: &url,
+                headers: &[
+                    ("content-type", content_type),
+                    ("authorization", &authorization),
+                ],
+                body: &body,
+            })
             .await
-            .map_err(std::io::Error::other)
     }
 }
 
+fn remote_client(http2: bool) -> std::io::Result<Client> {
+    let protocol = if http2 {
+        Protocol::Http2Only
+    } else {
+        Protocol::Auto
+    };
+    Client::with_protocol(
+        Limits {
+            max_request_bytes: usize::MAX,
+            max_body_bytes: u64::MAX,
+            total_timeout: Duration::from_secs(6 * 60 * 60),
+            read_timeout: Duration::from_secs(6 * 60 * 60),
+            ..Limits::default()
+        },
+        protocol,
+    )
+}
+
 /// Bounded control-plane requests to the fixed Forge CI origin.
-pub struct ForgeCiHttp(reqwest::Client);
+pub struct ForgeCiHttp(Client);
 
 impl ForgeCiHttp {
     /// Construct a client that never forwards Forge CI credentials through redirects.
     pub fn new() -> std::io::Result<Self> {
         super::super::net_guard::ensure_network_allowed("Forge CI")
             .map_err(std::io::Error::other)?;
-        let http = super::forge_http_builder()
-            .https_only(true)
-            .timeout(Duration::from_secs(15))
-            .build()
-            .map_err(forge_http_error)?;
+        let http = Client::new(Limits {
+            max_body_bytes: 16 * 1024,
+            total_timeout: Duration::from_secs(15),
+            read_timeout: Duration::from_secs(15),
+            ..Limits::default()
+        })
+        .map_err(forge_http_error)?;
         Ok(Self(http))
     }
 
@@ -196,18 +216,17 @@ impl ForgeCiHttp {
         path: &str,
         credential: Option<&str>,
     ) -> std::io::Result<(u16, Vec<u8>)> {
-        self.request(reqwest::Method::POST, path, credential).await
+        self.request(Method::Post, path, credential).await
     }
 
     /// Check a saved session.
     pub async fn get(&self, path: &str, credential: &str) -> std::io::Result<(u16, Vec<u8>)> {
-        self.request(reqwest::Method::GET, path, Some(credential))
-            .await
+        self.request(Method::Get, path, Some(credential)).await
     }
 
     async fn request(
         &self,
-        method: reqwest::Method,
+        method: Method,
         path: &str,
         credential: Option<&str>,
     ) -> std::io::Result<(u16, Vec<u8>)> {
@@ -216,19 +235,20 @@ impl ForgeCiHttp {
             return Err(std::io::Error::other("Forge CI route must begin with /"));
         }
         let url = format!("https://forge-ci.com{path}");
-        let request = if method == reqwest::Method::POST {
-            super::post_request(&self.0, &url)
-        } else {
-            super::get_request(&self.0, &url)
-        };
-        let request = match credential {
-            Some(credential) => request.bearer_auth(credential),
-            None => request,
-        };
-        let response = super::send_forge_request(request)
+        let authorization = credential.map(|token| format!("Bearer {token}"));
+        let headers = authorization
+            .as_deref()
+            .map(|value| [("authorization", value)]);
+        let response = self
+            .0
+            .execute(Request {
+                method,
+                headers: headers.as_ref().map_or(&[], |header| header.as_slice()),
+                ..Request::get(&url)
+            })
             .await
             .map_err(forge_http_error)?;
-        let status = response.status().as_u16();
+        let status = response.status();
         let body = super::read_forge_body(
             response,
             MAX_BODY,
@@ -240,8 +260,8 @@ impl ForgeCiHttp {
     }
 }
 
-fn forge_http_error(error: reqwest::Error) -> std::io::Error {
-    std::io::Error::other(format!("Forge CI request failed: {}", error.without_url()))
+fn forge_http_error(error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(error.kind(), format!("Forge CI request failed: {error}"))
 }
 
 #[cfg(test)]

@@ -99,10 +99,10 @@ pub async fn find_release_asset(
     }
     let resp = send_control_request(request, &url).await?;
     let status = resp.status();
-    if status.as_u16() == 404 {
+    if status == 404 {
         return Ok(None);
     }
-    if !status.is_success() {
+    if !(200..300).contains(&status) {
         return Err(SoldrError::Network(format!("{url} failed: HTTP {status}")));
     }
     let text = read_control_text(resp, &url, CONTROL_HEADER_TIMEOUT).await?;

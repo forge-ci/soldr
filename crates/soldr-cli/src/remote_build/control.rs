@@ -193,12 +193,8 @@ pub(super) async fn receive(client: &Client, session: &str) -> io::Result<i32> {
             "remote control response headers timed out",
         )
     })??;
-    if !response.status().is_success()
-        || response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            != Some("application/x-ndjson")
+    if !(200..300).contains(&response.status())
+        || response.header("content-type") != Some(b"application/x-ndjson".as_slice())
     {
         return Err(io::Error::other(format!(
             "remote control stream returned HTTP {}",
@@ -244,12 +240,12 @@ async fn consume_stream(
 ) -> io::Result<()> {
     let mut pending = Vec::new();
     let mut skip = if replay { progress.records } else { 0 };
-    while let Some(chunk) = body_read(response.chunk())
+    while let Some(chunk) = body_read(response.next_chunk())
         .await
         .map_err(interrupted_stream)?
         .map_err(interrupted_stream)?
     {
-        for part in chunk.split_inclusive(|&byte| byte == b'\n') {
+        for part in chunk.as_ref().split_inclusive(|&byte| byte == b'\n') {
             if part.len() > MAX_LINE + 1 - pending.len() {
                 return Err(io::Error::other(
                     "remote output record exceeds its size limit",
@@ -306,16 +302,16 @@ async fn finished_transcript(
             );
             if let Ok(Ok(mut response)) = tokio::time::timeout(HEADER_TIMEOUT, request).await {
                 let status = response.status();
-                if status.is_success() {
+                if (200..300).contains(&status) {
                     return Ok(response);
                 }
-                if !matches!(status.as_u16(), 404 | 502 | 503 | 504) {
-                    let detail = body_read(response.chunk())
+                if !matches!(status, 404 | 502 | 503 | 504) {
+                    let detail = body_read(response.next_chunk())
                         .await
                         .ok()
                         .and_then(Result::ok)
                         .flatten();
-                    let detail = detail.as_deref().unwrap_or_default();
+                    let detail = detail.as_ref().map(AsRef::as_ref).unwrap_or_default();
                     let detail = String::from_utf8_lossy(&detail[..detail.len().min(4096)]);
                     return Err(io::Error::other(format!(
                         "remote transcript request returned HTTP {status}: {detail}"

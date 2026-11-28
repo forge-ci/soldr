@@ -1,0 +1,122 @@
+schema = "fp-bindgen.core-wasm-abi"
+schema_revision = 1
+generator_revision = 1
+abi_version = 1
+namespace = "kernal-api:v1"
+
+[[resources]]
+name = "ArchiveEntry"
+kind = "opaque_host_handle"
+ownership = "owned"
+abi = "i64"
+
+[[resources]]
+name = "AuthenticatedArchive"
+kind = "opaque_host_handle"
+ownership = "owned"
+abi = "i64"
+
+[[resources]]
+name = "Blob"
+kind = "opaque_host_handle"
+ownership = "stream"
+abi = "i64"
+max_chunk_bytes = 65536
+[[resources]]
+name = "EncryptedArchive"
+kind = "opaque_host_handle"
+ownership = "owned"
+abi = "i64"
+
+[[imports]]
+namespace = "kernal-api:v1"
+name = "kernel_yield"
+direction = "guest-to-host"
+params = []
+results = [{ semantic = "()", abi = "unit" }]
+
+[[imports]]
+namespace = "kernal-api:v1"
+name = "operation_cancel"
+direction = "guest-to-host"
+params = [{ semantic = "u64", abi = "i64" }]
+results = [{ semantic = "i32", abi = "i32" }]
+
+[[imports]]
+namespace = "kernal-api:v1"
+name = "operation_poll"
+direction = "guest-to-host"
+params = [{ semantic = "u64", abi = "i64" }]
+results = [{ semantic = "u64", abi = "i64" }]
+
+[[imports]]
+namespace = "kernal-api:v1"
+name = "operation_submit"
+direction = "guest-to-host"
+params = [{ semantic = "u32", abi = "i32" }, { semantic = "u64", abi = "i64" }, { semantic = "u64", abi = "i64" }]
+results = [{ semantic = "u64", abi = "i64" }]
+
+[[imports]]
+namespace = "kernal-api:v1"
+name = "operation_yield"
+direction = "guest-to-host"
+params = [{ semantic = "u64", abi = "i64" }]
+results = [{ semantic = "i32", abi = "i32" }]
+
+[[imports]]
+namespace = "kernal-api:v1"
+name = "resource_release_archive_entry"
+direction = "guest-to-host"
+generated = true
+resource_control = "release"
+params = [{ semantic = "ArchiveEntry", abi = "i64", kind = "resource" }]
+results = [{ semantic = "i32", abi = "i32" }]
+
+[[imports]]
+namespace = "kernal-api:v1"
+name = "resource_release_authenticated_archive"
+direction = "guest-to-host"
+generated = true
+resource_control = "release"
+params = [{ semantic = "AuthenticatedArchive", abi = "i64", kind = "resource" }]
+results = [{ semantic = "i32", abi = "i32" }]
+
+[[imports]]
+namespace = "kernal-api:v1"
+name = "resource_release_encrypted_archive"
+direction = "guest-to-host"
+generated = true
+resource_control = "release"
+params = [{ semantic = "EncryptedArchive", abi = "i64", kind = "resource" }]
+results = [{ semantic = "i32", abi = "i32" }]
+
+[[imports]]
+namespace = "kernal-api:v1"
+name = "stream_read"
+direction = "guest-to-host"
+generated = true
+resource_control = "transfer_read"
+max_chunk_bytes = 65536
+params = [{ semantic = "stream", abi = "i64", kind = "resource" }, { semantic = "guest_ptr", abi = "i32" }, { semantic = "chunk_len", abi = "i32" }]
+results = [{ semantic = "i32", abi = "i32" }]
+
+[[imports]]
+namespace = "kernal-api:v1"
+name = "stream_write"
+direction = "guest-to-host"
+generated = true
+resource_control = "transfer_write"
+max_chunk_bytes = 65536
+params = [{ semantic = "stream", abi = "i64", kind = "resource" }, { semantic = "guest_ptr", abi = "i32" }, { semantic = "chunk_len", abi = "i32" }]
+results = [{ semantic = "i32", abi = "i32" }]
+
+[[imports]]
+namespace = "kernal-api:v1"
+name = "stream_close"
+direction = "guest-to-host"
+generated = true
+resource_control = "close"
+max_chunk_bytes = 65536
+params = [{ semantic = "stream", abi = "i64", kind = "resource" }]
+results = [{ semantic = "i32", abi = "i32" }]
+

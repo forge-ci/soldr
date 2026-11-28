@@ -224,7 +224,7 @@ async fn download_and_extract_with_pin_inner(
                 send_asset_request(get_request(&client, url), url, ASSET_HEADER_TIMEOUT).await?;
             // A missing asset is permanent, unlike a transient 5xx or timeout.
             // Preserve that distinction for the caller's retry classifier.
-            if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            if resp.status() == 404 {
                 return Err(SoldrError::ReleaseNotFound(format!(
                     "asset download {} failed: HTTP {}",
                     super::stream_download::safe_asset_url(url),

@@ -25,12 +25,11 @@ await-holding-invalid-types = [
 ]
 
 ## soldr#3785 / RUSTSEC-2026-0346: rustls client session values' `Debug`
-## impls exposed TLS secrets. soldr reaches rustls only through reqwest and
-## never names these types; this keeps any soldr code from holding (and so
-## debug-printing) a TLS connection, config or resumption value.
+## impls exposed TLS secrets. The HTTP backend owns TLS connections,
+## configuration and resumption values outside Soldr's application code.
 disallowed-types = [
-    { path = "rustls::ClientConnection", reason = "TLS session state: let reqwest own it (soldr#3785, RUSTSEC-2026-0346)" },
-    { path = "rustls::ClientConfig", reason = "TLS session state: let reqwest own it (soldr#3785, RUSTSEC-2026-0346)" },
+    { path = "rustls::ClientConnection", reason = "TLS session state belongs to the HTTP backend (soldr#3785, RUSTSEC-2026-0346)" },
+    { path = "rustls::ClientConfig", reason = "TLS session state belongs to the HTTP backend (soldr#3785, RUSTSEC-2026-0346)" },
     { path = "rustls::client::Tls13ClientSessionValue", reason = "TLS resumption secret (soldr#3785, RUSTSEC-2026-0346)" },
     { path = "rustls::client::Tls12ClientSessionValue", reason = "TLS resumption secret (soldr#3785, RUSTSEC-2026-0346)" },
     { path = "rustls::client::ClientSessionMemoryCache", reason = "TLS resumption store (soldr#3785, RUSTSEC-2026-0346)" },

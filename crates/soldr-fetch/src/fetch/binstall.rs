@@ -68,8 +68,8 @@ fn require_https(raw: &str, what: &str, allow_loopback_http: bool) -> Result<(),
     }
 }
 
-fn is_gone(status: reqwest::StatusCode) -> bool {
-    status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE
+fn is_gone(status: u16) -> bool {
+    status == 404 || status == 410
 }
 
 /// GET `url` (https-checked) to a temp file. `Ok(None)` on 404/410.
@@ -85,7 +85,7 @@ async fn download_optional(
     if is_gone(status) {
         return Ok(None);
     }
-    if !status.is_success() {
+    if !(200..300).contains(&status) {
         return Err(SoldrError::Network(format!(
             "binstall: HTTP {status} downloading {what} {url}"
         )));
@@ -259,7 +259,7 @@ async fn probe_candidates(
         )
         .await?;
         let status = probe.status();
-        if status.is_success() {
+        if (200..300).contains(&status) {
             return Ok(Some((url, fmt)));
         }
         if !guessed && !is_gone(status) {

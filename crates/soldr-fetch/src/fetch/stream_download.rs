@@ -10,9 +10,9 @@
 //! `stream_response_to_temp_file[_with_safety_timeout]` transparently tries
 //! N-way HTTP Range segmentation before falling back to the single-stream
 //! loop below. This is a deliberate design choice, not an afterthought: it
-//! is the ONLY place in `soldr-fetch` allowed to touch `reqwest` directly
-//! (`dylints/ban_raw_network_access` denies raw reqwest calls everywhere
-//! else under `crates/soldr-fetch/src/`), so folding segmentation in here
+//! centralizes HTTP request construction and download policy
+//! (`dylints/ban_raw_network_access` guards direct network access
+//! under `crates/soldr-fetch/src/`), so folding segmentation in here
 //! is what lets every existing caller — `syslib_common.rs`, `xwin_cache.rs`,
 //! `archive.rs`, `llvm.rs`, `zig.rs`, `apple_sdk.rs`, `rustup_init.rs`,
 //! `manifest_lookup.rs` — inherit it with **zero call-site changes**. They
@@ -62,7 +62,7 @@
 //! single connection negotiated HTTP/1.x (either because it was pinned, or
 //! because that is what the server offered), the segmented fan-out also
 //! pins HTTP/1-only; if it negotiated HTTP/2+, the segmented fan-out lets
-//! reqwest negotiate freely too. This preserves every existing pin's
+//! the client negotiate freely too. This preserves every existing pin's
 //! intent without any caller needing to pass its protocol choice through —
 //! "whatever pin stream_download applies stays owned by stream_download."
 //! `dl_bench.rs` separately confirmed empirically that Negotiated works
@@ -75,7 +75,7 @@
 //!
 //! 1. **Connect/TTFB** (`SOLDR_DOWNLOAD_CONNECT_TIMEOUT_SECS`, default 10s):
 //!    request issuance to first response byte (i.e. until headers are
-//!    available). Re-armed fresh on every redirect hop — reqwest's own
+//!    available). Re-armed fresh on every redirect hop — the client's
 //!    auto-redirect would share one `.send()` future across every hop,
 //!    making a per-hop timeout impossible, so the segmented client
 //!    disables auto-redirect (`redirect::Policy::none()`) and follows
@@ -172,7 +172,7 @@
 //! `Authorization: Bearer` header (from [`AUTH_TOKEN_ENV_VAR`], forward-
 //! prep for a future private MSVC origin) is attached only while the hop
 //! stays same-origin; a redirect to a different origin never carries it
-//! forward. This is the same posture reqwest's own auto-redirect takes
+//! forward. This is the same posture the client's auto-redirect takes
 //! for sensitive headers on cross-origin hops, applied manually here
 //! because the segmented client disables auto-redirect (see "Three
 //! clocks").
@@ -254,13 +254,14 @@ use std::time::Duration;
 
 use crate::core::SoldrError;
 use kernal_api::hash::Sha256Hasher;
+use kernal_api::http::{Client, Limits, Method, Protocol, Request, Response};
 
 pub(crate) const ASSET_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const ASSET_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const CONTROL_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
 /// Bounded JSON control requests to the Forge peer authorization service.
 #[derive(Clone)]
-pub struct ForgeSignalClient(reqwest::Client);
+pub struct ForgeSignalClient(Client);
 
 impl ForgeSignalClient {
     /// First-party relay and GitHub device authorization origin.
@@ -270,77 +271,50 @@ impl ForgeSignalClient {
     pub fn new() -> std::io::Result<Self> {
         super::net_guard::ensure_network_allowed("Forge remote peer authorization")
             .map_err(std::io::Error::other)?;
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(12))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map(Self)
-            .map_err(std::io::Error::other)
+        Client::new(Limits {
+            max_body_bytes: 4096,
+            total_timeout: Duration::from_secs(12),
+            read_timeout: Duration::from_secs(12),
+            ..Limits::default()
+        })
+        .map(Self)
     }
 
     /// Exchange typed JSON for a single authorization operation.
-    pub async fn post<Request: serde::Serialize, Response: serde::de::DeserializeOwned>(
+    pub async fn post<Payload: serde::Serialize, Reply: serde::de::DeserializeOwned>(
         &self,
         operation: &str,
-        request: &Request,
-    ) -> std::io::Result<Response> {
+        request: &Payload,
+    ) -> std::io::Result<Reply> {
         if !matches!(operation, "start" | "poll" | "check") {
             return Err(std::io::Error::other(
                 "invalid Forge authorization operation",
             ));
         }
-        let mut response = self
+        let url = format!("{}/v1/remote/{operation}", Self::ORIGIN);
+        let body = serde_json::to_vec(request).map_err(std::io::Error::other)?;
+        let response = self
             .0
-            .post(format!("{}/v1/remote/{operation}", Self::ORIGIN))
-            .json(request)
-            .send()
-            .await
-            .map_err(std::io::Error::other)?;
-        if !response.status().is_success() {
+            .execute(Request {
+                method: Method::Post,
+                url: &url,
+                headers: &[("content-type", "application/json")],
+                body: &body,
+            })
+            .await?;
+        if !(200..300).contains(&response.status()) {
             return Err(std::io::Error::other(format!(
                 "Forge peer authorization {operation}: HTTP {}",
                 response.status()
             )));
         }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(std::io::Error::other)? {
-            if bytes.len() + chunk.len() > 4096 {
-                return Err(std::io::Error::other(
-                    "Forge authorization response too large",
-                ));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        serde_json::from_slice(&bytes).map_err(std::io::Error::other)
+        serde_json::from_slice(&response.into_bytes().await?).map_err(std::io::Error::other)
     }
 }
 
-/// Catalogue and asset redirects are bounded independently of reqwest's
-/// changing default.  Reqwest strips sensitive headers on cross-origin hops.
-pub(crate) const MAX_REDIRECT_HOPS: usize = 5;
+/// Limit catalogue and asset redirects to five hops.
+pub(crate) const MAX_REDIRECT_HOPS: u8 = 5;
 
-fn safe_redirect_policy() -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(|attempt| {
-        if !may_follow_redirect(
-            attempt.previous().len(),
-            attempt
-                .previous()
-                .iter()
-                .any(|previous| previous.scheme() == "https"),
-            attempt.url(),
-        ) {
-            return attempt.stop();
-        }
-        attempt.follow()
-    })
-}
-
-fn may_follow_redirect(redirects_followed: usize, followed_https: bool, target: &url::Url) -> bool {
-    redirects_followed < MAX_REDIRECT_HOPS
-        && (!followed_https || target.scheme() == "https")
-        && target.username().is_empty()
-        && target.password().is_none()
-}
 /// A final circuit breaker for an otherwise-progressing asset download.
 ///
 /// An idle watchdog alone would permit a server to trickle bytes forever. The
@@ -351,162 +325,175 @@ pub(crate) const ASSET_SAFETY_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 6
 /// Transport compatibility policy for a remote asset host.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) enum AssetProtocol {
-    /// Let reqwest negotiate the best available HTTP version.
+    /// Let the client negotiate the best available HTTP version.
     #[default]
     Negotiated,
     /// Retain the HTTP/1-only compatibility mode required by selected SDK CDNs.
     Http1Only,
 }
 
-/// Construct the sole HTTP client for bounded control-plane requests.
-pub(crate) fn control_http_client(purpose: &str) -> Result<reqwest::Client, SoldrError> {
+/// Construct the HTTP client for bounded control-plane requests.
+pub(crate) fn control_http_client(purpose: &str) -> Result<Client, SoldrError> {
     super::net_guard::ensure_network_allowed(purpose)?;
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .redirect(safe_redirect_policy())
-        .timeout(CONTROL_HEADER_TIMEOUT)
-        .user_agent(format!("soldr/{}", crate::core::version()))
-        .build()
-        .map_err(|error| SoldrError::Network(error.to_string()))
+    Client::new(Limits {
+        max_redirects: MAX_REDIRECT_HOPS,
+        max_body_bytes: 64 * 1024 * 1024,
+        total_timeout: CONTROL_HEADER_TIMEOUT,
+        read_timeout: CONTROL_HEADER_TIMEOUT,
+        ..Limits::default()
+    })
+    .map_err(|error| SoldrError::Network(error.to_string()))
 }
 
 /// An HTTP connection after the signal server accepts the WebSocket upgrade.
-pub type SignalWebSocketTransport = reqwest::Upgraded;
+pub type SignalWebSocketTransport = Box<dyn SignalWebSocketIo + Send + Unpin>;
 
-/// Open a direct HTTP/1.1 upgrade and validate the server's handshake before
-/// exposing the stream to the agent protocol.
+/// Async I/O for an upgraded signal connection.
+pub trait SignalWebSocketIo:
+    tokio::io::AsyncRead + tokio::io::AsyncWrite + std::fmt::Debug
+{
+}
+
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + std::fmt::Debug> SignalWebSocketIo for T {}
+
+/// Open a direct HTTP/1.1 WebSocket connection to the signal server.
 pub async fn open_signal_websocket(
     url: url::Url,
     key: &str,
     accept: &str,
 ) -> Result<SignalWebSocketTransport, SoldrError> {
-    use reqwest::header::{
-        CONNECTION, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_EXTENSIONS, SEC_WEBSOCKET_KEY,
-        SEC_WEBSOCKET_PROTOCOL, SEC_WEBSOCKET_VERSION, UPGRADE,
-    };
-
     super::net_guard::ensure_network_allowed("signal WebSocket upgrade")?;
-    let response = reqwest::Client::builder()
-        .http1_only()
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .build()
-        .map_err(|_| SoldrError::Network("could not create the signal HTTP client".into()))?
-        .get(url)
-        .header(CONNECTION, "Upgrade")
-        .header(UPGRADE, "websocket")
-        .header(SEC_WEBSOCKET_VERSION, "13")
-        .header(SEC_WEBSOCKET_KEY, key)
-        .send()
+    let stream = Client::open_websocket(url.as_str(), key, accept, Limits::default())
         .await
-        .map_err(|_| SoldrError::Network("signal HTTP upgrade request failed".into()))?;
-
-    if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
-        return Err(SoldrError::Network(format!(
-            "signal WebSocket upgrade refused: {}",
-            response.status()
-        )));
-    }
-    let headers = response.headers();
-    let has_connection_upgrade = headers.get_all(CONNECTION).iter().any(|value| {
-        value.to_str().is_ok_and(|value| {
-            value
-                .split(',')
-                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
-        })
-    });
-    if !has_connection_upgrade
-        || !headers
-            .get(UPGRADE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
-        || !headers
-            .get(SEC_WEBSOCKET_ACCEPT)
-            .is_some_and(|value| value == accept)
-        || headers.contains_key(SEC_WEBSOCKET_EXTENSIONS)
-        || headers.contains_key(SEC_WEBSOCKET_PROTOCOL)
-    {
-        return Err(SoldrError::Network(
-            "invalid signal WebSocket upgrade response".into(),
-        ));
-    }
-
-    response
-        .upgrade()
-        .await
-        .map_err(|_| SoldrError::Network("signal WebSocket upgrade failed".into()))
+        .map_err(|error| {
+            let detail = if error.kind() == std::io::ErrorKind::InvalidData {
+                "invalid signal WebSocket upgrade response".into()
+            } else {
+                error.to_string()
+            };
+            SoldrError::Network(detail)
+        })?;
+    Ok(Box::new(stream))
 }
 
-/// Construct the sole HTTP client for streamed asset requests.
-pub(crate) fn asset_http_client(purpose: &str) -> Result<reqwest::Client, SoldrError> {
+/// Construct an HTTP client for streamed asset requests.
+pub(crate) fn asset_http_client(purpose: &str) -> Result<Client, SoldrError> {
     asset_http_client_with_protocol(purpose, AssetProtocol::Negotiated)
 }
 
-/// Construct an asset client that exposes redirects as non-success responses.
-/// Canonical multipart catalogue URLs are publication-state-bound to an exact
-/// ordinary-Git branch path, so following a redirect would escape that proof.
-pub(crate) fn asset_http_client_no_redirect(purpose: &str) -> Result<reqwest::Client, SoldrError> {
-    super::net_guard::ensure_network_allowed(purpose)?;
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent(format!("soldr/{}", crate::core::version()))
-        .build()
-        .map_err(|error| SoldrError::Network(error.to_string()))
+/// Multipart catalogue URLs are bound to an exact publication path.
+pub(crate) fn asset_http_client_no_redirect(purpose: &str) -> Result<Client, SoldrError> {
+    asset_client(
+        purpose,
+        AssetProtocol::Negotiated,
+        0,
+        Limits::default().connect_timeout,
+    )
 }
 
-/// Construct the sole asset client, optionally retaining a documented
-/// compatibility restriction for a particular host.
 pub(crate) fn asset_http_client_with_protocol(
     purpose: &str,
     protocol: AssetProtocol,
-) -> Result<reqwest::Client, SoldrError> {
+) -> Result<Client, SoldrError> {
+    asset_client(
+        purpose,
+        protocol,
+        MAX_REDIRECT_HOPS,
+        Limits::default().connect_timeout,
+    )
+}
+
+pub(super) fn asset_client(
+    purpose: &str,
+    protocol: AssetProtocol,
+    max_redirects: u8,
+    connect_timeout: Duration,
+) -> Result<Client, SoldrError> {
     super::net_guard::ensure_network_allowed(purpose)?;
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .redirect(safe_redirect_policy())
-        .user_agent(format!("soldr/{}", crate::core::version()));
-    if matches!(protocol, AssetProtocol::Http1Only) {
-        builder = builder.http1_only();
-    }
-    builder
-        .build()
-        .map_err(|error| SoldrError::Network(error.to_string()))
-}
-
-/// Keep credentials on the configured worker or control-plane origin.
-fn forge_http_builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(10))
-}
-
-async fn send_forge_request(
-    request: reqwest::RequestBuilder,
-) -> Result<reqwest::Response, reqwest::Error> {
-    request.send().await
+    let protocol = match protocol {
+        AssetProtocol::Negotiated => Protocol::Auto,
+        AssetProtocol::Http1Only => Protocol::Http1Only,
+    };
+    Client::with_protocol(
+        Limits {
+            max_redirects,
+            max_body_bytes: u64::MAX,
+            connect_timeout,
+            // Keep the existing header/idle/safety watchdogs authoritative.
+            read_timeout: ASSET_SAFETY_TIMEOUT + ASSET_IDLE_TIMEOUT,
+            total_timeout: ASSET_SAFETY_TIMEOUT + ASSET_HEADER_TIMEOUT + ASSET_IDLE_TIMEOUT,
+            ..Limits::default()
+        },
+        protocol,
+    )
+    .map_err(|error| SoldrError::Network(error.to_string()))
 }
 
 async fn read_forge_body(
-    mut response: reqwest::Response,
+    mut response: Response,
     limit: usize,
     size_error: &str,
-    map_error: impl Fn(reqwest::Error) -> std::io::Error,
+    map_error: impl Fn(std::io::Error) -> std::io::Error,
 ) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(&map_error)? {
+    while let Some(chunk) = response.next_chunk().await.map_err(&map_error)? {
+        let chunk = chunk.as_ref();
         if chunk.len() > limit - bytes.len() {
             return Err(std::io::Error::other(size_error.to_owned()));
         }
-        bytes.extend_from_slice(&chunk);
+        bytes.extend_from_slice(chunk);
     }
     Ok(bytes)
 }
 
-/// Build a GET request through the fetch boundary.
-pub(crate) fn get_request(client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
-    client.get(url)
+/// Own the URL and application headers until the fetch boundary sends the request.
+pub(crate) struct PendingRequest {
+    client: Client,
+    method: Method,
+    url: String,
+    headers: Vec<(&'static str, String)>,
+    body: std::io::Result<Vec<u8>>,
+}
+
+impl PendingRequest {
+    fn new(client: &Client, method: Method, url: &str) -> Self {
+        Self {
+            client: client.clone(),
+            method,
+            url: url.to_owned(),
+            headers: vec![("user-agent", format!("soldr/{}", crate::core::version()))],
+            body: Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) fn header(mut self, name: &'static str, value: impl Into<String>) -> Self {
+        self.headers.push((name, value.into()));
+        self
+    }
+
+    pub(crate) fn bearer_auth(self, token: &str) -> Self {
+        self.header("authorization", format!("Bearer {token}"))
+    }
+
+    pub(super) async fn send(self) -> std::io::Result<Response> {
+        let headers: Vec<_> = self
+            .headers
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect();
+        self.client
+            .execute(Request {
+                method: self.method,
+                url: &self.url,
+                headers: &headers,
+                body: &self.body?,
+            })
+            .await
+    }
+}
+
+pub(crate) fn get_request(client: &Client, url: &str) -> PendingRequest {
+    PendingRequest::new(client, Method::Get, url)
 }
 
 /// Probe a PyPI release through soldr-fetch's sole HTTP boundary.
@@ -518,26 +505,28 @@ pub async fn pypi_has_version(pkg: &str, version: &str) -> bool {
     get_request(&client, &url)
         .send()
         .await
-        .map(|response| response.status().is_success())
+        .map(|response| (200..300).contains(&response.status()))
         .unwrap_or(false)
 }
 
 /// Build a HEAD request through the fetch boundary.
-pub(crate) fn head_request(client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
-    client.head(url)
+pub(crate) fn head_request(client: &Client, url: &str) -> PendingRequest {
+    PendingRequest::new(client, Method::Head, url)
 }
 
 /// Build a POST request through the fetch boundary.
-pub(crate) fn post_request(client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
-    client.post(url)
+pub(crate) fn post_request(client: &Client, url: &str) -> PendingRequest {
+    PendingRequest::new(client, Method::Post, url)
 }
 
 /// Attach a serialized JSON request body through the fetch boundary.
 pub(crate) fn with_json_body<T: serde::Serialize>(
-    request: reqwest::RequestBuilder,
+    request: PendingRequest,
     body: &T,
-) -> reqwest::RequestBuilder {
-    request.json(body)
+) -> PendingRequest {
+    let mut request = request.header("content-type", "application/json");
+    request.body = serde_json::to_vec(body).map_err(std::io::Error::other);
+    request
 }
 
 #[derive(Debug)]
@@ -562,7 +551,7 @@ impl DownloadedAsset {
 }
 
 pub(crate) async fn stream_response_to_temp_file(
-    response: reqwest::Response,
+    response: Response,
     url: &str,
     idle_timeout: Duration,
 ) -> Result<DownloadedAsset, SoldrError> {
@@ -580,16 +569,15 @@ pub(crate) async fn stream_response_to_temp_file(
 /// again creates nested Range fanout.  Keep this separate from the legacy
 /// archive path: direct release downloads retain their Range behaviour.
 pub(crate) async fn stream_catalogue_part_to_temp_file(
-    response: reqwest::Response,
+    response: Response,
     url: &str,
     idle_timeout: Duration,
 ) -> Result<DownloadedAsset, SoldrError> {
     let safe_url = safe_asset_url(url);
-    if !response.status().is_success() {
+    if !(200..300).contains(&response.status()) {
         let retry_after = response
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|value| value.to_str().ok())
+            .header("retry-after")
+            .and_then(|value| std::str::from_utf8(value).ok())
             .map(|value| format!(" Retry-After: {value}"))
             .unwrap_or_default();
         return Err(SoldrError::Network(format!(
@@ -614,16 +602,15 @@ pub(crate) async fn stream_catalogue_part_to_temp_file(
 /// written remain in `file`; callers decide whether their validated resume
 /// state permits keeping or deleting that prefix.
 pub(crate) async fn stream_catalogue_part_into_file(
-    mut response: reqwest::Response,
+    mut response: Response,
     url: &str,
     file: &mut std::fs::File,
 ) -> Result<u64, SoldrError> {
     let safe_url = safe_asset_url(url);
-    if !response.status().is_success() {
+    if !(200..300).contains(&response.status()) {
         let retry_after = response
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|value| value.to_str().ok())
+            .header("retry-after")
+            .and_then(|value| std::str::from_utf8(value).ok())
             .and_then(|value| value.trim().parse::<u64>().ok())
             .map(|seconds| format!(" Retry-After: {seconds}"))
             .unwrap_or_default();
@@ -639,12 +626,13 @@ pub(crate) async fn stream_catalogue_part_into_file(
     loop {
         let remaining = ASSET_SAFETY_TIMEOUT.saturating_sub(started.elapsed());
         let wait = ASSET_IDLE_TIMEOUT.min(remaining);
-        let chunk = tokio::time::timeout(wait, response.chunk())
+        let chunk = tokio::time::timeout(wait, response.next_chunk())
             .await
             .map_err(|_| stalled_download_error(&safe_url, written, ASSET_IDLE_TIMEOUT))?
             .map_err(|error| interrupted_download_error(&safe_url, written, error))?;
         let Some(chunk) = chunk else { break };
-        file.write_all(&chunk)?;
+        let chunk = chunk.as_ref();
+        file.write_all(chunk)?;
         written = written.saturating_add(chunk.len() as u64);
     }
     file.flush()?;
@@ -671,7 +659,7 @@ pub(crate) fn safe_asset_url(raw: &str) -> String {
 /// or fails, so the single-stream path below is always exactly as safe as
 /// it was before this feature existed.
 pub(crate) async fn stream_response_to_temp_file_with_safety_timeout(
-    response: reqwest::Response,
+    response: Response,
     url: &str,
     idle_timeout: Duration,
     safety_timeout: Duration,
@@ -694,7 +682,7 @@ pub(crate) async fn stream_response_to_temp_file_with_safety_timeout(
 /// other test in the binary.
 #[cfg(test)]
 pub(crate) async fn stream_response_to_temp_file_with_pool(
-    response: reqwest::Response,
+    response: Response,
     url: &str,
     idle_timeout: Duration,
     safety_timeout: Duration,
@@ -712,7 +700,7 @@ pub(crate) async fn stream_response_to_temp_file_with_pool(
 }
 
 async fn stream_response_to_temp_file_inner(
-    response: reqwest::Response,
+    response: Response,
     url: &str,
     idle_timeout: Duration,
     safety_timeout: Duration,
@@ -720,7 +708,7 @@ async fn stream_response_to_temp_file_inner(
     quick: Arc<SocketPool>,
 ) -> Result<DownloadedAsset, SoldrError> {
     let safe_url = safe_asset_url(url);
-    if !response.status().is_success() {
+    if !(200..300).contains(&response.status()) {
         return Err(SoldrError::Network(format!(
             "asset download {safe_url} failed: HTTP {}",
             response.status()
@@ -778,7 +766,7 @@ async fn stream_response_to_temp_file_inner(
 /// catalogue part can opt into exactly this code without ever creating a
 /// nested Range request.
 async fn stream_response_to_temp_file_inner_direct(
-    mut response: reqwest::Response,
+    mut response: Response,
     url: &str,
     idle_timeout: Duration,
     safety_timeout: Duration,
@@ -800,7 +788,7 @@ async fn stream_response_to_temp_file_inner_direct(
         }
         let remaining = safety_timeout.saturating_sub(started.elapsed());
         let wait = idle_timeout.min(remaining);
-        let chunk = tokio::time::timeout(wait, response.chunk())
+        let chunk = tokio::time::timeout(wait, response.next_chunk())
             .await
             .map_err(|_| {
                 if wait == remaining {
@@ -815,8 +803,9 @@ async fn stream_response_to_temp_file_inner_direct(
         let Some(chunk) = chunk else {
             break;
         };
-        file.write_all(&chunk)?;
-        hasher.update(&chunk);
+        let chunk = chunk.as_ref();
+        file.write_all(chunk)?;
+        hasher.update(chunk);
         bytes = bytes.saturating_add(chunk.len() as u64);
     }
     file.flush()?;
@@ -829,10 +818,10 @@ async fn stream_response_to_temp_file_inner_direct(
 }
 
 pub(crate) async fn send_asset_request(
-    request: reqwest::RequestBuilder,
+    request: PendingRequest,
     url: &str,
     header_timeout: Duration,
-) -> Result<reqwest::Response, SoldrError> {
+) -> Result<Response, SoldrError> {
     let safe_url = safe_asset_url(url);
     tokio::time::timeout(header_timeout, request.send())
         .await
@@ -850,38 +839,38 @@ pub(crate) async fn send_asset_request(
 /// FIFO, no preemption, sized independently of Bulk so a small catalogue
 /// fetch never queues behind busy segment streams.
 pub(crate) async fn send_control_request(
-    request: reqwest::RequestBuilder,
+    request: PendingRequest,
     url: &str,
-) -> Result<reqwest::Response, SoldrError> {
+) -> Result<Response, SoldrError> {
     send_control_request_with_timeout(request, url, CONTROL_HEADER_TIMEOUT).await
 }
 
 /// Send a control request with a caller's narrower operation-specific budget.
 pub(crate) async fn send_control_request_with_timeout(
-    request: reqwest::RequestBuilder,
+    request: PendingRequest,
     url: &str,
     header_timeout: Duration,
-) -> Result<reqwest::Response, SoldrError> {
+) -> Result<Response, SoldrError> {
     send_control_request_with_pool_inner(request, url, header_timeout, quick_pool()).await
 }
 
 /// Test-only entry point that plumbs a caller-supplied pool through.
 #[cfg(test)]
 pub(crate) async fn send_control_request_with_pool(
-    request: reqwest::RequestBuilder,
+    request: PendingRequest,
     url: &str,
     header_timeout: Duration,
     pool: Arc<SocketPool>,
-) -> Result<reqwest::Response, SoldrError> {
+) -> Result<Response, SoldrError> {
     send_control_request_with_pool_inner(request, url, header_timeout, pool).await
 }
 
 async fn send_control_request_with_pool_inner(
-    request: reqwest::RequestBuilder,
+    request: PendingRequest,
     url: &str,
     header_timeout: Duration,
     pool: Arc<SocketPool>,
-) -> Result<reqwest::Response, SoldrError> {
+) -> Result<Response, SoldrError> {
     let safe_url = safe_asset_url(url);
     // Quick permits skip PENDING/preemption entirely -- see module docs.
     let mut permit = pool.acquire().await;
@@ -900,28 +889,23 @@ async fn send_control_request_with_pool_inner(
 
 /// Read a small control-plane response through the fetch boundary.
 pub(crate) async fn read_control_text(
-    response: reqwest::Response,
+    response: Response,
     url: &str,
     body_timeout: Duration,
 ) -> Result<String, SoldrError> {
     let safe_url = safe_asset_url(url);
-    tokio::time::timeout(body_timeout, response.text())
+    let bytes = tokio::time::timeout(body_timeout, response.into_bytes())
         .await
         .map_err(|_| SoldrError::Network(format!("control response body timed out: {safe_url}")))?
-        .map_err(|error| request_failure("control response body", &safe_url, &error))
+        .map_err(|error| request_failure("control response body", &safe_url, &error))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn request_failure(kind: &str, safe_url: &str, error: &reqwest::Error) -> SoldrError {
-    let category = if error.is_timeout() {
-        "timed out"
-    } else if error.is_connect() {
-        "connection failed"
-    } else if error.is_body() {
-        "body transfer failed"
-    } else if error.is_decode() {
-        "decode failed"
-    } else {
-        "request failed"
+fn request_failure(kind: &str, safe_url: &str, error: &std::io::Error) -> SoldrError {
+    let category = match error.kind() {
+        std::io::ErrorKind::TimedOut => "timed out",
+        std::io::ErrorKind::ConnectionRefused => "connection failed",
+        _ => "request failed",
     };
     SoldrError::Network(format!("{kind} {category}: {safe_url}"))
 }
@@ -932,8 +916,8 @@ fn stalled_download_error(url: &str, bytes: u64, idle_timeout: Duration) -> Sold
     ))
 }
 
-fn interrupted_download_error(url: &str, bytes: u64, error: reqwest::Error) -> SoldrError {
-    let category = if error.is_timeout() {
+fn interrupted_download_error(url: &str, bytes: u64, error: std::io::Error) -> SoldrError {
+    let category = if error.kind() == std::io::ErrorKind::TimedOut {
         "timeout"
     } else {
         "transport error"
@@ -951,21 +935,48 @@ pub(crate) use super::segmented_download::{
 };
 
 #[cfg(test)]
-mod redirect_tests {
-    use super::*;
+mod websocket_tests {
+    use super::open_signal_websocket;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
-    #[test]
-    fn auto_redirect_limit_accepts_five_and_rejects_six() {
-        let target = url::Url::parse("https://example.invalid/next").unwrap();
-        assert!(may_follow_redirect(4, true, &target));
-        assert!(!may_follow_redirect(5, true, &target));
-    }
-
-    #[test]
-    fn auto_redirect_rejects_https_downgrade_and_credentials() {
-        let downgrade = url::Url::parse("http://example.invalid/next").unwrap();
-        assert!(!may_follow_redirect(0, true, &downgrade));
-        let credentialed = url::Url::parse("https://user:secret@example.invalid/next").unwrap();
-        assert!(!may_follow_redirect(0, false, &credentialed));
+    #[tokio::test]
+    async fn websocket_upgrade_preserves_buffered_bytes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/signal", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            socket
+                .write_all(
+                    concat!(
+                        "HTTP/1.1 101 Switching Protocols\r\n",
+                        "Connection: Upgrade\r\nUpgrade: websocket\r\n",
+                        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n",
+                        "frame",
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let mut stream = open_signal_websocket(
+            url::Url::parse(&url).unwrap(),
+            "dGhlIHNhbXBsZSBub25jZQ==",
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
+        )
+        .await
+        .unwrap();
+        let mut frame = [0; 5];
+        stream.read_exact(&mut frame).await.unwrap();
+        assert_eq!(&frame, b"frame");
+        server.await.unwrap();
     }
 }

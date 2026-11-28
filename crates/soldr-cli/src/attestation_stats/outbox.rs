@@ -135,11 +135,8 @@ pub(super) async fn deliver(
         )
         .await
         .map_err(io::Error::other)??;
-        let status = response.status().as_u16();
-        let acknowledged = response
-            .headers()
-            .get(ACK_HEADER)
-            .is_some_and(|value| value == "1");
+        let status = response.status();
+        let acknowledged = response.header(ACK_HEADER) == Some(b"1".as_slice());
         if acknowledged && matches!(status, 201 | 204 | 422) {
             if status == 422 {
                 tracing::warn!("attestation stats server discarded an invalid or expired event");

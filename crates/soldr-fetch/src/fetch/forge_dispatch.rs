@@ -261,10 +261,10 @@ pub async fn request_forge_build(req: &ForgeRequest) -> Result<String, ForgeErro
     .map_err(|e| ForgeError::Network(format!("dispatch POST failed: {e}")))?;
 
     let status = resp.status();
-    if status == reqwest::StatusCode::NO_CONTENT {
+    if status == 204 {
         return Ok(now_iso);
     }
-    if status == reqwest::StatusCode::NOT_FOUND {
+    if status == 404 {
         return Err(ForgeError::Config(format!(
             "dispatch target {dispatch_url} returned 404 — is `{workflow}` published \
              on the {git_ref} ref of {repo}?",
@@ -327,7 +327,7 @@ pub async fn poll_forge_run(req: &ForgeRequest, since_iso: &str) -> Result<Actio
         )
         .await;
         let Ok(resp) = resp else { continue };
-        if !resp.status().is_success() {
+        if !(200..300).contains(&resp.status()) {
             continue;
         }
         let body: serde_json::Value = match super::stream_download::read_control_text(
