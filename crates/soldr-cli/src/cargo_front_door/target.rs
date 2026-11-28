@@ -262,10 +262,8 @@ pub(crate) async fn apply_linker_override_reporting(
     // SOLDR_LINKER=fast is inherited from setup-soldr. Do not replace an
     // explicit target toolchain with the host clang/LLD fallback.
     if let Some(linker_path) = injection.linker {
-        if !linker::effective_command_env_is_non_empty(command, &linker_key) {
-            let value = crate::linker_shim::linker_value_for_command(command, &linker_path)?;
-            command.env(&linker_key, value);
-        }
+        let explicit = matches!(selection.source, linker::LinkerSource::Env);
+        set_target_linker(command, &linker_key, &linker_path, explicit, &target)?;
     }
     if let Some(rustflags) = injection.rustflags {
         if !linker::effective_command_env_is_non_empty(command, &rustflags_key) {
@@ -278,6 +276,38 @@ pub(crate) async fn apply_linker_override_reporting(
         injection: reported,
         reld: reld_path,
     }))
+}
+
+/// Set `CARGO_TARGET_<T>_LINKER` unless the caller already chose one.
+/// soldr#4281: the blessed MSVC prep fills it with soldr's own `lld-link`
+/// default, which is not a user choice, so an explicit SOLDR_LINKER replaces
+/// it; a linker the user set still wins, with a warning instead of silence.
+fn set_target_linker(
+    command: &mut std::process::Command,
+    linker_key: &str,
+    linker_path: &str,
+    explicit: bool,
+    target: &str,
+) -> Result<(), SoldrError> {
+    let current = command
+        .get_envs()
+        .find(|(key, _)| *key == std::ffi::OsStr::new(linker_key))
+        .and_then(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+        .or_else(|| std::env::var_os(linker_key));
+    let blessed_default = current.as_deref() == Some(std::ffi::OsStr::new("lld-link"));
+    if !linker::effective_command_env_is_non_empty(command, linker_key)
+        || (explicit && blessed_default)
+    {
+        let value = crate::linker_shim::linker_value_for_command(command, linker_path)?;
+        command.env(linker_key, value);
+    } else if explicit {
+        eprintln!(
+            "soldr: warning: SOLDR_LINKER={} ignored for {target}: {linker_key} is already {}",
+            std::env::var(crate::LINKER_ENV_VAR).unwrap_or_default(),
+            current.unwrap_or_default().to_string_lossy()
+        );
+    }
+    Ok(())
 }
 
 /// Synchronous bridge for unit tests that only inspect the command environment.
