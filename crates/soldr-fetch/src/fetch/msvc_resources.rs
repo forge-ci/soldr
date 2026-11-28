@@ -118,7 +118,10 @@ fn recorded_tree(parent: &Path, resource: &Path, relative: &str) -> Option<PathB
         "compiler-rt/{}/windows-x64/bundle.tar.zst",
         super::MANAGED_LLVM_VERSION
     );
-    for entry in std::fs::read_dir(parent).ok()?.flatten() {
+    // Canonicalize like the online path does, so a reused tree resolves to
+    // the same path it was verified at (on Windows the `\\?\` verbatim form).
+    let parent = parent.canonicalize().ok()?;
+    for entry in std::fs::read_dir(&parent).ok()?.flatten() {
         let root = entry.path();
         let Ok(record) = std::fs::read_to_string(root.join(UNIT_RECORD)) else {
             continue;

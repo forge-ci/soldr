@@ -162,9 +162,10 @@ fn reld_bin_from_env() -> Result<Option<PathBuf>, SoldrError> {
     Ok(Some(path))
 }
 
-/// The archive extractor appends the host executable suffix to every name.
+/// The archive extractor appends the host executable suffix to every
+/// extensionless name; payloads such as `libllvm_ld.so` keep theirs.
 fn installed_name(name: &str) -> String {
-    format!("{name}{}", std::env::consts::EXE_SUFFIX)
+    super::archive::with_binary_ext(name, std::env::consts::EXE_SUFFIX)
 }
 
 fn managed_binary_path(paths: &SoldrPaths, asset: &ReleaseAsset) -> PathBuf {

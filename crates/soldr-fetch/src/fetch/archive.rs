@@ -411,8 +411,21 @@ fn copy_and_hash<W: Write>(
 pub(crate) fn desired_binary_names(binary_names: &[&str], target: &TargetTriple) -> Vec<String> {
     binary_names
         .iter()
-        .map(|binary_name| format!("{binary_name}{}", target.binary_ext()))
+        .map(|binary_name| with_binary_ext(binary_name, target.binary_ext()))
         .collect()
+}
+
+/// Append the target's executable suffix to an extensionless name only.
+///
+/// A listed file that already has an extension (reld's `libllvm_ld.so`
+/// engine, `LICENSE-LLVM.txt`) is a payload, not an executable, and keeps
+/// its name: on Windows it must not become `libllvm_ld.so.exe` (soldr#4281).
+pub(crate) fn with_binary_ext(name: &str, binary_ext: &str) -> String {
+    if std::path::Path::new(name).extension().is_some() {
+        name.to_owned()
+    } else {
+        format!("{name}{binary_ext}")
+    }
 }
 
 fn extract_zip<R: std::io::Read + std::io::Seek>(
@@ -593,6 +606,20 @@ mod tests {
     // The cargo-zigbuild URL convention is what soldr's
     // `download_and_extract` dispatches on. If a future URL ends in
     // `.txz` instead of `.tar.xz` the same path must trigger.
+    /// soldr#4281: on Windows only extensionless executables gain `.exe`;
+    /// reld's `libllvm_ld.so` engine and licence files keep their names.
+    #[test]
+    fn binary_ext_is_appended_only_to_extensionless_names() {
+        assert_eq!(with_binary_ext("reld", ".exe"), "reld.exe");
+        assert_eq!(with_binary_ext("reld-link", ".exe"), "reld-link.exe");
+        assert_eq!(with_binary_ext("libllvm_ld.so", ".exe"), "libllvm_ld.so");
+        assert_eq!(
+            with_binary_ext("LICENSE-LLVM.txt", ".exe"),
+            "LICENSE-LLVM.txt"
+        );
+        assert_eq!(with_binary_ext("reld", ""), "reld");
+    }
+
     #[test]
     fn tar_xz_url_suffix_recognized_for_dispatch() {
         // This is a documentation test for the dispatch table in
