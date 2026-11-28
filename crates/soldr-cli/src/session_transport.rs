@@ -96,10 +96,15 @@ pub fn session_hot_path(rustc_argv: &[String]) -> SessionHotPathOutcome {
         Err(err) => return SessionHotPathOutcome::HardFail(err),
     };
     let cwd = cwd.display().to_string();
-    let env: Vec<SessionEnvVar> = std::env::vars()
+    let mut env: Vec<SessionEnvVar> = std::env::vars()
         .map(|(key, value)| SessionEnvVar { key, value })
         .collect();
 
+    env.retain(|v| v.key != soldr_daemon::admission_progress::CLIENT_TOKEN);
+    env.push(SessionEnvVar {
+        key: soldr_daemon::admission_progress::CLIENT_TOKEN.into(),
+        value: std::process::id().to_string(),
+    });
     let started = std::time::Instant::now();
     let mut attempt =
         run_session_compile_for_service(&service_name, rustc_argv, cwd.clone(), env.clone());
@@ -355,8 +360,17 @@ fn run_session_compile_for_service(
             .build()
             .map_err(SessionError::pre_output)?;
         let compile = run_session_compile_async(service_name, rustc_argv, cwd, env);
-        crate::platform::wait::block_on_for(&runtime, compile, crate::platform::wait::LONG_CHILD)
-            .unwrap_or_else(|error| Err(SessionError::pre_output(error.into())))
+        let result = crate::platform::wait::block_on_for(
+            &runtime,
+            compile,
+            crate::platform::wait::LONG_CHILD,
+        )
+        .unwrap_or_else(|error| Err(SessionError::pre_output(error.into())));
+        // A progress probe may have timed out while its blocking connector is
+        // still running. Runtime::drop would wait without a deadline for it,
+        // undoing the compile's connection-liveness bound.
+        runtime.shutdown_background();
+        result
     };
 
     // A Cargo wrapper arrives before Soldr constructs its command runtime, but
@@ -411,7 +425,9 @@ async fn run_session_compile_async(
     probe.on_request_sent();
     let reply_timeout = crate::daemon::client::compile_reply_timeout();
     let pump = pump_session_output_with_timeout(&mut stream, reply_timeout, &mut probe);
-    crate::compile_stall_watch::await_compile_reply(pump).await
+    crate::compile_stall_watch::await_compile_reply(pump)
+        .await
+        .map_err(SessionError::pre_output)?
 }
 
 async fn connect_broker_with_busy_retry(
@@ -906,3 +922,13 @@ impl RelayProbe {
 #[cfg(test)]
 #[path = "session_transport_tests.rs"]
 mod tests;
+
+/// The same connection-liveness bound applies while monitoring a compile.
+pub(crate) fn compile_liveness_deadline() -> std::time::Duration {
+    session_setup_timeout(
+        std::time::Duration::from_secs(30),
+        std::env::var(CONNECTION_LIVENESS_DEADLINE_ENV)
+            .ok()
+            .as_deref(),
+    )
+}

@@ -1,9 +1,8 @@
-//! Compile-reply stall dump (soldr#3813). A SESSION compile that has not
-//! replied for `SOLDR_COMPILE_STALL_DUMP_SECS` (default 300 s) gets a
-//! forensic dump of the soldr daemon/broker and this process's descendants,
-//! and the dump path is printed on stderr. The wait itself is unchanged: the
-//! dump repeats every interval and never kills anything, so a legitimately
-//! long compile still finishes while a wedged one leaves evidence behind.
+//! Admission-aware compile supervision (soldr#4186).
+//! Queueing is healthy while the selected daemon admits or completes work.
+//! A daemon-wide no-progress interval produces bounded evidence and fails
+//! loudly. Host admission alone does not prove compiler execution: zccache's
+//! final shared/exclusive resource gate lies behind that boundary.
 
 use std::future::Future;
 use std::time::Duration;
@@ -26,6 +25,7 @@ pub(crate) fn stall_dump_interval(raw: Option<&str>) -> Option<Duration> {
 
 /// Await `work`, calling `on_stall(elapsed)` each time `interval` passes
 /// without it completing.
+#[cfg(test)]
 pub(crate) async fn await_with_stall_hook<F, H, Fut>(
     work: F,
     interval: Option<Duration>,
@@ -52,33 +52,216 @@ where
     }
 }
 
-/// Await a compile reply, dumping daemon/broker state on each stall interval.
-pub(crate) async fn await_compile_reply<F: Future>(work: F) -> F::Output {
-    let interval = stall_dump_interval(std::env::var(STALL_DUMP_ENV).ok().as_deref());
-    await_with_stall_hook(work, interval, |elapsed| async move {
-        let dumped = tokio::task::spawn_blocking(|| {
-            let paths = crate::core::SoldrPaths::new().map_err(std::io::Error::other)?;
-            crate::cook_watchdog_dump::write_stall_dump(&paths, "compile-reply")
-        })
-        .await;
-        let where_ = match dumped {
-            Ok(Ok(dir)) => format!("stack dump written to {}", dir.display()),
-            Ok(Err(error)) => format!("stack dump failed: {error}"),
-            Err(error) => format!("stack dump task failed: {error}"),
+/// Await a compile reply with admission-aware daemon liveness checks.
+pub(crate) async fn await_compile_reply<F: Future>(work: F) -> std::io::Result<F::Output> {
+    let Some(threshold) = stall_dump_interval(std::env::var(STALL_DUMP_ENV).ok().as_deref()) else {
+        return Ok(work.await);
+    };
+    tokio::pin!(work);
+    let mut classifier = StallClassifier::default();
+    let token = std::process::id().to_string();
+    let mut informed = false;
+    let mut disconnected_since = None;
+    loop {
+        tokio::select! {
+            biased;
+            output = &mut work => return Ok(output),
+            () = tokio::time::sleep(Duration::from_secs(5).min(threshold)) => {}
+        }
+        let probe_started = std::time::Instant::now();
+        let since = disconnected_since.unwrap_or(probe_started);
+        let budget =
+            crate::session_transport::compile_liveness_deadline().saturating_sub(since.elapsed());
+        let probe = tokio::task::spawn_blocking(daemon_progress);
+        let status = tokio::select! {
+            biased;
+            output = &mut work => return Ok(output),
+            result = tokio::time::timeout(budget, probe) => result
+                .map_err(std::io::Error::other)
+                .and_then(|r| r.map_err(std::io::Error::other))
+                .and_then(|r| r),
         };
-        eprintln!(
-            "\x1b[31msoldr: compile reply has made no progress for {}s; {where_}. Still waiting \
-             (set {STALL_DUMP_ENV}=0 to disable these dumps).\x1b[0m",
-            elapsed.as_secs()
-        );
-    })
-    .await
+        let status = match status {
+            Ok(status) => {
+                disconnected_since = None;
+                status
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                disconnected_since = None;
+                continue;
+            }
+            Err(error) => {
+                let since = disconnected_since.get_or_insert(probe_started);
+                if since.elapsed() < crate::session_transport::compile_liveness_deadline() {
+                    continue;
+                }
+                let message = format!("soldr: daemon progress connection is unavailable: {error}; run `soldr daemon status`, `soldr logs paths`, then `soldr daemon stop` and `soldr daemon start`");
+                eprintln!("\x1b[31m{message}\x1b[0m");
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, message));
+            }
+        };
+        let elapsed = classifier.observe(&status, &token, threshold);
+        if let Some(wait) = status
+            .admission
+            .as_ref()
+            .and_then(|a| a.waits.iter().find(|w| w.token == token && w.phase != 2))
+        {
+            if !informed && wait.waited_secs >= 60 {
+                let a = status.admission.as_ref().expect("admission exists");
+                eprintln!("\x1b[2msoldr: queued for a compile slot (#{} of {}, {} running, waited {}s)\x1b[0m",
+                    wait.position, a.queued, a.running, wait.waited_secs);
+                informed = true;
+            }
+        }
+        if let Some(reason) = elapsed {
+            let dump = tokio::task::spawn_blocking(|| {
+                let paths = crate::core::SoldrPaths::new().map_err(std::io::Error::other)?;
+                crate::cook_watchdog_dump::write_stall_dump(&paths, "compile-reply")
+            })
+            .await;
+            let message = format!("soldr: {reason}; diagnostic dump: {dump:?}. Run `soldr daemon status`, `soldr logs paths`, then `soldr daemon stop` and `soldr daemon start` for recovery");
+            eprintln!("\x1b[31m{message}\x1b[0m");
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, message));
+        }
+    }
+}
+
+pub(crate) fn daemon_progress() -> std::io::Result<crate::daemon::protocol::StatusInfo> {
+    let paths = crate::core::SoldrPaths::new().map_err(std::io::Error::other)?;
+    crate::daemon::client::status(&crate::daemon::client::default_sock_path(&paths))
+        .map_err(probe_error)
+}
+
+/// Maps a status-probe failure. `NotRunning` (no endpoint at the probed path)
+/// means this process cannot observe the daemon the compile is routed to
+/// (broker/session routes use another root): "no information", never "daemon
+/// dead". It becomes `ErrorKind::NotFound`, which the stall loop ignores.
+fn probe_error(error: crate::daemon::client::ClientError) -> std::io::Error {
+    match error {
+        crate::daemon::client::ClientError::NotRunning => std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "daemon endpoint not observable",
+        ),
+        other => std::io::Error::other(format!("{other:?}")),
+    }
+}
+
+#[derive(Default)]
+struct StallClassifier {
+    counters: Option<(u64, u64, u64)>,
+    unchanged_since: Option<std::time::Instant>,
+}
+impl StallClassifier {
+    fn observe(
+        &mut self,
+        status: &crate::daemon::protocol::StatusInfo,
+        _token: &str,
+        threshold: Duration,
+    ) -> Option<&'static str> {
+        let now = std::time::Instant::now();
+        let Some(a) = &status.admission else {
+            return Some("daemon does not report admission progress; update daemon");
+        };
+        let counters = (status.generation, a.admissions, a.completions);
+        if self.counters != Some(counters) {
+            self.counters = Some(counters);
+            self.unchanged_since = Some(now);
+        }
+        // A host permit is acquired BEFORE zccache's exclusive resource lock.
+        // Without a final-admission/output callback it is unsafe to interpret
+        // phase 2 elapsed time as compiler silence. Keep daemon-wide liveness.
+        if self
+            .unchanged_since
+            .is_some_and(|t| now.duration_since(t) >= threshold)
+        {
+            return Some(
+                "daemon has made no admissions or completions within the no-progress threshold",
+            );
+        }
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn status() -> crate::daemon::protocol::StatusInfo {
+        crate::daemon::protocol::StatusInfo {
+            version: crate::daemon::protocol::PROTOCOL_VERSION,
+            pid: 1,
+            generation: 1,
+            uptime_secs: 0,
+            request_count: 0,
+            cook_stats: None,
+            compile_backend: "embedded".into(),
+            compile_jobs: 1,
+            compile_jobs_source: "test".into(),
+            in_flight_compiles: Some(3),
+            maintenance_active: Some(false),
+            admission: Some(crate::core::wire::proto::WireAdmissionProgress {
+                queued: 2,
+                running: 1,
+                waits: vec![crate::core::wire::proto::WireCompileWait {
+                    token: "client".into(),
+                    phase: 1,
+                    position: 2,
+                    waited_secs: 900,
+                }],
+                ..Default::default()
+            }),
+        }
+    }
+    #[test]
+    fn queued_moving_is_healthy_but_daemon_without_progress_stalls() {
+        let mut classifier = StallClassifier::default();
+        let mut status = status();
+        let threshold = Duration::from_secs(300);
+        assert_eq!(classifier.observe(&status, "client", threshold), None);
+        classifier.unchanged_since = Some(std::time::Instant::now() - threshold);
+        status.admission.as_mut().unwrap().completions += 1;
+        assert_eq!(classifier.observe(&status, "client", threshold), None);
+        classifier.unchanged_since = Some(std::time::Instant::now() - threshold);
+        assert!(classifier
+            .observe(&status, "client", threshold)
+            .unwrap()
+            .contains("no admissions or completions"));
+    }
+    #[test]
+    fn host_admitted_wait_does_not_stall_while_other_work_completes() {
+        let mut classifier = StallClassifier::default();
+        let mut status = status();
+        status.admission.as_mut().unwrap().waits[0].phase = 2;
+        assert_eq!(
+            classifier.observe(&status, "client", Duration::from_secs(300)),
+            None
+        );
+    }
+
+    #[test]
+    fn unobservable_probe_endpoint_is_not_a_dead_daemon() {
+        use crate::daemon::client::ClientError;
+        // NotRunning must map to NotFound, which `await_compile_reply` skips
+        // instead of counting toward the dead-daemon deadline (a healthy compile
+        // routed through a broker/session root was killed after 35s).
+        assert_eq!(
+            probe_error(ClientError::NotRunning).kind(),
+            std::io::ErrorKind::NotFound
+        );
+        // Real transport/protocol failures still count as a lost connection.
+        assert_ne!(
+            probe_error(ClientError::Protocol("bad".into())).kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_ne!(
+            probe_error(ClientError::Io(std::io::Error::from(
+                std::io::ErrorKind::ConnectionRefused
+            )))
+            .kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
 
     #[test]
     fn interval_parses_default_disable_and_value() {

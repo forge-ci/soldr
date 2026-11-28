@@ -39,6 +39,7 @@ pub(crate) fn render(info: &StatusInfo, paths: &SoldrPaths, json: bool) {
             "uptime_secs": info.uptime_secs,
             "request_count": info.request_count,
             "in_flight_compiles": info.in_flight_compiles,
+            "admission": info.admission,
             "compile_jobs": {
                 "daemon": info.compile_jobs,
                 "daemon_source": info.compile_jobs_source,
@@ -63,6 +64,20 @@ pub(crate) fn render(info: &StatusInfo, paths: &SoldrPaths, json: bool) {
     match info.in_flight_compiles {
         Some(count) => println!("  in-flight compiles: {count}"),
         None => println!("  in-flight compiles: unknown (daemon does not report it)"),
+    }
+    if let Some(a) = &info.admission {
+        println!(
+            "  queued: {} (oldest waited {}s)",
+            a.queued, a.oldest_wait_secs
+        );
+        println!(
+            "  running: {} of {} slots (host admitted)",
+            a.running, info.compile_jobs
+        );
+        println!(
+            "  completions in last minute: {}",
+            a.completions_last_minute
+        );
     }
     println!(
         "  pkg version: {} (this cli: {})",

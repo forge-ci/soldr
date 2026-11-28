@@ -5,8 +5,8 @@ pub fn submit_request_with_timeout(
     timeout: Duration,
 ) -> Result<Response, ClientError> {
     let context = |stage, error| request_transport_error(sock_path, req, timeout, stage, error);
-    if let Some(mut stream) = connect_through_override(sock_path, timeout)
-        .map_err(|error| context("connect", error))?
+    if let Some(mut stream) =
+        connect_through_override(sock_path, timeout).map_err(|error| context("connect", error))?
     {
         write_frame_sync(&mut stream, req)
             .map_err(|error| context("write request", ClientError::from(error)))?;
@@ -17,8 +17,7 @@ pub fn submit_request_with_timeout(
         submit_request_windows_with_timeout(sock_path, req, timeout)
             .map_err(|error| context("named-pipe request/reply", error))
     } else {
-        let mut stream = connect(sock_path, timeout)
-            .map_err(|error| context("connect", error))?;
+        let mut stream = connect(sock_path, timeout).map_err(|error| context("connect", error))?;
         write_frame_sync(&mut stream, req)
             .map_err(|error| context("write request", ClientError::from(error)))?;
         read_frame_sync(&mut stream)
@@ -242,7 +241,10 @@ fn submit_fire_and_forget_windows(
                     )
                     .await
                     {
-                        Ok(Ok(_)) => ReceiptAck::Acknowledged,
+                        Ok(Ok(Response::Ack)) => ReceiptAck::Acknowledged,
+                        Ok(Ok(other)) => ReceiptAck::Unconfirmed(format!(
+                            "unexpected receipt response: {other:?}"
+                        )),
                         Ok(Err(error)) => ReceiptAck::Unconfirmed(format!("{error}")),
                         Err(_) => ReceiptAck::Unconfirmed(format!(
                             "no ack within {HOT_PATH_ACK_TIMEOUT:?}"
@@ -314,4 +316,49 @@ pub fn default_sock_path(paths: &SoldrPaths) -> PathBuf {
     }
     crate::daemon::session_endpoint::resolved_control_endpoint_path(paths)
         .unwrap_or_else(|_| PathBuf::from("<missing-daemon-control-endpoint>"))
+}
+
+/// Retries individual I/O operations, so a partial header/body is never lost.
+struct ReceiptRetry<'a, S> {
+    inner: &'a mut S,
+    deadline: std::time::Instant,
+}
+fn retry_receipt<T>(
+    deadline: std::time::Instant,
+    mut operation: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "receipt acknowledgement deadline expired",
+            ));
+        }
+        match operation() {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::TimedOut
+                ) && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+}
+impl<S: Read> Read for ReceiptRetry<'_, S> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        retry_receipt(self.deadline, || self.inner.read(buf))
+    }
+}
+impl<S: Write> Write for ReceiptRetry<'_, S> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        retry_receipt(self.deadline, || self.inner.write(buf))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        retry_receipt(self.deadline, || self.inner.flush())
+    }
 }

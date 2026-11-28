@@ -79,9 +79,9 @@ const REPLY_TIMEOUT: Duration = Duration::from_millis(2_000);
 /// longer than the generic status/shutdown request timeout.
 const CACHE_FLUSH_REPLY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Historical protocols that must remain able to retire their daemon during
-/// an in-place upgrade. v25 is the immediately preceding daemon protocol;
+/// an in-place upgrade. v26 is the immediately preceding daemon protocol;
 /// v17 is the last protocol whose shutdown acknowledgement lacked identity.
-const SHUTDOWN_COMPAT_PROTOCOL_VERSIONS: &[u32] = &[25, 24, 17];
+const SHUTDOWN_COMPAT_PROTOCOL_VERSIONS: &[u32] = &[26, 25, 24, 17];
 
 /// Default compile-dispatch timeout — rustc may take minutes for a release
 /// build of a large crate, so the default stays generous (30 minutes): a
@@ -206,9 +206,16 @@ fn write_awaiting_receipt_ack<S: Read + Write>(
     stream: &mut S,
     req: &Request,
 ) -> Result<ReceiptAck, ClientError> {
-    write_frame_sync(stream, req)?;
-    Ok(match read_frame_sync::<_, Response>(stream) {
-        Ok(_) => ReceiptAck::Acknowledged,
+    // Socket receive deadlines surface as EAGAIN on Unix. Retain partial
+    // frame bytes across retries instead of restarting a frame read.
+    let mut stream = ReceiptRetry {
+        inner: stream,
+        deadline: std::time::Instant::now() + Duration::from_secs(2),
+    };
+    write_frame_sync(&mut stream, req)?;
+    Ok(match read_frame_sync::<_, Response>(&mut stream) {
+        Ok(Response::Ack) => ReceiptAck::Acknowledged,
+        Ok(other) => ReceiptAck::Unconfirmed(format!("unexpected receipt response: {other:?}")),
         Err(error) => ReceiptAck::Unconfirmed(format!("{error}")),
     })
 }
