@@ -265,21 +265,49 @@ async fn install_locked(
         asset.plat_arch,
     );
 
-    place_llvm_tree(downloaded.path(), install_dir)?;
-    let libs_done = complete_host_libs(paths, bin_dir).await?;
-    write_stamp(stamp, libs_done)?;
+    // soldr#4295: extract, overlay and stamp a sibling staging directory, then
+    // rename the finished tree into place. The canonical name never holds a
+    // partial tree, and a leftover there is replaced instead of failing.
+    let staged = stage_llvm_tree(downloaded.path(), install_dir)?;
+    let staged_bin = staged.path().join("hardlinked").join("bin");
+    let libs_done = complete_host_libs(paths, &staged_bin).await?;
+    write_stamp(&staged.path().join(".complete"), libs_done)?;
+    promote_llvm_tree(staged, install_dir)?;
+    debug_assert!(stamp.is_file());
     eprintln!("soldr: extracted LLVM to {}", install_dir.display());
     Ok(bin_dir.to_path_buf())
 }
 
-/// Put the verified LLVM archive's tree at `install_dir` (soldr#4295).
-fn place_llvm_tree(archive: &Path, install_dir: &Path) -> Result<(), SoldrError> {
-    if install_dir.exists() {
-        std::fs::remove_dir_all(install_dir)?;
+/// Attach the operation and path to an IO error (soldr#4295: a bare
+/// `File exists (os error 17)` named nothing).
+fn io_at<'a>(op: &'static str, path: &'a Path) -> impl FnOnce(std::io::Error) -> SoldrError + 'a {
+    move |error| {
+        SoldrError::Io(std::io::Error::new(
+            error.kind(),
+            format!("{op} {}: {error}", path.display()),
+        ))
     }
-    std::fs::create_dir_all(install_dir)?;
-    extract_tar_zst_tree(std::fs::File::open(archive)?, install_dir)?;
-    let bin_dir = install_dir.join("hardlinked").join("bin");
+}
+
+/// A stamped install whose `bin` directory exists: nothing to replace.
+fn llvm_tree_complete(install_dir: &Path) -> bool {
+    install_dir.join(".complete").is_file() && install_dir.join("hardlinked").join("bin").is_dir()
+}
+
+/// Extract the verified LLVM archive into a fresh sibling of `install_dir`
+/// (same filesystem, so the final rename is atomic) and restore exec bits.
+fn stage_llvm_tree(archive: &Path, install_dir: &Path) -> Result<tempfile::TempDir, SoldrError> {
+    let parent = install_dir
+        .parent()
+        .ok_or_else(|| SoldrError::Archive("LLVM install path has no parent".into()))?;
+    std::fs::create_dir_all(parent).map_err(io_at("create", parent))?;
+    let staged = tempfile::Builder::new()
+        .prefix(".llvm-staging-")
+        .tempdir_in(parent)
+        .map_err(io_at("create staging dir in", parent))?;
+    let file = std::fs::File::open(archive).map_err(io_at("open", archive))?;
+    extract_tar_zst_tree(file, staged.path())?;
+    let bin_dir = staged.path().join("hardlinked").join("bin");
     if !bin_dir.is_dir() {
         return Err(SoldrError::Archive(format!(
             "LLVM extract did not produce expected directory {}",
@@ -287,7 +315,81 @@ fn place_llvm_tree(archive: &Path, install_dir: &Path) -> Result<(), SoldrError>
         )));
     }
     restore_bin_exec_bits(&bin_dir)?;
-    Ok(())
+    Ok(staged)
+}
+
+/// Move whatever sits at `path` (a stale or partial tree, a file, a dangling
+/// link) out of the way. A real directory is renamed aside first so the
+/// canonical name frees up at once, then deleted best-effort.
+fn clear_install_path(path: &Path) -> Result<(), SoldrError> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_at("inspect", path)(error)),
+    };
+    let result = if crate::platform::fs::links::is_link_or_reparse(&meta) {
+        crate::platform::fs::links::remove(path)
+    } else if meta.is_dir() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let mut aside = path.as_os_str().to_owned();
+        aside.push(format!(".stale-{}-{nonce}", std::process::id()));
+        let aside = PathBuf::from(aside);
+        std::fs::rename(path, &aside).map(|()| {
+            let _ = std::fs::remove_dir_all(&aside);
+        })
+    } else {
+        std::fs::remove_file(path)
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_at("remove stale", path)(error)),
+    }
+}
+
+/// Rename a finished staging tree to `install_dir`. If something is already
+/// there (EEXIST/ENOTEMPTY/ENOTDIR, or Windows' access denied): accept it when
+/// it is a complete stamped install (another installer won), otherwise
+/// replace it and retry.
+fn promote_llvm_tree(staged: tempfile::TempDir, install_dir: &Path) -> Result<(), SoldrError> {
+    const ATTEMPTS: usize = 5;
+    let staged = staged.keep();
+    let mut last_error = None;
+    for _ in 0..ATTEMPTS {
+        match std::fs::rename(&staged, install_dir) {
+            Ok(()) => return Ok(()),
+            Err(error) if std::fs::symlink_metadata(install_dir).is_ok() => {
+                if llvm_tree_complete(install_dir) {
+                    let _ = std::fs::remove_dir_all(&staged);
+                    return Ok(());
+                }
+                last_error = Some(error);
+                if let Err(clear) = clear_install_path(install_dir) {
+                    let _ = std::fs::remove_dir_all(&staged);
+                    return Err(clear);
+                }
+            }
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&staged);
+                return Err(io_at("rename staged LLVM into", install_dir)(error));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&staged);
+    Err(io_at("rename staged LLVM into", install_dir)(
+        last_error.unwrap_or_else(|| std::io::Error::other("install path kept reappearing")),
+    ))
+}
+
+/// Stage, stamp and promote a tree without the host-libs overlay (tests).
+#[cfg(test)]
+fn place_llvm_tree(archive: &Path, install_dir: &Path) -> Result<(), SoldrError> {
+    let staged = stage_llvm_tree(archive, install_dir)?;
+    write_stamp(&staged.path().join(".complete"), true)?;
+    promote_llvm_tree(staged, install_dir)
 }
 
 async fn catalogue_entry_for_asset(asset: &LlvmAsset) -> Result<ManifestEntry, SoldrError> {
@@ -446,7 +548,10 @@ mod tests {
         header.set_cksum();
         tar.append_data(&mut header, "hardlinked/bin/clang", &body[..])
             .expect("append");
-        tar.into_inner().expect("tar").finish().expect("zstd finish");
+        tar.into_inner()
+            .expect("tar")
+            .finish()
+            .expect("zstd finish");
         archive
     }
 
@@ -470,7 +575,11 @@ mod tests {
             return;
         }
         place_llvm_tree(&archive, &install_dir).expect("place over dangling link");
-        assert!(install_dir.join("hardlinked").join("bin").join("clang").is_file());
+        assert!(install_dir
+            .join("hardlinked")
+            .join("bin")
+            .join("clang")
+            .is_file());
     }
 
     /// soldr#4295: a regular file left at the install path is replaced, too.
@@ -481,7 +590,11 @@ mod tests {
         let install_dir = tmp.path().join("llvm-21.1.5-r1");
         std::fs::write(&install_dir, b"leftover").expect("write");
         place_llvm_tree(&archive, &install_dir).expect("place over a file");
-        assert!(install_dir.join("hardlinked").join("bin").join("clang").is_file());
+        assert!(install_dir
+            .join("hardlinked")
+            .join("bin")
+            .join("clang")
+            .is_file());
     }
 
     /// soldr#4295: a partial tree from an interrupted extraction is replaced,
@@ -494,7 +607,11 @@ mod tests {
         std::fs::create_dir_all(install_dir.join("hardlinked").join("lib")).expect("mkdir");
         std::fs::write(install_dir.join("hardlinked").join("stale"), b"x").expect("write");
         place_llvm_tree(&archive, &install_dir).expect("place over partial");
-        assert!(install_dir.join("hardlinked").join("bin").join("clang").is_file());
+        assert!(install_dir
+            .join("hardlinked")
+            .join("bin")
+            .join("clang")
+            .is_file());
         assert!(!install_dir.join("hardlinked").join("stale").exists());
     }
 
@@ -509,12 +626,19 @@ mod tests {
             let handles: Vec<_> = (0..8)
                 .map(|_| scope.spawn(|| place_llvm_tree(&archive, &install_dir)))
                 .collect();
-            handles.into_iter().map(|h| h.join().expect("join")).collect()
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("join"))
+                .collect()
         });
         for result in results {
             result.expect("concurrent place");
         }
-        assert!(install_dir.join("hardlinked").join("bin").join("clang").is_file());
+        assert!(install_dir
+            .join("hardlinked")
+            .join("bin")
+            .join("clang")
+            .is_file());
     }
 
     /// soldr#4295: an IO failure names the path it hit.
