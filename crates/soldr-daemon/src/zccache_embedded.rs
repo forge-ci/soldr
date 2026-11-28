@@ -682,7 +682,7 @@ fn uuid_like_random_id() -> String {
     let mut hasher = StreamHasher::new();
     hasher.update(&std::process::id().to_le_bytes());
     hasher.update(&nanos.to_le_bytes());
-    hex::encode(&hasher.finalize().as_bytes()[..16])
+    hasher.finalize().to_hex()[..32].to_string()
 }
 /// Encode [`CacheOutcome`] as the integer protocol expects on the wire:
 /// 1=Hit, 2=Miss, 3=Error. Kept inside the embedded module so the

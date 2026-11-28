@@ -101,7 +101,7 @@ pub(super) fn derive_legacy_identity(
     let mut hasher = StreamHasher::new();
     hasher.update(paths.root.as_os_str().to_string_lossy().as_bytes());
     hasher.update(exe_path.as_os_str().to_string_lossy().as_bytes());
-    let id = hex::encode(&hasher.finalize().as_bytes()[..16]);
+    let id = hasher.finalize().to_hex()[..32].to_string();
     HostIdentity {
         product: "soldr".to_string(),
         instance_id: id.clone(),
@@ -396,7 +396,7 @@ fn writer_lock_is_held(store: &std::path::Path) -> bool {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
         Err(_) => return true,
     };
-    kernal_api::platform::fs::try_lock_exclusive(&file).is_err()
+    kernal_api::platform::fs::try_lock_exclusive_owned(file).is_err()
 }
 
 /// True the first time a file's identity is seen, so a hardlinked file is

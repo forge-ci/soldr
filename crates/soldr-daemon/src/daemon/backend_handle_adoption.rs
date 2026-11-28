@@ -107,10 +107,7 @@ pub fn broker_route_identity(
     hasher.update(image_hash.as_bytes());
     let digest = hasher.finalize();
     Ok(BrokerRouteIdentity {
-        service_name: format!(
-            "{SOLDR_DAEMON_SERVICE_NAME}-{}",
-            hex::encode(&digest.as_bytes()[..16])
-        ),
+        service_name: format!("{SOLDR_DAEMON_SERVICE_NAME}-{}", &digest.to_hex()[..32]),
         image_hash,
     })
 }

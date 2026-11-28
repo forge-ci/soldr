@@ -165,7 +165,7 @@ pub(in crate::remote_build) async fn run_test_program(
     let cwd = cwd.strip_prefix(&source).map_err(io::Error::other)?;
     let mut random = [0; 16];
     getrandom::fill(&mut random).map_err(io::Error::other)?;
-    let directory = requests.join(hex::encode(random));
+    let directory = requests.join(crate::core::hex_lower(&random));
     fs::create_dir(&directory)?;
     let staged = directory.join("executable");
     fs::copy(executable, &staged)?;

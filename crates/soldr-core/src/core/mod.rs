@@ -47,6 +47,18 @@ mod toolchain_manifest;
 mod toolchain_resolve;
 pub mod wire;
 
+/// Encode bytes as lowercase hexadecimal.
+#[must_use]
+pub fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0F) as usize] as char);
+    }
+    out
+}
+
 pub use canonical_targets::{canonical_targets, is_canonical, CANONICAL_TARGETS};
 pub use clud::{running_under_clud, CLUD_SESSION_ENV_VAR};
 pub use env_flag::{flag, flag_value, foreign_flag, foreign_flag_value, is_off_value};

@@ -44,7 +44,6 @@
       "futures-util",
       "getrandom",
       "globset",
-      "hex",
       "interprocess",
       "iroh",
       "jwalk",
@@ -84,7 +83,6 @@
     ],
     "soldr-daemon": [
       "console-subscriber",
-      "hex",
       "interprocess",
       "kernal-api",
       "libc",

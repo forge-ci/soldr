@@ -23,6 +23,7 @@
 //! returns the resolved sha256.
 
 use crate::cache_lib::target_registry::RegistryError;
+use crate::core::hex_lower;
 use kernal_api::hash::Sha256Hasher;
 use std::fs::File;
 use std::io::Read;
@@ -272,16 +273,6 @@ fn hash_file(path: &Path) -> Result<([u8; 32], u64), RegistryError> {
 
 fn io_err(e: std::io::Error) -> RegistryError {
     RegistryError::Io(e)
-}
-
-fn hex_lower(bytes: &[u8; 32]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(64);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0F) as usize] as char);
-    }
-    out
 }
 
 /// Pretty-print an abbreviated SHA-256 (12 hex chars) for human-

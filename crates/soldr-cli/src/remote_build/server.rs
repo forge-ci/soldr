@@ -349,7 +349,7 @@ fn start(root: &Path, request: Start, access: &SessionAccess) -> io::Result<Vec<
 
     let mut random = [0; 16];
     getrandom::fill(&mut random).map_err(io::Error::other)?;
-    let id = hex::encode(random);
+    let id = crate::core::hex_lower(&random);
     let directory = root.join("sessions").join(&id);
     fs::create_dir(&directory)?;
     access.record(&directory)?;
@@ -717,7 +717,7 @@ fn warm_cook(
         }
         let packed = cook_archive::pack_cook_archive(&target.path().join("debug"), archives.path())
             .map_err(io::Error::other)?;
-        let hash = hex::encode(packed.sha256);
+        let hash = crate::core::hex_lower(&packed.sha256);
         slots::reflink(
             &archives.path().join(format!("{hash}.tar.zst")),
             &output.join("cook.tar.zst"),

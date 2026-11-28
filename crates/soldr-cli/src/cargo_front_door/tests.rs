@@ -2537,8 +2537,7 @@ reason=daemon unavailable\n";
         .write(true)
         .open(&cargo_lock_path)
         .expect("open Cargo lock fixture");
-    let guard =
-        kernal_api::platform::fs::try_lock_exclusive(&cargo_lock).expect("hold Cargo lock fixture");
+    let guard = kernal_api::platform::fs::try_lock_exclusive(&cargo_lock).expect("lock fixture");
     assert!(matches!(
         scrub_cached_fallback_diagnostics_once(&target).expect("defer active target"),
         FallbackOutputScrub::DeferredForActiveBuild(path) if path == cargo_lock_path

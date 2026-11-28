@@ -609,7 +609,7 @@ mod tests {
             .write(true)
             .open(lock_path)
             .unwrap();
-        let _guard = kernal_api::platform::fs::lock_exclusive(&held).unwrap();
+        kernal_api::fs_lock_exclusive(&held).unwrap();
 
         let started = Instant::now();
         let error = BrokerLease::acquire_with_ceiling(&path, Duration::from_millis(200))

@@ -42,7 +42,7 @@ fn platform_default(cache_root: &Path) -> Option<NormalizedPath> {
 fn windows_private_staging_root(cache_root: &Path, temp: &Path) -> PathBuf {
     let mut hasher = StreamHasher::new();
     hasher.update(cache_root.to_string_lossy().as_bytes());
-    let cache_id = hex::encode(&hasher.finalize().as_bytes()[..8]);
+    let cache_id = hasher.finalize().to_hex()[..16].to_string();
     temp.join("sz").join(cache_id)
 }
 

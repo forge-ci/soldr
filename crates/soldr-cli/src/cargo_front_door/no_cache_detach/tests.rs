@@ -168,7 +168,7 @@ fn active_build_lock_refuses_the_preflight() {
         .write(true)
         .open(&lock_path)
         .unwrap();
-    let _guard = kernal_api::platform::fs::lock_exclusive(&lock).unwrap();
+    kernal_api::fs_lock_exclusive(&lock).unwrap();
 
     let error = detach_target_tree(&target).unwrap_err();
     assert!(error.to_string().contains("build lock"));
@@ -220,7 +220,7 @@ fn nested_cross_target_build_lock_refuses_the_preflight() {
         .write(true)
         .open(&lock_path)
         .unwrap();
-    let _guard = kernal_api::platform::fs::lock_exclusive(&lock).unwrap();
+    kernal_api::fs_lock_exclusive(&lock).unwrap();
 
     let error = detach_target_tree(&target).unwrap_err();
     assert!(error.to_string().contains("aarch64-pc-windows-msvc"));
