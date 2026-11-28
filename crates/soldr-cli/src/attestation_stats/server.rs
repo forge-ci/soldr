@@ -92,6 +92,7 @@ fn retain_recent_records(state: Arc<Server>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kernal_api::http::{Client, Limits, Request};
 
     #[tokio::test]
     async fn stats_http_separates_credentials_and_deduplicates_worker_events() {
@@ -103,7 +104,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move { axum::serve(listener, router(state)).await });
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = Client::new(Limits::default()).unwrap();
         let origin = format!("http://{address}");
         let stats_url = format!("{origin}/v1/attestations/stats");
         let completion_url = format!("{origin}/v1/attestations/completions");
@@ -141,39 +142,41 @@ mod tests {
             .await
             .is_err());
         assert!(outbox.join(format!("{}.json", pending.session)).is_file());
-        assert_eq!(
-            client
-                .get(&stats_url)
-                .bearer_auth(write)
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::UNAUTHORIZED
-        );
+        let response = client
+            .execute(Request {
+                headers: &[("authorization", "Bearer write")],
+                ..Request::get(&stats_url)
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED.as_u16());
+        let event = kernal_api::json::parse(event.to_string().as_bytes()).unwrap();
         for (token, expected) in [
             (read, StatusCode::UNAUTHORIZED),
             (write, StatusCode::CREATED),
             (write, StatusCode::NO_CONTENT),
         ] {
+            let authorization = format!("Bearer {token}");
             let response = client
-                .post(&completion_url)
-                .bearer_auth(token)
-                .body(event.to_string())
-                .send()
+                .post_json(
+                    &completion_url,
+                    &[("authorization", &authorization)],
+                    &event,
+                )
                 .await
                 .unwrap();
-            assert_eq!(response.status(), expected);
+            assert_eq!(response.status(), expected.as_u16());
         }
         let response = client
-            .get(stats_url)
-            .bearer_auth(read)
-            .send()
+            .execute(Request {
+                headers: &[("authorization", "Bearer read")],
+                ..Request::get(&stats_url)
+            })
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK.as_u16());
         let stats: serde_json::Value =
-            serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+            serde_json::from_slice(&response.into_bytes().await.unwrap()).unwrap();
         assert_eq!(stats["completed"], 1);
         assert_eq!(stats["worker_ms"]["p95"], 10);
         assert_eq!(stats["publication_ms"]["p95"], 2);

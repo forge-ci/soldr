@@ -1,0 +1,30 @@
+package kernal:compiler-experiment@0.1.0;
+
+interface compilers {
+    enum error { rejected, cancelled, closed, failed, timed-out }
+    enum cache-status { hit, miss }
+    enum output-tag {
+        stdout, stderr, stdout-eof, stderr-eof,
+        stdout-abandoned, stderr-abandoned, stdout-error, stderr-error, exhausted,
+    }
+    record output-data { tag: output-tag, bytes: list<u8> }
+    record exit { code: option<s32>, success: bool }
+    resource grant;
+    resource process;
+    resource output {
+        // Synchronous and one-shot: its resource retains lowering credit
+        // until the call has lowered its result and the guest drops the handle.
+        copy: func() -> result<output-data, error>;
+    }
+    granted: func() -> result<option<grant>, error>;
+    // A cache identity is exactly 32 bytes. Keep it scalar so canonical list
+    // lowering cannot allocate attacker-controlled input before host checks.
+    lookup-cache: func(command: borrow<grant>, key-0: u64, key-1: u64, key-2: u64, key-3: u64) -> result<cache-status, error>;
+    spawn: async func(command: own<grant>) -> result<process, error>;
+    read: async func(child: borrow<process>) -> result<output, error>;
+    wait: async func(child: borrow<process>) -> result<exit, error>;
+    close: async func(child: own<process>) -> result<_, error>;
+}
+
+world compiler-client { import compilers; }
+world compiler-proof { export run: async func() -> result; }

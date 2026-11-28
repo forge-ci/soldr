@@ -105,7 +105,6 @@
       "flate2",
       "kernal-api",
       "minisign-verify",
-      "reqwest",
       "semver",
       "serde",
       "serde_json",

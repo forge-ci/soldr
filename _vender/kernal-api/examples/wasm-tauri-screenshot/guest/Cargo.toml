@@ -1,0 +1,24 @@
+[package]
+name = "kernal-api-wasm-tauri-guest"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95.0"
+publish = false
+
+# Source-only application guest, not another public facade or host dependency.
+# Warnings are errors here, as in the kernal-api workspace.
+[lints.rust]
+warnings = "deny"
+
+[workspace]
+
+[features]
+proof-trap-after-capture = []
+proof-block-after-capture = []
+
+[dependencies]
+# Migration-only source fixture. Replace the path with the exact release pin
+# after the guest-capable facade is published; this is not release acceptance.
+kernal-api = { version = "=0.1.42", path = "../../..", default-features = false }
+dashmap = "6.1.0"
+crossbeam-channel = "0.5.15"

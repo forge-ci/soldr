@@ -57,8 +57,8 @@ pub async fn stream_and_extract_source_zip(
     let response = send_asset_request(request, url, ASSET_HEADER_TIMEOUT).await?;
 
     let status = response.status();
-    if !status.is_success() {
-        if (status.as_u16() == 404 || status.as_u16() == 403) && token.is_none() {
+    if !(200..300).contains(&status) {
+        if matches!(status, 403 | 404) && token.is_none() {
             return Err(SoldrError::Network(format!(
                 "source zip {url} returned HTTP {status}. If this is a private repo, set \
                  GITHUB_TOKEN (or GH_TOKEN / SOLDR_GITHUB_TOKEN) and retry."

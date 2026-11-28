@@ -14,10 +14,10 @@ use super::stream_download::{
 };
 
 fn control_request(
-    client: &reqwest::Client,
+    client: &kernal_api::http::Client,
     url: &str,
     token: Option<&str>,
-) -> reqwest::RequestBuilder {
+) -> super::stream_download::PendingRequest {
     let mut request = get_request(client, url).header("Accept", "application/vnd.github+json");
     if let Some(token) = token {
         request = request.bearer_auth(token);
@@ -48,13 +48,13 @@ pub async fn resolve_commit_sha(
     let client = control_http_client("install ref resolution")?;
     let resp = send_control_request(control_request(&client, &url, token), &url).await?;
     let status = resp.status();
-    if !status.is_success() {
-        if status.as_u16() == 404 || status.as_u16() == 422 {
+    if !(200..300).contains(&status) {
+        if status == 404 || status == 422 {
             return Err(SoldrError::Other(format!(
                 "ref '{git_ref}' not found in {owner}/{repo}"
             )));
         }
-        return Err(not_found_hint(&url, status.as_u16(), token.is_some()));
+        return Err(not_found_hint(&url, status, token.is_some()));
     }
     let text = read_control_text(resp, &url, CONTROL_HEADER_TIMEOUT).await?;
     let body: serde_json::Value =
@@ -75,13 +75,13 @@ pub async fn resolve_latest_release_tag(
     let client = control_http_client("install release resolution")?;
     let resp = send_control_request(control_request(&client, &url, token), &url).await?;
     let status = resp.status();
-    if !status.is_success() {
-        if status.as_u16() == 404 {
+    if !(200..300).contains(&status) {
+        if status == 404 {
             return Err(SoldrError::Other(format!(
                 "no releases found for {owner}/{repo}"
             )));
         }
-        return Err(not_found_hint(&url, status.as_u16(), token.is_some()));
+        return Err(not_found_hint(&url, status, token.is_some()));
     }
     let text = read_control_text(resp, &url, CONTROL_HEADER_TIMEOUT).await?;
     let body: serde_json::Value =
@@ -105,8 +105,8 @@ pub async fn resolve_release_at_offset(
     let client = control_http_client("install release resolution")?;
     let resp = send_control_request(control_request(&client, &url, token), &url).await?;
     let status = resp.status();
-    if !status.is_success() {
-        return Err(not_found_hint(&url, status.as_u16(), token.is_some()));
+    if !(200..300).contains(&status) {
+        return Err(not_found_hint(&url, status, token.is_some()));
     }
     let text = read_control_text(resp, &url, CONTROL_HEADER_TIMEOUT).await?;
     let body: serde_json::Value =

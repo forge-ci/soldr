@@ -34,7 +34,7 @@ pub(super) async fn resolve_repo(crate_name: &str) -> Result<RepoInfo, SoldrErro
 
     let resp = send_control_request(get_request(&client, &url), &url).await?;
 
-    if !resp.status().is_success() {
+    if !(200..300).contains(&resp.status()) {
         return Err(SoldrError::ToolNotFound(format!(
             "{crate_name}: not found on crates.io"
         )));
@@ -120,7 +120,7 @@ pub(super) async fn fetch_release(
 }
 
 async fn fetch_latest_by_prefix(
-    client: &reqwest::Client,
+    client: &kernal_api::http::Client,
     repo: &RepoInfo,
     prefix: &str,
 ) -> Result<serde_json::Value, SoldrError> {
@@ -130,7 +130,7 @@ async fn fetch_latest_by_prefix(
     );
     let resp = send_control_request(github_request(client, repo, &url), &url).await?;
 
-    if !resp.status().is_success() {
+    if !(200..300).contains(&resp.status()) {
         let status = resp.status();
         let body = read_control_text(resp, &url, super::stream_download::CONTROL_HEADER_TIMEOUT)
             .await
@@ -174,13 +174,13 @@ async fn fetch_latest_by_prefix(
 }
 
 async fn fetch_release_value(
-    client: &reqwest::Client,
+    client: &kernal_api::http::Client,
     repo: &RepoInfo,
     url: &str,
 ) -> Result<serde_json::Value, SoldrError> {
     let resp = send_control_request(github_request(client, repo, url), url).await?;
 
-    if !resp.status().is_success() {
+    if !(200..300).contains(&resp.status()) {
         let status = resp.status();
         let body = read_control_text(resp, url, super::stream_download::CONTROL_HEADER_TIMEOUT)
             .await
@@ -199,7 +199,7 @@ async fn fetch_release_value(
 }
 
 async fn fetch_release_by_listing(
-    client: &reqwest::Client,
+    client: &kernal_api::http::Client,
     repo: &RepoInfo,
     tags: &[String],
 ) -> Result<serde_json::Value, SoldrError> {
@@ -209,7 +209,7 @@ async fn fetch_release_by_listing(
     );
     let resp = send_control_request(github_request(client, repo, &url), &url).await?;
 
-    if !resp.status().is_success() {
+    if !(200..300).contains(&resp.status()) {
         let status = resp.status();
         let body = read_control_text(resp, &url, super::stream_download::CONTROL_HEADER_TIMEOUT)
             .await
@@ -293,16 +293,13 @@ fn github_status_error(
     repo: &RepoInfo,
     stage: &str,
     url: &str,
-    status: reqwest::StatusCode,
+    status: u16,
     body: &str,
 ) -> SoldrError {
     let message = github_status_message(repo, stage, url, status, body);
-    if status == reqwest::StatusCode::FORBIDDEN
-        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-        || status.is_server_error()
-    {
+    if status == 403 || status == 429 || (500..600).contains(&status) {
         SoldrError::Network(message)
-    } else if status == reqwest::StatusCode::NOT_FOUND {
+    } else if status == 404 {
         SoldrError::ReleaseNotFound(message)
     } else {
         SoldrError::ToolNotFound(message)
@@ -313,7 +310,7 @@ fn github_status_message(
     repo: &RepoInfo,
     stage: &str,
     url: &str,
-    status: reqwest::StatusCode,
+    status: u16,
     body: &str,
 ) -> String {
     let snippet = body.trim();
@@ -323,6 +320,10 @@ fn github_status_message(
         format!("{}...", snippet.chars().take(240).collect::<String>())
     } else {
         snippet.to_string()
+    };
+    let status = match kernal_api::http::status_reason(status) {
+        Some(reason) => format!("{status} {reason}"),
+        None => status.to_string(),
     };
     format!(
         "GitHub {stage} failed for {}/{}: HTTP {} at {url}; response: {snippet}",
@@ -358,15 +359,15 @@ fn parse_release_info(
     Ok(ReleaseInfo { version, assets })
 }
 
-fn github_request<'a>(
-    client: &'a reqwest::Client,
+fn github_request(
+    client: &kernal_api::http::Client,
     repo: &RepoInfo,
-    url: &'a str,
-) -> reqwest::RequestBuilder {
+    url: &str,
+) -> super::stream_download::PendingRequest {
     let mut request = get_request(client, url).header("Accept", "application/vnd.github+json");
 
     if let Some(token) = github_auth_token_for_repo(repo) {
-        request = request.bearer_auth(token);
+        request = request.bearer_auth(&token);
     }
 
     request
@@ -927,30 +928,19 @@ mod tests {
         let r = repo("PyO3", "maturin");
         let url = "https://api.github.com/repos/PyO3/maturin/releases/latest";
 
-        for status in [
-            reqwest::StatusCode::FORBIDDEN,
-            reqwest::StatusCode::TOO_MANY_REQUESTS,
-            reqwest::StatusCode::BAD_GATEWAY,
-            reqwest::StatusCode::SERVICE_UNAVAILABLE,
-        ] {
+        for status in [403, 429, 502, 503] {
             let err = github_status_error(&r, "release lookup", url, status, "rate limit exceeded");
             assert!(
                 matches!(err, SoldrError::Network(_)),
                 "HTTP {status} must classify as Network, got {err:?}",
             );
             // The status still has to reach the user.
-            assert!(err.to_string().contains(status.as_str()));
+            assert!(err.to_string().contains(&status.to_string()));
         }
 
         // soldr#3911: 404 means the release does not exist. It is never
         // retried, and still reads as "tool not found" to the user.
-        let missing = github_status_error(
-            &r,
-            "release lookup",
-            url,
-            reqwest::StatusCode::NOT_FOUND,
-            "Not Found",
-        );
+        let missing = github_status_error(&r, "release lookup", url, 404, "Not Found");
         assert!(
             matches!(missing, SoldrError::ReleaseNotFound(_)),
             "{missing:?}"
@@ -965,7 +955,7 @@ mod tests {
             &repo("LukeMathWalker", "cargo-chef"),
             "release lookup",
             "https://api.github.com/repos/LukeMathWalker/cargo-chef/releases/tags/v0.1.73",
-            reqwest::StatusCode::FORBIDDEN,
+            403,
             "{\"message\":\"rate limited\"}",
         );
 

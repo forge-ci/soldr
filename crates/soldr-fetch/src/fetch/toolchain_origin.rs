@@ -251,7 +251,7 @@ async fn fetch_redirect_manifest(manifest_url: &str) -> Result<(String, Vec<Stri
             REDIRECT_FETCH_TIMEOUT,
         )
         .await?;
-        if !response.status().is_success() {
+        if !(200..300).contains(&response.status()) {
             return Err(SoldrError::Network(format!(
                 "redirect manifest {safe_url} returned HTTP {}",
                 response.status()

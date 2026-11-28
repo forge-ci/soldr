@@ -10,8 +10,7 @@
 # Run locally: `soldr cargo deny check bans`.
 
 [graph]
-# The workspace vendors zccache and running-process as path dependencies;
-# their trees are part of the build and therefore part of the ratchet.
+# Check the enabled dependency graph, including the vendored kernal-api.
 all-features = false
 
 [bans]
@@ -52,10 +51,6 @@ skip = [
     { name = "winnow", version = "=1.0.5" },
     { name = "digest", version = "=0.11.3" },
     { name = "sha2", version = "=0.11.1" },
-    # Iroh 1.5 requires reqwest 0.13 and wasm-streams 0.5. The existing
-    # Soldr HTTP client still uses reqwest 0.12 and wasm-streams 0.4.
-    { name = "reqwest", version = "=0.13.5" },
-    { name = "wasm-streams", version = "=0.5.0" },
     # Iroh's network stack requires newer APIs while its resolver, netdev
     # and the existing Soldr dependency graph still pin the other versions.
     { name = "base64", version = "=0.23.1" },

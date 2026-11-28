@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Deterministic PNG quota proof</title>
+<style>html,body{margin:0;overflow:hidden}canvas{display:block}</style>
+<canvas id="noise" width="800" height="600" aria-label="Deterministic noise for PNG quota testing"></canvas>
+<script>
+// Fixed-seed, high-entropy RGB pixels exceed the 1 MiB encoded PNG limit.
+// No network, randomness, timers, or platform APIs participate in this fixture.
+const context = document.getElementById('noise').getContext('2d');
+const pixels = context.createImageData(800, 600);
+let state = 0x12345678;
+for (let index = 0; index < pixels.data.length; index += 4) {
+  state ^= state << 13; state ^= state >>> 17; state ^= state << 5;
+  pixels.data[index] = state & 255;
+  pixels.data[index + 1] = (state >>> 8) & 255;
+  pixels.data[index + 2] = (state >>> 16) & 255;
+  pixels.data[index + 3] = 255;
+}
+context.putImageData(pixels, 0, 0);
+</script></html>

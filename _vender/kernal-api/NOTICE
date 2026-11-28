@@ -1,0 +1,23 @@
+Portions of the platform, crash-capture, profiling, and symbolization code were
+adapted from zackees/running-process under the BSD 3-Clause License.
+
+The checked-in pprof message definitions implement Google's
+`perftools.profiles` protobuf schema, originally published under the Apache
+License 2.0. Only the stable field names, types, and wire numbers are
+represented here; no generated build-time dependency is required.
+
+The optional Windows ConPTY sidecar contains binary artifacts from
+Microsoft.Windows.Console.ConPTY, distributed by Microsoft under the MIT
+License. Their package version and provenance are recorded under
+vendor/win32/conpty/.
+
+The optional `fs-watch` feature's Windows backend
+(src/platform_win/fs_watch.rs) is adapted from the `notify` project's
+`ReadDirectoryChangesW` implementation (notify-rs/notify, `notify` 7.0.0,
+CC0-1.0 License: https://github.com/notify-rs/notify), carrying two fixes
+for silent Windows failure modes that upstream 7.0.0 does not have: a
+completion-notification buffer overflow, and `ReadDirectoryChangesW` failing
+to re-issue and silently killing the watch. Both are documented at the top
+of that file. Linux and macOS instead depend on the exact upstream `notify`
+7.0.0 release directly, which carries no divergence from upstream on those
+platforms.

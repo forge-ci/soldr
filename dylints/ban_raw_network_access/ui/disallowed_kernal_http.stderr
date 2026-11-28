@@ -1,0 +1,10 @@
+error: kernal_api::http `new` bypasses fetch::stream_download; use its control or asset request helpers
+  --> $DIR/disallowed_kernal_http.rs:6:13
+   |
+LL |     let _ = kernal_api::http::Client::new();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[deny(ban_raw_network_access)]` on by default
+
+error: aborting due to 1 previous error
+

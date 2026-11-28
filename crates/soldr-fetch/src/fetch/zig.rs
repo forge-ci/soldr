@@ -235,11 +235,11 @@ async fn download_zig_asset(url: &str) -> Result<DownloadedAsset, SoldrError> {
 }
 
 async fn download_zig_asset_once(
-    client: &reqwest::Client,
+    client: &kernal_api::http::Client,
     url: &str,
 ) -> Result<DownloadedAsset, SoldrError> {
     let resp = send_asset_request(
-        get_request(client, url).header(reqwest::header::ACCEPT_ENCODING, "identity"),
+        get_request(client, url).header("accept-encoding", "identity"),
         url,
         ASSET_HEADER_TIMEOUT,
     )

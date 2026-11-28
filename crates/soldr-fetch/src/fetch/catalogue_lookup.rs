@@ -557,7 +557,7 @@ async fn fetch_v2_at(
     )
     .await
     .map_err(OriginError::Unavailable)?;
-    let status = resp.status().as_u16();
+    let status = resp.status();
     if should_fallback_to_v1(status) {
         return Ok(V2Outcome::Missing);
     }
@@ -619,8 +619,8 @@ async fn fetch_v1_classified(url: &str) -> Result<ManifestIndex, OriginError> {
     )
     .await
     .map_err(OriginError::Unavailable)?;
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
+    if !(200..300).contains(&resp.status()) {
+        let status = resp.status();
         return Err(OriginError::from_status(
             status,
             SoldrError::Network(format!(
@@ -651,7 +651,7 @@ async fn fetch_v2_index_from(url: &str) -> Result<ManifestIndex, SoldrError> {
         MANIFEST_FETCH_TIMEOUT,
     )
     .await?;
-    if !resp.status().is_success() {
+    if !(200..300).contains(&resp.status()) {
         return Err(SoldrError::Network(format!(
             "manifest fetch {safe_url} returned HTTP {}",
             resp.status()
@@ -726,7 +726,7 @@ struct CatalogueProbe {
 }
 
 async fn probe_catalogue(
-    client: &reqwest::Client,
+    client: &kernal_api::http::Client,
     url: &str,
 ) -> Result<CatalogueProbe, SoldrError> {
     let safe_url = super::stream_download::safe_asset_url(url);
@@ -737,16 +737,15 @@ async fn probe_catalogue(
     )
     .await?;
     let header = |name: &str| {
-        resp.headers()
-            .get(name)
-            .and_then(|v| v.to_str().ok())
+        resp.header(name)
+            .and_then(|v| std::str::from_utf8(v).ok())
             .map(|s| s.to_string())
     };
     let etag = header("etag");
     let last_modified = header("last-modified");
     let content_length = header("content-length").and_then(|s| s.parse::<u64>().ok());
-    let status = resp.status().as_u16();
-    let body = if resp.status().is_success() {
+    let status = resp.status();
+    let body = if (200..300).contains(&resp.status()) {
         Some(
             super::stream_download::read_control_text(resp, &safe_url, MANIFEST_FETCH_TIMEOUT)
                 .await,

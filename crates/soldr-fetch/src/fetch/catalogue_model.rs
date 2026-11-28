@@ -294,7 +294,7 @@ pub(crate) async fn bind_v2_publication_state(body: &str) -> Result<(), SoldrErr
         MANIFEST_FETCH_TIMEOUT,
     )
     .await?;
-    if !response.status().is_success() {
+    if !(200..300).contains(&response.status()) {
         return Err(SoldrError::Network(format!(
             "publication-state fetch {safe_state_url} returned HTTP {}",
             response.status()

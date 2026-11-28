@@ -1,0 +1,14 @@
+[package]
+name = "kernal-api-daemon-registration-v2-consumer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Warnings are errors here, as in the kernal-api workspace.
+[lints.rust]
+warnings = "deny"
+
+[workspace]
+
+[dependencies]
+kernal-api = { path = "../..", default-features = false, features = ["daemon-registration-v2"] }

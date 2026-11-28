@@ -15,7 +15,7 @@
 //! Methodology notes (see module docs in the PR description for the full
 //! writeup):
 //! - Every request (probe + segment + single-stream) goes through the
-//!   ORIGINAL url with reqwest's default redirect-following. This means
+//!   ORIGINAL url and follows redirects. This means
 //!   a per-request signed URL (GitHub release assets redirect to
 //!   objects.githubusercontent.com with a short-lived SAS token) is
 //!   re-resolved independently for every single HTTP request, which is
@@ -43,6 +43,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kernal_api::hash::Sha256Hasher;
+use kernal_api::http::{Client, Limits, Request, Response};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, BoxError>;
@@ -193,12 +194,56 @@ fn auth_token() -> Option<String> {
         .filter(|v| !v.trim().is_empty())
 }
 
-fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .user_agent("soldr-dl-bench/0.1 (segmented-download-experiment)")
-        .build()
-        .expect("build reqwest client")
+fn client() -> Client {
+    Client::new(Limits {
+        max_body_bytes: u64::MAX,
+        connect_timeout: Duration::from_secs(15),
+        total_timeout: Duration::from_secs(6 * 60 * 60),
+        ..Limits::default()
+    })
+    .expect("build HTTP client")
+}
+
+async fn get(client: &Client, url: &str, range: Option<&str>) -> Result<Response> {
+    let mut current = url::Url::parse(url)?;
+    let origin = current.origin();
+    let authorization = auth_token().map(|token| format!("Bearer {token}"));
+    for hop in 0..=10 {
+        let mut headers = vec![(
+            "user-agent",
+            "soldr-dl-bench/0.1 (segmented-download-experiment)",
+        )];
+        if let Some(range) = range {
+            headers.push(("range", range));
+        }
+        if let Some(authorization) = authorization
+            .as_deref()
+            .filter(|_| current.origin() == origin)
+        {
+            headers.push(("authorization", authorization));
+        }
+        let response = client
+            .execute(Request {
+                headers: &headers,
+                ..Request::get(current.as_str())
+            })
+            .await?;
+        if !matches!(response.status(), 301..=303 | 307..=308) {
+            return Ok(response);
+        }
+        let Some(location) = response.header("location") else {
+            return Ok(response);
+        };
+        if hop == 10 {
+            break;
+        }
+        let next = current.join(std::str::from_utf8(location)?)?;
+        if current.scheme() == "https" && next.scheme() != "https" {
+            return Err("redirect would downgrade HTTPS".into());
+        }
+        current = next;
+    }
+    Err("HTTP redirect limit exceeded".into())
 }
 
 // ---- positional (pwrite/seek_write) file I/O so N segment tasks can
@@ -223,23 +268,20 @@ fn write_at_all(file: &std::fs::File, mut buf: &[u8], mut offset: u64) -> std::i
     Ok(())
 }
 
-async fn run_single_stream(client: &reqwest::Client, url: &str, out: &Path) -> Result<RunOutcome> {
+async fn run_single_stream(client: &Client, url: &str, out: &Path) -> Result<RunOutcome> {
     use std::io::Write;
     let started = Instant::now();
 
-    let mut req = client.get(url);
-    if let Some(tok) = auth_token() {
-        req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {tok}"));
-    }
-    let mut resp = req.send().await?;
-    if !resp.status().is_success() {
+    let mut resp = get(client, url, None).await?;
+    if !(200..300).contains(&resp.status()) {
         return Err(format!("single-stream GET failed: HTTP {}", resp.status()).into());
     }
 
     let mut file = std::fs::File::create(out)?;
     let mut bytes = 0u64;
-    while let Some(chunk) = resp.chunk().await? {
-        file.write_all(&chunk)?;
+    while let Some(chunk) = resp.next_chunk().await? {
+        let chunk = chunk.as_ref();
+        file.write_all(chunk)?;
         bytes += chunk.len() as u64;
     }
     file.sync_all()?;
@@ -264,19 +306,14 @@ struct ProbeResult {
 /// CDNs mishandle HEAD on redirected assets; a tiny ranged GET is a more
 /// reliable probe across both media.githubusercontent and GitHub release
 /// signed URLs).
-async fn probe_range_support(client: &reqwest::Client, url: &str) -> Result<ProbeResult> {
-    let mut req = client.get(url).header(reqwest::header::RANGE, "bytes=0-0");
-    if let Some(tok) = auth_token() {
-        req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {tok}"));
-    }
-    let resp = req.send().await?;
+async fn probe_range_support(client: &Client, url: &str) -> Result<ProbeResult> {
+    let resp = get(client, url, Some("bytes=0-0")).await?;
     let status = resp.status();
 
-    if status == reqwest::StatusCode::PARTIAL_CONTENT {
+    if status == 206 {
         let content_range = resp
-            .headers()
-            .get(reqwest::header::CONTENT_RANGE)
-            .and_then(|v| v.to_str().ok())
+            .header("content-range")
+            .and_then(|value| std::str::from_utf8(value).ok())
             .ok_or("206 response missing Content-Range")?;
         // Format: "bytes 0-0/12345"
         let total: u64 = content_range
@@ -289,7 +326,7 @@ async fn probe_range_support(client: &reqwest::Client, url: &str) -> Result<Prob
             total_len: total,
             range_supported: true,
         })
-    } else if status.is_success() {
+    } else if (200..300).contains(&status) {
         // Server ignored Range and sent the whole thing (or the whole 1
         // byte, coincidentally) -- treat as unsupported and let the
         // caller fall back to single-stream. Content-Length here would
@@ -304,12 +341,7 @@ async fn probe_range_support(client: &reqwest::Client, url: &str) -> Result<Prob
     }
 }
 
-async fn run_segmented(
-    client: &reqwest::Client,
-    url: &str,
-    out: &Path,
-    n: u32,
-) -> Result<RunOutcome> {
+async fn run_segmented(client: &Client, url: &str, out: &Path, n: u32) -> Result<RunOutcome> {
     let started = Instant::now();
 
     let probe = probe_range_support(client, url).await?;
@@ -350,18 +382,10 @@ async fn run_segmented(
         let client = client.clone();
         let url = url.to_string();
         let file = Arc::clone(&file);
-        let token = auth_token();
         tasks.push(tokio::spawn(async move {
-            let mut req = client.get(&url).header(
-                reqwest::header::RANGE,
-                format!("bytes={start}-{end_inclusive}"),
-            );
-            if let Some(tok) = &token {
-                req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {tok}"));
-            }
-            let mut resp = req.send().await?;
-            if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT && !resp.status().is_success()
-            {
+            let range = format!("bytes={start}-{end_inclusive}");
+            let mut resp = get(&client, &url, Some(&range)).await?;
+            if resp.status() != 206 {
                 return Err::<u64, BoxError>(
                     format!(
                         "segment [{start},{end_inclusive}] failed: HTTP {}",
@@ -372,8 +396,9 @@ async fn run_segmented(
             }
             let mut offset = start;
             let mut written = 0u64;
-            while let Some(chunk) = resp.chunk().await? {
-                write_at_all(&file, &chunk, offset)?;
+            while let Some(chunk) = resp.next_chunk().await? {
+                let chunk = chunk.as_ref();
+                write_at_all(&file, chunk, offset)?;
                 offset += chunk.len() as u64;
                 written += chunk.len() as u64;
             }
