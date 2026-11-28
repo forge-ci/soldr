@@ -55,6 +55,35 @@ const GLIBC_FILES: &[&str] = &[
     "PROVENANCE-llvm-ld.md",
 ];
 
+/// reld's macOS builds load the engine as `libllvm_ld.dylib` (soldr#4298).
+const MACOS_FILES: &[&str] = &[
+    "reld",
+    "reld-link",
+    "libllvm_ld.dylib",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+    "LICENSE-LLVM.txt",
+    "LICENSE-llvm-ld.txt",
+    "LICENSE-LIBXML2.txt",
+    "LICENSE-MIMALLOC.txt",
+    "NOTICE",
+    "PROVENANCE-llvm-ld.md",
+];
+
+/// reld's Windows builds load the engine as `llvm_ld.dll` (soldr#4298).
+/// Extensionless names take `.exe` on Windows, so only the licences that
+/// carry an extension are listed.
+const WINDOWS_FILES: &[&str] = &[
+    "reld",
+    "reld-link",
+    "llvm_ld.dll",
+    "LICENSE-LLVM.txt",
+    "LICENSE-llvm-ld.txt",
+    "LICENSE-LIBXML2.txt",
+    "LICENSE-MIMALLOC.txt",
+    "PROVENANCE-llvm-ld.md",
+];
+
 /// The glibc reld 0.2.3 needs: `reld` uses GLIBC_2.39 symbols.
 const GLIBC_FLOOR: (u32, u32) = (2, 39);
 
@@ -208,28 +237,28 @@ fn release_asset_for(
             triple: "x86_64-apple-darwin",
             extension: "tar.gz",
             cache_name: "reld",
-            files: STATIC_FILES,
+            files: MACOS_FILES,
             sha256: "073565e1fff66671ab27bbc83f4fe31b9dd6bcdc2163ce1e06b6eb5f7b185e8f",
         },
         (HostOs::MacOs, HostArch::Aarch64) => ReleaseAsset {
             triple: "aarch64-apple-darwin",
             extension: "tar.gz",
             cache_name: "reld",
-            files: STATIC_FILES,
+            files: MACOS_FILES,
             sha256: "d688c529eda43a18bed4477d0aa5fb7bd1982caf84b2689e850e5f88317e20d8",
         },
         (HostOs::Windows, HostArch::X86_64) => ReleaseAsset {
             triple: "x86_64-pc-windows-msvc",
             extension: "zip",
             cache_name: "reld",
-            files: STATIC_FILES,
+            files: WINDOWS_FILES,
             sha256: "be053e50da77dfecd559d764bd4f3659da3e84a278b425849ee95c5de50f699f",
         },
         (HostOs::Windows, HostArch::Aarch64) => ReleaseAsset {
             triple: "aarch64-pc-windows-msvc",
             extension: "zip",
             cache_name: "reld",
-            files: STATIC_FILES,
+            files: WINDOWS_FILES,
             sha256: "eba79aa6c769fd825f3f842838c88bcbb0bbf5b715c19a16b05c4bd377261a4d",
         },
         (os, arch) => {
@@ -633,5 +662,4 @@ mod tests {
             }
         }
     }
-
 }
