@@ -21,7 +21,6 @@ const LIFECYCLE_ROTATE_KEEP: usize = 5_000;
 /// Best-effort: if the lock cannot be opened or taken, `f` runs unlocked.
 /// The lock is released when the file handle drops.
 pub(super) fn with_lifecycle_journal_lock<T>(path: &Path, f: impl FnOnce() -> T) -> T {
-    use fs2::FileExt;
     let mut lock_name = path
         .file_name()
         .map(|n| n.to_os_string())

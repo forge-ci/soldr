@@ -631,7 +631,7 @@ fn synthetic_build_session_id() -> String {
     let mut hasher = zccache::hash::StreamHasher::new();
     hasher.update(&std::process::id().to_le_bytes());
     hasher.update(&nanos.to_le_bytes());
-    hex::encode(&hasher.finalize().as_bytes()[..12])
+    hasher.finalize().to_hex()[..24].to_string()
 }
 
 pub(crate) fn managed_zccache_cache_dir(

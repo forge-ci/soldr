@@ -3,7 +3,6 @@
 
 use super::super::target_registry::TargetRegistry;
 use super::*;
-use fs2::FileExt;
 use std::path::PathBuf;
 use tempfile::tempdir;
 
@@ -605,7 +604,7 @@ fn safety_guard_short_circuits_on_active_lock() {
         .truncate(false)
         .open(target.join(".cargo-lock"))
         .unwrap();
-    cargo_lock.try_lock_exclusive().unwrap();
+    let _guard = kernal_api::platform::fs::try_lock_exclusive(&cargo_lock).unwrap();
 
     let now = current_unix_seconds().unwrap();
     registry

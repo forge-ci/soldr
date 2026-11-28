@@ -3,8 +3,7 @@
 //! Split out of `lifecycle/mod.rs` for the per-file LOC ratchet.
 
 use crate::core::SoldrPaths;
-use fs2::FileExt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::time::{Duration, Instant};
 
 const ROOT_OWNER_LOCK_NAME: &str = "root-owner.lock";
@@ -19,7 +18,7 @@ pub(crate) fn root_owner_lock_path(paths: &SoldrPaths) -> std::path::PathBuf {
 /// same product root concurrently; duplicate starts of one image still race
 /// on this lock.
 pub struct RootOwnershipGuard {
-    file: File,
+    _lock: kernal_api::platform::fs::OwnedFileLock,
 }
 
 impl RootOwnershipGuard {
@@ -41,8 +40,8 @@ impl RootOwnershipGuard {
             .write(true)
             .truncate(false)
             .open(dir.join(ROOT_OWNER_LOCK_NAME))?;
-        match file.try_lock_exclusive() {
-            Ok(()) => Ok(Some(Self { file })),
+        match kernal_api::platform::fs::try_lock_exclusive_owned(file) {
+            Ok(lock) => Ok(Some(Self { _lock: lock })),
             Err(error) if crate::cache_lib::cargo_lock::lock_is_held(&error) => Ok(None),
             Err(error) => Err(error),
         }
@@ -109,10 +108,4 @@ pub enum RootAcquireOutcome {
     AlreadyServing(u32),
     /// The lock stayed busy with nobody serving for the whole budget.
     TimedOut,
-}
-
-impl Drop for RootOwnershipGuard {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
-    }
 }

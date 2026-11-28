@@ -19,7 +19,7 @@ pub(crate) const BLOCK_FREE_GB_ENV_VAR: &str = "SOLDR_TARGET_BLOCK_FREE_GB";
 /// Env-var that disables the watchdog entirely when set to a falsy
 /// value (`0` / `false` / `no` / `off`, case-insensitive).
 pub(crate) const AUTO_PRUNE_ENABLED_ENV_VAR: &str = "SOLDR_TARGET_AUTO_PRUNE_ENABLED";
-/// Test seam — when set, overrides the real `fs2::available_space`
+/// Test seam — when set, overrides the real `kernal_api::platform::resources::available_space`
 /// probe so unit tests can drive every threshold edge.
 ///
 /// Accepts either a single value, or a comma-separated sequence
@@ -117,7 +117,7 @@ pub(crate) fn free_bytes_for(path: &Path) -> io::Result<u64> {
         });
     }
     let probe = existing_probe_path(path);
-    fs2::available_space(&probe)
+    kernal_api::platform::resources::available_space(&probe)
 }
 
 /// Resolve the build volume for a cargo invocation. Prefers the

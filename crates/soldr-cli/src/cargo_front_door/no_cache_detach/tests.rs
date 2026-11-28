@@ -158,8 +158,6 @@ fn symlinks_are_not_followed() {
 
 #[test]
 fn active_build_lock_refuses_the_preflight() {
-    use fs2::FileExt;
-
     let root = tempfile::tempdir().unwrap();
     let target = root.path().join("target");
     std::fs::create_dir_all(&target).unwrap();
@@ -170,7 +168,7 @@ fn active_build_lock_refuses_the_preflight() {
         .write(true)
         .open(&lock_path)
         .unwrap();
-    lock.lock_exclusive().unwrap();
+    kernal_api::fs_lock_exclusive(&lock).unwrap();
 
     let error = detach_target_tree(&target).unwrap_err();
     assert!(error.to_string().contains("build lock"));
@@ -189,8 +187,6 @@ fn persistent_but_unlocked_build_lock_is_allowed() {
 
 #[test]
 fn acquired_build_locks_remain_held_until_guard_drop() {
-    use fs2::FileExt;
-
     let root = tempfile::tempdir().unwrap();
     let target = root.path().join("target");
     std::fs::create_dir_all(&target).unwrap();
@@ -205,16 +201,14 @@ fn acquired_build_locks_remain_held_until_guard_drop() {
         .write(true)
         .open(&lock_path)
         .unwrap();
-    assert!(contender.try_lock_exclusive().is_err());
+    assert!(kernal_api::platform::fs::try_lock_exclusive(&contender).is_err());
 
     drop(guards);
-    contender.try_lock_exclusive().unwrap();
+    let _guard = kernal_api::platform::fs::try_lock_exclusive(&contender).unwrap();
 }
 
 #[test]
 fn nested_cross_target_build_lock_refuses_the_preflight() {
-    use fs2::FileExt;
-
     let root = tempfile::tempdir().unwrap();
     let target = root.path().join("target");
     let profile = target.join("aarch64-pc-windows-msvc/debug");
@@ -226,7 +220,7 @@ fn nested_cross_target_build_lock_refuses_the_preflight() {
         .write(true)
         .open(&lock_path)
         .unwrap();
-    lock.lock_exclusive().unwrap();
+    kernal_api::fs_lock_exclusive(&lock).unwrap();
 
     let error = detach_target_tree(&target).unwrap_err();
     assert!(error.to_string().contains("aarch64-pc-windows-msvc"));

@@ -952,13 +952,15 @@ pub(crate) fn teardown_std_child(
     context: &str,
     violation: &Violation,
 ) -> crate::core::SoldrError {
-    use wait_timeout::ChildExt;
     let mut message = violation.message.clone();
     match super::kill_cargo_process_tree(child) {
         Ok(detail) => message.push_str(&format!("; {detail}")),
         Err(err) => message.push_str(&format!("; kill failed: {err}")),
     }
-    match child.wait_timeout(Duration::from_secs(super::KILLED_CARGO_REAP_TIMEOUT_SECS)) {
+    match crate::platform::wait::try_wait_for(
+        child,
+        Duration::from_secs(super::KILLED_CARGO_REAP_TIMEOUT_SECS),
+    ) {
         Ok(Some(status)) => super::debug_trace::child_exited(child.id(), context, &status),
         Ok(None) => message.push_str(&format!(
             "; process did not exit within {} seconds after kill",

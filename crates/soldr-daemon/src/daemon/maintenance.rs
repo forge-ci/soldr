@@ -983,8 +983,8 @@ fn filesystem_space(path: &Path) -> (Option<u64>, Option<u64>) {
         .find(|candidate| candidate.exists())
         .unwrap_or(path);
     (
-        fs2::total_space(probe).ok(),
-        fs2::available_space(probe).ok(),
+        kernal_api::platform::resources::total_space(probe).ok(),
+        kernal_api::platform::resources::available_space(probe).ok(),
     )
 }
 

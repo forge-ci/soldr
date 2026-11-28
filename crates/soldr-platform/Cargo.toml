@@ -27,10 +27,8 @@ interprocess = { version = "2", features = ["tokio"] }
 # version the locked `zccache` package depends on (soldr#3297); the guard
 # `kernal_api_version_matches_across_the_fleet` in
 # crates/soldr-cli/tests/guards/version_lockstep.rs enforces that.
-kernal-api = { workspace = true, features = ["fs"] }
+kernal-api = { workspace = true }
 running-process = { version = "=4.10.21", default-features = false, features = ["client"] }
-fs2 = { workspace = true }
-wait-timeout = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tar = { workspace = true }

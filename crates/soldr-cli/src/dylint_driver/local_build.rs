@@ -12,7 +12,6 @@
 //! the parent `dylint_driver` so its `use super::*;` still resolves these
 //! items via the parent's `use local_build::*;` re-export.
 
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{File, OpenOptions},
@@ -449,7 +448,7 @@ pub(super) fn write_driver_build_marker(
 }
 
 /// Advisory lock guarding a build of the driver at `driver_dir`, mirroring
-/// `dylint_cook.rs`'s `lock_target` (`fs2::FileExt::lock_exclusive`, held for
+/// `dylint_cook.rs`'s `lock_target` (held for
 /// the caller's guard lifetime). Two soldr processes racing to build the
 /// same (nightly, cargo-dylint version, host) driver serialize here instead
 /// of both compiling at once.

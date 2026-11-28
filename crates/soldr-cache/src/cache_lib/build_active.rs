@@ -7,7 +7,6 @@
 
 use crate::cache_lib::cargo_lock::lock_is_held;
 use crate::core::SoldrPaths;
-use fs2::FileExt;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -52,7 +51,7 @@ impl BuildActivityLease {
             .write(true)
             .truncate(false)
             .open(&path)?;
-        file.try_lock_exclusive()?;
+        kernal_api::fs_try_lock_exclusive(&file)?;
         Ok(Self {
             _root_lease: root_lease,
             file,
@@ -67,7 +66,7 @@ impl BuildActivityLease {
 
 impl Drop for BuildActivityLease {
     fn drop(&mut self) {
-        let _ = self.file.unlock();
+        let _ = kernal_api::fs_unlock(&self.file);
         let _ = fs::remove_file(&self.path);
     }
 }
@@ -76,7 +75,7 @@ impl Drop for BuildActivityLease {
 /// session clients that did not enter through `soldr cargo`; the front door's
 /// [`BuildActivityLease`] adds the per-session diagnostic lock on top.
 pub struct BuildRootLease {
-    file: File,
+    _lock: kernal_api::platform::fs::OwnedFileLock,
 }
 
 impl BuildRootLease {
@@ -89,24 +88,20 @@ impl BuildRootLease {
             .write(true)
             .truncate(false)
             .open(maintenance_lock_path(paths))?;
-        if let Err(error) =
-            crate::platform::wait::lock_shared_for(&file, crate::platform::wait::SHORT_LOCK)
-        {
-            return Err(io::Error::new(
+        let lock = kernal_api::platform::fs::lock_shared_owned_for(
+            file,
+            crate::platform::wait::SHORT_LOCK,
+        )
+        .map_err(|error| {
+            io::Error::new(
                 error.kind(),
                 format!(
                     "could not acquire the build lease at {}: {error}",
                     maintenance_lock_path(paths).display()
                 ),
-            ));
-        }
-        Ok(Self { file })
-    }
-}
-
-impl Drop for BuildRootLease {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
+            )
+        })?;
+        Ok(Self { _lock: lock })
     }
 }
 
@@ -114,7 +109,7 @@ impl Drop for BuildRootLease {
 /// pass. Acquiring this lock blocks new build leases and fails while any build
 /// already owns its shared side, closing the probe-then-delete race.
 pub struct MaintenanceLease {
-    file: File,
+    _lock: kernal_api::platform::fs::OwnedFileLock,
 }
 
 impl MaintenanceLease {
@@ -127,17 +122,11 @@ impl MaintenanceLease {
             .write(true)
             .truncate(false)
             .open(maintenance_lock_path(paths))?;
-        match file.try_lock_exclusive() {
-            Ok(()) => Ok(Some(Self { file })),
+        match kernal_api::platform::fs::try_lock_exclusive_owned(file) {
+            Ok(lock) => Ok(Some(Self { _lock: lock })),
             Err(error) if lock_is_held(&error) => Ok(None),
             Err(error) => Err(error),
         }
-    }
-}
-
-impl Drop for MaintenanceLease {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
     }
 }
 
@@ -159,9 +148,9 @@ pub fn any_active(paths: &SoldrPaths) -> io::Result<bool> {
         Err(error) if lock_is_held(&error) => return Ok(true),
         Err(error) => return Err(error),
     };
-    match root_lock.try_lock_exclusive() {
+    match kernal_api::fs_try_lock_exclusive(&root_lock) {
         Ok(()) => {
-            let _ = root_lock.unlock();
+            let _ = kernal_api::fs_unlock(&root_lock);
         }
         Err(error) if lock_is_held(&error) => return Ok(true),
         Err(error) => return Err(error),
@@ -189,9 +178,9 @@ pub fn any_active(paths: &SoldrPaths) -> io::Result<bool> {
             Err(error) if lock_is_held(&error) => return Ok(true),
             Err(error) => return Err(error),
         };
-        match file.try_lock_exclusive() {
+        match kernal_api::fs_try_lock_exclusive(&file) {
             Ok(()) => {
-                let _ = file.unlock();
+                let _ = kernal_api::fs_unlock(&file);
                 let _ = fs::remove_file(path);
             }
             Err(error) if lock_is_held(&error) => return Ok(true),

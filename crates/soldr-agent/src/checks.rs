@@ -168,8 +168,9 @@ pub async fn collect(config: &Config) -> Vec<Check> {
         tokio::join!(futures_util::future::join_all(services), capacity(config));
     checks.extend(capacity_checks);
     for path in [std::path::Path::new("/"), config.soldr_root.as_path()] {
-        let space = volume::free_bytes(path)
-            .and_then(|free| fs2::total_space(path).map(|total| (free, total)));
+        let space = volume::free_bytes(path).and_then(|free| {
+            kernal_api::platform::resources::total_space(path).map(|total| (free, total))
+        });
         let (ok, detail) = match space {
             Ok((free, total)) => (
                 total > 0 && u128::from(free) * 100 > u128::from(total) * 5,

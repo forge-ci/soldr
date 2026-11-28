@@ -61,7 +61,7 @@ fn claim_at(temp: &TempDir, exe: &str) -> DaemonProcess {
 }
 
 fn route_image() -> String {
-    hex::encode([7_u8; 32])
+    kernal_api::hash::Blake3Digest::from_bytes([7_u8; 32]).to_hex()
 }
 
 fn paths(temp: &TempDir) -> SoldrPaths {
@@ -148,7 +148,7 @@ fn foreign_image_claim_is_never_adopted() {
         &paths,
         GENERATION,
         "1.0.0",
-        &hex::encode([9_u8; 32]),
+        &kernal_api::hash::Blake3Digest::from_bytes([9_u8; 32]).to_hex(),
         &endpoint(&temp, "placement-b"),
         SHORT,
         || Ok(None),
@@ -174,7 +174,7 @@ fn matching_image_without_a_live_daemon_fails_the_exact_probe() {
     let _generation = Generation::set();
     let claim = DaemonProcess::current_process(endpoint(&temp, "placement-a"), None)
         .expect("current process identity");
-    let image = hex::encode(claim.exe_hash);
+    let image = kernal_api::hash::Blake3Digest::from_bytes(claim.exe_hash).to_hex();
     publish_broker_route_claim(&paths, &claim).expect("publish claim");
 
     let error = wait_for_broker_backend_handle_while(

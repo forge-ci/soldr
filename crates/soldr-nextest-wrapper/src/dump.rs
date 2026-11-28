@@ -5,7 +5,6 @@ use crate::write_stderr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
-use wait_timeout::ChildExt;
 
 const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(12);
 
@@ -73,7 +72,7 @@ fn gdb_dump(debugger: &Path, pid: u32) -> Result<(), String> {
         .map_err(|error| {
             format!("nextest timeout: gdb failed ({error}); using /proc fallback\n")
         })?;
-    match child.wait_timeout(DIAGNOSTIC_TIMEOUT) {
+    match soldr_platform::wait::try_wait_for(&mut child, DIAGNOSTIC_TIMEOUT) {
         Ok(Some(status)) if status.success() => Ok(()),
         Ok(Some(status)) => Err(format!(
             "nextest timeout: gdb exited {}; using /proc fallback\n",

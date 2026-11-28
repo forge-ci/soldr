@@ -33,7 +33,7 @@ impl Lease {
         let (limit, reserve) = match limit {
             Some(limit) => (limit, MINIMUM_FREE),
             None => {
-                let total = fs2::total_space(root)?;
+                let total = kernal_api::platform::resources::total_space(root)?;
                 (auto_slot_limit(total), disk_reserve(total))
             }
         };
@@ -171,7 +171,7 @@ fn create_generation(db: &Connection, root: &Path, manifest: &Manifest) -> io::R
 
 fn reserve_space(root: &Path, reserve: u64) -> io::Result<()> {
     // Reflinks make the seed cheap, but each compile can dirty private blocks.
-    let available = fs2::available_space(root)?;
+    let available = kernal_api::platform::resources::available_space(root)?;
     if available < reserve {
         return Err(io::Error::other(format!(
             "remote slot allocation needs {reserve} bytes of free disk headroom; {available} available"

@@ -33,7 +33,6 @@ pub(crate) use spawn_env::*;
 use crate::cache_lib::{daemon_lifecycle_log_path, soldr_daemon_dir};
 use crate::core::SoldrPaths;
 use crate::platform::process::inspect::find_file_holders;
-use fs2::FileExt;
 use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;

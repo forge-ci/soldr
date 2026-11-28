@@ -17,7 +17,6 @@ path = "src/main.rs"
 kernal-api = { workspace = true, features = ["hash-sha256"] }
 soldr-core = { path = "../soldr-core" }
 soldr-platform = { path = "../soldr-platform" }
-wait-timeout = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

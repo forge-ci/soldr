@@ -37,10 +37,8 @@ axum = { version = "0.8", default-features = false, features = ["http1", "http2"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 clap = { workspace = true }
 filetime = { workspace = true }
-fs2 = { workspace = true }
 getrandom = "0.4"
 globset = "0.4"
-hex = { workspace = true }
 ring = "0.17"
 iroh = { version = "1.5.0", default-features = false, features = ["tls-ring"] }
 interprocess = { version = "2", features = ["tokio"] }
@@ -60,7 +58,6 @@ tokio = { workspace = true }
 toml = { workspace = true }
 toml_edit = { workspace = true }
 tracing = { workspace = true }
-wait-timeout = { workspace = true }
 zip = { workspace = true }
 zstd = { workspace = true }
 

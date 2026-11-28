@@ -18,7 +18,6 @@ url = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
-wait-timeout = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

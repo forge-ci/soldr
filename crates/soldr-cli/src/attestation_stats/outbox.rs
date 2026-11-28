@@ -88,18 +88,18 @@ pub(super) fn enqueue(directory: &Path, event: &Completion) -> io::Result<()> {
         .write(true)
         .open(directory.join("queue.lock"))?;
     let started = std::time::Instant::now();
-    loop {
-        match fs2::FileExt::try_lock_exclusive(&lock) {
-            Ok(()) => break,
+    let _guard = loop {
+        match kernal_api::platform::fs::try_lock_exclusive(&lock) {
+            Ok(guard) => break guard,
             Err(error)
-                if error.kind() == fs2::lock_contended_error().kind()
+                if kernal_api::platform::fs::is_lock_conflict(&error)
                     && started.elapsed() < Duration::from_millis(250) =>
             {
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(error) => return Err(error),
         }
-    }
+    };
     if pending(directory)?.take(MAX_PENDING).count() == MAX_PENDING {
         return Err(io::Error::other("attestation stats outbox is full"));
     }

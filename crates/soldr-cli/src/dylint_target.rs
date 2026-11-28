@@ -1,6 +1,5 @@
 //! Rust standard-library targets required by cross-target Dylint checks.
 
-use fs2::FileExt;
 use std::path::Path;
 
 use crate::core::SoldrError;
@@ -109,7 +108,7 @@ where
         "the dylint target install",
     )?;
     let result = ensure_target_locked(home, channel, target, install);
-    FileExt::unlock(&lock)?;
+    kernal_api::fs_unlock(&lock)?;
     result
 }
 

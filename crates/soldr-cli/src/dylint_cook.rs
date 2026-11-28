@@ -11,7 +11,6 @@ use crate::core::{read_rust_toolchain_manifest, SoldrError};
 use crate::dylint_cook_tree::CookTree;
 use crate::dylint_libraries::canonical_channel;
 use crate::dylint_toolchain::DylintToolchainPlan;
-use fs2::FileExt;
 use kernal_api::hash::Sha256Hasher;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -320,8 +319,8 @@ pub(crate) async fn run(args: &[String], cache_enabled: bool) -> Result<i32, Sol
     {
         output.outcome = "skip";
         emit_output(&output, parsed.json)?;
-        FileExt::unlock(&lock)?;
-        FileExt::unlock(&source_lock)?;
+        kernal_api::fs_unlock(&lock)?;
+        kernal_api::fs_unlock(&source_lock)?;
         return Ok(0);
     }
 
@@ -344,8 +343,8 @@ pub(crate) async fn run(args: &[String], cache_enabled: bool) -> Result<i32, Sol
     write_marker(&marker_path, &expected)?;
     output.outcome = "miss";
     emit_output(&output, parsed.json)?;
-    FileExt::unlock(&lock)?;
-    FileExt::unlock(&source_lock)?;
+    kernal_api::fs_unlock(&lock)?;
+    kernal_api::fs_unlock(&source_lock)?;
     Ok(0)
 }
 

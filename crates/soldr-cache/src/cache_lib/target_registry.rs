@@ -503,7 +503,6 @@ pub fn workspace_root_for_target(target_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs2::FileExt;
     use tempfile::tempdir;
 
     fn fixed_now() -> i64 {
@@ -875,7 +874,7 @@ mod tests {
             .truncate(false)
             .open(target_dir.join(".cargo-lock"))
             .unwrap();
-        cargo_lock.try_lock_exclusive().unwrap();
+        let _guard = kernal_api::platform::fs::try_lock_exclusive(&cargo_lock).unwrap();
 
         let outcome = evaluate_safety_guards(
             &target_dir,

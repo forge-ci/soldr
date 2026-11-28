@@ -874,7 +874,7 @@ fn a_build_holding_the_root_lease_no_longer_starves_the_store_pass() {
             )
             .expect("live service writer lock");
         assert!(
-            fs2::FileExt::try_lock_exclusive(&lock).is_err(),
+            kernal_api::platform::fs::try_lock_exclusive(&lock).is_err(),
             "a running service must hold its writer lock"
         );
 
@@ -999,7 +999,6 @@ fn status_reports_retired_store_bytes() {
             activity: MaintenanceActivity::default(),
         };
 
-        use fs2::FileExt as _;
         let writer = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -1007,7 +1006,8 @@ fn status_reports_retired_store_bytes() {
             .write(true)
             .open(retired_route.join(crate::zccache_embedded::ZCCACHE_WRITER_LOCK_FILE))
             .expect("retired route writer lock");
-        writer.try_lock_exclusive().expect("hold live sibling lock");
+        let writer = kernal_api::platform::fs::try_lock_exclusive_owned(writer)
+            .expect("hold live sibling lock");
         let mut while_live =
             MaintenanceStatus::new(&context, MaintenanceKind::Pressure, SystemTime::now());
         super::retired_status::measure_retired(&context, &mut while_live);

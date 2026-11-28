@@ -33,7 +33,6 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use wait_timeout::ChildExt;
 
 mod build_session;
 pub(crate) mod cache_annotations; // soldr#3924 — where those annotations go

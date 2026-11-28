@@ -3,7 +3,6 @@
 
 use super::*;
 use filetime::{set_file_mtime, FileTime};
-use fs2::FileExt as _;
 use running_process::broker::protocol_v2::ServiceDefinitionBuilder;
 use std::fs::{self, OpenOptions};
 
@@ -55,7 +54,7 @@ fn broker_retirement_retries_locked_cache_and_preserves_live_sibling() {
         .write(true)
         .open(retired_store.join(".writer.lock"))
         .unwrap();
-    writer.try_lock_exclusive().unwrap();
+    let guard = kernal_api::platform::fs::try_lock_exclusive(&writer).unwrap();
     let live = BTreeSet::from([sibling.to_string()]);
 
     let first = crate::broker_daemon_disk::sweep_daemon_disk(
@@ -70,7 +69,7 @@ fn broker_retirement_retries_locked_cache_and_preserves_live_sibling() {
     assert!(live_store.exists());
     assert!(services.join(format!("{retiring}.servicedef.v2")).exists());
 
-    writer.unlock().unwrap();
+    drop(guard);
     drop(writer);
     let second = crate::broker_daemon_disk::sweep_daemon_disk(
         &routes,

@@ -81,9 +81,19 @@ fn valid_grant(key: &hmac::Key, token: &str, now: u64, starts_session: bool) -> 
     {
         return false;
     }
+    decode_signature(signature)
+        .is_some_and(|tag| hmac::verify(key, claims.as_bytes(), &tag).is_ok())
+}
+
+fn decode_signature(signature: &str) -> Option<[u8; 32]> {
+    let encoded: &[u8; 64] = signature.as_bytes().try_into().ok()?;
     let mut tag = [0; 32];
-    hex::decode_to_slice(signature, &mut tag).is_ok()
-        && hmac::verify(key, claims.as_bytes(), &tag).is_ok()
+    for (byte, &[high, low]) in tag.iter_mut().zip(encoded.as_chunks::<2>().0) {
+        let high = char::from(high).to_digit(16)? as u8;
+        let low = char::from(low).to_digit(16)? as u8;
+        *byte = (high << 4) | low;
+    }
+    Some(tag)
 }
 
 #[cfg(test)]
@@ -96,9 +106,13 @@ mod tests {
         let expiry = 1_000;
         let nonce = "a".repeat(43);
         let claims = format!("w1.42.{expiry}.{nonce}");
-        let tag = hex::encode(hmac::sign(&key, claims.as_bytes()));
+        let tag = crate::core::hex_lower(hmac::sign(&key, claims.as_bytes()).as_ref());
         let grant = format!("{claims}.{tag}");
         assert!(valid_grant(&key, &grant, expiry - 1, true));
+        let uppercase = format!("{claims}.{}", tag.to_uppercase());
+        assert!(valid_grant(&key, &uppercase, expiry - 1, true));
+        assert!(decode_signature(&tag[..63]).is_none());
+        assert!(decode_signature(&format!("+{}", &tag[1..])).is_none());
         assert!(!valid_grant(&key, &grant, expiry, true));
         assert!(valid_grant(&key, &grant, expiry, false));
         assert!(!valid_grant(

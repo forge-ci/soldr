@@ -68,7 +68,7 @@ pub fn claim_matches_route_image(
     claim: &DaemonProcess,
     route_image_blake3_hex: &str,
 ) -> Result<(), ClaimAdoptionError> {
-    let claimed_blake3 = hex::encode(claim.exe_hash);
+    let claimed_blake3 = kernal_api::hash::Blake3Digest::from_bytes(claim.exe_hash).to_hex();
     if claimed_blake3.eq_ignore_ascii_case(route_image_blake3_hex) {
         Ok(())
     } else {

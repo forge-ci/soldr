@@ -5,10 +5,10 @@
     "soldr-agent": [
       "base64",
       "ed25519-dalek",
-      "fs2",
       "futures-util",
       "getrandom",
       "if-addrs",
+      "kernal-api",
       "prost",
       "serde",
       "serde_json",
@@ -20,7 +20,6 @@
     ],
     "soldr-cache": [
       "filetime",
-      "fs2",
       "jwalk",
       "kernal-api",
       "prost",
@@ -42,11 +41,9 @@
       "cap-std",
       "clap",
       "filetime",
-      "fs2",
       "futures-util",
       "getrandom",
       "globset",
-      "hex",
       "interprocess",
       "iroh",
       "jwalk",
@@ -67,7 +64,6 @@
       "toml",
       "toml_edit",
       "tracing",
-      "wait-timeout",
       "widestring",
       "windows-sys",
       "zccache",
@@ -83,13 +79,10 @@
       "thiserror",
       "toml",
       "url",
-      "wait-timeout",
       "windows-sys"
     ],
     "soldr-daemon": [
       "console-subscriber",
-      "fs2",
-      "hex",
       "interprocess",
       "kernal-api",
       "libc",
@@ -110,7 +103,6 @@
     "soldr-fetch": [
       "bzip2",
       "flate2",
-      "fs2",
       "kernal-api",
       "minisign-verify",
       "reqwest",
@@ -128,11 +120,9 @@
       "zstd"
     ],
     "soldr-nextest-wrapper": [
-      "kernal-api",
-      "wait-timeout"
+      "kernal-api"
     ],
     "soldr-platform": [
-      "fs2",
       "interprocess",
       "kernal-api",
       "libc",
@@ -142,7 +132,6 @@
       "tar",
       "thiserror",
       "tokio",
-      "wait-timeout",
       "widestring",
       "windows-sys"
     ]

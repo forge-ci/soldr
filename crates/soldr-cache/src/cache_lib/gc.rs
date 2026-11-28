@@ -509,7 +509,7 @@ fn detach_target(path: &Path, root: &Path) -> std::io::Result<DetachedCandidate>
 /// An owned detached target protected from concurrent trash sweeps.
 pub struct DetachedCandidate {
     path: PathBuf,
-    _lock: std::fs::File,
+    _lock: kernal_api::platform::fs::OwnedFileLock,
 }
 
 /// Reclaim a target that is already detached from its original build path.

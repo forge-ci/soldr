@@ -779,9 +779,9 @@ fn wait_for_cargo_child_guarded(
         if crate::platform::process::signal::forward_child_termination(child.id())
             .map_err(|err| SoldrError::Other(format!("forward termination to {context}: {err}")))?
         {
-            let _ = child.wait_timeout(Duration::from_millis(100));
+            let _ = crate::platform::wait::try_wait_for(child, Duration::from_millis(100));
             let detail = kill_cargo_process_tree(child);
-            let _ = child.wait_timeout(Duration::from_secs(KILLED_CARGO_REAP_TIMEOUT_SECS));
+            let _ = crate::platform::wait::try_wait_for(child, Duration::from_secs(KILLED_CARGO_REAP_TIMEOUT_SECS));
             return Err(SoldrError::Other(format!(
                 "{context} interrupted by termination signal; tree cleanup: {detail:?}"
             )));
@@ -804,8 +804,7 @@ fn wait_for_cargo_child_guarded(
         if guard.is_some() {
             wait_for = wait_for.min(nested_cargo_guard::GUARD_TICK);
         }
-        match child
-            .wait_timeout(wait_for)
+        match crate::platform::wait::try_wait_for(child, wait_for)
             .map_err(|err| SoldrError::Other(format!("wait on {context} failed: {err}")))?
         {
             Some(status) => {
@@ -859,7 +858,7 @@ fn cargo_timeout_error(
     timeout: Duration,
 ) -> SoldrError {
     let kill_result = kill_cargo_process_tree(child);
-    let reap_result = child.wait_timeout(Duration::from_secs(KILLED_CARGO_REAP_TIMEOUT_SECS));
+    let reap_result = crate::platform::wait::try_wait_for(child, Duration::from_secs(KILLED_CARGO_REAP_TIMEOUT_SECS));
     let timeout_secs = timeout.as_secs();
     let mut message = format!(
         "{context} timed out after {timeout_secs} seconds \

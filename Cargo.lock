@@ -1154,16 +1154,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs2"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
-dependencies = [
- "libc",
- "winapi",
-]
-
-[[package]]
 name = "futures"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1440,12 +1430,6 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
-
-[[package]]
-name = "hex"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "http"
@@ -4121,10 +4105,10 @@ version = "0.9.57"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
- "fs2",
  "futures-util",
  "getrandom 0.4.3",
  "if-addrs",
+ "kernal-api",
  "prost",
  "serde",
  "serde_json",
@@ -4142,7 +4126,6 @@ name = "soldr-cache"
 version = "0.9.57"
 dependencies = [
  "filetime",
- "fs2",
  "jwalk",
  "kernal-api",
  "prost",
@@ -4170,11 +4153,9 @@ dependencies = [
  "cap-std",
  "clap",
  "filetime",
- "fs2",
  "futures-util",
  "getrandom 0.4.3",
  "globset",
- "hex",
  "interprocess",
  "iroh",
  "jwalk",
@@ -4202,7 +4183,6 @@ dependencies = [
  "toml",
  "toml_edit",
  "tracing",
- "wait-timeout",
  "widestring",
  "windows-sys 0.61.2",
  "zccache",
@@ -4224,7 +4204,6 @@ dependencies = [
  "thiserror 2.0.20",
  "toml",
  "url",
- "wait-timeout",
  "windows-sys 0.61.2",
 ]
 
@@ -4234,8 +4213,6 @@ version = "0.9.57"
 dependencies = [
  "console-subscriber",
  "filetime",
- "fs2",
- "hex",
  "interprocess",
  "kernal-api",
  "libc",
@@ -4263,7 +4240,6 @@ version = "0.9.57"
 dependencies = [
  "bzip2",
  "flate2",
- "fs2",
  "kernal-api",
  "minisign-verify",
  "reqwest 0.12.28",
@@ -4291,14 +4267,12 @@ dependencies = [
  "soldr-core",
  "soldr-platform",
  "tempfile",
- "wait-timeout",
 ]
 
 [[package]]
 name = "soldr-platform"
 version = "0.9.57"
 dependencies = [
- "fs2",
  "interprocess",
  "kernal-api",
  "libc",
@@ -4309,7 +4283,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "wait-timeout",
  "widestring",
  "windows-sys 0.61.2",
 ]
@@ -5080,15 +5053,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "wait-timeout"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09ac3b126d3914f9849036f826e054cbabdc8519970b8998ddaf3b5bd3c65f11"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "walkdir"

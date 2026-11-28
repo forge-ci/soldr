@@ -4,7 +4,7 @@
 //!
 //! ```ignore
 //! let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-//! if child.wait_timeout(budget)?.is_none() {
+//! if try_wait_for(&mut child, budget)?.is_none() {
 //!     let _ = child.kill();
 //!     let output = child.wait_with_output()?;   // <-- can block forever
 //!     panic!("timed out\nstdout:\n{}", ...);    // <-- therefore never runs
@@ -66,7 +66,6 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use wait_timeout::ChildExt;
 
 /// How long to keep waiting for the drain threads to see EOF after the child
 /// (or its tree) is gone. Only a survivor still holding a write handle can
@@ -211,7 +210,9 @@ impl TrackedChild {
     /// [`Self::wait_bounded`] would add the drain grace to the measurement --
     /// or that must keep the handle. Finish with `wait_bounded`.
     pub(crate) fn wait_for_exit(&mut self, timeout: Duration) -> Option<ExitStatus> {
-        self.child.wait_timeout(timeout).ok().flatten()
+        soldr_platform::wait::try_wait_for(&mut self.child, timeout)
+            .ok()
+            .flatten()
     }
 
     /// Poll the drained stdout until it contains `needle`. Returns `false` at
@@ -240,9 +241,7 @@ impl TrackedChild {
     /// descendant does. That property is the whole point -- the caller's
     /// diagnostic panic has to be reachable.
     pub(crate) fn wait_bounded(mut self, timeout: Duration) -> TrackedOutput {
-        let settled = self
-            .child
-            .wait_timeout(timeout)
+        let settled = soldr_platform::wait::try_wait_for(&mut self.child, timeout)
             .expect("wait for tracked child");
         if let Some(status) = settled {
             let pipes_closed = self.await_pipes(PIPE_DRAIN_GRACE);
@@ -263,9 +262,7 @@ impl TrackedChild {
             }
             Err(_) => "tree kill failed",
         };
-        let status = self
-            .child
-            .wait_timeout(TREE_KILL_REAP_BUDGET)
+        let status = soldr_platform::wait::try_wait_for(&mut self.child, TREE_KILL_REAP_BUDGET)
             .ok()
             .flatten();
         let pipes_closed = self.await_pipes(PIPE_DRAIN_GRACE);

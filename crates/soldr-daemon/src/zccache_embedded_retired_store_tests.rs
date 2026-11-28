@@ -633,8 +633,6 @@ fn a_store_of_fresh_unlinked_files_is_removed_on_the_first_pass() {
 /// immediately.
 #[test]
 fn a_held_writer_lock_defers_expiry_until_the_service_exits() {
-    use fs2::FileExt;
-
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = SoldrPaths::with_root(temp.path().join(".soldr"));
     let now = SystemTime::now();
@@ -677,7 +675,8 @@ fn a_held_writer_lock_defers_expiry_until_the_service_exits() {
 
     let lock_path = retired.join(ZCCACHE_WRITER_LOCK_FILE);
     let lock = std::fs::File::create(&lock_path).expect("writer lock file");
-    lock.try_lock_exclusive().expect("acquire writer lock");
+    let lock =
+        kernal_api::platform::fs::try_lock_exclusive_owned(lock).expect("acquire writer lock");
 
     let held = sweep_legacy_cache_roots(&paths, now, crate::cache_lib::gc_policy::STALENESS_GATE);
     assert_eq!(held.live_retained, 1, "{held:?}");

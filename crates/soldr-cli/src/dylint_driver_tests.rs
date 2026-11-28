@@ -21,7 +21,6 @@
 
 use super::*;
 use crate::TEST_PROCESS_ENV_LOCK as ENV_LOCK;
-use fs2::FileExt;
 
 fn sample_plan() -> DylintToolchainPlan {
     DylintToolchainPlan::identity(
@@ -307,15 +306,14 @@ fn driver_build_lock_is_exclusive_within_the_process() {
         .open(&contender_path)
         .expect("open contender handle");
     assert!(
-        contender.try_lock_exclusive().is_err(),
+        kernal_api::platform::fs::try_lock_exclusive(&contender).is_err(),
         "a second handle must not be able to take the lock while the first holds it"
     );
 
     drop(_held);
 
     // Once released, a fresh attempt succeeds.
-    contender
-        .try_lock_exclusive()
+    let _guard = kernal_api::platform::fs::try_lock_exclusive(&contender)
         .expect("the lock must be acquirable once released");
 }
 

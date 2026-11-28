@@ -3,7 +3,6 @@
 //! file stays within the project LOC budget.
 
 use super::*;
-use fs2::FileExt;
 use std::fs::File;
 use tempfile::tempdir;
 
@@ -19,7 +18,7 @@ fn touch(path: &Path) {
     File::create(path).unwrap();
 }
 
-fn hold_cargo_lock(path: &Path) -> File {
+fn hold_cargo_lock(path: &Path) -> kernal_api::platform::fs::OwnedFileLock {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
@@ -30,8 +29,7 @@ fn hold_cargo_lock(path: &Path) -> File {
         .truncate(false)
         .open(path)
         .unwrap();
-    file.try_lock_exclusive().unwrap();
-    file
+    kernal_api::platform::fs::try_lock_exclusive_owned(file).unwrap()
 }
 
 fn touch_dir(path: &Path) {

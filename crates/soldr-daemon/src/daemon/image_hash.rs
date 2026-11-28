@@ -241,15 +241,13 @@ fn wait_for_hash_lock_within(
     budget: std::time::Duration,
     progress: &mut impl FnMut(u64, u64),
 ) -> HashLockOutcome {
-    use fs2::FileExt as _;
-
     let started = std::time::Instant::now();
     let deadline = started + budget;
     let mut next_progress = started;
     let mut backoff = HASH_LOCK_BACKOFF_BASE;
     let mut waited = false;
     loop {
-        match lock.try_lock_exclusive() {
+        match kernal_api::fs_try_lock_exclusive(lock) {
             Ok(()) => {
                 if waited {
                     eprintln!(
@@ -501,8 +499,6 @@ mod tests {
 
     #[test]
     fn hash_lock_wait_is_bounded_and_degrades_to_direct_hashing() {
-        use fs2::FileExt as _;
-
         let temp = tempfile::tempdir().expect("tempdir");
         let lock_path = temp.path().join("held.lock");
         let holder = std::fs::OpenOptions::new()
@@ -512,7 +508,8 @@ mod tests {
             .write(true)
             .open(&lock_path)
             .expect("open holder");
-        holder.try_lock_exclusive().expect("holder takes the lock");
+        let holder = kernal_api::platform::fs::try_lock_exclusive_owned(holder)
+            .expect("holder takes the lock");
 
         let waiter = std::fs::OpenOptions::new()
             .read(true)
@@ -538,7 +535,7 @@ mod tests {
             elapsed < budget * 10,
             "must not overshoot the budget, waited {elapsed:?}"
         );
-        fs2::FileExt::unlock(&holder).expect("release");
+        drop(holder);
     }
 
     #[test]
