@@ -78,7 +78,7 @@ pub(crate) fn write_stall_dump(paths: &SoldrPaths, phase: &str) -> std::io::Resu
             .unwrap_or_else(|_| format!("{}:unreachable", paths.cache.display()));
     let mut fingerprint: Vec<_> = descendants
         .iter()
-        .chain(daemon_and_broker.iter())
+        .chain(daemon_and_broker.iter().copied())
         .map(|p| format!("{}:{}:{:?}:{}", p.pid, p.name, p.cmd, p.status))
         .collect();
     fingerprint.sort_unstable();
