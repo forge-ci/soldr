@@ -335,3 +335,31 @@ fn real_clang_cl_config_keeps_libpaths_out_of_compile_only_inputs() {
         String::from_utf8_lossy(&link.stderr).contains("lib/windows/clang_rt.builtins-x86_64.lib")
     );
 }
+
+// soldr#4185: a driver directory left without `.complete` (killed writer,
+// partial cache restore) must be replaced, not fail every later build.
+#[test]
+fn incomplete_driver_dir_is_replaced() {
+    if crate::platform::host::facts::os() == crate::platform::host::facts::HostOs::Windows {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = SoldrPaths::with_root(tmp.path().join("root"));
+    let bin = tmp.path().join("llvm");
+    std::fs::create_dir_all(&bin).unwrap();
+    for tool in ["clang", "clang++"] {
+        std::fs::write(bin.join(tool), "").unwrap();
+    }
+    let spec = apple_spec("x86_64-apple-darwin", Path::new("/sdk"));
+    let (cc, cxx) = write_drivers(&paths, "x86_64-apple-darwin", &bin, &spec).unwrap();
+    let dir = cc.parent().unwrap();
+    std::fs::remove_file(dir.join(".complete")).unwrap();
+    std::fs::write(dir.join("leftover"), "partial").unwrap();
+    assert_eq!(
+        write_drivers(&paths, "x86_64-apple-darwin", &bin, &spec).unwrap(),
+        (cc.clone(), cxx)
+    );
+    assert!(dir.join(".complete").is_file());
+    assert!(!dir.join("leftover").exists());
+    assert!(cc.is_file());
+}

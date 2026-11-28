@@ -135,3 +135,45 @@ fn concurrent_slots_publish_one_complete_tree() {
         .iter()
         .all(|r| r == &roots[0] && r.join(BUILTINS).is_file()));
 }
+
+// soldr#4174: a tree verified online must be reusable when the catalogue is
+// unreachable (restored prepared state, air-gapped runner).
+#[tokio::test]
+async fn offline_reuses_a_tree_verified_online() {
+    let temp = tempfile::tempdir().unwrap();
+    let (paths, original, index) = seed(temp.path(), true);
+    let online = ensure_from_index(&paths, &original, &index).await.unwrap();
+    // The downloaded bundle need not survive the restore.
+    std::fs::remove_dir_all(paths.cache.join("catalogue-v2")).unwrap();
+    assert_eq!(
+        ensure_from_index(&paths, &original, &ManifestIndex::empty())
+            .await
+            .unwrap(),
+        online
+    );
+}
+
+#[tokio::test]
+async fn offline_without_a_verified_tree_still_refuses() {
+    let temp = tempfile::tempdir().unwrap();
+    let (paths, original, _) = seed(temp.path(), true);
+    let error = ensure_from_index(&paths, &original, &ManifestIndex::empty())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Refs #4167"), "{error}");
+}
+
+#[tokio::test]
+async fn offline_refuses_a_tree_whose_record_does_not_match_its_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let (paths, original, index) = seed(temp.path(), true);
+    let online = ensure_from_index(&paths, &original, &index).await.unwrap();
+    let root = online.ancestors().nth(4).unwrap().to_path_buf();
+    let record = std::fs::read_to_string(root.join(UNIT_RECORD)).unwrap();
+    std::fs::write(root.join(UNIT_RECORD), record.replace('\n', "\nx")).unwrap();
+    assert!(
+        ensure_from_index(&paths, &original, &ManifestIndex::empty())
+            .await
+            .is_err()
+    );
+}

@@ -11,6 +11,9 @@ use crate::core::{SoldrError, SoldrPaths};
 
 const FORMAT: &str = "msvc-resources-v1";
 const BUILTINS: &str = "lib/windows/clang_rt.builtins-x86_64.lib";
+/// The verified catalogue unit a published tree was composed from, so a
+/// restored tree can be re-verified without the catalogue (soldr#4174).
+const UNIT_RECORD: &str = "catalogue-unit";
 
 fn select_unit(index: &ManifestIndex) -> Result<ManifestEntry, SoldrError> {
     let asset = format!(
