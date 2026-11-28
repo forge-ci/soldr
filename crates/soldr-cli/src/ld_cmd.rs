@@ -275,7 +275,9 @@ fn check_fuse(verb: &str, family: Family, fuse: Fuse, target: &str) -> Result<()
     let supported = match fuse {
         Fuse::Lld => true,
         Fuse::GnuLd => elf || family == Family::WindowsGnu,
-        Fuse::Reld | Fuse::Mold => elf,
+        // reld links COFF through its `reld-link` entry point (soldr#4281).
+        Fuse::Reld => elf || family == Family::WindowsMsvc,
+        Fuse::Mold => elf,
         Fuse::RustLld => true,
     };
     if supported {
@@ -284,7 +286,8 @@ fn check_fuse(verb: &str, family: Family, fuse: Fuse, target: &str) -> Result<()
     let options = match family {
         Family::LinuxGnu | Family::LinuxMusl => "lld, ld, reld, mold, rust-lld",
         Family::WindowsGnu => "lld, ld, rust-lld",
-        Family::Darwin | Family::WindowsMsvc => "lld, rust-lld",
+        Family::Darwin => "lld, rust-lld",
+        Family::WindowsMsvc => "lld, reld, rust-lld",
     };
     Err(SoldrError::Other(format!(
         "soldr {verb}: --fuse={} cannot link `{target}`; supported for this target: {options}",
@@ -450,12 +453,33 @@ async fn prepare_msvc(
             xwin.display()
         )));
     }
-    let (program, mut args) = if fuse == Fuse::RustLld {
-        (rust_lld()?, vec!["-flavor".to_string(), "link".to_string()])
-    } else {
-        (llvm_tool(paths, "lld-link").await?, Vec::new())
+    let llvm_bin = crate::fetch::ensure_llvm_toolchain(paths).await?;
+    let (program, mut args) = match fuse {
+        Fuse::RustLld => (rust_lld()?, vec!["-flavor".to_string(), "link".to_string()]),
+        Fuse::Reld => {
+            let reld_link = reld_link_beside(&crate::fetch::reld::ensure_reld(paths).await?);
+            if !reld_link.is_file() {
+                return Err(SoldrError::Other(format!(
+                    "soldr link: the managed reld has no {} (soldr#4281)",
+                    reld_link.display()
+                )));
+            }
+            (reld_link, Vec::new())
+        }
+        _ => (
+            llvm_bin.join(crate::platform::executable::name::native("lld-link")),
+            Vec::new(),
+        ),
     };
-    args.extend(msvc_link_args(target, &lib_dirs));
+    // The same compiler-rt builtins the cc driver's lld-link shim carries
+    // (__udivti3 and friends from C objects), soldr#4281.
+    let builtins = if target == "x86_64-pc-windows-msvc" {
+        let resource = crate::fetch::msvc_resources::ensure(paths, &llvm_bin, target).await?;
+        Some(resource.join("lib/windows/clang_rt.builtins-x86_64.lib"))
+    } else {
+        None
+    };
+    args.extend(msvc_link_args(target, &lib_dirs, builtins.as_deref()));
     Ok(PreparedLinker {
         program,
         args,
@@ -463,7 +487,7 @@ async fn prepare_msvc(
     })
 }
 
-fn msvc_link_args(target: &str, lib_dirs: &[PathBuf]) -> Vec<String> {
+fn msvc_link_args(target: &str, lib_dirs: &[PathBuf], builtins: Option<&Path>) -> Vec<String> {
     let machine = if target.starts_with("aarch64") {
         "ARM64"
     } else {
@@ -475,7 +499,13 @@ fn msvc_link_args(target: &str, lib_dirs: &[PathBuf]) -> Vec<String> {
             .iter()
             .map(|dir| format!("/LIBPATH:{}", dir.display())),
     );
+    args.extend(builtins.map(|lib| lib.display().to_string()));
     args
+}
+
+/// reld's link.exe entry point, installed beside `reld`.
+fn reld_link_beside(reld: &Path) -> PathBuf {
+    reld.with_file_name(format!("reld-link{}", std::env::consts::EXE_SUFFIX))
 }
 
 async fn llvm_tool(paths: &SoldrPaths, name: &str) -> Result<PathBuf, SoldrError> {
