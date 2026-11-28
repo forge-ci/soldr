@@ -265,24 +265,29 @@ async fn install_locked(
         asset.plat_arch,
     );
 
+    place_llvm_tree(downloaded.path(), install_dir)?;
+    let libs_done = complete_host_libs(paths, bin_dir).await?;
+    write_stamp(stamp, libs_done)?;
+    eprintln!("soldr: extracted LLVM to {}", install_dir.display());
+    Ok(bin_dir.to_path_buf())
+}
+
+/// Put the verified LLVM archive's tree at `install_dir` (soldr#4295).
+fn place_llvm_tree(archive: &Path, install_dir: &Path) -> Result<(), SoldrError> {
     if install_dir.exists() {
         std::fs::remove_dir_all(install_dir)?;
     }
     std::fs::create_dir_all(install_dir)?;
-    extract_tar_zst_tree(std::fs::File::open(downloaded.path())?, install_dir)?;
-
+    extract_tar_zst_tree(std::fs::File::open(archive)?, install_dir)?;
+    let bin_dir = install_dir.join("hardlinked").join("bin");
     if !bin_dir.is_dir() {
         return Err(SoldrError::Archive(format!(
             "LLVM extract did not produce expected directory {}",
             bin_dir.display()
         )));
     }
-
-    restore_bin_exec_bits(bin_dir)?;
-    let libs_done = complete_host_libs(paths, bin_dir).await?;
-    write_stamp(stamp, libs_done)?;
-    eprintln!("soldr: extracted LLVM to {}", install_dir.display());
-    Ok(bin_dir.to_path_buf())
+    restore_bin_exec_bits(&bin_dir)?;
+    Ok(())
 }
 
 async fn catalogue_entry_for_asset(asset: &LlvmAsset) -> Result<ManifestEntry, SoldrError> {
@@ -427,6 +432,102 @@ fn extract_tar_zst_tree<R: std::io::Read>(reader: R, dest: &Path) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tiny stand-in for the LLVM archive: `hardlinked/bin/clang`.
+    fn fake_llvm_archive(dir: &Path) -> PathBuf {
+        let archive = dir.join("llvm.tar.zst");
+        let file = std::fs::File::create(&archive).expect("create archive");
+        let zst = zstd::stream::write::Encoder::new(file, 1).expect("zstd");
+        let mut tar = tar::Builder::new(zst);
+        let body = b"#!/bin/sh\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, "hardlinked/bin/clang", &body[..])
+            .expect("append");
+        tar.into_inner().expect("tar").finish().expect("zstd finish");
+        archive
+    }
+
+    /// soldr#4295: a dangling link left at the install path (an interrupted
+    /// install, or a shared root another lane rewrote) made
+    /// `create_dir_all` fail with a bare `File exists (os error 17)`.
+    #[test]
+    fn place_llvm_tree_replaces_a_dangling_link_at_the_install_path() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let archive = fake_llvm_archive(tmp.path());
+        let install_dir = tmp.path().join("bin").join("llvm-21.1.5-r1");
+        std::fs::create_dir_all(install_dir.parent().unwrap()).expect("mkdir");
+        if crate::platform::fs::links::create(
+            &tmp.path().join("gone").to_string_lossy(),
+            &install_dir,
+            true,
+        )
+        .is_err()
+        {
+            eprintln!("skipping: cannot create directory symlinks here");
+            return;
+        }
+        place_llvm_tree(&archive, &install_dir).expect("place over dangling link");
+        assert!(install_dir.join("hardlinked").join("bin").join("clang").is_file());
+    }
+
+    /// soldr#4295: a regular file left at the install path is replaced, too.
+    #[test]
+    fn place_llvm_tree_replaces_a_file_at_the_install_path() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let archive = fake_llvm_archive(tmp.path());
+        let install_dir = tmp.path().join("llvm-21.1.5-r1");
+        std::fs::write(&install_dir, b"leftover").expect("write");
+        place_llvm_tree(&archive, &install_dir).expect("place over a file");
+        assert!(install_dir.join("hardlinked").join("bin").join("clang").is_file());
+    }
+
+    /// soldr#4295: a partial tree from an interrupted extraction is replaced,
+    /// and nothing from it survives.
+    #[test]
+    fn place_llvm_tree_replaces_a_partial_install() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let archive = fake_llvm_archive(tmp.path());
+        let install_dir = tmp.path().join("llvm-21.1.5-r1");
+        std::fs::create_dir_all(install_dir.join("hardlinked").join("lib")).expect("mkdir");
+        std::fs::write(install_dir.join("hardlinked").join("stale"), b"x").expect("write");
+        place_llvm_tree(&archive, &install_dir).expect("place over partial");
+        assert!(install_dir.join("hardlinked").join("bin").join("clang").is_file());
+        assert!(!install_dir.join("hardlinked").join("stale").exists());
+    }
+
+    /// soldr#4295: concurrent installers into one root (lanes whose install
+    /// locks do not see each other) all succeed with a complete tree.
+    #[test]
+    fn concurrent_place_llvm_tree_calls_all_succeed() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let archive = fake_llvm_archive(tmp.path());
+        let install_dir = tmp.path().join("llvm-21.1.5-r1");
+        let results: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| place_llvm_tree(&archive, &install_dir)))
+                .collect();
+            handles.into_iter().map(|h| h.join().expect("join")).collect()
+        });
+        for result in results {
+            result.expect("concurrent place");
+        }
+        assert!(install_dir.join("hardlinked").join("bin").join("clang").is_file());
+    }
+
+    /// soldr#4295: an IO failure names the path it hit.
+    #[test]
+    fn place_llvm_tree_error_names_the_archive_path() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let missing = tmp.path().join("missing.tar.zst");
+        let err = place_llvm_tree(&missing, &tmp.path().join("llvm")).expect_err("missing archive");
+        assert!(
+            err.to_string().contains(&missing.display().to_string()),
+            "error must name the path: {err}"
+        );
+    }
 
     /// Serializes the two tests below, which are the *only* places that
     /// mutate `LLVM_DIR_ENV_VAR`.
