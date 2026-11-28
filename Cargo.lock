@@ -2124,7 +2124,7 @@ dependencies = [
  "running-process",
  "sha2 0.10.9",
  "strsim",
- "sysinfo 0.39.6",
+ "sysinfo",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -2630,7 +2630,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "web-sys",
- "windows 0.62.2",
+ "windows",
  "windows-result 0.4.1",
  "wmi",
 ]
@@ -3476,7 +3476,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "rustix",
- "windows 0.62.2",
+ "windows",
 ]
 
 [[package]]
@@ -3634,7 +3634,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "sysinfo 0.39.6",
+ "sysinfo",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
@@ -3654,7 +3654,7 @@ dependencies = [
  "interprocess",
  "libc",
  "miniz_oxide",
- "sysinfo 0.39.6",
+ "sysinfo",
  "thiserror 2.0.20",
  "tokio",
  "widestring",
@@ -4195,7 +4195,6 @@ dependencies = [
  "soldr-daemon",
  "soldr-fetch",
  "soldr-platform",
- "sysinfo 0.30.13",
  "tar",
  "tempfile",
  "thiserror 2.0.20",
@@ -4468,21 +4467,6 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.30.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a5b4ddaee55fb2bea2bf0e5000747e5f5c0de765e5a5ff87f4cd106439f4bb3"
-dependencies = [
- "cfg-if",
- "core-foundation-sys",
- "libc",
- "ntapi",
- "once_cell",
- "rayon",
- "windows 0.52.0",
-]
-
-[[package]]
-name = "sysinfo"
 version = "0.39.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2071df9448915b71c4fe6d25deaf1c22f12bd234f01540b77312bb8e41361e6"
@@ -4493,7 +4477,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
  "objc2-open-directory",
- "windows 0.62.2",
+ "windows",
 ]
 
 [[package]]
@@ -5289,16 +5273,6 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows"
-version = "0.52.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e48a53791691ab099e5e2ad123536d0fff50652600abaf43bbf952894110d0be"
-dependencies = [
- "windows-core 0.52.0",
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "527fadee13e0c05939a6a05d5bd6eec6cd2e3dbd648b9f8e447c6518133d8580"
@@ -5316,15 +5290,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b2d95af1a8a14a3c7367e1ed4fc9c20e0a26e79551b1454d72583c97cc6610"
 dependencies = [
  "windows-core 0.62.2",
-]
-
-[[package]]
-name = "windows-core"
-version = "0.52.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33ab640c8d7e35bf8ba19b884ba838ceb4fba93a4e8c65a9059d08afcfc683d9"
-dependencies = [
- "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -5671,7 +5636,7 @@ dependencies = [
  "log",
  "serde",
  "thiserror 2.0.20",
- "windows 0.62.2",
+ "windows",
  "windows-core 0.62.2",
 ]
 

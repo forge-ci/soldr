@@ -3,19 +3,19 @@
 //! watchdog's pure timing logic stays easy to read and unit test separately
 //! from the process-inspection/termination side, which needs real PIDs.
 //!
-//! Process discovery uses `sysinfo` (already a `soldr-cli` dependency, see
-//! `broker_inventory.rs` for the established pattern) rather than hand-rolled
-//! `/proc` parsing, so the same code paths work on Linux, macOS and Windows
-//! without any `#[cfg(target_os = ...)]` outside the platform boundary.
 //! Native thread backtraces (`gdb` / `eu-stack`) are Linux-realistic tools
 //! that are simply absent on other platforms -- the code checks `PATH` for
 //! them rather than branching on OS, so the behavior degrades automatically
 //! instead of needing a cfg.
 
 use crate::core::SoldrPaths;
+use crate::platform::process::metadata::{self, ProcessEntry};
+use kernal_api::platform::process;
+use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const BACKTRACE_TOOL_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -45,17 +45,32 @@ pub(crate) fn write_stall_dump(paths: &SoldrPaths, phase: &str) -> std::io::Resu
         .join(crate::cook_watchdog::stall_dump_dirname());
     std::fs::create_dir_all(&dir)?;
 
-    let table = live_process_snapshot();
+    let table = metadata::snapshot();
     let this_pid = std::process::id();
-    let descendants = descendants_of(&table, this_pid);
-    let daemon_and_broker = soldr_service_processes(&table, this_pid);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let descendants: Vec<_> = descendants_of(&table, this_pid)
+        .into_iter()
+        .map(|entry| process_snapshot(entry, now))
+        .collect();
+    let services: Vec<_> = table
+        .iter()
+        .filter(|entry| entry.name.starts_with("soldr"))
+        .map(|entry| process_snapshot(entry, now))
+        .collect();
+    let daemon_and_broker = soldr_service_processes(&services, this_pid);
 
     write_process_list(&dir.join("cook-descendants.txt"), &descendants)?;
-    write_process_list(&dir.join("daemon-broker.txt"), &daemon_and_broker)?;
+    write_process_list(
+        &dir.join("daemon-broker.txt"),
+        daemon_and_broker.iter().copied(),
+    )?;
 
     let backtrace_tool = detect_backtrace_tool();
     let mut backtrace_summary = String::new();
-    for process in descendants.iter().chain(daemon_and_broker.iter()) {
+    for process in descendants.iter().chain(daemon_and_broker.iter().copied()) {
         if let Some(tool) = backtrace_tool {
             match capture_native_backtrace(tool, process.pid) {
                 Some(text) => {
@@ -97,43 +112,55 @@ pub(crate) fn write_stall_dump(paths: &SoldrPaths, phase: &str) -> std::io::Resu
 /// Best-effort: a process that already exited or refuses signals is simply
 /// skipped, because the caller is already returning a hard error either way.
 pub(crate) fn terminate_cook_descendants() {
-    let table = live_process_snapshot();
-    let descendants = descendants_of(&table, std::process::id());
-    for process in &descendants {
-        terminate_pid_best_effort(process.pid);
+    let table = metadata::snapshot();
+    let current = std::process::id();
+    // Capture each descendant before signaling anything, while the observed
+    // tree still exists. Never signal the watchdog itself.
+    let identities: Vec<_> = descendants_of(&table, current)
+        .into_iter()
+        .filter_map(|entry| match process::capture_identity(entry.pid) {
+            process::ProcessIdentityCapture::Found(identity) => Some(identity),
+            _ => None,
+        })
+        .collect();
+    for identity in identities.into_iter().rev() {
+        if matches!(
+            process::signal_terminate(identity),
+            Err(process::ProcessIdentityActionError::Unavailable(
+                process::ProcessIdentityUnavailable::Unsupported
+            ))
+        ) {
+            let _ = process::force_kill(identity);
+        }
     }
 }
 
-fn live_process_snapshot() -> Vec<ProcessSnapshot> {
-    use sysinfo::{ProcessRefreshKind, System, UpdateKind};
-
-    let mut system = System::new();
-    let detail = ProcessRefreshKind::new()
-        .with_cmd(UpdateKind::Always)
-        .with_exe(UpdateKind::Always);
-    system.refresh_processes_specifics(detail);
-    system
-        .processes()
-        .values()
-        .filter(|process| process.thread_kind().is_none())
-        .map(|process| ProcessSnapshot {
-            pid: process.pid().as_u32(),
-            parent_pid: process.parent().map(sysinfo::Pid::as_u32),
-            name: process.name().to_string(),
-            exe: process.exe().map(std::path::Path::to_path_buf),
-            cmd: process.cmd().to_vec(),
-            status: format!("{:?}", process.status()),
-            run_time_secs: process.run_time(),
-        })
-        .collect()
+fn process_snapshot(process: &ProcessEntry, now: u64) -> ProcessSnapshot {
+    let pid = process.pid;
+    let (cmd, _) = metadata::arguments_and_environment(pid);
+    ProcessSnapshot {
+        pid,
+        parent_pid: process.parent_pid,
+        name: process.name.clone(),
+        exe: metadata::executable_path(pid),
+        cmd,
+        status: if process.running {
+            "running"
+        } else {
+            "not running"
+        }
+        .into(),
+        run_time_secs: metadata::start_time_unix(pid).map_or(0, |start| now.saturating_sub(start)),
+    }
 }
 
-fn descendants_of(table: &[ProcessSnapshot], root_pid: u32) -> Vec<&ProcessSnapshot> {
+fn descendants_of(table: &[ProcessEntry], root_pid: u32) -> Vec<&ProcessEntry> {
     let mut result = Vec::new();
     let mut frontier = vec![root_pid];
+    let mut visited = HashSet::from([root_pid]);
     while let Some(pid) = frontier.pop() {
         for candidate in table {
-            if candidate.parent_pid == Some(pid) && candidate.pid != root_pid {
+            if candidate.parent_pid == Some(pid) && visited.insert(candidate.pid) {
                 result.push(candidate);
                 frontier.push(candidate.pid);
             }
@@ -156,12 +183,13 @@ fn soldr_service_processes(table: &[ProcessSnapshot], current_pid: u32) -> Vec<&
         .collect()
 }
 
-fn write_process_list(
+fn write_process_list<'a>(
     path: &std::path::Path,
-    processes: &[&ProcessSnapshot],
+    processes: impl IntoIterator<Item = &'a ProcessSnapshot>,
 ) -> std::io::Result<()> {
     let mut file = std::fs::File::create(path)?;
-    if processes.is_empty() {
+    let mut processes = processes.into_iter().peekable();
+    if processes.peek().is_none() {
         writeln!(file, "(none found)")?;
         return Ok(());
     }
@@ -257,16 +285,6 @@ fn capture_native_backtrace(tool: BacktraceTool, pid: u32) -> Option<String> {
         None
     } else {
         Some(out)
-    }
-}
-
-fn terminate_pid_best_effort(pid: u32) {
-    use sysinfo::{Pid, ProcessRefreshKind, Signal, System};
-
-    let mut system = System::new();
-    system.refresh_processes_specifics(ProcessRefreshKind::new());
-    if let Some(process) = system.process(Pid::from_u32(pid)) {
-        let _ = process.kill_with(Signal::Term);
     }
 }
 

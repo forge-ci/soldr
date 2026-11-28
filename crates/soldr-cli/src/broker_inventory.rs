@@ -18,7 +18,7 @@
 //!   a human sees the pile-up without running doctor;
 //! * `soldr broker purge` stops the leaked processes (see `broker_cmd.rs`).
 //!
-//! The process scan is one pass over the process table via `sysinfo`. The
+//! The process scan examines the host process table once. The
 //! classification is pure over [`ProcessRecord`]s so the rules are unit
 //! testable, and [`PROCESS_LIST_FILE_ENV`] lets integration tests feed a
 //! scripted table instead of the live one (the `doctor` standalone-zccache
@@ -245,38 +245,24 @@ fn env_home_of(environ: &[String]) -> Option<PathBuf> {
 }
 
 fn live_process_table() -> Vec<ProcessRecord> {
-    use sysinfo::{ProcessRefreshKind, System, UpdateKind};
+    use crate::platform::process::metadata;
 
-    // Two phases. A full refresh with exe/cmd/environ for every task on the
-    // host (Linux threads included: 20k on a busy build box) took 5 s; the
-    // cheap enumeration reads one `stat` per task and the detail refresh
-    // runs only for the handful whose image name starts with `soldr`.
-    let mut system = System::new();
-    system.refresh_processes_specifics(ProcessRefreshKind::new());
-    let candidates: Vec<sysinfo::Pid> = system
-        .processes()
-        .values()
-        .filter(|process| process.thread_kind().is_none())
-        .filter(|process| process.name().starts_with("soldr"))
-        .map(sysinfo::Process::pid)
-        .collect();
-    let detail = ProcessRefreshKind::new()
-        .with_exe(UpdateKind::Always)
-        .with_cmd(UpdateKind::Always)
-        .with_environ(UpdateKind::Always);
-    candidates
+    metadata::snapshot()
         .into_iter()
-        .filter_map(|pid| {
-            system.refresh_process_specifics(pid, detail);
-            let process = system.process(pid)?;
-            let record = ProcessRecord {
-                pid: pid.as_u32(),
-                exe: process.exe()?.to_path_buf(),
-                cmd: process.cmd().to_vec(),
-                home: env_home_of(process.environ()),
-                start_time: process.start_time(),
-            };
-            Role::of_record(&record).map(|_| record)
+        .filter(|process| process.name.starts_with("soldr"))
+        .filter_map(|process| {
+            let pid = process.pid;
+            let exe = metadata::executable_path(pid)?;
+            let (cmd, environ) = metadata::arguments_and_environment(pid);
+            Role::of_process(&exe, &cmd)?;
+            Some(ProcessRecord {
+                pid,
+                exe,
+                cmd,
+                home: env_home_of(&environ),
+                start_time: crate::platform::process::metadata::start_time_unix(pid)
+                    .unwrap_or_default(),
+            })
         })
         .collect()
 }
@@ -313,23 +299,9 @@ pub(crate) fn still_soldr_process(pid: u32, expected_role: Role) -> bool {
             .any(|r| r.pid == pid && Role::of_record(r) == Some(expected_role))
             && crate::platform::process::inspect::is_alive(pid);
     }
-    use sysinfo::{Pid, ProcessRefreshKind, System, UpdateKind};
-    let pid = Pid::from_u32(pid);
-    let mut system = System::new();
-    system.refresh_process_specifics(
-        pid,
-        ProcessRefreshKind::new()
-            .with_exe(UpdateKind::Always)
-            .with_cmd(UpdateKind::Always),
-    );
-    system.process(pid).and_then(|process| {
-        Role::of_record(&ProcessRecord {
-            pid: pid.as_u32(),
-            exe: process.exe()?.to_path_buf(),
-            cmd: process.cmd().to_vec(),
-            home: None,
-            start_time: 0,
-        })
+    crate::platform::process::metadata::executable_path(pid).and_then(|exe| {
+        let (cmd, _) = crate::platform::process::metadata::arguments_and_environment(pid);
+        Role::of_process(&exe, &cmd)
     }) == Some(expected_role)
 }
 

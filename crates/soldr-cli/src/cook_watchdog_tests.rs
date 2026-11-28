@@ -262,13 +262,10 @@ async fn run_with_watchdog_stall_integration_dumps_and_kills_real_child() {
     );
 
     // The watchdog terminates the descendant tree before returning; give the
-    // signal a moment to land, then confirm the process is gone (checked via
-    // `sysinfo`, cross-platform, rather than a platform-specific /proc read).
+    // signal a moment to land, then confirm the process is gone.
     std::thread::sleep(Duration::from_millis(500));
-    let mut system = sysinfo::System::new();
-    system.refresh_processes_specifics(sysinfo::ProcessRefreshKind::new());
     assert!(
-        system.process(sysinfo::Pid::from_u32(child_pid)).is_none(),
+        !kernal_api::platform::process::is_alive(child_pid),
         "expected the sleep child to have been terminated"
     );
 

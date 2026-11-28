@@ -53,7 +53,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 semver = { workspace = true }
 kernal-api = { workspace = true, features = ["hash-sha256", "text-similarity"] }
-sysinfo = "0.30"
 tar = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }

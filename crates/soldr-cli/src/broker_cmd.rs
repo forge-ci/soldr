@@ -10,6 +10,7 @@
 //! their own module from the start, matching `daemon_entry.rs`,
 //! `cache.rs`, etc.
 
+use kernal_api::platform::process::{self, ProcessIdentity, ProcessIdentityCapture};
 use std::time::{Duration, Instant};
 
 use crate::core::SoldrError;
@@ -404,11 +405,11 @@ fn stop_verified_broker(
 
     // Watch the broker too, so a cooperative drain that overruns the deadline is
     // force-killed rather than left running.
-    let watch: Vec<(&str, u32, u64)> = vec![("broker", broker_pid, broker_start_token)];
+    let watch: Vec<(&str, u32, ProcessIdentity)> = vec![("broker", broker_pid, broker_start_token)];
     let deadline = std::time::Instant::now() + broker_stop_deadline();
     loop {
         maintain_retirement_lease(retirement_lease)?;
-        let alive: Vec<(&str, u32, u64)> = watch
+        let alive: Vec<(&str, u32, ProcessIdentity)> = watch
             .iter()
             .copied()
             .filter(|(_, pid, token)| verified_broker_generation(*pid) == Some(*token))
@@ -790,12 +791,13 @@ mod retirement_tests {
     }
 }
 
-/// Return the start token only when `pid` still names the exact installed
+/// Return the process identity only when `pid` still names the exact installed
 /// stable-broker executable. Both fields are required before every signal so
 /// PID reuse can only make stop conclude that the original generation exited.
-pub(crate) fn verified_broker_generation(pid: u32) -> Option<u64> {
-    use sysinfo::{Pid, ProcessRefreshKind, System};
-
+pub(crate) fn verified_broker_generation(pid: u32) -> Option<ProcessIdentity> {
+    let ProcessIdentityCapture::Found(identity) = process::capture_identity(pid) else {
+        return None;
+    };
     let installed = crate::broker_identity::ResolvedBrokerEndpoint::resolve()
         .ok()
         .and_then(|endpoint| std::fs::canonicalize(endpoint.executable_path).ok());
@@ -805,13 +807,13 @@ pub(crate) fn verified_broker_generation(pid: u32) -> Option<u64> {
     let caller = std::env::current_exe()
         .ok()
         .and_then(|path| std::fs::canonicalize(path).ok());
-    let pid = Pid::from_u32(pid);
-    let mut system = System::new();
-    system.refresh_process_specifics(pid, ProcessRefreshKind::everything());
-    let process = system.process(pid)?;
-    let actual = std::fs::canonicalize(process.exe()?).ok()?;
-    (installed.as_ref() == Some(&actual) || caller.as_ref() == Some(&actual))
-        .then(|| process.start_time())
+    let actual =
+        std::fs::canonicalize(crate::platform::process::metadata::executable_path(pid)?).ok()?;
+    if installed.as_ref() != Some(&actual) && caller.as_ref() != Some(&actual) {
+        return None;
+    }
+    matches!(process::capture_identity(pid), ProcessIdentityCapture::Found(current) if current == identity)
+        .then_some(identity)
 }
 
 /// Ask the broker to shut down cooperatively via the running-process

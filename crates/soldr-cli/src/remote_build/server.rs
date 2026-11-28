@@ -499,7 +499,7 @@ fn run(
     };
     let mut timing = timer.finish();
     let publication_started = Instant::now();
-    let runner_name = sysinfo::System::host_name();
+    let runner_name = kernal_api::platform::host::hostname();
     let attestation = serde_json::to_vec_pretty(&serde_json::json!({
         "schema_version": 1,
         "session": id,

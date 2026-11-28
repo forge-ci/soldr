@@ -77,23 +77,23 @@ pub(crate) fn capture(raw_args: &[String]) -> Result<bool, String> {
 }
 
 fn ancestor_is_live(claimed: u32) -> bool {
-    use sysinfo::{Pid, ProcessRefreshKind, System};
-    if claimed == std::process::id() || !crate::platform::process::inspect::is_alive(claimed) {
+    use crate::platform::process::metadata;
+    use kernal_api::platform::process;
+
+    let current = std::process::id();
+    if claimed == current || !process::is_alive(claimed) {
         return false;
     }
-    let mut system = System::new();
-    let mut pid = Pid::from_u32(std::process::id());
+    let parents: std::collections::HashMap<_, _> = metadata::snapshot()
+        .into_iter()
+        .filter_map(|entry| Some((entry.pid, entry.parent_pid?)))
+        .collect();
+    let mut pid = current;
     for _ in 0..64 {
-        if !system.refresh_process_specifics(pid, ProcessRefreshKind::new()) {
-            return false;
-        }
-        let Some(process) = system.process(pid) else {
+        let Some(&parent) = parents.get(&pid) else {
             return false;
         };
-        let Some(parent) = process.parent() else {
-            return false;
-        };
-        if parent.as_u32() == claimed {
+        if parent == claimed {
             return true;
         }
         if parent == pid {
