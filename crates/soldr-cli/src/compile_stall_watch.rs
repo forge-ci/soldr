@@ -129,15 +129,21 @@ pub(crate) async fn await_compile_reply<F: Future>(work: F) -> std::io::Result<F
 pub(crate) fn daemon_progress() -> std::io::Result<crate::daemon::protocol::StatusInfo> {
     let paths = crate::core::SoldrPaths::new().map_err(std::io::Error::other)?;
     crate::daemon::client::status(&crate::daemon::client::default_sock_path(&paths))
-        .map_err(|e| match e {
-            // No endpoint at the probed path: this process cannot observe the
-            // daemon the compile is routed to (broker/session routes use another
-            // root). That is "no information", never "daemon dead".
-            crate::daemon::client::ClientError::NotRunning => {
-                std::io::Error::new(std::io::ErrorKind::NotFound, "daemon endpoint not observable")
-            }
-            other => std::io::Error::other(format!("{other:?}")),
-        })
+        .map_err(probe_error)
+}
+
+/// Maps a status-probe failure. `NotRunning` (no endpoint at the probed path)
+/// means this process cannot observe the daemon the compile is routed to
+/// (broker/session routes use another root): "no information", never "daemon
+/// dead". It becomes `ErrorKind::NotFound`, which the stall loop ignores.
+fn probe_error(error: crate::daemon::client::ClientError) -> std::io::Error {
+    match error {
+        crate::daemon::client::ClientError::NotRunning => std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "daemon endpoint not observable",
+        ),
+        other => std::io::Error::other(format!("{other:?}")),
+    }
 }
 
 #[derive(Default)]
@@ -230,6 +236,30 @@ mod tests {
         assert_eq!(
             classifier.observe(&status, "client", Duration::from_secs(300)),
             None
+        );
+    }
+
+    #[test]
+    fn unobservable_probe_endpoint_is_not_a_dead_daemon() {
+        use crate::daemon::client::ClientError;
+        // NotRunning must map to NotFound, which `await_compile_reply` skips
+        // instead of counting toward the dead-daemon deadline (a healthy compile
+        // routed through a broker/session root was killed after 35s).
+        assert_eq!(
+            probe_error(ClientError::NotRunning).kind(),
+            std::io::ErrorKind::NotFound
+        );
+        // Real transport/protocol failures still count as a lost connection.
+        assert_ne!(
+            probe_error(ClientError::Protocol("bad".into())).kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_ne!(
+            probe_error(ClientError::Io(std::io::Error::from(
+                std::io::ErrorKind::ConnectionRefused
+            )))
+            .kind(),
+            std::io::ErrorKind::NotFound
         );
     }
 
